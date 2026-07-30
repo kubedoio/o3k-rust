@@ -14,8 +14,11 @@ entries:
       response: [token, expires_at, project, catalog]
     known_deviations:
       - Full Keystone policy, federation, and non-password authentication are out of scope.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::keystone_password_scope_returns_signed_subject_token
+      - crates/o3k-api/tests/health.rs::keystone_invalid_password_is_generic_unauthorized
+      - crates/o3k-identity/src/lib.rs::tests
+    status: implemented
 
   - service: image
     operation: image_create

@@ -1,5 +1,5 @@
 [package]
-name = "o3k-api"
+name = "o3k-identity"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-axum.workspace = true
-o3k-identity = { path = "../o3k-identity" }
+base64.workspace = true
+hmac.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
-http.workspace = true
-o3k-identity = { path = "../o3k-identity" }
 serde_json.workspace = true
-tokio.workspace = true
-tower.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true

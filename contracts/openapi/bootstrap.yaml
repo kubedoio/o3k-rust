@@ -7,6 +7,33 @@ info:
 servers:
   - url: http://127.0.0.1:8080
 paths:
+  /v3/auth/tokens:
+    post:
+      operationId: issuePasswordScopedToken
+      summary: Issue a project-scoped password token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenRequest'
+      responses:
+        '201':
+          description: Token issued.
+          headers:
+            X-Subject-Token:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '400':
+          description: Unsupported or malformed authentication request.
+        '401':
+          description: Authentication failed.
+        '503':
+          description: Bootstrap identity is not configured.
   /healthz:
     get:
       operationId: getHealth
@@ -35,6 +62,63 @@ paths:
                 $ref: '#/components/schemas/Status'
 components:
   schemas:
+    TokenRequest:
+      type: object
+      additionalProperties: false
+      required: [auth]
+      properties:
+        auth:
+          type: object
+          required: [identity, scope]
+          properties:
+            identity:
+              type: object
+              required: [methods, password]
+              properties:
+                methods:
+                  type: array
+                  minItems: 1
+                  maxItems: 1
+                  items:
+                    type: string
+                    enum: [password]
+                password:
+                  type: object
+                  required: [user]
+                  properties:
+                    user:
+                      type: object
+                      required: [password]
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                        password: {type: string, format: password}
+            scope:
+              type: object
+              required: [project]
+              properties:
+                project:
+                  type: object
+                  properties:
+                    id: {type: string}
+                    name: {type: string}
+    TokenResponse:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: object
+          required: [expires_at, issued_at, methods, project, user, roles, catalog]
+          properties:
+            expires_at: {type: string, format: date-time}
+            issued_at: {type: string, format: date-time}
+            methods:
+              type: array
+              items: {type: string}
+            project: {type: object}
+            user: {type: object}
+            roles: {type: array, items: {type: object}}
+            catalog: {type: array, items: {type: object}}
     Status:
       type: object
       additionalProperties: false
