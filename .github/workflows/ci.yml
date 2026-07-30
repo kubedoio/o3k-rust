@@ -45,5 +45,5 @@ jobs:
           command: check
       - name: Audit Rust dependencies for vulnerabilities
         run: |
-          cargo install cargo-audit --locked
+          cargo install cargo-audit --version 0.22.1 --locked
           cargo audit --locked
