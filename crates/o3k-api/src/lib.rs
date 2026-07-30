@@ -16,7 +16,9 @@ use axum::{
 };
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
+use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
 use serde::Serialize;
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -34,6 +36,7 @@ pub struct AppState {
     ready: Arc<AtomicBool>,
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
+    network: Option<Arc<NetworkService>>,
 }
 
 impl AppState {
@@ -59,6 +62,12 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn with_network(mut self, service: NetworkService) -> Self {
+        self.network = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
@@ -72,6 +81,15 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2/images", get(list_images).post(create_image))
         .route("/v2/images/{id}", get(show_image).delete(delete_image))
         .route("/v2/images/{id}/file", axum::routing::put(upload_image))
+        .route("/v2.0/networks", get(list_networks).post(create_network))
+        .route(
+            "/v2.0/networks/{id}",
+            get(show_network).delete(delete_network),
+        )
+        .route("/v2.0/subnets", get(list_subnets).post(create_subnet))
+        .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
+        .route("/v2.0/ports", get(list_ports).post(create_port))
+        .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
         .layer(axum::extract::DefaultBodyLimit::max(
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
         ))
@@ -444,5 +462,501 @@ async fn delete_image(
     match service.delete(&token.project_id, id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => image_error(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct NetworkRequestBody {
+    network: CreateNetworkRequest,
+}
+#[derive(serde::Deserialize)]
+struct CreateNetworkRequest {
+    name: String,
+}
+#[derive(serde::Serialize)]
+struct NetworkEnvelope {
+    network: NetworkResponse,
+}
+#[derive(serde::Serialize)]
+struct NetworkList {
+    networks: Vec<NetworkResponse>,
+}
+#[derive(serde::Serialize)]
+struct NetworkResponse {
+    id: String,
+    name: String,
+    project_id: String,
+    status: String,
+}
+
+fn network_response(value: NetworkRecord) -> NetworkResponse {
+    NetworkResponse {
+        id: value.id.to_string(),
+        name: value.name,
+        project_id: value.project_id,
+        status: value.status,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SubnetRequestBody {
+    subnet: CreateSubnetRequest,
+}
+#[derive(serde::Deserialize)]
+struct CreateSubnetRequest {
+    name: String,
+    network_id: uuid::Uuid,
+    cidr: String,
+    gateway_ip: Option<Ipv4Addr>,
+    allocation_pools: Option<Vec<AllocationPool>>,
+}
+#[derive(serde::Deserialize)]
+struct AllocationPool {
+    start: Ipv4Addr,
+    end: Ipv4Addr,
+}
+#[derive(serde::Serialize)]
+struct SubnetEnvelope {
+    subnet: SubnetResponse,
+}
+#[derive(serde::Serialize)]
+struct SubnetList {
+    subnets: Vec<SubnetResponse>,
+}
+#[derive(serde::Serialize)]
+struct SubnetResponse {
+    id: String,
+    network_id: String,
+    name: String,
+    project_id: String,
+    cidr: String,
+    gateway_ip: Ipv4Addr,
+    allocation_pools: Vec<AllocationPoolResponse>,
+}
+#[derive(serde::Serialize)]
+struct AllocationPoolResponse {
+    start: Ipv4Addr,
+    end: Ipv4Addr,
+}
+
+fn subnet_response(value: SubnetRecord) -> SubnetResponse {
+    SubnetResponse {
+        id: value.id.to_string(),
+        network_id: value.network_id.to_string(),
+        name: value.name,
+        project_id: value.project_id,
+        cidr: value.cidr,
+        gateway_ip: value.gateway_ip,
+        allocation_pools: vec![AllocationPoolResponse {
+            start: value.allocation_start,
+            end: value.allocation_end,
+        }],
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PortRequestBody {
+    port: CreatePortRequest,
+}
+#[derive(serde::Deserialize)]
+struct CreatePortRequest {
+    name: String,
+    network_id: uuid::Uuid,
+}
+#[derive(serde::Serialize)]
+struct PortEnvelope {
+    port: PortResponse,
+}
+#[derive(serde::Serialize)]
+struct PortList {
+    ports: Vec<PortResponse>,
+}
+#[derive(serde::Serialize)]
+struct PortResponse {
+    id: String,
+    network_id: String,
+    project_id: String,
+    name: String,
+    fixed_ips: Vec<FixedIpResponse>,
+    status: String,
+}
+#[derive(serde::Serialize)]
+struct FixedIpResponse {
+    subnet_id: String,
+    ip_address: Ipv4Addr,
+}
+
+fn port_response(value: PortRecord, subnet_id: Option<uuid::Uuid>) -> PortResponse {
+    PortResponse {
+        id: value.id.to_string(),
+        network_id: value.network_id.to_string(),
+        project_id: value.project_id,
+        name: value.name,
+        fixed_ips: subnet_id
+            .into_iter()
+            .map(|id| FixedIpResponse {
+                subnet_id: id.to_string(),
+                ip_address: value.fixed_ip,
+            })
+            .collect(),
+        status: value.status,
+    }
+}
+
+fn network_error(error: NetworkError) -> axum::response::Response {
+    match error {
+        NetworkError::NotFound => keystone_error(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "network resource was not found",
+        ),
+        NetworkError::Conflict | NetworkError::PoolExhausted => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "network operation is not allowed",
+        ),
+        NetworkError::InvalidRequest => keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid network request",
+        ),
+        NetworkError::Storage(_) | NetworkError::CorruptMetadata(_) => keystone_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal Server Error",
+            "network storage is unavailable",
+        ),
+    }
+}
+
+fn network_service(state: &AppState) -> Result<&Arc<NetworkService>, axum::response::Response> {
+    state.network.as_ref().ok_or_else(|| {
+        keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "network service is not configured",
+        )
+    })
+}
+
+async fn create_network(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<NetworkRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid network request",
+        );
+    };
+    match service.create_network(&token.project_id, body.network.name) {
+        Ok(value) => (
+            StatusCode::CREATED,
+            Json(NetworkEnvelope {
+                network: network_response(value),
+            }),
+        )
+            .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn list_networks(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.list_networks(&token.project_id) {
+        Ok(values) => Json(NetworkList {
+            networks: values.into_iter().map(network_response).collect(),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn show_network(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.get_network(&token.project_id, id) {
+        Ok(value) => Json(NetworkEnvelope {
+            network: network_response(value),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn delete_network(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.delete_network(&token.project_id, id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn create_subnet(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<SubnetRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid subnet request",
+        );
+    };
+    let pool = body
+        .subnet
+        .allocation_pools
+        .as_ref()
+        .and_then(|values| values.first());
+    match service.create_subnet(
+        &token.project_id,
+        body.subnet.network_id,
+        body.subnet.name,
+        body.subnet.cidr,
+        body.subnet.gateway_ip,
+        pool.map(|v| v.start),
+        pool.map(|v| v.end),
+    ) {
+        Ok(value) => (
+            StatusCode::CREATED,
+            Json(SubnetEnvelope {
+                subnet: subnet_response(value),
+            }),
+        )
+            .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn list_subnets(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.list_subnets(&token.project_id) {
+        Ok(values) => Json(SubnetList {
+            subnets: values.into_iter().map(subnet_response).collect(),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn show_subnet(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.get_subnet(&token.project_id, id) {
+        Ok(value) => Json(SubnetEnvelope {
+            subnet: subnet_response(value),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn delete_subnet(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.delete_subnet(&token.project_id, id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn create_port(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<PortRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid port request",
+        );
+    };
+    match service.create_port(&token.project_id, body.port.network_id, body.port.name) {
+        Ok(value) => {
+            let subnet = service
+                .list_subnets(&token.project_id)
+                .ok()
+                .and_then(|values| {
+                    values
+                        .into_iter()
+                        .find(|v| v.network_id == value.network_id)
+                        .map(|v| v.id)
+                });
+            (
+                StatusCode::CREATED,
+                Json(PortEnvelope {
+                    port: port_response(value, subnet),
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+async fn list_ports(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.list_ports(&token.project_id) {
+        Ok(values) => Json(PortList {
+            ports: values
+                .into_iter()
+                .map(|v| {
+                    let subnet = service.list_subnets(&token.project_id).ok().and_then(|ss| {
+                        ss.into_iter()
+                            .find(|s| s.network_id == v.network_id)
+                            .map(|s| s.id)
+                    });
+                    port_response(v, subnet)
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+async fn show_port(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.get_port(&token.project_id, id) {
+        Ok(value) => {
+            let subnet = service.list_subnets(&token.project_id).ok().and_then(|ss| {
+                ss.into_iter()
+                    .find(|s| s.network_id == value.network_id)
+                    .map(|s| s.id)
+            });
+            Json(PortEnvelope {
+                port: port_response(value, subnet),
+            })
+            .into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+async fn delete_port(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.delete_port(&token.project_id, id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => network_error(error),
     }
 }

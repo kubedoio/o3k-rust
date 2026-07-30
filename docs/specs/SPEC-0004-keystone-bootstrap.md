@@ -21,10 +21,9 @@ remain verifiable across restart when the same key is retained.
 - project: `bootstrap-project` / `admin`;
 - domain: `default` / `Default`;
 - role: `member`;
-- catalog: identity (`/v3`) and the implemented image subset (`/v2`).
+- catalog: identity (`/v3`), image (`/v2`), and flat network (`/v2.0`).
 
-The catalog does not advertise compute or network services until those routes
-exist. Authentication failures use a generic 401 message and never
+The catalog does not advertise compute services until those routes exist. Authentication failures use a generic 401 message and never
 echo credentials, names, tokens, or internal errors.
 
 ## Evidence

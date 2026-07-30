@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.data_dir.join("images"),
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
     )?;
+    let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
             "bootstrap-user".to_owned(),
@@ -38,8 +39,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_api::AppState::new()
             .with_identity(identity)
             .with_image(image_service)
+            .with_network(network_service)
     } else {
-        o3k_api::AppState::new().with_image(image_service)
+        o3k_api::AppState::new()
+            .with_image(image_service)
+            .with_network(network_service)
     };
     state.set_ready(true);
     let shutdown_state = state.clone();

@@ -90,8 +90,9 @@ entries:
     supported_fields: [name, project_id, admin_state_up]
     known_deviations:
       - Only a flat provider network is in the initial profile.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+    status: implemented
   - service: network
     operation: network_list_show_delete
     api_version: neutron-v2
@@ -103,8 +104,9 @@ entries:
     supported_fields: [id, name, project_id, status]
     known_deviations:
       - Routers, floating IPs, security groups, VXLAN, and DVR are out of scope.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+    status: implemented
   - service: subnet_create
     operation: subnet_create
     api_version: neutron-v2
@@ -113,9 +115,10 @@ entries:
       - https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet
     supported_fields: [name, network_id, project_id, cidr, gateway_ip, allocation_pools]
     known_deviations:
-      - One subnet and one allocation pool are planned for the initial profile.
-    executable_tests: []
-    status: planned
+      - One subnet and one allocation pool are supported per network in the initial profile.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+    status: implemented
   - service: subnet
     operation: subnet_list_show_delete
     api_version: neutron-v2
@@ -126,8 +129,22 @@ entries:
       - https://docs.openstack.org/api-ref/network/v2/index.html#delete-subnet
     supported_fields: [id, name, network_id, project_id, cidr, gateway_ip]
     known_deviations: []
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+    status: implemented
+
+  - service: port
+    operation: port_list_show_create_delete
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#ports
+    supported_fields: [id, name, network_id, project_id, fixed_ips, status]
+    known_deviations:
+      - Ports receive one deterministic IPv4 address; device owners, security groups, and updates are out of scope.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::neutron_network_subnet_port_lifecycle_is_deterministic
+    status: implemented
 
   - service: compute
     operation: flavor_create

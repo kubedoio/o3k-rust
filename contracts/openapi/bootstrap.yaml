@@ -131,6 +131,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Status'
+  /v2.0/networks:
+    get:
+      operationId: listNetworks
+      responses: {'200': {description: Project-scoped networks.}}
+    post:
+      operationId: createNetwork
+      requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
+      responses: {'201': {description: Network created.}, '400': {description: Invalid request.}, '401': {description: Unauthorized.}}
+  /v2.0/networks/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {operationId: showNetwork, responses: {'200': {description: Network details.}, '404': {description: Not found.}}}
+    delete: {operationId: deleteNetwork, responses: {'204': {description: Network deleted.}, '409': {description: Network has dependents.}}}
+  /v2.0/subnets:
+    get: {operationId: listSubnets, responses: {'200': {description: Project-scoped subnets.}}}
+    post: {operationId: createSubnet, requestBody: {required: true, content: {application/json: {schema: {type: object}}}}, responses: {'201': {description: Subnet created.}, '400': {description: Invalid CIDR or pool.}}}
+  /v2.0/subnets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {operationId: showSubnet, responses: {'200': {description: Subnet details.}}}
+    delete: {operationId: deleteSubnet, responses: {'204': {description: Subnet deleted.}, '409': {description: Subnet has ports.}}}
+  /v2.0/ports:
+    get: {operationId: listPorts, responses: {'200': {description: Project-scoped ports.}}}
+    post: {operationId: createPort, requestBody: {required: true, content: {application/json: {schema: {type: object}}}}, responses: {'201': {description: Port created.}, '409': {description: Address pool exhausted.}}}
+  /v2.0/ports/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {operationId: showPort, responses: {'200': {description: Port details.}}}
+    delete: {operationId: deletePort, responses: {'204': {description: Port deleted.}}}
 components:
   schemas:
     TokenRequest:

@@ -13,6 +13,7 @@ workspace = true
 axum.workspace = true
 o3k-identity = { path = "../o3k-identity" }
 o3k-image = { path = "../o3k-image" }
+o3k-network = { path = "../o3k-network" }
 serde.workspace = true
 uuid.workspace = true
 
