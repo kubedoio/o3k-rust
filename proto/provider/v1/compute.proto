@@ -29,6 +29,8 @@ message CreateInstanceRequest {
   string idempotency_key = 7;
 }
 
+// Field numbers are permanent. Removed fields must be reserved here.
+
 message GetInstanceRequest {
   string provider_instance_id = 1;
 }
