@@ -81,6 +81,7 @@ mod tests {
             state: 99,
             error_category: 0,
             redacted_message: String::new(),
+            provider_resource_id: String::new(),
         };
         let decoded = match proto::Operation::decode(operation.encode_to_vec().as_slice()) {
             Ok(value) => value,

@@ -8,6 +8,9 @@ service ComputeProvider {
   rpc CreateInstance(CreateInstanceRequest) returns (Operation);
   rpc GetInstance(GetInstanceRequest) returns (Instance);
   rpc DeleteInstance(DeleteInstanceRequest) returns (Operation);
+  rpc StartInstance(ActionInstanceRequest) returns (Operation);
+  rpc StopInstance(ActionInstanceRequest) returns (Operation);
+  rpc RebootInstance(ActionInstanceRequest) returns (Operation);
   rpc GetOperation(GetOperationRequest) returns (Operation);
 }
 
@@ -41,6 +44,12 @@ message DeleteInstanceRequest {
   string idempotency_key = 3;
 }
 
+message ActionInstanceRequest {
+  string operation_id = 1;
+  string provider_instance_id = 2;
+  string idempotency_key = 3;
+}
+
 message GetOperationRequest {
   string provider_operation_id = 1;
 }
@@ -68,6 +77,7 @@ message Operation {
   OperationState state = 3;
   ErrorCategory error_category = 4;
   string redacted_message = 5;
+  string provider_resource_id = 6;
 }
 
 enum OperationState {

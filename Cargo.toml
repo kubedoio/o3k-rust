@@ -11,6 +11,7 @@ members = [
     "crates/o3k-reconciler",
     "crates/o3k-provider-contract",
     "crates/o3k-compute",
+    "crates/o3k-cellhv",
     "crates/o3k-store",
 ]
 resolver = "2"
@@ -37,7 +38,7 @@ time = { version = "=0.3.36", features = ["formatting", "macros"] }
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 prost = "0.13"
-tonic = "0.12"
+tonic = { version = "0.12", features = ["transport", "tls-native-roots"] }
 tonic-build = "0.12"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
