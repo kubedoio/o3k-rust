@@ -15,6 +15,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_path = config.data_dir.join("o3k.sqlite");
     let _store = o3k_store::SqliteStore::connect_file(&database_path).await?;
+    let image_service = o3k_image::ImageService::open(
+        config.data_dir.join("images"),
+        o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
+    )?;
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
             "bootstrap-user".to_owned(),
@@ -31,9 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(address = %config.listen_addr, data_dir = %config.data_dir.display(), provider = ?config.provider, "o3kd listening");
 
     let state = if let Some(identity) = identity {
-        o3k_api::AppState::new().with_identity(identity)
-    } else {
         o3k_api::AppState::new()
+            .with_identity(identity)
+            .with_image(image_service)
+    } else {
+        o3k_api::AppState::new().with_image(image_service)
     };
     state.set_ready(true);
     let shutdown_state = state.clone();

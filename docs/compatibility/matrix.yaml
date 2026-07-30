@@ -14,6 +14,7 @@ entries:
       response: [token, expires_at, project, catalog]
     known_deviations:
       - Full Keystone policy, federation, and non-password authentication are out of scope.
+      - The catalog advertises only identity and the implemented image subset.
     executable_tests:
       - crates/o3k-api/tests/health.rs::keystone_password_scope_returns_signed_subject_token
       - crates/o3k-api/tests/health.rs::keystone_invalid_password_is_generic_unauthorized
@@ -29,8 +30,10 @@ entries:
     supported_fields: [name, visibility, container_format, disk_format, size, checksum]
     known_deviations:
       - Local filesystem content is the only initial backend.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload
+      - crates/o3k-image/src/lib.rs::tests
+    status: implemented
   - service: image
     operation: image_upload
     api_version: glance-v2
@@ -40,8 +43,10 @@ entries:
     supported_fields: [content, checksum]
     known_deviations:
       - Import, multi-store, and signature workflows are out of scope.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload
+      - crates/o3k-image/src/lib.rs::tests
+    status: implemented
   - service: image
     operation: image_list
     api_version: glance-v2
@@ -50,8 +55,9 @@ entries:
       - https://docs.openstack.org/api-ref/image/v2/index.html#list-images
     supported_fields: [id, name, status, size, checksum]
     known_deviations: []
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload
+    status: implemented
   - service: image
     operation: image_show
     api_version: glance-v2
@@ -60,8 +66,9 @@ entries:
       - https://docs.openstack.org/api-ref/image/v2/index.html#show-image-details
     supported_fields: [id, name, status, size, checksum]
     known_deviations: []
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload
+    status: implemented
   - service: image
     operation: image_delete
     api_version: glance-v2
@@ -70,8 +77,9 @@ entries:
       - https://docs.openstack.org/api-ref/image/v2/index.html#delete-image
     supported_fields: [id]
     known_deviations: []
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload
+    status: implemented
 
   - service: network
     operation: network_create
