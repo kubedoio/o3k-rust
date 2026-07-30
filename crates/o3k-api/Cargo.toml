@@ -12,7 +12,9 @@ workspace = true
 [dependencies]
 axum.workspace = true
 o3k-identity = { path = "../o3k-identity" }
+o3k-image = { path = "../o3k-image" }
 serde.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 http.workspace = true

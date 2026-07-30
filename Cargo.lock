@@ -795,10 +795,12 @@ dependencies = [
  "axum",
  "http",
  "o3k-identity",
+ "o3k-image",
  "serde",
  "serde_json",
  "tokio",
  "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -834,6 +836,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-image"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "o3k-store"
 version = "0.1.0-alpha.0"
 dependencies = [
@@ -853,6 +866,7 @@ dependencies = [
  "o3k-api",
  "o3k-config",
  "o3k-identity",
+ "o3k-image",
  "o3k-store",
  "tokio",
  "tracing",

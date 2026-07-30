@@ -1,6 +1,7 @@
 use axum::body::Body;
 use http::{Method, Request, StatusCode, header};
 use o3k_identity::{Secret, TokenService};
+use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use serde_json::Value;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -72,7 +73,7 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert!(
         body["token"]["catalog"]
             .as_array()
-            .is_some_and(|items| items.len() == 1)
+            .is_some_and(|items| items.len() == 2)
     );
     Ok(())
 }
@@ -100,5 +101,104 @@ async fn keystone_invalid_password_is_generic_unauthorized()
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = axum::body::to_bytes(response.into_body(), 4096).await?;
     assert!(!String::from_utf8(body.to_vec())?.contains("wrong"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!("/tmp/o3k-api-images-{}", std::process::id()));
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES)?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_image(image);
+    let auth_body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let auth_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth_body.to_string()))?,
+        )
+        .await?;
+    let token = auth_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("token missing"))?
+        .to_str()?
+        .to_owned();
+    let create_body = serde_json::json!({"name":"test-image","visibility":"private","container_format":"bare","disk_format":"raw"});
+    let create_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2/images")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(create_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(create_response.into_body(), 4096).await?)?;
+    let id = create_json["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("image id missing"))?
+        .to_owned();
+    let upload_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2/images/{id}/file"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from("image-content"))?,
+        )
+        .await?;
+    assert_eq!(upload_response.status(), StatusCode::NO_CONTENT);
+    let second_upload = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2/images/{id}/file"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from("changed"))?,
+        )
+        .await?;
+    assert_eq!(second_upload.status(), StatusCode::CONFLICT);
+    let show_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2/images/{id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let show_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(show_response.into_body(), 4096).await?)?;
+    assert_eq!(show_json["status"], "active");
+    assert_eq!(show_json["size"], 13);
+    let delete_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2/images/{id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    std::fs::remove_dir_all(root)?;
     Ok(())
 }

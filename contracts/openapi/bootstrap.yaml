@@ -54,6 +54,77 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Status'
+  /v2/images:
+    get:
+      operationId: listImages
+      responses:
+        '200':
+          description: Project-scoped image list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [images]
+                properties:
+                  images:
+                    type: array
+                    items: {$ref: '#/components/schemas/Image'}
+        '401': {description: Authentication required.}
+    post:
+      operationId: createImage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ImageCreate'}
+      responses:
+        '201':
+          description: Queued image metadata created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Image'}
+        '400': {description: Invalid image metadata.}
+        '401': {description: Authentication required.}
+  /v2/images/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    get:
+      operationId: showImage
+      responses:
+        '200':
+          description: Image metadata.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Image'}
+        '401': {description: Authentication required.}
+        '404': {description: Image not found or inaccessible.}
+    delete:
+      operationId: deleteImage
+      responses:
+        '204': {description: Image deleted.}
+        '401': {description: Authentication required.}
+        '404': {description: Image not found or inaccessible.}
+  /v2/images/{id}/file:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+    put:
+      operationId: uploadImage
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: {}
+      responses:
+        '204': {description: Image content stored and activated.}
+        '401': {description: Authentication required.}
+        '404': {description: Image not found or inaccessible.}
+        '409': {description: Active image content is immutable.}
+        '413': {description: Upload exceeds the configured limit.}
         '503':
           description: Process is alive but startup or dependency checks are incomplete.
           content:
@@ -119,6 +190,28 @@ components:
             user: {type: object}
             roles: {type: array, items: {type: object}}
             catalog: {type: array, items: {type: object}}
+    ImageCreate:
+      type: object
+      additionalProperties: false
+      required: [name, container_format, disk_format]
+      properties:
+        name: {type: string, minLength: 1}
+        visibility: {type: string, enum: [private]}
+        container_format: {type: string, minLength: 1}
+        disk_format: {type: string, minLength: 1}
+    Image:
+      type: object
+      required: [id, name, owner, status, visibility, container_format, disk_format]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        owner: {type: string}
+        status: {type: string, enum: [queued, active]}
+        visibility: {type: string, enum: [private]}
+        container_format: {type: string}
+        disk_format: {type: string}
+        size: {type: integer, format: int64, nullable: true}
+        checksum: {type: string, nullable: true}
     Status:
       type: object
       additionalProperties: false

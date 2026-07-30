@@ -5,6 +5,7 @@ members = [
     "crates/o3k-config",
     "crates/o3k-domain",
     "crates/o3k-identity",
+    "crates/o3k-image",
     "crates/o3k-store",
 ]
 resolver = "2"
