@@ -3,7 +3,13 @@
 
 [advisories]
 version = 2
-ignore = []
+ignore = [
+  # tonic 0.12.3 still depends on rustls-pemfile 2.2.0. The RustSec record
+  # classifies it as unmaintained and provides no safe upgrade; the adapter
+  # does not parse attacker-controlled PEM input in this project. Revisit
+  # when upgrading tonic, and do not add vulnerability IDs here.
+  "RUSTSEC-2025-0134",
+]
 
 [licenses]
 version = 2

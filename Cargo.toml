@@ -20,7 +20,7 @@ resolver = "2"
 version = "0.1.0-alpha.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.88"
 repository = "https://github.com/kubedoio/o3k-rust"
 
 [workspace.dependencies]
@@ -34,7 +34,7 @@ serde_json = "1"
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "macros", "migrate"] }
 thiserror = "2"
-time = { version = "=0.3.36", features = ["formatting", "macros"] }
+time = { version = "=0.3.47", features = ["formatting", "macros"] }
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 prost = "0.13"
@@ -44,8 +44,8 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["serde", "v7"] }
-# Keep SQLx's URL/IDNA dependency compatible with the supported Rust 1.85 toolchain.
-url = "=2.4.1"
+# Keep the URL/IDNA graph on a patched release.
+url = "=2.5.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
