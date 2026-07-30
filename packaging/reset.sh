@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+DATA_DIR=/var/lib/o3k
+LOG_DIR=/var/log/o3k
+CONFIRM=0
+while (($#)); do case "$1" in --data-dir) DATA_DIR="$2"; shift 2;; --log-dir) LOG_DIR="$2"; shift 2;; --yes) CONFIRM=1; shift;; *) echo "unknown option: $1" >&2; exit 2;; esac; done
+[[ $CONFIRM -eq 1 ]] || { echo "reset removes owned data; repeat with --yes" >&2; exit 2; }
+for path in "$DATA_DIR" "$LOG_DIR"; do [[ -n "$path" && "$path" == /* && "$path" != / ]] || { echo "refusing unsafe reset path" >&2; exit 2; }; done
+command -v systemctl >/dev/null 2>&1 && systemctl stop o3kd.service 2>/dev/null || true
+for path in "$DATA_DIR" "$LOG_DIR"; do [[ -d "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; done
+echo "reset owned state under $DATA_DIR and $LOG_DIR; credentials were preserved"
+

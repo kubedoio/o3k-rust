@@ -1,0 +1,21 @@
+[Unit]
+Description=O3K TestLab daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=o3k
+Group=o3k
+EnvironmentFile=-/etc/o3k/o3kd.env
+ExecStart=/usr/local/bin/o3kd --listen-addr 127.0.0.1:8080 --data-dir /var/lib/o3k --log-filter info
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/o3k /var/log/o3k
+
+[Install]
+WantedBy=multi-user.target
+
