@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+axum.workspace = true
 o3k-api = { path = "../../crates/o3k-api" }
 tokio.workspace = true
 tracing.workspace = true
