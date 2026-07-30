@@ -1,0 +1,20 @@
+[package]
+name = "o3k-provider-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+o3k-provider = { path = "../o3k-provider" }
+prost.workspace = true
+tonic.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

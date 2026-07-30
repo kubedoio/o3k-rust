@@ -9,6 +9,7 @@ members = [
     "crates/o3k-network",
     "crates/o3k-provider",
     "crates/o3k-reconciler",
+    "crates/o3k-provider-contract",
     "crates/o3k-store",
 ]
 resolver = "2"
@@ -34,6 +35,9 @@ thiserror = "2"
 time = { version = "=0.3.36", features = ["formatting", "macros"] }
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+prost = "0.13"
+tonic = "0.12"
+tonic-build = "0.12"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
