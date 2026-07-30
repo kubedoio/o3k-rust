@@ -26,3 +26,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: TestLab fake-provider workflow
+        run: bash tests/testlab.sh
+      - name: Upload TestLab artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testlab-artifacts
+          path: target/testlab-artifacts/

@@ -183,13 +183,19 @@ impl ComputeService {
             .provider_id
             .as_deref()
             .ok_or(ComputeError::Conflict)?;
-        self.provider
+        let delete_result = self
+            .provider
             .delete_instance(DeleteInstanceRequest {
                 operation_id: Uuid::now_v7(),
                 provider_instance_id: provider_id.to_owned(),
                 idempotency_key: format!("delete-{id}"),
             })
-            .await?;
+            .await;
+        if let Err(error) = delete_result {
+            if !matches!(error, ProviderError::NotFound) {
+                return Err(ComputeError::Provider(error));
+            }
+        }
         self.store
             .update_resource(
                 id,
