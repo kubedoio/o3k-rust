@@ -1,0 +1,42 @@
+# Dependency policy for cargo-deny.  Keep this file intentionally explicit:
+# new registries, git sources, licenses, or advisories must be reviewed.
+
+[advisories]
+version = 2
+ignore = [
+  # tonic 0.12.3 still depends on rustls-pemfile 2.2.0. The RustSec record
+  # classifies it as unmaintained and provides no safe upgrade; the adapter
+  # does not parse attacker-controlled PEM input in this project. Revisit
+  # when upgrading tonic, and do not add vulnerability IDs here.
+  "RUSTSEC-2025-0134",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "OpenSSL",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
