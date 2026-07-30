@@ -10,6 +10,7 @@ members = [
     "crates/o3k-provider",
     "crates/o3k-reconciler",
     "crates/o3k-provider-contract",
+    "crates/o3k-compute",
     "crates/o3k-store",
 ]
 resolver = "2"

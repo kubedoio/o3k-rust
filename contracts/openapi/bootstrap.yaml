@@ -157,6 +157,23 @@ paths:
     parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
     get: {operationId: showPort, responses: {'200': {description: Port details.}}}
     delete: {operationId: deletePort, responses: {'204': {description: Port deleted.}}}
+  /v2.1/{project_id}/flavors:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get: {operationId: listFlavors, responses: {'200': {description: TestLab flavor catalog.}, '401': {description: Authentication required.}}}
+  /v2.1/{project_id}/flavors/{id}:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {operationId: showFlavor, responses: {'200': {description: Flavor details.}, '404': {description: Flavor not found.}}}
+  /v2.1/{project_id}/servers:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get: {operationId: listServers, responses: {'200': {description: Project-scoped server list.}}}
+    post: {operationId: createServer, requestBody: {required: true, content: {application/json: {schema: {type: object}}}}, responses: {'202': {description: Server create accepted.}, '400': {description: Invalid request.}, '409': {description: Conflict.}}}
+  /v2.1/{project_id}/servers/{id}:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {operationId: showServer, responses: {'200': {description: Server details.}, '404': {description: Server not found.}}}
+    delete: {operationId: deleteServer, responses: {'204': {description: Server deleted.}, '409': {description: Invalid server state.}}}
+  /v2.1/{project_id}/servers/{id}/action:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    post: {operationId: serverAction, requestBody: {required: true, content: {application/json: {schema: {type: object}}}}, responses: {'202': {description: Server action accepted.}, '400': {description: Unsupported action.}, '409': {description: Invalid server state.}}}
 components:
   schemas:
     TokenRequest:

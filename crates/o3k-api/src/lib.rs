@@ -14,9 +14,11 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
+use o3k_provider::InstanceAction;
 use serde::Serialize;
 use std::net::Ipv4Addr;
 
@@ -37,6 +39,7 @@ pub struct AppState {
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
+    compute: Option<Arc<ComputeService>>,
 }
 
 impl AppState {
@@ -68,6 +71,12 @@ impl AppState {
     }
 
     #[must_use]
+    pub fn with_compute(mut self, service: ComputeService) -> Self {
+        self.compute = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
@@ -90,6 +99,20 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
+        .route("/v2.1/{project_id}/flavors", get(list_flavors))
+        .route("/v2.1/{project_id}/flavors/{id}", get(show_flavor))
+        .route(
+            "/v2.1/{project_id}/servers",
+            get(list_servers).post(create_server),
+        )
+        .route(
+            "/v2.1/{project_id}/servers/{id}",
+            get(show_server).delete(delete_server),
+        )
+        .route(
+            "/v2.1/{project_id}/servers/{id}/action",
+            post(server_action),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
         ))
@@ -958,5 +981,375 @@ async fn delete_port(
     match service.delete_port(&token.project_id, id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
+    }
+}
+
+#[derive(Serialize)]
+struct FlavorResponse {
+    id: String,
+    name: String,
+    vcpus: u32,
+    ram: u64,
+    disk: u64,
+}
+#[derive(Serialize)]
+struct FlavorListResponse {
+    flavors: Vec<FlavorResponse>,
+}
+#[derive(Serialize)]
+struct FlavorEnvelope {
+    flavor: FlavorResponse,
+}
+
+fn flavor_response(flavor: Flavor) -> FlavorResponse {
+    FlavorResponse {
+        id: flavor.id.to_string(),
+        name: flavor.name,
+        vcpus: flavor.vcpus,
+        ram: flavor.ram_mib,
+        disk: flavor.disk_gib,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateServerEnvelope {
+    server: CreateServerRequest,
+}
+#[derive(serde::Deserialize)]
+struct CreateServerRequest {
+    name: String,
+    image: Option<IdReference>,
+    flavor: Option<IdReference>,
+    networks: Option<Vec<NetworkReference>>,
+}
+#[derive(serde::Deserialize)]
+struct IdReference {
+    id: String,
+}
+#[derive(serde::Deserialize)]
+struct NetworkReference {
+    uuid: Option<String>,
+}
+#[derive(Serialize)]
+struct ServerEnvelope {
+    server: ServerResponse,
+}
+#[derive(Serialize)]
+struct ServerListResponse {
+    servers: Vec<ServerResponse>,
+}
+#[derive(Serialize)]
+struct ServerResponse {
+    id: String,
+    name: String,
+    status: String,
+    tenant_id: String,
+    project_id: String,
+    image: IdResponse,
+    flavor: IdResponse,
+    addresses: serde_json::Value,
+}
+#[derive(Serialize)]
+struct IdResponse {
+    id: String,
+}
+
+fn server_response(server: Server) -> ServerResponse {
+    ServerResponse {
+        id: server.id.to_string(),
+        name: server.name,
+        status: server.status,
+        tenant_id: server.project_id.clone(),
+        project_id: server.project_id,
+        image: IdResponse {
+            id: server.image_id,
+        },
+        flavor: IdResponse {
+            id: server.flavor_id.to_string(),
+        },
+        addresses: serde_json::json!({}),
+    }
+}
+
+fn compute_error(error: ComputeError) -> axum::response::Response {
+    match error {
+        ComputeError::NotFound => keystone_error(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "compute resource was not found",
+        ),
+        ComputeError::Conflict => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "compute operation conflicts with current state",
+        ),
+        ComputeError::InvalidRequest => keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid compute request",
+        ),
+        ComputeError::Store(_) | ComputeError::Reconcile(_) | ComputeError::Provider(_) => {
+            keystone_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "compute service is unavailable",
+            )
+        }
+    }
+}
+
+fn project_token(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    project_id: &str,
+) -> Result<o3k_identity::VerifiedToken, axum::response::Response> {
+    let token = require_token(state, headers)?;
+    if token.project_id != project_id {
+        return Err(keystone_error(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "compute resource was not found",
+        ));
+    }
+    Ok(token)
+}
+
+fn compute_service(state: &AppState) -> Result<&Arc<ComputeService>, axum::response::Response> {
+    state.compute.as_ref().ok_or_else(|| {
+        keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service is not configured",
+        )
+    })
+}
+
+async fn list_flavors(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    Json(FlavorListResponse {
+        flavors: service.flavors().into_iter().map(flavor_response).collect(),
+    })
+    .into_response()
+}
+
+async fn show_flavor(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.flavor(id) {
+        Ok(flavor) => Json(FlavorEnvelope {
+            flavor: flavor_response(flavor),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn create_server(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+    request: Result<Json<CreateServerEnvelope>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid server request",
+        );
+    };
+    let Some(image) = body
+        .server
+        .image
+        .and_then(|reference| (!reference.id.trim().is_empty()).then_some(reference.id))
+    else {
+        return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "image is required");
+    };
+    let Some(flavor) = body
+        .server
+        .flavor
+        .and_then(|reference| reference.id.parse().ok())
+    else {
+        return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "flavor is required");
+    };
+    let Some(networks) = body.server.networks else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "network is required",
+        );
+    };
+    if networks.is_empty()
+        || networks
+            .iter()
+            .any(|network| network.uuid.as_deref().is_none_or(str::is_empty))
+    {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "network is required",
+        );
+    }
+    let idempotency = headers
+        .get("x-openstack-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(&body.server.name)
+        .to_owned();
+    match service
+        .create_server(
+            &token.project_id,
+            body.server.name,
+            image,
+            flavor,
+            idempotency,
+        )
+        .await
+    {
+        Ok(server) => (
+            StatusCode::ACCEPTED,
+            Json(ServerEnvelope {
+                server: server_response(server),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn list_servers(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.list_servers(&token.project_id).await {
+        Ok(servers) => Json(ServerListResponse {
+            servers: servers.into_iter().map(server_response).collect(),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn show_server(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.show_server(&token.project_id, id).await {
+        Ok(server) => Json(ServerEnvelope {
+            server: server_response(server),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn delete_server(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.delete_server(&token.project_id, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn server_action(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+    request: Result<Json<serde_json::Value>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid server action",
+        );
+    };
+    let action = match body
+        .as_object()
+        .and_then(|object| object.keys().next())
+        .map(String::as_str)
+    {
+        Some("os-start") => InstanceAction::Start,
+        Some("os-stop") => InstanceAction::Stop,
+        Some("reboot") | Some("os-reboot") => InstanceAction::Reboot,
+        _ => {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "unsupported server action",
+            );
+        }
+    };
+    match service.action(&token.project_id, id, action).await {
+        Ok(server) => (
+            StatusCode::ACCEPTED,
+            Json(ServerEnvelope {
+                server: server_response(server),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error),
     }
 }

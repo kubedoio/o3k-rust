@@ -33,6 +33,13 @@ pub struct DeleteInstanceRequest {
     pub idempotency_key: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceAction {
+    Start,
+    Stop,
+    Reboot,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Instance {
     pub provider_instance_id: String,
@@ -129,6 +136,13 @@ pub trait ComputeProvider: Send + Sync {
     async fn delete_instance(
         &self,
         request: DeleteInstanceRequest,
+    ) -> Result<Operation, ProviderError>;
+    async fn action_instance(
+        &self,
+        provider_instance_id: &str,
+        action: InstanceAction,
+        operation_id: Uuid,
+        idempotency_key: &str,
     ) -> Result<Operation, ProviderError>;
     async fn get_operation(&self, provider_operation_id: Uuid) -> Result<Operation, ProviderError>;
 }
@@ -383,6 +397,55 @@ impl ComputeProvider for FakeComputeProvider {
                 operation_id: operation.provider_operation_id,
             });
         }
+        Ok(operation)
+    }
+
+    async fn action_instance(
+        &self,
+        provider_instance_id: &str,
+        action: InstanceAction,
+        operation_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        let mut state = self.lock()?;
+        match state.failure {
+            FailureInjection::Transient => return Err(ProviderError::Retryable),
+            FailureInjection::Terminal => return Err(ProviderError::Terminal),
+            FailureInjection::StaleState => return Err(ProviderError::StaleState),
+            _ => {}
+        }
+        let current = state
+            .instances
+            .get(provider_instance_id)
+            .ok_or(ProviderError::NotFound)?
+            .state;
+        let next = match (action, current) {
+            (InstanceAction::Start, InstanceState::Stopped) => InstanceState::Running,
+            (InstanceAction::Stop, InstanceState::Running) => InstanceState::Stopped,
+            (InstanceAction::Reboot, InstanceState::Running | InstanceState::Stopped) => {
+                InstanceState::Running
+            }
+            _ => return Err(ProviderError::Conflict),
+        };
+        let instance = state
+            .instances
+            .get_mut(provider_instance_id)
+            .ok_or(ProviderError::NotFound)?;
+        instance.state = next;
+        let operation = Self::operation(
+            &mut state,
+            operation_id,
+            OperationState::Succeeded,
+            None,
+            None,
+        );
+        state.idempotency.insert(
+            format!("action:{idempotency_key}"),
+            (
+                operation.provider_operation_id,
+                provider_instance_id.to_owned(),
+            ),
+        );
         Ok(operation)
     }
 

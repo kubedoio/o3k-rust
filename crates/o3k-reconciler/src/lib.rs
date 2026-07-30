@@ -259,7 +259,7 @@ where
             .update_resource(
                 resource.id,
                 resource.generation,
-                "active",
+                &resource.desired_state,
                 "active",
                 resource.generation,
                 provider_resource_id.as_deref(),

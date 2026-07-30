@@ -164,11 +164,13 @@ entries:
     public_sources:
       - https://docs.openstack.org/api-ref/compute/#list-flavors
       - https://docs.openstack.org/api-ref/compute/#show-flavor-details
-      - https://docs.openstack.org/api-ref/compute/#delete-flavor
+      - https://docs.openstack.org/api-ref/compute/#show-flavor-details
     supported_fields: [id, name, vcpus, ram, disk]
-    known_deviations: []
-    executable_tests: []
-    status: planned
+    known_deviations:
+      - The initial catalog is read-only; flavor administration and deletion are out of scope.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
+    status: implemented
   - service: compute
     operation: server_create
     api_version: nova-v2.1
@@ -178,8 +180,9 @@ entries:
     supported_fields: [name, image, flavor, networks, project_id]
     known_deviations:
       - Keypairs, metadata extensions, config-drive, and scheduler extensions are out of scope.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
+    status: implemented
   - service: compute
     operation: server_list_show_delete
     api_version: nova-v2.1
@@ -191,8 +194,9 @@ entries:
     supported_fields: [id, name, status, image, flavor, addresses, project_id]
     known_deviations:
       - Pagination and the broader Nova query/filter surface are deferred.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
+    status: implemented
   - service: compute
     operation: server_start_stop_reboot
     api_version: nova-v2.1
@@ -204,5 +208,6 @@ entries:
     supported_fields: [server_id, reboot_type]
     known_deviations:
       - Hard reboot and soft reboot are mapped by the provider contract; hypervisor-specific behavior is not exposed.
-    executable_tests: []
-    status: planned
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
+    status: implemented

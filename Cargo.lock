@@ -969,13 +969,30 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "axum 0.8.9",
  "http",
+ "o3k-compute",
  "o3k-identity",
  "o3k-image",
  "o3k-network",
+ "o3k-provider",
+ "o3k-store",
  "serde",
  "serde_json",
  "tokio",
  "tower 0.5.3",
+ "uuid",
+]
+
+[[package]]
+name = "o3k-compute"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "o3k-provider",
+ "o3k-reconciler",
+ "o3k-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
  "uuid",
 ]
 
@@ -1084,10 +1101,12 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "axum 0.8.9",
  "o3k-api",
+ "o3k-compute",
  "o3k-config",
  "o3k-identity",
  "o3k-image",
  "o3k-network",
+ "o3k-provider",
  "o3k-store",
  "tokio",
  "tracing",

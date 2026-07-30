@@ -1,8 +1,11 @@
 use axum::body::Body;
 use http::{Method, Request, StatusCode, header};
+use o3k_compute::ComputeService;
 use o3k_identity::{Secret, TokenService};
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use o3k_network::NetworkService;
+use o3k_provider::FakeComputeProvider;
+use o3k_store::SqliteStore;
 use serde_json::Value;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -74,7 +77,7 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert!(
         body["token"]["catalog"]
             .as_array()
-            .is_some_and(|items| items.len() == 3)
+            .is_some_and(|items| items.len() == 4)
     );
     Ok(())
 }
@@ -287,5 +290,103 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
     assert_eq!(port["port"]["fixed_ips"][0]["ip_address"], "192.0.2.2");
     std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn nova_server_lifecycle_uses_project_scoped_envelopes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let path = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-compute-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
+    let compute = ComputeService::new(store, std::sync::Arc::new(FakeComputeProvider::new()));
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_compute(compute);
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("token missing"))?
+        .to_str()?
+        .to_owned();
+    let flavors = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/bootstrap-project/flavors")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(flavors.status(), StatusCode::OK);
+    let flavor_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(flavors.into_body(), 4096).await?)?;
+    let flavor_id = flavor_json["flavors"][0]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("flavor missing"))?;
+    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
+    let created = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/bootstrap-project/servers")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "nova-test-request")
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(created.status(), StatusCode::ACCEPTED);
+    let server_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 8192).await?)?;
+    assert_eq!(server_json["server"]["status"], "ACTIVE");
+    let server_id = server_json["server"]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("server missing"))?;
+    let stopped = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                ))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"os-stop":null}"#))?,
+        )
+        .await?;
+    assert_eq!(stopped.status(), StatusCode::ACCEPTED);
+    let deleted = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.1/bootstrap-project/servers/{server_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    std::fs::remove_file(path)?;
     Ok(())
 }

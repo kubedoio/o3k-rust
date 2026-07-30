@@ -360,6 +360,12 @@ impl TokenService {
                     "network",
                     "http://127.0.0.1:8080/v2.0",
                 ),
+                service(
+                    "compute",
+                    "compute",
+                    "compute",
+                    "http://127.0.0.1:8080/v2.1",
+                ),
             ],
         }
     }
