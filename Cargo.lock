@@ -869,6 +869,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-reconciler"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "o3k-provider",
+ "o3k-store",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "o3k-store"
 version = "0.1.0-alpha.0"
 dependencies = [

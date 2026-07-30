@@ -36,6 +36,10 @@ failure injection for transient, terminal, timeout/unknown-outcome, stale
 state, and partial-completion scenarios. `run_conformance` is reusable by
 future provider adapters.
 
+Successful and unknown operations retain an optional provider resource ID so a
+reconciler can observe the resource after a lost response without issuing a
+duplicate create.
+
 Provider errors intentionally expose categories and operation identity only;
 provider-specific payloads and diagnostics are not part of the public error.
 
