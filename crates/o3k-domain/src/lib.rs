@@ -46,7 +46,14 @@ impl ServerState {
             (self, to),
             (Self::Requested, Self::Building)
                 | (Self::Building, Self::Active)
+                | (Self::Requested, Self::Error)
                 | (Self::Building, Self::Error)
+                | (Self::Active, Self::Error)
+                | (Self::Stopping, Self::Error)
+                | (Self::Stopped, Self::Error)
+                | (Self::Starting, Self::Error)
+                | (Self::Rebooting, Self::Error)
+                | (Self::Deleting, Self::Error)
                 | (Self::Active, Self::Stopping)
                 | (Self::Stopped, Self::Starting)
                 | (Self::Starting, Self::Active)
@@ -56,7 +63,10 @@ impl ServerState {
                 | (Self::Requested, Self::Deleting)
                 | (Self::Building, Self::Deleting)
                 | (Self::Active, Self::Deleting)
+                | (Self::Stopping, Self::Deleting)
                 | (Self::Stopped, Self::Deleting)
+                | (Self::Starting, Self::Deleting)
+                | (Self::Rebooting, Self::Deleting)
                 | (Self::Error, Self::Deleting)
                 | (Self::Deleting, Self::Deleted)
         );
@@ -72,11 +82,49 @@ mod tests {
     use super::{ServerState, TransitionError};
 
     #[test]
-    fn valid_server_transition_is_accepted() {
-        assert_eq!(
-            ServerState::Requested.transition(ServerState::Building),
-            Ok(ServerState::Building)
-        );
+    fn valid_server_transitions_are_accepted() {
+        let transitions = [
+            (ServerState::Requested, ServerState::Building),
+            (ServerState::Building, ServerState::Active),
+            (ServerState::Active, ServerState::Stopping),
+            (ServerState::Stopping, ServerState::Stopped),
+            (ServerState::Stopped, ServerState::Starting),
+            (ServerState::Starting, ServerState::Active),
+            (ServerState::Active, ServerState::Rebooting),
+            (ServerState::Rebooting, ServerState::Active),
+            (ServerState::Deleting, ServerState::Deleted),
+        ];
+
+        for (from, to) in transitions {
+            assert_eq!(from.transition(to), Ok(to), "{from:?} -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn every_non_deleted_state_can_fail_or_be_deleted() {
+        let non_deleted_states = [
+            ServerState::Requested,
+            ServerState::Building,
+            ServerState::Active,
+            ServerState::Stopping,
+            ServerState::Stopped,
+            ServerState::Starting,
+            ServerState::Rebooting,
+            ServerState::Deleting,
+            ServerState::Error,
+        ];
+
+        for state in non_deleted_states {
+            if state != ServerState::Error {
+                assert_eq!(state.transition(ServerState::Error), Ok(ServerState::Error));
+            }
+            if state != ServerState::Deleting {
+                assert_eq!(
+                    state.transition(ServerState::Deleting),
+                    Ok(ServerState::Deleting)
+                );
+            }
+        }
     }
 
     #[test]
