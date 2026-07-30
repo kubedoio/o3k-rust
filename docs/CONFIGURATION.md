@@ -27,11 +27,18 @@ problem without printing secret values.
 | Log filter | `log_filter` | `O3K_LOG_FILTER` | `--log-filter` | `info` |
 | Provider | `provider` | `O3K_PROVIDER` | `--provider` | `fake` |
 | Bootstrap secret | `bootstrap_secret` | `O3K_BOOTSTRAP_SECRET` | `--bootstrap-secret` | unset |
+| Bootstrap password | `bootstrap_password` | `O3K_BOOTSTRAP_PASSWORD` | `--bootstrap-password` | unset |
+| Token signing key | `token_signing_key` | `O3K_TOKEN_SIGNING_KEY` | `--token-signing-key` | unset |
 
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
 The default address must remain loopback unless an operator explicitly changes
 it. Secrets have redacted `Debug` and `Display` representations and must not be
 included in logs, errors, or command output.
+
+The Keystone bootstrap token route is enabled only when both
+`bootstrap_password` and a random `token_signing_key` (at least 32 bytes) are
+configured. Keep both values outside the TOML file when possible, for example
+in a protected environment or secret manager.
 
 Example:
 

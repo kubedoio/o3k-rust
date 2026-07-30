@@ -1,3 +1,4 @@
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -14,10 +15,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_path = config.data_dir.join("o3k.sqlite");
     let _store = o3k_store::SqliteStore::connect_file(&database_path).await?;
+    let identity = match (config.bootstrap_password(), config.token_signing_key()) {
+        (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
+            "bootstrap-user".to_owned(),
+            "admin".to_owned(),
+            o3k_identity::Secret::new(password.expose().to_owned()),
+            "bootstrap-project".to_owned(),
+            "admin".to_owned(),
+            o3k_identity::Secret::new(signing_key.expose().to_owned()),
+            Duration::from_secs(3600),
+        )?),
+        _ => None,
+    };
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(address = %config.listen_addr, data_dir = %config.data_dir.display(), provider = ?config.provider, "o3kd listening");
 
-    let state = o3k_api::AppState::new();
+    let state = if let Some(identity) = identity {
+        o3k_api::AppState::new().with_identity(identity)
+    } else {
+        o3k_api::AppState::new()
+    };
     state.set_ready(true);
     let shutdown_state = state.clone();
     axum::serve(listener, o3k_api::router_with_state(state))

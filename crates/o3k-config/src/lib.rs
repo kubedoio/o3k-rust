@@ -54,6 +54,8 @@ pub struct Config {
     pub log_filter: String,
     pub provider: Provider,
     bootstrap_secret: Option<Secret>,
+    bootstrap_password: Option<Secret>,
+    token_signing_key: Option<Secret>,
 }
 
 impl fmt::Debug for Config {
@@ -67,6 +69,8 @@ impl fmt::Debug for Config {
             .field("log_filter", &self.log_filter)
             .field("provider", &self.provider)
             .field("bootstrap_secret", &self.bootstrap_secret)
+            .field("bootstrap_password", &self.bootstrap_password)
+            .field("token_signing_key", &self.token_signing_key)
             .finish()
     }
 }
@@ -106,6 +110,16 @@ impl Config {
     pub fn bootstrap_secret(&self) -> Option<&Secret> {
         self.bootstrap_secret.as_ref()
     }
+
+    #[must_use]
+    pub fn bootstrap_password(&self) -> Option<&Secret> {
+        self.bootstrap_password.as_ref()
+    }
+
+    #[must_use]
+    pub fn token_signing_key(&self) -> Option<&Secret> {
+        self.token_signing_key.as_ref()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -133,6 +147,10 @@ pub enum ConfigError {
     InvalidProvider,
     #[error("bootstrap secret must not contain a newline")]
     InvalidSecret,
+    #[error("bootstrap password must not contain a newline")]
+    InvalidBootstrapPassword,
+    #[error("token signing key must be at least 32 bytes")]
+    WeakTokenSigningKey,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -144,6 +162,8 @@ struct PartialConfig {
     log_filter: Option<String>,
     provider: Option<String>,
     bootstrap_secret: Option<String>,
+    bootstrap_password: Option<String>,
+    token_signing_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -155,6 +175,8 @@ struct FileConfig {
     log_filter: Option<String>,
     provider: Option<String>,
     bootstrap_secret: Option<String>,
+    bootstrap_password: Option<String>,
+    token_signing_key: Option<String>,
 }
 
 impl From<FileConfig> for PartialConfig {
@@ -166,6 +188,8 @@ impl From<FileConfig> for PartialConfig {
             log_filter: file.log_filter,
             provider: file.provider,
             bootstrap_secret: file.bootstrap_secret,
+            bootstrap_password: file.bootstrap_password,
+            token_signing_key: file.token_signing_key,
             ..Self::default()
         }
     }
@@ -194,6 +218,12 @@ impl PartialConfig {
         if other.bootstrap_secret.is_some() {
             self.bootstrap_secret = other.bootstrap_secret;
         }
+        if other.bootstrap_password.is_some() {
+            self.bootstrap_password = other.bootstrap_password;
+        }
+        if other.token_signing_key.is_some() {
+            self.token_signing_key = other.token_signing_key;
+        }
     }
 
     fn from_environment(environment: &[(String, String)]) -> Self {
@@ -204,6 +234,8 @@ impl PartialConfig {
             log_filter: value_from_env(environment, "O3K_LOG_FILTER"),
             provider: value_from_env(environment, "O3K_PROVIDER"),
             bootstrap_secret: value_from_env(environment, "O3K_BOOTSTRAP_SECRET"),
+            bootstrap_password: value_from_env(environment, "O3K_BOOTSTRAP_PASSWORD"),
+            token_signing_key: value_from_env(environment, "O3K_TOKEN_SIGNING_KEY"),
             ..Self::default()
         }
     }
@@ -232,6 +264,12 @@ impl PartialConfig {
                 "--provider" => result.provider = Some(value("--provider")?),
                 "--bootstrap-secret" => {
                     result.bootstrap_secret = Some(value("--bootstrap-secret")?)
+                }
+                "--bootstrap-password" => {
+                    result.bootstrap_password = Some(value("--bootstrap-password")?)
+                }
+                "--token-signing-key" => {
+                    result.token_signing_key = Some(value("--token-signing-key")?)
                 }
                 option if option == "--help" || option == "-h" => {
                     return Err(ConfigError::UnknownOption(option.to_owned()));
@@ -290,6 +328,21 @@ impl PartialConfig {
         {
             return Err(ConfigError::InvalidSecret);
         }
+        if self
+            .bootstrap_password
+            .as_deref()
+            .is_some_and(|password| password.contains(['\n', '\r']))
+        {
+            return Err(ConfigError::InvalidBootstrapPassword);
+        }
+        if self.bootstrap_password.is_some()
+            && self
+                .token_signing_key
+                .as_ref()
+                .is_none_or(|key| key.len() < 32)
+        {
+            return Err(ConfigError::WeakTokenSigningKey);
+        }
 
         Ok(Config {
             config_path,
@@ -299,6 +352,8 @@ impl PartialConfig {
             log_filter,
             provider,
             bootstrap_secret: self.bootstrap_secret.map(Secret),
+            bootstrap_password: self.bootstrap_password.map(Secret),
+            token_signing_key: self.token_signing_key.map(Secret),
         })
     }
 }
@@ -383,5 +438,17 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(result, Err(ConfigError::InvalidListenAddress)));
+    }
+
+    #[test]
+    fn bootstrap_password_requires_a_strong_separate_signing_key() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[
+                ("O3K_BOOTSTRAP_PASSWORD", "password"),
+                ("O3K_TOKEN_SIGNING_KEY", "short"),
+            ]),
+        );
+        assert!(matches!(result, Err(ConfigError::WeakTokenSigningKey)));
     }
 }
