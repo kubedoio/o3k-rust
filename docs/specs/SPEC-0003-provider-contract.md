@@ -1,6 +1,6 @@
 # SPEC-0003 — Provider Boundary
 
-Status: Draft
+Status: Implemented compute subset
 
 ## Purpose
 
@@ -25,6 +25,19 @@ Network and storage contracts will be added only with their vertical slices.
 - provider errors map to typed categories;
 - provider-specific debug details are retained internally and redacted publicly;
 - capability discovery is explicit and versioned.
+
+## Rust port and fake
+
+`o3k-provider` defines the Rust-native `ComputeProvider` trait independently
+from protobuf transport. Its initial subset covers capabilities, instance
+create/get/delete, and operation lookup. `FakeComputeProvider` is stateful and
+supports idempotency-key replay, idempotent deletion of absent instances, and
+failure injection for transient, terminal, timeout/unknown-outcome, stale
+state, and partial-completion scenarios. `run_conformance` is reusable by
+future provider adapters.
+
+Provider errors intentionally expose categories and operation identity only;
+provider-specific payloads and diagnostics are not part of the public error.
 
 ## CellHV
 
