@@ -15,7 +15,7 @@ pub struct Capabilities {
     pub capabilities: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInstanceRequest {
     pub operation_id: Uuid,
     pub o3k_server_id: Uuid,
@@ -26,7 +26,7 @@ pub struct CreateInstanceRequest {
     pub idempotency_key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeleteInstanceRequest {
     pub operation_id: Uuid,
     pub provider_instance_id: String,
@@ -57,6 +57,7 @@ pub struct Operation {
     pub o3k_operation_id: Uuid,
     pub state: OperationState,
     pub error_category: Option<ErrorCategory>,
+    pub provider_resource_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,12 +208,14 @@ impl FakeComputeProvider {
         request: Uuid,
         state_value: OperationState,
         category: Option<ErrorCategory>,
+        provider_resource_id: Option<String>,
     ) -> Operation {
         let operation = Operation {
             provider_operation_id: Uuid::now_v7(),
             o3k_operation_id: request,
             state: state_value,
             error_category: category,
+            provider_resource_id,
         };
         state
             .operations
@@ -282,7 +285,7 @@ impl ComputeProvider for FakeComputeProvider {
             },
             observed_message: None,
         };
-        state.instances.insert(provider_id, instance);
+        state.instances.insert(provider_id.clone(), instance);
         let operation_state = if state.failure == FailureInjection::Timeout {
             OperationState::UnknownOutcome
         } else {
@@ -294,6 +297,7 @@ impl ComputeProvider for FakeComputeProvider {
             operation_state,
             (operation_state == OperationState::UnknownOutcome)
                 .then_some(ErrorCategory::UnknownOutcome),
+            Some(provider_id),
         );
         state.idempotency.insert(
             request.idempotency_key,
@@ -342,6 +346,7 @@ impl ComputeProvider for FakeComputeProvider {
                 request.operation_id,
                 OperationState::Succeeded,
                 None,
+                None,
             );
             state.idempotency.insert(
                 request.idempotency_key,
@@ -367,6 +372,7 @@ impl ComputeProvider for FakeComputeProvider {
             operation_state,
             (operation_state == OperationState::UnknownOutcome)
                 .then_some(ErrorCategory::UnknownOutcome),
+            None,
         );
         state.idempotency.insert(
             request.idempotency_key,
