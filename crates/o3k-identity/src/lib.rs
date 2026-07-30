@@ -8,7 +8,6 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -426,12 +425,38 @@ fn sign(key: &Secret, input: &[u8]) -> Result<String, AuthError> {
 }
 
 fn format_time(seconds: u64) -> Result<String, AuthError> {
-    OffsetDateTime::from_unix_timestamp(
-        i64::try_from(seconds).map_err(|_| AuthError::InvalidRequest)?,
-    )
-    .map_err(|_| AuthError::InvalidRequest)?
-    .format(&Rfc3339)
-    .map_err(|_| AuthError::InvalidRequest)
+    let days = seconds / 86_400;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_date(days)?;
+    let hour = day_seconds / 3_600;
+    let minute = (day_seconds % 3_600) / 60;
+    let second = day_seconds % 60;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z"
+    ))
+}
+
+// Howard Hinnant's proleptic Gregorian calendar conversion, adapted for
+// non-negative Unix timestamps. This keeps token formatting on the standard
+// library and avoids pulling a date parser into the authentication boundary.
+fn civil_date(days_since_epoch: u64) -> Result<(i64, u64, u64), AuthError> {
+    let days = i64::try_from(days_since_epoch).map_err(|_| AuthError::InvalidRequest)?;
+    let shifted = days + 719_468;
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    Ok((
+        year,
+        u64::try_from(month).map_err(|_| AuthError::InvalidRequest)?,
+        u64::try_from(day).map_err(|_| AuthError::InvalidRequest)?,
+    ))
 }
 
 fn default_domain() -> DomainDetails {

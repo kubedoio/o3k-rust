@@ -15,12 +15,14 @@ licenses, advisories, bans, and sources in CI.
 | thiserror, time, uuid | O3K maintainers | errors, timestamps, resource IDs | crates.io; MIT/Apache-2.0 family |
 | prost, tonic, tonic-build | O3K maintainers | provider protobuf/gRPC boundary | crates.io; MIT/Apache-2.0 family |
 | tracing, tracing-subscriber | O3K maintainers | structured diagnostics | crates.io; MIT/Apache-2.0 family |
-| url | O3K maintainers | SQLx URL/IDNA compatibility | crates.io; MIT/Apache-2.0 family; pinned to patched 2.5.7 |
+| url | O3K maintainers | SQLx URL/IDNA compatibility | crates.io; MIT/Apache-2.0 family; pinned to patched 2.5.4 |
 
 The policy also permits `CDLA-Permissive-2.0` for the transitive
 `webpki-roots` dependency. This is an intentional, reviewed exception to the
 common license set; BSL and LGPL alternatives remain disallowed unless a
-future dependency review explicitly changes `deny.toml`.
+future dependency review explicitly changes `deny.toml`. Internal path
+dependencies are intentionally allowed; the source gate rejects unknown
+external registries and git sources.
 
 The only current advisory exception is RustSec RUSTSEC-2025-0134 for the
 unmaintained `rustls-pemfile` 2.2.0 pulled by tonic 0.12.3. It is not a
