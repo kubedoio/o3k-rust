@@ -1,0 +1,180 @@
+schema_version: 1
+matrix_version: 0.1.0-alpha.0
+source_accessed: 2026-07-30
+profile: testlab-alpha
+entries:
+  - service: identity
+    operation: token_issue_password_scoped
+    api_version: keystone-v3
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token
+    supported_fields:
+      request: [auth.identity.password.user, auth.scope.project]
+      response: [token, expires_at, project, catalog]
+    known_deviations:
+      - Full Keystone policy, federation, and non-password authentication are out of scope.
+    executable_tests: []
+    status: planned
+
+  - service: image
+    operation: image_create
+    api_version: glance-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/image/v2/index.html#create-image
+    supported_fields: [name, visibility, container_format, disk_format, size, checksum]
+    known_deviations:
+      - Local filesystem content is the only initial backend.
+    executable_tests: []
+    status: planned
+  - service: image
+    operation: image_upload
+    api_version: glance-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/image/v2/index.html#upload-binary-image-data
+    supported_fields: [content, checksum]
+    known_deviations:
+      - Import, multi-store, and signature workflows are out of scope.
+    executable_tests: []
+    status: planned
+  - service: image
+    operation: image_list
+    api_version: glance-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/image/v2/index.html#list-images
+    supported_fields: [id, name, status, size, checksum]
+    known_deviations: []
+    executable_tests: []
+    status: planned
+  - service: image
+    operation: image_show
+    api_version: glance-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/image/v2/index.html#show-image-details
+    supported_fields: [id, name, status, size, checksum]
+    known_deviations: []
+    executable_tests: []
+    status: planned
+  - service: image
+    operation: image_delete
+    api_version: glance-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/image/v2/index.html#delete-image
+    supported_fields: [id]
+    known_deviations: []
+    executable_tests: []
+    status: planned
+
+  - service: network
+    operation: network_create
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#create-network
+    supported_fields: [name, project_id, admin_state_up]
+    known_deviations:
+      - Only a flat provider network is in the initial profile.
+    executable_tests: []
+    status: planned
+  - service: network
+    operation: network_list_show_delete
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#list-networks
+      - https://docs.openstack.org/api-ref/network/v2/index.html#show-network-details
+      - https://docs.openstack.org/api-ref/network/v2/index.html#delete-network
+    supported_fields: [id, name, project_id, status]
+    known_deviations:
+      - Routers, floating IPs, security groups, VXLAN, and DVR are out of scope.
+    executable_tests: []
+    status: planned
+  - service: subnet_create
+    operation: subnet_create
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet
+    supported_fields: [name, network_id, project_id, cidr, gateway_ip, allocation_pools]
+    known_deviations:
+      - One subnet and one allocation pool are planned for the initial profile.
+    executable_tests: []
+    status: planned
+  - service: subnet
+    operation: subnet_list_show_delete
+    api_version: neutron-v2
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/network/v2/index.html#list-subnets
+      - https://docs.openstack.org/api-ref/network/v2/index.html#show-subnet-details
+      - https://docs.openstack.org/api-ref/network/v2/index.html#delete-subnet
+    supported_fields: [id, name, network_id, project_id, cidr, gateway_ip]
+    known_deviations: []
+    executable_tests: []
+    status: planned
+
+  - service: compute
+    operation: flavor_create
+    api_version: nova-v2.1
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#flavors-os-flavors
+    supported_fields: [id, name, vcpus, ram, disk]
+    known_deviations:
+      - Flavor extra specifications and administrative extensions are out of scope.
+    executable_tests: []
+    status: planned
+  - service: compute
+    operation: flavor_list_show_delete
+    api_version: nova-v2.1
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#list-flavors
+      - https://docs.openstack.org/api-ref/compute/#show-flavor-details
+      - https://docs.openstack.org/api-ref/compute/#delete-flavor
+    supported_fields: [id, name, vcpus, ram, disk]
+    known_deviations: []
+    executable_tests: []
+    status: planned
+  - service: compute
+    operation: server_create
+    api_version: nova-v2.1
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#create-server
+    supported_fields: [name, image, flavor, networks, project_id]
+    known_deviations:
+      - Keypairs, metadata extensions, config-drive, and scheduler extensions are out of scope.
+    executable_tests: []
+    status: planned
+  - service: compute
+    operation: server_list_show_delete
+    api_version: nova-v2.1
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#list-servers
+      - https://docs.openstack.org/api-ref/compute/#show-server-details
+      - https://docs.openstack.org/api-ref/compute/#delete-server
+    supported_fields: [id, name, status, image, flavor, addresses, project_id]
+    known_deviations:
+      - Pagination and the broader Nova query/filter surface are deferred.
+    executable_tests: []
+    status: planned
+  - service: compute
+    operation: server_start_stop_reboot
+    api_version: nova-v2.1
+    microversion: null
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#start-server
+      - https://docs.openstack.org/api-ref/compute/#stop-server
+      - https://docs.openstack.org/api-ref/compute/#reboot-server
+    supported_fields: [server_id, reboot_type]
+    known_deviations:
+      - Hard reboot and soft reboot are mapped by the provider contract; hypervisor-specific behavior is not exposed.
+    executable_tests: []
+    status: planned
