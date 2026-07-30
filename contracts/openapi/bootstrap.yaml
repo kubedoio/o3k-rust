@@ -22,7 +22,13 @@ paths:
       operationId: getReadiness
       responses:
         '200':
-          description: Process can accept requests.
+          description: Process has completed startup and can accept requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '503':
+          description: Process is alive but startup or dependency checks are incomplete.
           content:
             application/json:
               schema:
