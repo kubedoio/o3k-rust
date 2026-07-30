@@ -1,0 +1,20 @@
+[package]
+name = "o3k-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+http.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true

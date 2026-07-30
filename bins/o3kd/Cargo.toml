@@ -1,0 +1,17 @@
+[package]
+name = "o3kd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+o3k-api = { path = "../../crates/o3k-api" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

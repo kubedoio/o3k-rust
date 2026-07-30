@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package o3k.provider.v1;
+
+// Draft provider contract. Field numbers are stable once released.
+service ComputeProvider {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
+  rpc CreateInstance(CreateInstanceRequest) returns (Operation);
+  rpc GetInstance(GetInstanceRequest) returns (Instance);
+  rpc DeleteInstance(DeleteInstanceRequest) returns (Operation);
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+}
+
+message GetCapabilitiesRequest {}
+
+message GetCapabilitiesResponse {
+  string provider_name = 1;
+  string provider_version = 2;
+  repeated string capabilities = 3;
+}
+
+message CreateInstanceRequest {
+  string operation_id = 1;
+  string o3k_server_id = 2;
+  string name = 3;
+  uint32 vcpus = 4;
+  uint64 memory_mib = 5;
+  string image_id = 6;
+  string idempotency_key = 7;
+}
+
+message GetInstanceRequest {
+  string provider_instance_id = 1;
+}
+
+message DeleteInstanceRequest {
+  string operation_id = 1;
+  string provider_instance_id = 2;
+  string idempotency_key = 3;
+}
+
+message GetOperationRequest {
+  string provider_operation_id = 1;
+}
+
+message Instance {
+  string provider_instance_id = 1;
+  string o3k_server_id = 2;
+  InstanceState state = 3;
+  string observed_message = 4;
+}
+
+enum InstanceState {
+  INSTANCE_STATE_UNSPECIFIED = 0;
+  INSTANCE_STATE_CREATING = 1;
+  INSTANCE_STATE_RUNNING = 2;
+  INSTANCE_STATE_STOPPED = 3;
+  INSTANCE_STATE_DELETING = 4;
+  INSTANCE_STATE_DELETED = 5;
+  INSTANCE_STATE_ERROR = 6;
+}
+
+message Operation {
+  string provider_operation_id = 1;
+  string o3k_operation_id = 2;
+  OperationState state = 3;
+  ErrorCategory error_category = 4;
+  string redacted_message = 5;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_ACCEPTED = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCEEDED = 3;
+  OPERATION_STATE_RETRYABLE = 4;
+  OPERATION_STATE_UNKNOWN_OUTCOME = 5;
+  OPERATION_STATE_FAILED = 6;
+}
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_INVALID_REQUEST = 1;
+  ERROR_CATEGORY_NOT_FOUND = 2;
+  ERROR_CATEGORY_CONFLICT = 3;
+  ERROR_CATEGORY_CAPACITY = 4;
+  ERROR_CATEGORY_RETRYABLE = 5;
+  ERROR_CATEGORY_UNKNOWN_OUTCOME = 6;
+  ERROR_CATEGORY_TERMINAL = 7;
+}
