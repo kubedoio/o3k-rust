@@ -12,9 +12,11 @@ workspace = true
 [dependencies]
 axum.workspace = true
 o3k-api = { path = "../../crates/o3k-api" }
+o3k-compute = { path = "../../crates/o3k-compute" }
 o3k-config = { path = "../../crates/o3k-config" }
 o3k-identity = { path = "../../crates/o3k-identity" }
 o3k-image = { path = "../../crates/o3k-image" }
+o3k-provider = { path = "../../crates/o3k-provider" }
 o3k-network = { path = "../../crates/o3k-network" }
 o3k-store = { path = "../../crates/o3k-store" }
 tokio.workspace = true
