@@ -12,6 +12,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_config::LogFormat::Pretty => subscriber.pretty().init(),
     }
 
+    let database_path = config.data_dir.join("o3k.sqlite");
+    let _store = o3k_store::SqliteStore::connect_file(&database_path).await?;
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(address = %config.listen_addr, data_dir = %config.data_dir.display(), provider = ?config.provider, "o3kd listening");
 

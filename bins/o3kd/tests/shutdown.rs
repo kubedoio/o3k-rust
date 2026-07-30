@@ -14,7 +14,14 @@ fn assert_signal_shutdown(signal: &str) -> Result<(), Box<dyn std::error::Error>
     drop(probe);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_o3kd"))
-        .args(["--listen-addr", &address.to_string(), "--log-filter", "off"])
+        .args([
+            "--listen-addr",
+            &address.to_string(),
+            "--data-dir",
+            &format!("/tmp/o3kd-test-{}-{signal}", std::process::id()),
+            "--log-filter",
+            "off",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
