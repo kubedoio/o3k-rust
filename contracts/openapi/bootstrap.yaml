@@ -1,0 +1,38 @@
+openapi: 3.1.0
+info:
+  title: O3K Bootstrap API
+  version: 0.1.0-alpha.0
+  description: >-
+    Bootstrap-only contract. It does not claim complete OpenStack compatibility.
+servers:
+  - url: http://127.0.0.1:8080
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+  /readyz:
+    get:
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Process can accept requests.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+components:
+  schemas:
+    Status:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string

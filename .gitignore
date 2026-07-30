@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
+coverage/
+artifacts/
