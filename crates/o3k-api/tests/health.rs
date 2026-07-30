@@ -2,6 +2,7 @@ use axum::body::Body;
 use http::{Method, Request, StatusCode, header};
 use o3k_identity::{Secret, TokenService};
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
+use o3k_network::NetworkService;
 use serde_json::Value;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -73,7 +74,7 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert!(
         body["token"]["catalog"]
             .as_array()
-            .is_some_and(|items| items.len() == 2)
+            .is_some_and(|items| items.len() == 3)
     );
     Ok(())
 }
@@ -199,6 +200,92 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
         )
         .await?;
     assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn neutron_network_subnet_port_lifecycle_is_deterministic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!("/tmp/o3k-api-network-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(NetworkService::open(&root)?);
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("token missing"))?
+        .to_str()?
+        .to_owned();
+    let body = serde_json::json!({"network":{"name":"flat"}});
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/networks")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let network: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    let network_id = network["network"]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("network id missing"))?
+        .to_owned();
+    let body =
+        serde_json::json!({"subnet":{"name":"lab","network_id":network_id,"cidr":"192.0.2.0/29"}});
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let subnet: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    assert_eq!(subnet["subnet"]["gateway_ip"], "192.0.2.1");
+    let body = serde_json::json!({"port":{"name":"port-1","network_id":network_id}});
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/ports")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let port: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    assert_eq!(port["port"]["fixed_ips"][0]["ip_address"], "192.0.2.2");
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

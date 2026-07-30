@@ -15,6 +15,7 @@ o3k-api = { path = "../../crates/o3k-api" }
 o3k-config = { path = "../../crates/o3k-config" }
 o3k-identity = { path = "../../crates/o3k-identity" }
 o3k-image = { path = "../../crates/o3k-image" }
+o3k-network = { path = "../../crates/o3k-network" }
 o3k-store = { path = "../../crates/o3k-store" }
 tokio.workspace = true
 tracing.workspace = true

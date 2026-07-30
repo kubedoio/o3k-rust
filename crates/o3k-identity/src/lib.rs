@@ -354,6 +354,12 @@ impl TokenService {
                     "http://127.0.0.1:8080/v3",
                 ),
                 service("image", "image", "image", "http://127.0.0.1:8080/v2"),
+                service(
+                    "network",
+                    "network",
+                    "network",
+                    "http://127.0.0.1:8080/v2.0",
+                ),
             ],
         }
     }

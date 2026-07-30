@@ -796,6 +796,7 @@ dependencies = [
  "http",
  "o3k-identity",
  "o3k-image",
+ "o3k-network",
  "serde",
  "serde_json",
  "tokio",
@@ -847,6 +848,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-network"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "o3k-store"
 version = "0.1.0-alpha.0"
 dependencies = [
@@ -867,6 +878,7 @@ dependencies = [
  "o3k-config",
  "o3k-identity",
  "o3k-image",
+ "o3k-network",
  "o3k-store",
  "tokio",
  "tracing",
