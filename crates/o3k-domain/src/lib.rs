@@ -37,10 +37,7 @@ pub enum ServerState {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TransitionError {
     #[error("invalid server transition from {from:?} to {to:?}")]
-    Invalid {
-        from: ServerState,
-        to: ServerState,
-    },
+    Invalid { from: ServerState, to: ServerState },
 }
 
 impl ServerState {
@@ -64,10 +61,9 @@ impl ServerState {
                 | (Self::Deleting, Self::Deleted)
         );
 
-        valid.then_some(to).ok_or(TransitionError::Invalid {
-            from: self,
-            to,
-        })
+        valid
+            .then_some(to)
+            .ok_or(TransitionError::Invalid { from: self, to })
     }
 }
 
