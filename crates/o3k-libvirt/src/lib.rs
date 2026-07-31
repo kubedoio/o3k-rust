@@ -5,7 +5,11 @@
 //! the control plane usable on hosts where libvirt development libraries are
 //! not installed and reports a clear readiness error instead.
 
-use std::{fmt, path::Component, sync::Arc};
+use std::{
+    fmt, fs,
+    path::{Component, Path},
+    sync::Arc,
+};
 
 use o3k_provider_contract::compute_proto as proto;
 use sha2::{Digest, Sha256};
@@ -52,9 +56,15 @@ pub struct DomainSpec {
     pub vcpus: u32,
     pub memory_mib: u64,
     pub image_id: String,
-    /// Host path to an O3K-owned, materialized config-drive image.
-    pub config_drive_image_path: Option<String>,
+    /// Host-local materialized config-drive image bound to its content digest.
+    pub config_drive_image: Option<ConfigDriveImage>,
     pub network_interfaces: Vec<DomainNetworkInterface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDriveImage {
+    pub path: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,9 +142,9 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         || spec.memory_mib == 0
         || validate_image_source(&spec.image_id).is_err()
         || spec
-            .config_drive_image_path
-            .as_deref()
-            .is_some_and(|path| validate_image_source(path).is_err())
+            .config_drive_image
+            .as_ref()
+            .is_some_and(|image| validate_config_drive_image(image).is_err())
         || spec.network_interfaces.iter().any(|interface| {
             validate_tap_name(&interface.tap_name).is_err()
                 || validate_mac_address(&interface.mac_address).is_err()
@@ -147,13 +157,10 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
     }
     let name = stable_domain_name(&spec.metadata.server_id);
     let m = &spec.metadata;
-    let config_drive = spec
-        .config_drive_image_path
-        .as_deref()
-        .map(|path| {
+    let config_drive = spec.config_drive_image.as_ref().map(|image| {
             format!(
                 "<disk type=\"file\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\" /><source file=\"{}\" /><target dev=\"sda\" bus=\"sata\" /><readonly /></disk>",
-                xml_escape(path)
+                xml_escape(&image.path)
             )
         })
         .unwrap_or_default();
@@ -278,6 +285,37 @@ fn validate_image_source(value: &str) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+fn validate_config_drive_image(image: &ConfigDriveImage) -> Result<(), ()> {
+    if !Path::new(&image.path).is_absolute()
+        || validate_image_source(&image.path).is_err()
+        || !valid_sha256(&image.sha256)
+    {
+        return Err(());
+    }
+    let metadata = fs::symlink_metadata(&image.path).map_err(|_| ())?;
+    if !metadata.is_file() {
+        return Err(());
+    }
+    let bytes = fs::read(&image.path).map_err(|_| ())?;
+    if sha256_hex(&bytes) != image.sha256 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut result = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(&mut result, "{byte:02x}");
+    }
+    result
 }
 
 fn validate_tap_name(value: &str) -> Result<(), ()> {
@@ -920,7 +958,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
             image_id,
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: Vec::new(),
         })
         .map_err(provider_error)?;
@@ -1080,7 +1118,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 512,
             image_id: "/var/lib/o3k/disk&1.qcow2".to_owned(),
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: Vec::new(),
         };
         let first = build_domain_xml(&spec)?;
@@ -1102,7 +1140,14 @@ mod tests {
     }
 
     #[test]
-    fn domain_xml_attaches_config_drive_read_only() -> Result<(), LibvirtError> {
+    fn domain_xml_attaches_config_drive_read_only() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-config-drive-{}-{}.iso",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let content = b"verified-config-drive";
+        fs::write(&path, content)?;
         let spec = DomainSpec {
             metadata: DomainMetadata {
                 server_id: "server-config-drive".to_owned(),
@@ -1114,15 +1159,22 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-            config_drive_image_path: Some(
-                "/var/lib/o3k/config-drive/server-config-drive.iso".to_owned(),
-            ),
+            config_drive_image: Some(ConfigDriveImage {
+                path: path.display().to_string(),
+                sha256: sha256_hex(content),
+            }),
             network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
         assert!(xml.contains("device=\"cdrom\""));
-        assert!(xml.contains("source file=\"/var/lib/o3k/config-drive/server-config-drive.iso\""));
+        assert!(xml.contains(&format!("source file=\"{}\"", path.display())));
         assert!(xml.contains("<target dev=\"sda\" bus=\"sata\" /><readonly />"));
+        let mut mismatched = spec.clone();
+        if let Some(image) = mismatched.config_drive_image.as_mut() {
+            image.sha256 = "0".repeat(64);
+        }
+        assert!(build_domain_xml(&mismatched).is_err());
+        fs::remove_file(path)?;
         Ok(())
     }
 
@@ -1139,7 +1191,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: vec![DomainNetworkInterface {
                 tap_name: "o3ktap-a1b2c3d4".to_owned(),
                 mac_address: "02:00:00:00:00:01".to_owned(),
@@ -1218,7 +1270,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
@@ -1248,7 +1300,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: Vec::new(),
         };
         let owned_xml = build_domain_xml(&owned_spec)?.xml;
@@ -1296,7 +1348,7 @@ mod tests {
                     vcpus: 1,
                     memory_mib: 128,
                     image_id: image_id.to_owned(),
-                    config_drive_image_path: None,
+                    config_drive_image: None,
                     network_interfaces: Vec::new(),
                 })
                 .is_err()
@@ -1313,7 +1365,10 @@ mod tests {
                     vcpus: 1,
                     memory_mib: 128,
                     image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-                    config_drive_image_path: Some(config_drive_image_path.to_owned()),
+                    config_drive_image: Some(ConfigDriveImage {
+                        path: config_drive_image_path.to_owned(),
+                        sha256: "0".repeat(64),
+                    }),
                     network_interfaces: Vec::new(),
                 })
                 .is_err()
@@ -1335,7 +1390,7 @@ mod tests {
                     vcpus: 1,
                     memory_mib: 128,
                     image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-                    config_drive_image_path: None,
+                    config_drive_image: None,
                     network_interfaces: vec![network_interface],
                 })
                 .is_err()
@@ -1370,7 +1425,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
-            config_drive_image_path: None,
+            config_drive_image: None,
             network_interfaces: Vec::new(),
         };
         let built = build_domain_xml(&spec)?;
