@@ -731,6 +731,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_observation_forwarding_projects_stopped_server() -> Result<(), ComputeError> {
+        let service = service("agent-observation-forwarding").await?;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "observed-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            image_id: Some("image-1".to_owned()),
+            network_ids: vec!["network-1".to_owned()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            idempotency_key: "agent-observation-forwarding".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        let observation = o3k_provider_contract::compute_proto::Observation {
+            resource_id: request.o3k_server_id.to_string(),
+            provider_resource_id: "agent-domain-stopped".to_owned(),
+            operation_id: request.operation_id.to_string(),
+            operation_state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            state: o3k_provider_contract::compute_proto::ResourceState::Stopped as i32,
+            ..Default::default()
+        };
+        service.apply_agent_observation(&observation).await?;
+        assert_eq!(
+            service
+                .show_server("project-a", request.o3k_server_id)
+                .await?
+                .status,
+            "SHUTOFF"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn scheduler_binding_is_persisted_idempotently_and_released_on_delete()
     -> Result<(), ComputeError> {
         let placement_root =
