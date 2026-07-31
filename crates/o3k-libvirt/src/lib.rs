@@ -5,7 +5,7 @@
 //! the control plane usable on hosts where libvirt development libraries are
 //! not installed and reports a clear readiness error instead.
 
-use std::{fmt, sync::Arc};
+use std::{fmt, path::Component, sync::Arc};
 
 use o3k_provider_contract::compute_proto as proto;
 use sha2::{Digest, Sha256};
@@ -70,7 +70,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
     if spec.vcpus == 0
         || spec.vcpus > 512
         || spec.memory_mib == 0
-        || spec.image_id.trim().is_empty()
+        || validate_image_source(&spec.image_id).is_err()
     {
         return Err(LibvirtError::new(
             ErrorCategory::InvalidRequest,
@@ -119,19 +119,26 @@ pub fn discover_domain_xmls(domains: &[(String, String)]) -> Vec<DiscoveryResult
         .iter()
         .map(|(name, xml)| discover_domain_xml(name, xml))
         .collect::<Vec<_>>();
-    let mut seen = std::collections::HashSet::new();
-    for result in &mut results {
+    let mut counts = std::collections::HashMap::new();
+    for result in &results {
         if let DiscoveryResult::Owned { metadata, .. } = result {
-            if !seen.insert(metadata.server_id.clone()) {
-                let name = match result {
-                    DiscoveryResult::Owned { name, .. } => name.clone(),
-                    _ => String::new(),
-                };
-                *result = DiscoveryResult::Quarantined {
-                    name,
-                    reason: "duplicate O3K server ID".to_owned(),
-                };
+            *counts.entry(metadata.server_id.clone()).or_insert(0_usize) += 1;
+        }
+    }
+    for result in &mut results {
+        let duplicate = match result {
+            DiscoveryResult::Owned { name, metadata }
+                if counts.get(&metadata.server_id).copied().unwrap_or_default() > 1 =>
+            {
+                Some((name.clone(), metadata.server_id.clone()))
             }
+            _ => None,
+        };
+        if let Some((name, server_id)) = duplicate {
+            *result = DiscoveryResult::Quarantined {
+                name,
+                reason: format!("duplicate O3K server ID: {server_id}"),
+            };
         }
     }
     results
@@ -156,6 +163,19 @@ fn validate_metadata(metadata: &DomainMetadata) -> Result<(), LibvirtError> {
             ErrorCategory::InvalidRequest,
             "domain managed-by value is invalid",
         ));
+    }
+    Ok(())
+}
+
+fn validate_image_source(value: &str) -> Result<(), ()> {
+    if value.trim().is_empty()
+        || value.chars().any(char::is_control)
+        || value.contains("://")
+        || std::path::Path::new(value)
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return Err(());
     }
     Ok(())
 }
@@ -937,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_duplicate_metadata_is_quarantined() {
+    fn malformed_or_duplicate_metadata_is_quarantined() -> Result<(), LibvirtError> {
         let malformed = "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" generation=\"x\" /></metadata></domain>";
         assert!(matches!(
             discover_domain_xml("o3k-bad", malformed),
@@ -950,6 +970,52 @@ mod tests {
                 name: "foreign".to_owned()
             }
         );
+
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "duplicate-server".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+        };
+        let xml = build_domain_xml(&spec)?.xml;
+        let discovered = discover_domain_xmls(&[
+            ("o3k-first".to_owned(), xml.clone()),
+            ("o3k-second".to_owned(), xml),
+        ]);
+        assert!(
+            discovered
+                .iter()
+                .all(|result| matches!(result, DiscoveryResult::Quarantined { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn domain_xml_rejects_unsafe_image_sources() {
+        let metadata = DomainMetadata {
+            server_id: "server".to_owned(),
+            project_id: "project".to_owned(),
+            generation: 1,
+            operation_id: "operation".to_owned(),
+            managed_by: "o3k-compute".to_owned(),
+        };
+        for image_id in ["../outside.qcow2", "https://example.invalid/disk", "disk\n"] {
+            assert!(
+                build_domain_xml(&DomainSpec {
+                    metadata: metadata.clone(),
+                    vcpus: 1,
+                    memory_mib: 128,
+                    image_id: image_id.to_owned(),
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

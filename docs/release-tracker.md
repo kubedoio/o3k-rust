@@ -10,7 +10,7 @@ the real-libvirt acceptance evidence exists.
 | #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
 | #38 | secure registration/heartbeat | merged | control-plane startup failures now clear readiness; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
-| #40 | domain XML/ownership/discovery | merged | host discovery pending |
+| #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
 | #41 | image cache/overlays | merged | atomic/idempotent publication and verified project-scoped artifact resolution with digest revalidation added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication added; integration allocation pending |
