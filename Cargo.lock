@@ -986,6 +986,7 @@ dependencies = [
 name = "o3k-compute"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "o3k-provider",
  "o3k-reconciler",
  "o3k-store",
@@ -1097,10 +1098,13 @@ dependencies = [
 name = "o3k-libvirt"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
+ "o3k-provider",
  "o3k-provider-contract",
  "sha2",
  "thiserror",
  "tokio",
+ "uuid",
  "virt",
 ]
 
@@ -1189,6 +1193,7 @@ dependencies = [
  "o3k-config",
  "o3k-identity",
  "o3k-image",
+ "o3k-libvirt",
  "o3k-network",
  "o3k-provider",
  "o3k-store",

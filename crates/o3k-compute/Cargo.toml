@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 o3k-provider = { path = "../o3k-provider" }
 o3k-reconciler = { path = "../o3k-reconciler" }
 o3k-store = { path = "../o3k-store" }

@@ -41,7 +41,7 @@ pub enum ReconcileError {
     RetryExhausted,
 }
 
-pub struct OperationJournal<S, P> {
+pub struct OperationJournal<S, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
     max_attempts: u8,
@@ -49,7 +49,7 @@ pub struct OperationJournal<S, P> {
     events: Arc<Mutex<Vec<JournalEvent>>>,
 }
 
-impl<S, P> Clone for OperationJournal<S, P> {
+impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
@@ -61,7 +61,7 @@ impl<S, P> Clone for OperationJournal<S, P> {
     }
 }
 
-impl<S, P> OperationJournal<S, P>
+impl<S, P: ?Sized> OperationJournal<S, P>
 where
     S: DurableStore + 'static,
     P: ComputeProvider + 'static,

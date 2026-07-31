@@ -20,8 +20,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
     )?;
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
-    let compute_service =
-        o3k_compute::ComputeService::new(store, Arc::new(o3k_provider::FakeComputeProvider::new()));
+    let compute_service = match config.provider {
+        o3k_config::Provider::Libvirt => {
+            let adapter = o3k_libvirt::LibvirtAdapter::new(o3k_libvirt::LibvirtConfig::default())?;
+            o3k_compute::ComputeService::new(
+                store,
+                Arc::new(o3k_libvirt::LibvirtProvider::new(adapter)),
+            )
+        }
+        o3k_config::Provider::Fake | o3k_config::Provider::CellHv => {
+            o3k_compute::ComputeService::new(
+                store,
+                Arc::new(o3k_provider::FakeComputeProvider::new()),
+            )
+        }
+    };
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
             "bootstrap-user".to_owned(),
