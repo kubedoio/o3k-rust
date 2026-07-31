@@ -263,6 +263,10 @@ impl FakeComputeProvider {
     fn delete_fingerprint(request: &DeleteInstanceRequest) -> String {
         request.provider_instance_id.clone()
     }
+
+    fn action_fingerprint(provider_instance_id: &str, action: InstanceAction) -> String {
+        format!("{provider_instance_id}:{action:?}")
+    }
 }
 
 #[async_trait]
@@ -420,6 +424,21 @@ impl ComputeProvider for FakeComputeProvider {
         idempotency_key: &str,
     ) -> Result<Operation, ProviderError> {
         let mut state = self.lock()?;
+        if idempotency_key.trim().is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let idempotency_key = format!("action:{idempotency_key}");
+        let fingerprint = Self::action_fingerprint(provider_instance_id, action);
+        if let Some((operation_id, original)) = state.idempotency.get(&idempotency_key) {
+            if original != &fingerprint {
+                return Err(ProviderError::Conflict);
+            }
+            return state
+                .operations
+                .get(operation_id)
+                .cloned()
+                .ok_or(ProviderError::Storage);
+        }
         match state.failure {
             FailureInjection::Transient => return Err(ProviderError::Retryable),
             FailureInjection::Terminal => return Err(ProviderError::Terminal),
@@ -444,20 +463,28 @@ impl ComputeProvider for FakeComputeProvider {
             .get_mut(provider_instance_id)
             .ok_or(ProviderError::NotFound)?;
         instance.state = next;
+        let operation_state = if state.failure == FailureInjection::Timeout {
+            OperationState::UnknownOutcome
+        } else {
+            OperationState::Succeeded
+        };
         let operation = Self::operation(
             &mut state,
             operation_id,
-            OperationState::Succeeded,
-            None,
+            operation_state,
+            (operation_state == OperationState::UnknownOutcome)
+                .then_some(ErrorCategory::UnknownOutcome),
             None,
         );
         state.idempotency.insert(
-            format!("action:{idempotency_key}"),
-            (
-                operation.provider_operation_id,
-                provider_instance_id.to_owned(),
-            ),
+            idempotency_key,
+            (operation.provider_operation_id, fingerprint),
         );
+        if operation.state == OperationState::UnknownOutcome {
+            return Err(ProviderError::UnknownOutcome {
+                operation_id: operation.provider_operation_id,
+            });
+        }
         Ok(operation)
     }
 
@@ -562,6 +589,50 @@ mod tests {
             OperationState::UnknownOutcome
         );
         assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn timeout_action_replays_same_operation_without_repeating_mutation()
+    -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let created = provider.create_instance(request("create-action")).await?;
+        let provider_instance_id = created.provider_resource_id.ok_or(ProviderError::Storage)?;
+        provider.set_failure(FailureInjection::Timeout)?;
+        let first_error = match provider
+            .action_instance(
+                &provider_instance_id,
+                InstanceAction::Stop,
+                Uuid::now_v7(),
+                "stop-action",
+            )
+            .await
+        {
+            Ok(_) => return Err(ProviderError::InvalidRequest),
+            Err(error) => error,
+        };
+        let ProviderError::UnknownOutcome { operation_id } = first_error else {
+            return Err(ProviderError::InvalidRequest);
+        };
+        assert_eq!(
+            provider.get_instance(&provider_instance_id).await?.state,
+            InstanceState::Stopped
+        );
+
+        let replay = provider
+            .action_instance(
+                &provider_instance_id,
+                InstanceAction::Stop,
+                Uuid::now_v7(),
+                "stop-action",
+            )
+            .await?;
+        assert_eq!(replay.provider_operation_id, operation_id);
+        assert_eq!(replay.state, OperationState::UnknownOutcome);
+        assert_eq!(
+            provider.get_instance(&provider_instance_id).await?.state,
+            InstanceState::Stopped
+        );
         Ok(())
     }
 
