@@ -13,7 +13,15 @@ SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) packaging/make-release.sh 0.2
 cd dist/o3k-0.2.0-alpha.1
 sha256sum --check SHA256SUMS
 python3 -m json.tool sbom.spdx.json >/dev/null
+# Also checks that SHA256SUMS covers exactly every regular bundle file.
+bash packaging/verify-release-bundle.sh .
 ```
+
+`verify-release-bundle.sh` fails closed on a checksum mismatch, an unlisted or
+missing regular file, duplicate or escaping checksum paths, and symlinks in the
+bundle. `packaging/make-release.sh` runs this verification after creating the
+manifest and checksum file; it does not authenticate the bundle or replace
+artifact signing.
 
 The project does not claim SLSA compliance and does not automatically publish
 production releases. Before public alpha, the recommended keyless signing

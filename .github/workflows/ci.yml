@@ -42,6 +42,8 @@ jobs:
         run: bash tests/packaging-safety.sh
       - name: Test release bundle installer
         run: bash tests/packaging-bundle.sh
+      - name: Test release bundle integrity
+        run: bash tests/release-bundle-integrity.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
