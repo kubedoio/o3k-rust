@@ -6,6 +6,7 @@ use std::{
 use o3k_provider::{
     ComputeProvider, CreateInstanceRequest, OperationState as ProviderOperationState, ProviderError,
 };
+use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_store::{
     DurableStore, OperationRecord, OperationState, ProviderReference, ResourceRecord, StoreError,
 };
@@ -167,6 +168,111 @@ where
             .await?;
         self.event(operation_id, resource_id, JournalEventKind::IntentPersisted);
         Ok(operation_id)
+    }
+
+    /// Applies an authenticated compute-agent update to the same durable records
+    /// used by the provider reconciliation loop. Agent messages are deliberately
+    /// not persisted: only a stable category is retained for operator safety.
+    pub async fn apply_agent_update(
+        &self,
+        update: &agent_proto::OperationUpdate,
+    ) -> Result<OperationState, ReconcileError> {
+        let operation_id =
+            Uuid::parse_str(&update.operation_id).map_err(|_| ReconcileError::InvalidIntent)?;
+        let resource_id =
+            Uuid::parse_str(&update.resource_id).map_err(|_| ReconcileError::InvalidIntent)?;
+        let operation = self.store.get_operation(operation_id).await?;
+        if operation.resource_id != resource_id {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        if matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::Failed
+        ) {
+            return Ok(operation.state);
+        }
+
+        let state = agent_proto::OperationState::try_from(update.state)
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let durable_state = match state {
+            agent_proto::OperationState::Accepted | agent_proto::OperationState::Running => {
+                OperationState::Running
+            }
+            agent_proto::OperationState::Succeeded => OperationState::Succeeded,
+            agent_proto::OperationState::Failed => OperationState::Failed,
+            agent_proto::OperationState::UnknownOutcome => OperationState::UnknownOutcome,
+            agent_proto::OperationState::Unspecified => return Err(ReconcileError::InvalidIntent),
+        };
+        let error_category = if durable_state == OperationState::Failed {
+            Some(agent_error_category(update.error_category)?)
+        } else {
+            None
+        };
+        let provider_operation_id = operation.provider_operation_id.as_deref();
+        self.store
+            .update_operation(
+                operation_id,
+                durable_state,
+                provider_operation_id,
+                error_category,
+                (durable_state == OperationState::Failed).then_some("agent operation failed"),
+            )
+            .await?;
+
+        if durable_state == OperationState::Succeeded {
+            let resource = self.store.get_resource(resource_id).await?;
+            let provider_id = (!update.provider_resource_id.is_empty())
+                .then_some(update.provider_resource_id.as_str())
+                .or(resource.provider_id.as_deref());
+            if let Some(provider_resource_id) = provider_id {
+                match self
+                    .store
+                    .get_provider_reference(resource_id, "compute-agent")
+                    .await
+                {
+                    Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
+                    Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
+                    Err(StoreError::ProviderReferenceNotFound) => {
+                        self.store
+                            .attach_provider_reference(&ProviderReference {
+                                resource_id,
+                                provider_name: "compute-agent".to_owned(),
+                                provider_resource_id: provider_resource_id.to_owned(),
+                            })
+                            .await?;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            let observed_state = if operation.kind == "lifecycle:delete" {
+                "DELETED"
+            } else if operation.kind == "create" {
+                "active"
+            } else {
+                resource.observed_state.as_str()
+            };
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    &resource.desired_state,
+                    observed_state,
+                    resource.generation,
+                    provider_id,
+                )
+                .await?;
+        }
+        self.event(
+            operation_id,
+            resource_id,
+            match durable_state {
+                OperationState::Succeeded => JournalEventKind::Succeeded,
+                OperationState::Failed => JournalEventKind::Failed,
+                OperationState::UnknownOutcome => JournalEventKind::UnknownObserved,
+                _ => JournalEventKind::ProviderStarted,
+            },
+        );
+        Ok(durable_state)
     }
 
     pub async fn reconcile_lifecycle_once(
@@ -661,6 +767,23 @@ where
     }
 }
 
+fn agent_error_category(value: i32) -> Result<&'static str, ReconcileError> {
+    let category =
+        agent_proto::ErrorCategory::try_from(value).map_err(|_| ReconcileError::InvalidIntent)?;
+    match category {
+        agent_proto::ErrorCategory::InvalidRequest => Ok("invalid_request"),
+        agent_proto::ErrorCategory::Unauthenticated => Ok("unauthenticated"),
+        agent_proto::ErrorCategory::Unauthorized => Ok("unauthorized"),
+        agent_proto::ErrorCategory::Conflict => Ok("conflict"),
+        agent_proto::ErrorCategory::Capacity => Ok("capacity"),
+        agent_proto::ErrorCategory::NotFound => Ok("not_found"),
+        agent_proto::ErrorCategory::Retryable => Ok("retryable"),
+        agent_proto::ErrorCategory::UnknownOutcome => Ok("unknown_outcome"),
+        agent_proto::ErrorCategory::Terminal => Ok("terminal"),
+        agent_proto::ErrorCategory::Unspecified => Err(ReconcileError::InvalidIntent),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +849,70 @@ mod tests {
             "active"
         );
         assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_success_is_durable_and_idempotent() -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-success", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            provider_resource_id: "agent-domain-1".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "active"
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "compute-agent")
+                .await?
+                .provider_resource_id,
+            "agent-domain-1"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_failure_persists_category_without_provider_message() -> Result<(), ReconcileError>
+    {
+        let (journal, store, _) = journal("agent-failure", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
+            error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
+            redacted_message: "secret-provider-detail".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Failed
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.error_category.as_deref(), Some("terminal"));
+        assert_eq!(
+            operation.error_message.as_deref(),
+            Some("agent operation failed")
+        );
         Ok(())
     }
 
