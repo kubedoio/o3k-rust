@@ -126,6 +126,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 if max_bytes == 0 {
                     return Err(AgentError::Protocol("console bound is invalid".to_owned()));
                 }
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 let bytes = self
                     .adapter
                     .read_console(name.clone(), max_bytes)
@@ -321,5 +327,19 @@ mod tests {
         assert!(verify_owned_domain(&inspection(xml), "server-1").is_ok());
         assert!(verify_owned_domain(&inspection(xml), "server-2").is_err());
         assert!(verify_owned_domain(&inspection("<domain />"), "server-1").is_err());
+    }
+
+    #[test]
+    fn console_observation_requires_matching_owned_metadata() {
+        let owned = "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" server_id=\"server-console\" project_id=\"project\" generation=\"1\" operation_id=\"operation\" managed_by=\"o3k-compute\" /></metadata></domain>";
+        assert!(verify_owned_domain(&inspection(owned), "server-console").is_ok());
+        assert!(verify_owned_domain(&inspection(owned), "other-project-server").is_err());
+        assert!(
+            verify_owned_domain(
+                &inspection("<domain><metadata /></domain>"),
+                "server-console"
+            )
+            .is_err()
+        );
     }
 }

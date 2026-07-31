@@ -33,6 +33,7 @@ the real-libvirt acceptance evidence exists.
 | #81 | Neutron/TAP/bridge/DHCP lifecycle | repository link-kind safety boundary complete; ADR-0089 and parser regression coverage reject existing non-bridge links before host mutation | blocked until agent-backed create, real TAP/bridge/libvirt/DHCP orchestration, guest fixed-IP evidence, cleanup/restart evidence, and trusted real-host artifact exist; no host acceptance claimed |
 | #82 | Placement scheduling and allocations | repository publication rollback boundary complete; ADR-0090 and regression coverage restore in-memory state after failed ledger publication | blocked until agent-backed provider inventory/create/delete wiring, real guest allocation evidence, restart recovery, and trusted real-host scheduling artifact exist; no host acceptance claimed |
 | #83 | libvirt lifecycle and observed Nova state | repository observed-state projection boundary complete; ADR-0091 and regression coverage fail closed for paused, crashed, blocked, suspended, unknown, and inconsistent libvirt observations | blocked until agent-backed lifecycle dispatch, real Nova/guest lifecycle evidence, restart/failure recovery, and trusted real-host artifact exist; no host acceptance claimed |
+| #84 | libvirt serial console and Nova console-log | repository console ownership fence complete; ADR-0092 and regression coverage require matching O3K domain metadata before opening a libvirt stream | blocked until actual CirrOS output, bounded restart persistence, cross-project CLI isolation, deletion evidence, and trusted real-host console artifact exist; no host acceptance claimed |
 
 ## Current release gate
 
@@ -112,3 +113,5 @@ publication fails for issue #82; it does not substitute for real Placement,
 agent, or host scheduling evidence. ADR-0091 records the fail-closed
 projection of libvirt lifecycle observations for issue #83; it does not
 substitute for real libvirt, guest, Nova, or host evidence.
+ADR-0092 records the ownership fence before libvirt console streams are opened
+for issue #84; it does not substitute for actual guest output or host evidence.
