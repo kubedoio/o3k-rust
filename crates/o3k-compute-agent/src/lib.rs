@@ -567,7 +567,22 @@ pub struct CreateCommandSpec {
     pub deadline_unix_ms: i64,
     pub image_id: String,
     pub flavor_id: String,
-    pub network_port_ids: Vec<String>,
+    pub image_artifact_id: String,
+    pub image_sha256: String,
+    pub image_format: String,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub disk_gib: u64,
+    pub config_drive_artifact_id: String,
+    pub config_drive_sha256: String,
+    pub network_attachments: Vec<NetworkAttachmentSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkAttachmentSpec {
+    pub port_id: String,
+    pub mac: String,
+    pub fixed_ipv4: String,
 }
 
 pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, AgentError> {
@@ -580,7 +595,15 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         deadline_unix_ms,
         image_id,
         flavor_id,
-        network_port_ids,
+        image_artifact_id,
+        image_sha256,
+        image_format,
+        vcpus,
+        memory_mib,
+        disk_gib,
+        config_drive_artifact_id,
+        config_drive_sha256,
+        network_attachments,
     } = spec;
     if agent_id.trim().is_empty()
         || agent_epoch.trim().is_empty()
@@ -589,17 +612,52 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         || idempotency_key.trim().is_empty()
         || image_id.trim().is_empty()
         || flavor_id.trim().is_empty()
-        || network_port_ids.iter().any(|id| id.trim().is_empty())
         || deadline_unix_ms <= unix_ms()
+        || !valid_reference(&image_id)
+        || !valid_reference(&flavor_id)
+        || !valid_reference(&image_artifact_id)
+        || !valid_sha256(&image_sha256)
+        || !matches!(image_format.as_str(), "raw" | "qcow2")
+        || !(1..=256).contains(&vcpus)
+        || !(1..=1_048_576).contains(&memory_mib)
+        || !(1..=1_048_576).contains(&disk_gib)
+        || !valid_reference(&config_drive_artifact_id)
+        || !valid_sha256(&config_drive_sha256)
+        || network_attachments
+            .iter()
+            .any(|attachment| !valid_network_attachment(attachment))
+        || has_duplicate_network_ports(&network_attachments)
     {
         return Err(AgentError::Protocol(
-            "create command identity, resources, and deadline are invalid".to_owned(),
+            "create command identity, resolved resources, and deadline are invalid".to_owned(),
         ));
     }
+    let network_port_ids = network_attachments
+        .iter()
+        .map(|attachment| attachment.port_id.clone())
+        .collect();
     let create = proto::CreateCommand {
         image_id,
         flavor_id,
         network_port_ids,
+        resolved: Some(proto::ResolvedCreateInputs {
+            image_artifact_id,
+            image_sha256,
+            image_format,
+            vcpus,
+            memory_mib,
+            disk_gib,
+            config_drive_artifact_id,
+            config_drive_sha256,
+            network_attachments: network_attachments
+                .into_iter()
+                .map(|attachment| proto::NetworkAttachment {
+                    port_id: attachment.port_id,
+                    mac: attachment.mac,
+                    fixed_ipv4: attachment.fixed_ipv4,
+                })
+                .collect(),
+        }),
     };
     let canonical = proto::CanonicalCommandPayload {
         operation_id: operation_id.clone(),
@@ -632,6 +690,85 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         payload_fingerprint_sha256,
         action: Some(proto::command::Action::Create(create)),
     })
+}
+
+fn valid_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_network_attachment(attachment: &NetworkAttachmentSpec) -> bool {
+    valid_reference(&attachment.port_id)
+        && attachment.mac.len() == 17
+        && attachment.mac.split(':').count() == 6
+        && attachment
+            .mac
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        && attachment.fixed_ipv4.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+fn has_duplicate_network_ports(attachments: &[NetworkAttachmentSpec]) -> bool {
+    attachments.iter().enumerate().any(|(index, attachment)| {
+        attachments[..index]
+            .iter()
+            .any(|prior| prior.port_id == attachment.port_id)
+    })
+}
+
+fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError> {
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(AgentError::Protocol(
+            "create command resolved inputs are required".to_owned(),
+        ));
+    };
+    if !valid_reference(&create.image_id)
+        || !valid_reference(&create.flavor_id)
+        || !valid_reference(&resolved.image_artifact_id)
+        || !valid_sha256(&resolved.image_sha256)
+        || !matches!(resolved.image_format.as_str(), "raw" | "qcow2")
+        || !(1..=256).contains(&resolved.vcpus)
+        || !(1..=1_048_576).contains(&resolved.memory_mib)
+        || !(1..=1_048_576).contains(&resolved.disk_gib)
+        || !valid_reference(&resolved.config_drive_artifact_id)
+        || !valid_sha256(&resolved.config_drive_sha256)
+        || resolved.network_attachments.iter().any(|attachment| {
+            !valid_network_attachment(&NetworkAttachmentSpec {
+                port_id: attachment.port_id.clone(),
+                mac: attachment.mac.clone(),
+                fixed_ipv4: attachment.fixed_ipv4.clone(),
+            })
+        })
+        || has_duplicate_network_ports(
+            &resolved
+                .network_attachments
+                .iter()
+                .map(|attachment| NetworkAttachmentSpec {
+                    port_id: attachment.port_id.clone(),
+                    mac: attachment.mac.clone(),
+                    fixed_ipv4: attachment.fixed_ipv4.clone(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        || create.network_port_ids.len() != resolved.network_attachments.len()
+        || create
+            .network_port_ids
+            .iter()
+            .zip(&resolved.network_attachments)
+            .any(|(port_id, attachment)| port_id != &attachment.port_id)
+    {
+        return Err(AgentError::Protocol(
+            "create command resolved inputs are invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
@@ -1118,6 +1255,7 @@ impl CommandExecutor for FakeCommandExecutor {
         let provider_resource_id = format!("fake-{}", stable_fake_resource_id(&resource_key));
         match command.action.as_ref() {
             Some(proto::command::Action::Create(create)) => {
+                validate_proto_create(create)?;
                 let mut resources = self
                     .resources
                     .lock()
@@ -1640,8 +1778,8 @@ mod tests {
         Ok(())
     }
 
-    fn fake_create_command() -> Result<proto::Command, AgentError> {
-        build_create_command(CreateCommandSpec {
+    fn valid_create_spec() -> CreateCommandSpec {
+        CreateCommandSpec {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
             operation_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"fake-operation").to_string(),
@@ -1650,8 +1788,43 @@ mod tests {
             deadline_unix_ms: unix_ms().saturating_add(10_000),
             image_id: "image-1".to_owned(),
             flavor_id: "flavor-1".to_owned(),
-            network_port_ids: vec!["port-1".to_owned()],
-        })
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-1".to_owned(),
+                mac: "02:00:00:00:00:01".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+            }],
+        }
+    }
+
+    fn fake_create_command() -> Result<proto::Command, AgentError> {
+        build_create_command(valid_create_spec())
+    }
+
+    #[test]
+    fn resolved_create_inputs_reject_paths_digests_and_duplicate_ports() {
+        let mut invalid = valid_create_spec();
+        invalid.image_artifact_id = "/var/lib/o3k/image.qcow2".to_owned();
+        assert!(build_create_command(invalid).is_err());
+
+        let mut invalid = valid_create_spec();
+        invalid.image_sha256 = "not-a-sha256".to_owned();
+        assert!(build_create_command(invalid).is_err());
+
+        let mut invalid = valid_create_spec();
+        invalid.network_attachments.push(NetworkAttachmentSpec {
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:02".to_owned(),
+            fixed_ipv4: "192.0.2.11".to_owned(),
+        });
+        assert!(build_create_command(invalid).is_err());
     }
 
     #[tokio::test]
@@ -1676,6 +1849,18 @@ mod tests {
         executor.execute(&delete).await?;
         assert_eq!(executor.resource_count(), 0);
         assert_eq!(executor.artifact_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_executor_rejects_unresolved_create_commands() -> Result<(), AgentError> {
+        let executor = FakeCommandExecutor::default();
+        let mut command = fake_create_command()?;
+        if let Some(proto::command::Action::Create(create)) = command.action.as_mut() {
+            create.resolved = None;
+        }
+        assert!(executor.execute(&command).await.is_err());
+        assert_eq!(executor.resource_count(), 0);
         Ok(())
     }
 
@@ -1708,7 +1893,19 @@ mod tests {
             deadline_unix_ms: deadline,
             image_id: "image-1".to_owned(),
             flavor_id: "flavor-1".to_owned(),
-            network_port_ids: vec!["port-1".to_owned()],
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-1".to_owned(),
+                mac: "02:00:00:00:00:01".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+            }],
         })?;
         let second = build_create_command(CreateCommandSpec {
             agent_id: "node".to_owned(),
@@ -1719,7 +1916,19 @@ mod tests {
             deadline_unix_ms: deadline,
             image_id: "image-1".to_owned(),
             flavor_id: "flavor-1".to_owned(),
-            network_port_ids: vec!["port-1".to_owned()],
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-1".to_owned(),
+                mac: "02:00:00:00:00:01".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+            }],
         })?;
         assert_eq!(first, second);
         let changed = build_create_command(CreateCommandSpec {
@@ -1731,7 +1940,19 @@ mod tests {
             deadline_unix_ms: deadline,
             image_id: "image-1".to_owned(),
             flavor_id: "flavor-1".to_owned(),
-            network_port_ids: vec!["port-2".to_owned()],
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-2".to_owned(),
+                mac: "02:00:00:00:00:02".to_owned(),
+                fixed_ipv4: "192.0.2.11".to_owned(),
+            }],
         })?;
         assert_eq!(first.command_id, changed.command_id);
         assert_ne!(

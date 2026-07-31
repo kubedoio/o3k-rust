@@ -167,6 +167,27 @@ message CreateCommand {
   string image_id = 1;
   string flavor_id = 2;
   repeated string network_port_ids = 3;
+  // Resolved, immutable inputs. These are references and bounded values, not
+  // host paths, XML, shell text, or credentials.
+  ResolvedCreateInputs resolved = 4;
+}
+
+message ResolvedCreateInputs {
+  string image_artifact_id = 1;
+  string image_sha256 = 2;
+  string image_format = 3;
+  uint32 vcpus = 4;
+  uint64 memory_mib = 5;
+  uint64 disk_gib = 6;
+  string config_drive_artifact_id = 7;
+  string config_drive_sha256 = 8;
+  repeated NetworkAttachment network_attachments = 9;
+}
+
+message NetworkAttachment {
+  string port_id = 1;
+  string mac = 2;
+  string fixed_ipv4 = 3;
 }
 
 message InspectCommand {}
