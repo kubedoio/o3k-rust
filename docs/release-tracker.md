@@ -36,7 +36,7 @@ until the independent evidence and decisions listed below exist.
 | #54 | program tracker | this change | tracked here |
 | #94 | program closure and provenance tracker | repository contract guarded; ADR-0100 | blocked until every required real-host artifact and independent human decision is recorded; no program closure is claimed |
 | #77 | protected real-host validation | repository implementation complete; ADR-0084 and portable guard tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
-| #76 | protected runner capability probe | repository implementation complete; ADR-0085, redacted capability artifact, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
+| #76 | protected runner capability probe | repository implementation complete; ADR-0085/0102, redacted atomically published artifact fenced to workflow run/attempt/source commit, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
 | #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
 | #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087, regular-file checks and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
 | #80 | config-drive attachment | repository failed-generation cleanup complete; ADR-0088 and regression coverage remove unpublished temporary directories while preserving unowned destinations | blocked until ISO/VFAT media, libvirt/agent attachment, guest cloud-init evidence, and trusted real-host evidence exist |
@@ -161,3 +161,6 @@ commit; it does not provide approval or host evidence.
 ADR-0100 records the fail-closed source-controlled tracker contract for issue
 #94; it does not validate host artifacts, human identity, signatures, or
 release publication.
+ADR-0102 records the atomic, workflow-attempt-bound capability artifact fence
+for issue #76; it does not provide real runner capability evidence or host
+acceptance.

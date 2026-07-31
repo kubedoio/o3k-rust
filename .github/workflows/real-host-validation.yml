@@ -32,6 +32,9 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
           O3K_REAL_HOST_SERVICE_ACCOUNT: ${{ vars.O3K_REAL_HOST_SERVICE_ACCOUNT || 'o3k-testlab' }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ github.sha }}
           O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
         run: bash scripts/real-host-capability-probe.sh
 
@@ -41,6 +44,9 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ github.sha }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_HEAD_REF: ${{ github.head_ref }}

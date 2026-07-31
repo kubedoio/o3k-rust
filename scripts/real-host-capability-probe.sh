@@ -13,8 +13,14 @@ MIN_FREE_BYTES="${O3K_REAL_HOST_MIN_FREE_BYTES:-10737418240}"
 EXPECTED_LABELS="self-hosted,linux,x64,kvm,libvirt,o3k-testlab"
 
 mkdir -p "$(dirname "${OUTPUT_PATH}")"
+# Do not leave an older passing artifact available if the probe cannot start or
+# is interrupted before it publishes a replacement. Removing a symlink removes
+# only the link, never its target.
+rm -f -- "${OUTPUT_PATH}"
 
-python3 - "${OUTPUT_PATH}" "${DISK_PATH}" "${KVM_PATH}" "${MIN_FREE_BYTES}" "${EXPECTED_LABELS}" <<'PY'
+python3 - "${OUTPUT_PATH}" "${DISK_PATH}" "${KVM_PATH}" "${MIN_FREE_BYTES}" "${EXPECTED_LABELS}" \
+    "${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}" "${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}" \
+    "${GITHUB_SHA:-}" <<'PY'
 import json
 import os
 import pwd
@@ -22,9 +28,19 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
-output_path, disk_path, kvm_path, minimum_free, expected_labels = sys.argv[1:]
+(
+    output_path,
+    disk_path,
+    kvm_path,
+    minimum_free,
+    expected_labels,
+    workflow_run_id,
+    workflow_run_attempt,
+    source_commit,
+) = sys.argv[1:]
 errors = []
 skips = []
 
@@ -158,9 +174,33 @@ result = {
     "checks": checks,
     "finished_at": int(time.time()),
 }
-with open(output_path, "w", encoding="utf-8") as output:
-    json.dump(result, output, indent=2, sort_keys=True)
-    output.write("\n")
+
+# The workflow identity is intentionally metadata, not a secret. It prevents a
+# persistent self-hosted workspace from reusing an artifact from another run or
+# retry. Local portable tests may omit it; the protected workflow always sets it.
+if workflow_run_id:
+    result["workflow_run_id"] = workflow_run_id
+if workflow_run_attempt:
+    result["workflow_run_attempt"] = workflow_run_attempt
+if source_commit:
+    result["source_commit"] = source_commit
+
+directory = os.path.dirname(output_path) or "."
+descriptor, temporary = tempfile.mkstemp(prefix=".runner-capabilities.", dir=directory,
+                                          text=True)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(result, output, indent=2, sort_keys=True)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, output_path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
 
 if status == "failed":
     raise SystemExit(1)

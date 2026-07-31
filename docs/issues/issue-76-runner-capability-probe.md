@@ -10,7 +10,12 @@ Implemented on the repository branch:
   non-root/service-account, image-input, and runner-label checks;
 - portable fake-command tests;
 - protected workflow preflight and unconditional artifact upload;
+- capability artifacts are atomically published and fenced to the exact
+  workflow run, retry attempt, and source commit before lifecycle execution;
 - [ADR-0085](../adr/ADR-0085-runner-capability-probe.md).
+
+The artifact fencing decision is recorded in
+[ADR-0102](../adr/ADR-0102-runner-capability-artifact-fencing.md).
 
 ## Host-gated acceptance
 

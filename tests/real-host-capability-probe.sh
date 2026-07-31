@@ -25,6 +25,9 @@ export O3K_REAL_HOST_CAPABILITY_OUTPUT="${WORK_DIR}/artifacts/runner-capabilitie
 export O3K_REAL_HOST_KVM_PATH="${KVM_PATH}"
 export O3K_REAL_HOST_DISK_PATH="${WORK_DIR}"
 export O3K_REAL_HOST_MIN_FREE_BYTES=1
+export O3K_REAL_HOST_WORKFLOW_RUN_ID=portable-run-1
+export O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT=1
+export GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
 unset O3K_REAL_HOST_SERVICE_ACCOUNT
 export O3K_REAL_HOST_RUNNER_LABELS="self-hosted,linux,x64,kvm,libvirt,o3k-testlab"
 export O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH}"
@@ -37,6 +40,9 @@ assert value["status"] == "skipped"
 assert "/dev/kvm" in value["required_missing"]
 assert value["redacted"] is True
 assert "environment_variables" not in value
+assert value["workflow_run_id"] == "portable-run-1"
+assert value["workflow_run_attempt"] == "1"
+assert value["source_commit"] == "0123456789abcdef0123456789abcdef01234567"
 PY
 
 export O3K_REAL_HOST_KVM_PATH=/dev/null
