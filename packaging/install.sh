@@ -37,8 +37,29 @@ if [[ $EUID -eq 0 ]]; then
   id o3k >/dev/null 2>&1 || useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
   RUN_USER=o3k
 else RUN_USER="$(id -un)"; fi
-install -d -m 0755 "$PREFIX/bin" "$PREFIX/share/o3k" "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"
-for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do touch "$path/.o3k-owned"; chmod 0644 "$path/.o3k-owned"; done
+
+mark_owned_dir() {
+  local path="$1" marker="$1/.o3k-owned"
+  if [[ -e "$path" ]]; then
+    [[ -d "$path" && ! -L "$path" ]] || { echo "refusing non-directory install path: $path" >&2; exit 2; }
+    if [[ -e "$marker" ]]; then
+      [[ -f "$marker" && ! -L "$marker" ]] || { echo "refusing invalid ownership marker: $marker" >&2; exit 2; }
+      grep -Fqx "o3k-owned-v1 path=$path" "$marker" || { echo "refusing unrecognized ownership marker: $marker" >&2; exit 2; }
+    elif [[ -n "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+      echo "refusing to claim populated unowned directory: $path" >&2
+      exit 2
+    else
+      printf 'o3k-owned-v1 path=%s\n' "$path" >"$marker"
+    fi
+  else
+    install -d -m 0755 "$path"
+    printf 'o3k-owned-v1 path=%s\n' "$path" >"$marker"
+  fi
+  chmod 0644 "$marker"
+}
+
+install -d -m 0755 "$PREFIX/bin" "$PREFIX/share/o3k"
+for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do mark_owned_dir "$path"; done
 install -m 0755 "$BINARY" "$PREFIX/bin/o3kd"
 install -m 0644 "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service"
 install -m 0755 "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$PREFIX/share/o3k/"
@@ -56,10 +77,32 @@ if [[ ! -e "$ENV_FILE" ]]; then
 ' "$SIGNING_KEY"; } >"$ENV_FILE"
   chmod 0600 "$ENV_FILE"
 fi
-if [[ "$PROFILE" == libvirt && ! -e "$CONFIG_DIR/o3k-compute.env" ]]; then
-  umask 077
-  printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" /etc/o3k/tls >"$CONFIG_DIR/o3k-compute.env"
-  chmod 0600 "$CONFIG_DIR/o3k-compute.env"
+if [[ "$PROFILE" == libvirt ]]; then
+  TLS_DIR="$CONFIG_DIR/tls"
+  for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
+    [[ -s "$TLS_DIR/$file" ]] || { echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2; exit 2; }
+  done
+  if [[ $EUID -eq 0 ]]; then
+    chgrp o3k "$TLS_DIR" "$TLS_DIR"/*
+    chmod 0750 "$TLS_DIR"
+    chmod 0640 "$TLS_DIR"/*
+  fi
+  FINGERPRINT="$(<"$TLS_DIR/agent-fingerprint")"
+  [[ "$FINGERPRINT" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "agent fingerprint is invalid" >&2; exit 2; }
+  if [[ ! -e "$CONFIG_DIR/o3k-compute.env" ]]; then
+    umask 077
+    printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"
+    chmod 0600 "$CONFIG_DIR/o3k-compute.env"
+  fi
+  for setting in \
+    "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
+    "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
+    "O3K_COMPUTE_CLIENT_CA=$TLS_DIR/ca.pem" \
+    "O3K_COMPUTE_AUTHORIZED_AGENTS=$(<"$TLS_DIR/agent-id")=$FINGERPRINT"; do
+    key="${setting%%=*}"
+    grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
+  done
+  install -m 0640 "$TLS_DIR/agent-id" "$DATA_DIR/agent-id"
 fi
 if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k "$DATA_DIR" "$LOG_DIR"

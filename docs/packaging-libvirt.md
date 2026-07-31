@@ -17,6 +17,12 @@ environment files, and separate `o3kd`/`o3k-compute` systemd units. The
 compute unit uses the `o3k` user with `libvirt`/`kvm` supplementary groups;
 neither service runs as root.
 
+Certificate bootstrap creates CA, server, and agent certificates, the agent
+identity, and its SHA-256 authorization fingerprint. The installer refuses a
+libvirt profile when this complete TLS set is absent, configures the control
+plane from those files, and grants only the `o3k` group read access to the
+certificate directory.
+
 `packaging/reset.sh --yes` preserves credentials and removes only contents of
 marked O3K-owned data/log directories. `packaging/uninstall.sh --purge --yes`
 similarly refuses unmarked paths and does not touch foreign libvirt domains,
