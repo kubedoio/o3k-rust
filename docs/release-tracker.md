@@ -11,7 +11,10 @@ This file is the source-controlled status record for issue #54. A merged PR
 means the scoped implementation and repository gates passed; it does not mean
 the real-libvirt acceptance evidence exists. The tracker contract is checked
 by `packaging/validate-program-tracker.sh`; it must remain blocked and pending
-until the independent evidence and decisions listed below exist.
+until the independent evidence and decisions listed below exist. The validator
+also requires a row for every issue in #94's closure chain (#76–#84 and
+#86–#94); PR #85 is tracked as a prerequisite in the issue, not as a closure
+row. This is a source-document completeness check, not host evidence.
 
 | Issue | Scope | Repository state | Real-host evidence |
 |---:|---|---|---|

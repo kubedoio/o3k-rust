@@ -18,10 +18,12 @@ bookkeeping.
 Add a small, source-controlled tracker contract with explicit ownership
 (`owner_issue: 94`), release-gate ownership (`release_issue: 93`), and
 fail-closed `blocked`/`pending` state. Validate the contract in CI, require
-an explicit row for issue #94, and require the decision log and
-evidence-closure sections to remain present. The validator checks documentation
-shape and non-claiming state only; it does not inspect host artifacts, verify a
-human reviewer, verify signatures, or publish a release.
+an explicit row for every issue in #94's closure chain, and require the
+decision log and evidence-closure sections to remain present. PR #85 is a
+pre-existing prerequisite in #94, not a closure issue, so it is intentionally
+not part of that row set. The validator checks documentation shape and
+non-claiming state only; it does not inspect host artifacts, verify a human
+reviewer, verify signatures, or publish a release.
 
 ## Alternatives rejected
 
@@ -34,7 +36,7 @@ human reviewer, verify signatures, or publish a release.
 
 ## Verification
 
-`tests/program-tracker.sh` validates the current tracker and rejects a
-`ready` program state or an explicit closure claim. The check is documentation
-validation only and intentionally leaves host, human, signing, and publication
-evidence pending.
+`tests/program-tracker.sh` validates the current tracker, rejects a `ready`
+program state or an explicit closure claim, and rejects removal of a required
+closure-chain row. The check is documentation validation only and intentionally
+leaves host, human, signing, and publication evidence pending.

@@ -20,6 +20,10 @@ import os
 import re
 import sys
 
+REQUIRED_CLOSURE_ISSUES = {
+    76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94
+}
+
 path = os.environ["INPUT"]
 try:
     with open(path, encoding="utf-8") as stream:
@@ -78,9 +82,9 @@ for line in text.splitlines():
         errors.append(f"issue #{issue} appears more than once")
     rows[issue] = cells
 
-for issue in (93, 94):
+for issue in REQUIRED_CLOSURE_ISSUES:
     if issue not in rows:
-        errors.append(f"required closure row #{issue} is missing")
+        errors.append(f"required issue #94 closure row #{issue} is missing")
 
 row_93 = rows.get(93)
 if row_93:
