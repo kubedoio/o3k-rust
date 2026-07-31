@@ -28,9 +28,23 @@ if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" ==
 if [[ $EUID -ne 0 && ( "$PREFIX" == /usr/* || "$DATA_DIR" == /var/* || "$CONFIG_DIR" == /etc/* ) ]]; then echo "system paths require root; use sudo or explicit user paths" >&2; exit 2; fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "$PROFILE" == libvirt ]]; then "$ROOT_DIR/packaging/preflight.sh" --profile libvirt; fi
-if [[ -z "$BINARY" ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd; BINARY="$ROOT_DIR/target/release/o3kd"; fi
+if [[ -z "$BINARY" ]]; then
+  if [[ -x "$ROOT_DIR/bin/o3kd" ]]; then
+    BINARY="$ROOT_DIR/bin/o3kd"
+  else
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
+    BINARY="$ROOT_DIR/target/release/o3kd"
+  fi
+fi
 [[ -x "$BINARY" ]] || { echo "binary is not executable: $BINARY" >&2; exit 1; }
-if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute; COMPUTE_BINARY="$ROOT_DIR/target/release/o3k-compute"; fi
+if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
+  if [[ -x "$ROOT_DIR/bin/o3k-compute" ]]; then
+    COMPUTE_BINARY="$ROOT_DIR/bin/o3k-compute"
+  else
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute
+    COMPUTE_BINARY="$ROOT_DIR/target/release/o3k-compute"
+  fi
+fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
 if [[ $EUID -eq 0 ]]; then
   getent group o3k >/dev/null || groupadd --system o3k

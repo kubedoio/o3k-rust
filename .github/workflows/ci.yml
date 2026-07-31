@@ -32,6 +32,8 @@ jobs:
         run: bash tests/openstack-cli-cleanup.sh
       - name: Test packaging safety
         run: bash tests/packaging-safety.sh
+      - name: Test release bundle installer
+        run: bash tests/packaging-bundle.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
