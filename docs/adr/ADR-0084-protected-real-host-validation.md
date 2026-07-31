@@ -22,12 +22,17 @@ non-canceling fixed concurrency group, and accepts only
 `kubedoio/o3k-rust` `workflow_dispatch` runs with no fork refs.
 
 The pre-run guard runs before the lifecycle step and checks trust context,
-required tools, `/dev/kvm`, and `qemu:///system`. It records bounded OS,
-kernel, capability, and tool-presence metadata without reading or uploading
-environment variables. The post-run guard always runs, merges the lifecycle
-result, and exits nonzero unless prerequisites and lifecycle both pass. Both
-guards write the redacted machine-readable `real-host-workflow-result.json`.
-The workflow always uploads the artifact directory.
+required tools, `/dev/kvm`, and `qemu:///system`. It then performs a read-only
+owned-resource inventory: `virsh` domains are restricted to the repository's
+`o3k-` ownership prefix, and fixed-name TestLab OpenStack resources are queried
+only when credentials are present. An unavailable inventory or non-empty
+baseline blocks the lifecycle. Only filtered resource names/IDs are recorded;
+credentials, command output, and environment variables are never uploaded.
+The post-run guard always repeats the same inventory, reports added owned
+resources as redacted leak details, and exits nonzero unless prerequisites,
+lifecycle, cleanup, and leak detection all pass. Both guards write the
+redacted machine-readable `real-host-workflow-result.json`. The workflow
+always uploads the artifact directory.
 
 The privileged lifecycle remains the existing public OpenStack CLI harness.
 No reset, uninstall, broad process kill, or recursive cleanup is added by the
@@ -37,6 +42,7 @@ workflow; existing cleanup remains scoped to resources created by that run.
 
 Forks and unapproved/untrusted contexts fail closed before host operations.
 Missing tools or KVM produce explicit skipped/non-passing evidence, while
-workflow and lifecycle failures produce failed evidence. A protected GitHub
-environment and correctly labeled runner are operational prerequisites, not
-claims established by repository tests.
+unclean/unavailable inventories and workflow/lifecycle leaks produce failed or
+blocked evidence. No cleanup is attempted by the inventory guards. A protected
+GitHub environment and correctly labeled runner are operational prerequisites,
+not claims established by repository tests.

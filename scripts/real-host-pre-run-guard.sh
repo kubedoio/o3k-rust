@@ -7,6 +7,7 @@ ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflo
 RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
 EXPECTED_REPOSITORY="kubedoio/o3k-rust"
 KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
+INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
 mkdir -p "${ARTIFACT_DIR}"
 
 blocked_reason=
@@ -101,5 +102,40 @@ if [[ "${ready}" != true ]]; then
     exit 0
 fi
 
+if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${INVENTORY_PATH}"; then
+    ready=false
+    reason=owned_inventory_unavailable
+elif ! python3 - "${INVENTORY_PATH}" <<'PY'
+import json, sys
+inventory = json.load(open(sys.argv[1], encoding="utf-8"))
+if inventory.get("status") != "available" or inventory.get("domains"):
+    raise SystemExit(1)
+if any(inventory.get("openstack", {}).get("resources", {}).values()):
+    raise SystemExit(1)
+PY
+then
+    ready=false
+    reason=baseline_not_clean
+fi
+
+python3 - "${RESULT_PATH}" "${ready}" "${reason}" "${INVENTORY_PATH}" <<'PY'
+import json, sys
+path, ready, reason, inventory_path = sys.argv[1:]
+result = json.load(open(path, encoding="utf-8"))
+try:
+    result["inventory_baseline"] = json.load(open(inventory_path, encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    result["inventory_baseline"] = {"status": "unavailable", "redacted": True}
+result["status"] = "ready" if ready == "true" else "blocked"
+result["reason"] = reason
+with open(path, "w", encoding="utf-8") as output:
+    json.dump(result, output, indent=2)
+    output.write("\n")
+PY
+
+if [[ "${ready}" != true ]]; then
+    echo "real-host workflow baseline guard blocked: ${reason}" >&2
+    exit 1
+fi
 printf 'ready=true\n' >>"${GITHUB_OUTPUT:-/dev/null}"
 echo "real-host workflow guard ready"

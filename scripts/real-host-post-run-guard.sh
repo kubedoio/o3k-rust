@@ -6,11 +6,28 @@ ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflo
 RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
 LIFECYCLE_RESULT="${ARTIFACT_DIR}/libvirt-result.json"
 STEP_STATUS="${O3K_REAL_HOST_WORKFLOW_STEP_STATUS:-skipped}"
+CURRENT_INVENTORY="${ARTIFACT_DIR}/real-host-owned-inventory-after.json"
 mkdir -p "${ARTIFACT_DIR}"
 
-python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${STEP_STATUS}" <<'PY'
+inventory_status=not_checked
+if python3 - "${RESULT_PATH}" <<'PY'
+import json, sys
+try:
+    ready = json.load(open(sys.argv[1], encoding="utf-8")).get("status") == "ready"
+except (OSError, json.JSONDecodeError):
+    ready = False
+raise SystemExit(0 if ready else 1)
+PY
+then
+    inventory_status=available
+    if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${CURRENT_INVENTORY}"; then
+        inventory_status=unavailable
+    fi
+fi
+
+python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" <<'PY'
 import json, sys, time
-result_path, lifecycle_path, step_status = sys.argv[1:]
+result_path, lifecycle_path, step_status, current_inventory_path, inventory_status = sys.argv[1:]
 try:
     with open(result_path, encoding="utf-8") as stream:
         preflight = json.load(stream)
@@ -24,11 +41,40 @@ try:
 except (OSError, json.JSONDecodeError):
     lifecycle_status = None
 
+baseline = preflight.get("inventory_baseline", {})
+after = None
+result_leaks = None
+if status == "ready" and inventory_status == "available":
+    try:
+        with open(current_inventory_path, encoding="utf-8") as stream:
+            after = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        after = {"status": "unavailable", "redacted": True}
+    if baseline.get("status") == "available" and after.get("status") == "available":
+        baseline_resources = baseline.get("openstack", {}).get("resources", {})
+        after_resources = after.get("openstack", {}).get("resources", {})
+        result_leaks = {
+            "domains": sorted(set(after.get("domains", [])) - set(baseline.get("domains", []))),
+            "openstack": {
+                name: sorted(set(after_resources.get(name, [])) - set(baseline_resources.get(name, [])))
+                for name in sorted(set(baseline_resources) | set(after_resources))
+            },
+        }
+        result_leaks["openstack"] = {
+            name: values for name, values in result_leaks["openstack"].items() if values
+        }
+
 if status == "blocked":
     final_status = "blocked"
 elif status != "ready":
     final_status = "skipped"
     reason = "prerequisites_skipped"
+elif inventory_status != "available" or after is None or after.get("status") != "available" or result_leaks is None:
+    final_status = "failed"
+    reason = "owned_inventory_unavailable_after_workflow"
+elif result_leaks["domains"] or result_leaks["openstack"]:
+    final_status = "failed"
+    reason = "resource_leak_detected"
 elif step_status != "success":
     final_status = "failed" if step_status == "failure" else "skipped"
     reason = "workflow_step_failed" if step_status == "failure" else "workflow_step_skipped"
@@ -42,6 +88,10 @@ else:
 result = {"artifact_type": "real-host-workflow-result", "status": final_status,
           "reason": reason, "redacted": True, "finished_at": int(time.time()),
           "preflight_status": status, "lifecycle_status": lifecycle_status}
+if result_leaks is not None:
+    result["leaks"] = result_leaks
+if after is not None:
+    result["inventory_after"] = after
 if isinstance(preflight.get("environment"), dict):
     result["environment"] = preflight["environment"]
 with open(result_path, "w", encoding="utf-8") as output:

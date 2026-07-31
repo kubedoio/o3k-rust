@@ -29,10 +29,16 @@ jobs:
         id: guard
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
         run: bash scripts/real-host-pre-run-guard.sh
 
       - name: Run public real-host lifecycle
@@ -41,8 +47,14 @@ jobs:
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
           OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
         run: bash tests/testlab-libvirt.sh
 
@@ -50,6 +62,12 @@ jobs:
         if: always()
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
 
