@@ -678,6 +678,8 @@ mod tests {
             memory_mib: 128,
             image_id: None,
             network_ids: Vec::new(),
+            placement_provider_id: None,
+            placement_allocation_id: None,
             idempotency_key: "journal-test-key".to_owned(),
         }
     }
