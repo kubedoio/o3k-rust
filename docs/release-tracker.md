@@ -9,7 +9,7 @@ the real-libvirt acceptance evidence exists.
 | #36 | libvirt/KVM direction | merged | pending |
 | #37 | compute-agent protocol | merged | protocol tests passed |
 | #38 | secure registration/heartbeat | merged | host deployment pending |
-| #39 | local libvirt adapter | merged | host libvirt pending |
+| #39 | local libvirt adapter | merged | provider-backed daemon readiness added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | host discovery pending |
 | #41 | image cache/overlays | merged | atomic/idempotent publication for base, upload, metadata, and overlays added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |

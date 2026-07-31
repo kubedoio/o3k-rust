@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 use std::{
-    io,
+    io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     process::{Command, Stdio},
     thread,
@@ -39,6 +39,16 @@ fn assert_signal_shutdown(signal: &str) -> Result<(), Box<dyn std::error::Error>
     if TcpStream::connect(address).is_err() {
         let _ = child.kill();
         return Err(io::Error::new(io::ErrorKind::TimedOut, "o3kd did not start").into());
+    }
+    let mut readiness = TcpStream::connect(address)?;
+    readiness.set_read_timeout(Some(Duration::from_secs(2)))?;
+    readiness.write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut response = Vec::new();
+    readiness.read_to_end(&mut response)?;
+    let response = String::from_utf8_lossy(&response);
+    if !response.starts_with("HTTP/1.1 200 OK") {
+        let _ = child.kill();
+        return Err(io::Error::other(format!("daemon is not ready: {response}")).into());
     }
 
     let signal_status = Command::new("kill")
