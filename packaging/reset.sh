@@ -13,6 +13,9 @@ for path in "$DATA_DIR" "$LOG_DIR"; do
     exit 2
   fi
 done
-command -v systemctl >/dev/null 2>&1 && systemctl stop o3kd.service 2>/dev/null || true
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl stop o3k-compute.service 2>/dev/null || true
+  systemctl stop o3kd.service 2>/dev/null || true
+fi
 for path in "$DATA_DIR" "$LOG_DIR"; do [[ -d "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; done
 echo "reset O3K-owned state under $DATA_DIR and $LOG_DIR; credentials were preserved"

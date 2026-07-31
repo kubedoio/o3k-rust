@@ -21,7 +21,7 @@ the real-libvirt acceptance evidence exists.
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
 | #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, list coverage, and redacted evidence with discarded raw CLI errors added; real CLI/libvirt endpoint pending |
-| #51 | clean-host packaging | merged | libvirt profile now selects libvirt; Ubuntu/Debian clean installs pending |
+| #51 | clean-host packaging | merged | libvirt profile selects libvirt and reset stops both control-plane and compute services; Ubuntu/Debian clean installs pending |
 | #52 | measurements | merged | fake control-plane measured with configured-password authentication and finalized cleanup evidence; guest metrics pending |
 | #53 | release gate | merged | benchmark cleanup evidence now finalizes consistently; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
@@ -69,8 +69,9 @@ and ADR-0028 (bounded console offset reads), ADR-0029 (CLI harness failure
 cleanup), ADR-0030 (dnsmasq supervision), ADR-0031 (typed resolved create
 inputs), ADR-0032 (measurement authentication input), ADR-0033 (CLI list and
 resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
-(image publication temporaries), ADR-0036 (network metadata publication), and
-ADR-0062 (image-cache hit revalidation). ADR-0037 through ADR-0061 record the
+(image publication temporaries), ADR-0036 (network metadata publication),
+ADR-0062 (image-cache hit revalidation), and ADR-0063 (reset service cleanup).
+ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
