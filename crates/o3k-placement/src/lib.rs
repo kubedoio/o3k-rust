@@ -232,6 +232,15 @@ impl PlacementLedger {
             .cloned()
             .ok_or(PlacementError::NotFound)
     }
+    pub fn providers(&self) -> Result<Vec<ResourceProvider>, PlacementError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| PlacementError::Lock)?
+            .values()
+            .cloned()
+            .collect())
+    }
 }
 
 fn persist(root: &Path, state: &BTreeMap<String, ResourceProvider>) -> Result<(), PlacementError> {

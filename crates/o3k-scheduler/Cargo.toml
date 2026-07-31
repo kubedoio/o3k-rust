@@ -1,0 +1,14 @@
+[package]
+name = "o3k-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+o3k-placement = { path = "../o3k-placement" }
+thiserror.workspace = true

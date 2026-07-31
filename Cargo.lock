@@ -1149,6 +1149,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-scheduler"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "o3k-placement",
+ "thiserror",
+]
+
+[[package]]
 name = "o3k-store"
 version = "0.1.0-alpha.0"
 dependencies = [
