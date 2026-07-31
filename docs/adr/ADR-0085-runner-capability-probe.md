@@ -31,7 +31,9 @@ credentials, arbitrary command paths, or image contents. The probe does not
 install packages, alter services, contact OpenStack, create resources, or
 clean up resources. The protected workflow runs it before the pre-run guard,
 uses a passed artifact as the guard's eligibility input, and uploads it with
-the other artifacts even when a later step fails.
+the other artifacts even when a later step fails. A missing, malformed,
+skipped, or failed artifact makes the pre-run guard write an explicit redacted
+blocked reason and exit nonzero; it can never allow the lifecycle step.
 
 The label and service-account declarations are explicit workflow inputs to the
 probe. GitHub runner assignment remains enforced by the workflow's exact

@@ -49,6 +49,36 @@ assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 PY
 
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
+           "status": "failed", "reason": "runner_labels_mismatch", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+: >"${GITHUB_OUTPUT}"
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "failed capability probe was accepted" >&2
+    exit 1
+fi
+if grep -q '^ready=true$' "${GITHUB_OUTPUT}"; then
+    echo "failed capability probe marked guard ready" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value == {"artifact_type": "real-host-workflow-result",
+                 "status": "blocked", "reason": "capability_probe_failed",
+                 "redacted": True, "finished_at": value["finished_at"]}
+PY
+
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
+           "status": "passed", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+
 export GITHUB_REPOSITORY=attacker/o3k-rust
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
     echo "non-canonical repository was accepted" >&2

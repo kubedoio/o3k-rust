@@ -18,7 +18,8 @@ This change does not claim host acceptance. A maintainer must configure the
 protected `o3k-real-host-validation` environment and an exact-label,
 dedicated non-root runner with KVM/libvirt, the required tools, sufficient
 disk, the configured service account, and a valid local image. A manual run
-must produce `status: passed` in `runner-capabilities.json`, then a passing
+must produce `status: passed` in `runner-capabilities.json`; any other or
+missing status blocks the pre-run guard. It must then produce a passing
 redacted real-host workflow result with no owned-resource leaks. Missing host
 capabilities remain skipped evidence; unsafe runner configuration fails the
 probe. The probe makes no provisioning or destructive changes.

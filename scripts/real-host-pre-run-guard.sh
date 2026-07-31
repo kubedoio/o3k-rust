@@ -48,13 +48,12 @@ PY
 )"
 fi
 if [[ "${capability_status}" != passed ]]; then
-    capability_result_status=skipped
+    capability_result_status=blocked
     capability_reason=capability_probe_unavailable
-    capability_exit=0
     if [[ "${capability_status}" == failed ]]; then
-        capability_result_status=blocked
         capability_reason=capability_probe_failed
-        capability_exit=1
+    elif [[ "${capability_status}" == skipped ]]; then
+        capability_reason=capability_probe_skipped
     fi
     python3 - "${RESULT_PATH}" "${capability_result_status}" "${capability_reason}" <<'PY'
 import json, sys, time
@@ -65,8 +64,8 @@ with open(path, "w", encoding="utf-8") as output:
               output, indent=2)
     output.write("\n")
 PY
-    echo "real-host capability probe did not pass; lifecycle skipped" >&2
-    exit "${capability_exit}"
+    echo "real-host capability probe did not pass; lifecycle blocked" >&2
+    exit 1
 fi
 
 declare -A tools=(
