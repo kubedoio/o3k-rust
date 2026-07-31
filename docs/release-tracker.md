@@ -15,7 +15,7 @@ the real-libvirt acceptance evidence exists.
 | #42 | config-drive | merged | atomic replacement publication and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication and allocation-preserving provider synchronization added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
-| #45 | bridge/TAP | merged | TAP reuse ownership fencing, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
+| #45 | bridge/TAP | merged | TAP reuse ownership fencing, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication and owned dnsmasq supervision added; TAP/dnsmasq/guest IP evidence pending |
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, and non-empty network validation added; agent-backed artifact realization/create and host evidence pending |
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
