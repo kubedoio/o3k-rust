@@ -22,6 +22,7 @@ pub enum LogFormat {
 pub enum Provider {
     Fake,
     CellHv,
+    Libvirt,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -169,7 +170,7 @@ pub enum ConfigError {
     EmptyLogFilter,
     #[error("log format must be `json` or `pretty`")]
     InvalidLogFormat,
-    #[error("provider must be `fake` or `cellhv`")]
+    #[error("provider must be `fake`, `cellhv`, or `libvirt`")]
     InvalidProvider,
     #[error("bootstrap secret must not contain a newline")]
     InvalidSecret,
@@ -406,6 +407,7 @@ impl PartialConfig {
         {
             "fake" => Provider::Fake,
             "cellhv" => Provider::CellHv,
+            "libvirt" => Provider::Libvirt,
             _ => return Err(ConfigError::InvalidProvider),
         };
         if self

@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
+#[cfg(test)]
+use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, FakeComputeProvider,
-    InstanceAction, ProviderError,
+    Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
+    InstanceAction, Operation, ProviderError,
 };
 use o3k_reconciler::{OperationJournal, ReconcileError};
 use o3k_store::{DurableStore, SqliteStore, StoreError};
@@ -48,13 +51,60 @@ pub enum ComputeError {
 #[derive(Clone)]
 pub struct ComputeService {
     store: Arc<SqliteStore>,
-    provider: Arc<FakeComputeProvider>,
-    journal: OperationJournal<SqliteStore, FakeComputeProvider>,
+    provider: Arc<ProviderBackend>,
+    journal: OperationJournal<SqliteStore, ProviderBackend>,
+}
+
+#[derive(Clone)]
+pub struct ProviderBackend(Arc<dyn ComputeProvider>);
+
+impl<P: ComputeProvider + 'static> From<Arc<P>> for ProviderBackend {
+    fn from(provider: Arc<P>) -> Self {
+        Self(provider)
+    }
+}
+
+#[async_trait]
+impl ComputeProvider for ProviderBackend {
+    async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
+        self.0.capabilities().await
+    }
+    async fn create_instance(
+        &self,
+        request: CreateInstanceRequest,
+    ) -> Result<Operation, ProviderError> {
+        self.0.create_instance(request).await
+    }
+    async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
+        self.0.get_instance(id).await
+    }
+    async fn delete_instance(
+        &self,
+        request: DeleteInstanceRequest,
+    ) -> Result<Operation, ProviderError> {
+        self.0.delete_instance(request).await
+    }
+    async fn action_instance(
+        &self,
+        id: &str,
+        action: InstanceAction,
+        operation_id: Uuid,
+        key: &str,
+    ) -> Result<Operation, ProviderError> {
+        self.0.action_instance(id, action, operation_id, key).await
+    }
+    async fn get_operation(&self, id: Uuid) -> Result<Operation, ProviderError> {
+        self.0.get_operation(id).await
+    }
 }
 
 impl ComputeService {
     #[must_use]
-    pub fn new(store: Arc<SqliteStore>, provider: Arc<FakeComputeProvider>) -> Self {
+    pub fn new<P>(store: Arc<SqliteStore>, provider: Arc<P>) -> Self
+    where
+        Arc<P>: Into<ProviderBackend>,
+    {
+        let provider = Arc::new(provider.into());
         let journal = OperationJournal::new(store.clone(), provider.clone(), 3);
         Self {
             store,
@@ -64,7 +114,7 @@ impl ComputeService {
     }
 
     #[must_use]
-    pub fn provider(&self) -> Arc<FakeComputeProvider> {
+    pub fn provider(&self) -> Arc<ProviderBackend> {
         self.provider.clone()
     }
 

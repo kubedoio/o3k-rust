@@ -593,6 +593,176 @@ fn xml_values(xml: &str, tag: &str, attribute: &str) -> Vec<String> {
         .collect()
 }
 
+/// Compute-provider implementation backed by the local-system libvirt adapter.
+#[derive(Clone)]
+pub struct LibvirtProvider {
+    adapter: LibvirtAdapter,
+    operations: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<uuid::Uuid, o3k_provider::Operation>>,
+    >,
+}
+
+impl LibvirtProvider {
+    pub fn new(adapter: LibvirtAdapter) -> Self {
+        Self {
+            adapter,
+            operations: std::sync::Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+        }
+    }
+
+    fn operation(
+        &self,
+        request: uuid::Uuid,
+        resource: Option<String>,
+    ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        let operation = o3k_provider::Operation {
+            provider_operation_id: uuid::Uuid::now_v7(),
+            o3k_operation_id: request,
+            state: o3k_provider::OperationState::Succeeded,
+            error_category: None,
+            provider_resource_id: resource,
+        };
+        self.operations
+            .lock()
+            .map_err(|_| o3k_provider::ProviderError::Storage)?
+            .insert(operation.provider_operation_id, operation.clone());
+        Ok(operation)
+    }
+}
+
+fn provider_error(error: LibvirtError) -> o3k_provider::ProviderError {
+    match error.category {
+        ErrorCategory::NotFound => o3k_provider::ProviderError::NotFound,
+        ErrorCategory::InvalidRequest => o3k_provider::ProviderError::InvalidRequest,
+        ErrorCategory::ConnectionLost => o3k_provider::ProviderError::Retryable,
+        ErrorCategory::Unavailable | ErrorCategory::OperationFailed => {
+            o3k_provider::ProviderError::Terminal
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_provider::ComputeProvider for LibvirtProvider {
+    async fn capabilities(
+        &self,
+    ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+        let value = self.adapter.capabilities().await.map_err(provider_error)?;
+        Ok(o3k_provider::Capabilities {
+            provider_name: "o3k-libvirt".into(),
+            provider_version: value.libvirt_version.unwrap_or_else(|| "unknown".into()),
+            capabilities: value.supported_operations,
+        })
+    }
+
+    async fn create_instance(
+        &self,
+        request: o3k_provider::CreateInstanceRequest,
+    ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        let image_id = request
+            .image_id
+            .clone()
+            .ok_or(o3k_provider::ProviderError::InvalidRequest)?;
+        let definition = build_domain_xml(&DomainSpec {
+            metadata: DomainMetadata {
+                server_id: request.o3k_server_id.to_string(),
+                project_id: "unknown".into(),
+                generation: 1,
+                operation_id: request.operation_id.to_string(),
+                managed_by: "o3k-compute".into(),
+            },
+            vcpus: request.vcpus,
+            memory_mib: request.memory_mib,
+            image_id,
+        })
+        .map_err(provider_error)?;
+        self.adapter
+            .define(DomainDefinition {
+                name: definition.name.clone(),
+                xml: definition.xml,
+            })
+            .await
+            .map_err(provider_error)?;
+        if let Err(error) = self.adapter.start(definition.name.clone()).await {
+            let _ = self.adapter.undefine(definition.name.clone()).await;
+            return Err(provider_error(error));
+        }
+        self.operation(request.operation_id, Some(definition.name))
+    }
+
+    async fn get_instance(
+        &self,
+        provider_instance_id: &str,
+    ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+        let inspection = self
+            .adapter
+            .inspect(provider_instance_id.to_owned())
+            .await
+            .map_err(provider_error)?;
+        Ok(o3k_provider::Instance {
+            provider_instance_id: inspection.name,
+            o3k_server_id: uuid::Uuid::nil(),
+            state: if inspection.active {
+                o3k_provider::InstanceState::Running
+            } else {
+                o3k_provider::InstanceState::Stopped
+            },
+            observed_message: Some(inspection.state),
+        })
+    }
+
+    async fn delete_instance(
+        &self,
+        request: o3k_provider::DeleteInstanceRequest,
+    ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        let name = request.provider_instance_id;
+        match self.adapter.inspect(name.clone()).await {
+            Ok(inspection) => {
+                if inspection.active {
+                    self.adapter
+                        .force_stop(name.clone())
+                        .await
+                        .map_err(provider_error)?;
+                }
+                self.adapter.undefine(name).await.map_err(provider_error)?;
+            }
+            Err(error) if error.category == ErrorCategory::NotFound => {}
+            Err(error) => return Err(provider_error(error)),
+        }
+        self.operation(request.operation_id, None)
+    }
+
+    async fn action_instance(
+        &self,
+        provider_instance_id: &str,
+        action: o3k_provider::InstanceAction,
+        operation_id: uuid::Uuid,
+        _idempotency_key: &str,
+    ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        let name = provider_instance_id.to_owned();
+        match action {
+            o3k_provider::InstanceAction::Start => self.adapter.start(name).await,
+            o3k_provider::InstanceAction::Stop => self.adapter.shutdown(name).await,
+            o3k_provider::InstanceAction::Reboot => self.adapter.reboot(name).await,
+        }
+        .map_err(provider_error)?;
+        self.operation(operation_id, Some(provider_instance_id.to_owned()))
+    }
+
+    async fn get_operation(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        self.operations
+            .lock()
+            .map_err(|_| o3k_provider::ProviderError::Storage)?
+            .get(&id)
+            .cloned()
+            .ok_or(o3k_provider::ProviderError::NotFound)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
