@@ -107,6 +107,7 @@ impl PlacementLedger {
             return Err(PlacementError::InvalidAllocation);
         }
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state
             .entry(node_id.to_owned())
             .or_insert_with(|| ResourceProvider {
@@ -121,7 +122,7 @@ impl PlacementLedger {
         provider.inventories = inventories;
         provider.generation = provider.generation.saturating_add(1);
         let result = provider.clone();
-        persist(&self.root, &state)?;
+        persist_or_restore(&self.root, &mut state, previous)?;
         Ok(result)
     }
 
@@ -132,6 +133,7 @@ impl PlacementLedger {
         mut inventories: BTreeMap<String, Inventory>,
     ) -> Result<ResourceProvider, PlacementError> {
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state.get_mut(provider_id).ok_or(PlacementError::NotFound)?;
         if generation != provider.generation {
             return Err(PlacementError::StaleGeneration);
@@ -140,7 +142,7 @@ impl PlacementLedger {
         provider.inventories = inventories;
         provider.generation = provider.generation.saturating_add(1);
         let result = provider.clone();
-        persist(&self.root, &state)?;
+        persist_or_restore(&self.root, &mut state, previous)?;
         Ok(result)
     }
 
@@ -158,6 +160,7 @@ impl PlacementLedger {
             return Err(PlacementError::InvalidAllocation);
         }
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state
             .entry(node_id.to_owned())
             .or_insert_with(|| ResourceProvider {
@@ -173,7 +176,7 @@ impl PlacementLedger {
         provider.state = state_value;
         provider.generation = provider.generation.saturating_add(1);
         let result = provider.clone();
-        persist(&self.root, &state)?;
+        persist_or_restore(&self.root, &mut state, previous)?;
         Ok(result)
     }
 
@@ -193,6 +196,7 @@ impl PlacementLedger {
             return Err(PlacementError::InvalidAllocation);
         }
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state.get_mut(provider_id).ok_or(PlacementError::NotFound)?;
         if let Some(existing) = provider.allocations.get(allocation_id) {
             if existing.consumer_id == consumer_id && existing.resources == resources {
@@ -230,12 +234,13 @@ impl PlacementLedger {
             .allocations
             .insert(allocation_id.to_owned(), allocation.clone());
         provider.generation += 1;
-        persist(&self.root, &state)?;
+        persist_or_restore(&self.root, &mut state, previous)?;
         Ok(allocation)
     }
 
     pub fn release(&self, provider_id: &str, allocation_id: &str) -> Result<(), PlacementError> {
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state.get_mut(provider_id).ok_or(PlacementError::NotFound)?;
         if let Some(allocation) = provider.allocations.remove(allocation_id) {
             for (class, amount) in allocation.resources {
@@ -244,7 +249,7 @@ impl PlacementLedger {
                 }
             }
             provider.generation += 1;
-            persist(&self.root, &state)?;
+            persist_or_restore(&self.root, &mut state, previous)?;
         }
         Ok(())
     }
@@ -255,10 +260,11 @@ impl PlacementLedger {
         state_value: ProviderState,
     ) -> Result<(), PlacementError> {
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = state.clone();
         let provider = state.get_mut(provider_id).ok_or(PlacementError::NotFound)?;
         provider.state = state_value;
         provider.generation += 1;
-        persist(&self.root, &state)
+        persist_or_restore(&self.root, &mut state, previous)
     }
     pub fn provider(&self, provider_id: &str) -> Result<ResourceProvider, PlacementError> {
         self.state
@@ -291,6 +297,20 @@ fn persist(root: &Path, state: &BTreeMap<String, ResourceProvider>) -> Result<()
         return Err(PlacementError::Storage(error));
     }
     Ok(())
+}
+
+fn persist_or_restore(
+    root: &Path,
+    state: &mut BTreeMap<String, ResourceProvider>,
+    previous: BTreeMap<String, ResourceProvider>,
+) -> Result<(), PlacementError> {
+    match persist(root, state) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *state = previous;
+            Err(error)
+        }
+    }
 }
 
 fn reconcile_inventory_usage(
@@ -371,6 +391,40 @@ mod tests {
         assert_eq!(reopened.provider("node-1")?.allocations.len(), 1);
         reopened.release("node-1", "alloc-1")?;
         reopened.release("node-1", "alloc-1")?;
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_allocation_publication_rolls_back_memory_state() -> Result<(), PlacementError> {
+        let root = std::env::temp_dir().join(format!(
+            "o3k-placement-publication-rollback-{}",
+            Uuid::now_v7()
+        ));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.register_provider("node-1", inventory())?;
+
+        // A directory at the final publication path makes the atomic rename
+        // fail after the temporary state has been written.
+        fs::remove_file(root.join("placement.json")).map_err(PlacementError::Storage)?;
+        fs::create_dir(root.join("placement.json")).map_err(PlacementError::Storage)?;
+
+        assert!(matches!(
+            ledger.allocate(
+                "node-1",
+                "allocation-1",
+                "server-1",
+                BTreeMap::from([(VCPU.to_owned(), 1)]),
+                provider.generation,
+            ),
+            Err(PlacementError::Storage(_))
+        ));
+
+        let current = ledger.provider("node-1")?;
+        assert!(current.allocations.is_empty());
+        assert_eq!(current.inventories[VCPU].used, 0);
+        assert_eq!(current.generation, provider.generation);
+
         fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
         Ok(())
     }
