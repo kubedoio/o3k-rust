@@ -36,6 +36,19 @@ PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
 grep -Fqx 'stop o3k-compute.service' "$WORK_DIR/systemctl.log"
 grep -Fqx 'stop o3kd.service' "$WORK_DIR/systemctl.log"
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/log/.o3k-owned" ]]
+
+printf '%s\n' 'foreign helper' >"$WORK_DIR/prefix/share/o3k/foreign-helper.sh"
+PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
+  bash "$WORK_DIR/prefix/share/o3k/uninstall.sh" \
+  --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
+  --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
+for file in o3kd.service o3k-compute.service reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh; do
+  [[ ! -e "$WORK_DIR/prefix/share/o3k/$file" ]] || { echo "uninstall left helper file: $file" >&2; exit 1; }
+done
+[[ ! -e "$WORK_DIR/prefix/bin/o3kd" && ! -e "$WORK_DIR/prefix/bin/o3k-compute" ]]
+[[ -f "$WORK_DIR/prefix/share/o3k/foreign-helper.sh" ]]
+[[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/config/o3kd.env" && -f "$WORK_DIR/log/.o3k-owned" ]]
+
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
