@@ -15,6 +15,7 @@ allow = [
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
+  "LGPL-2.1",
   "MIT",
   "MPL-2.0",
   "OpenSSL",
