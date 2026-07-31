@@ -68,7 +68,10 @@ install -> token -> image -> network -> flavor -> server
 -> restart -> show/list -> delete -> reset
 ```
 
-Run first with stub providers and then with CellHV in a Linux integration environment.
+Run the contract suite with the fake provider, then run the release gate with
+libvirt/KVM through `o3k-compute` in a clean Linux integration environment.
+CellHV coverage is optional follow-on provider conformance and does not replace
+the libvirt release evidence.
 
 ### 7. Compatibility matrix
 

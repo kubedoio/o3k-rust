@@ -20,7 +20,7 @@ Ports
   store, clock, identity signer, compute/network/storage providers
         |
 Adapters
-  SQLite/PostgreSQL, stub, CellHV, local/S3
+  SQLite/PostgreSQL, fake, libvirt/KVM, CellHV (optional), local/S3
 ```
 
 Dependencies point inward. The domain does not depend on Axum, SQLx, protobuf-generated provider clients, or OpenStack JSON structures.
@@ -65,17 +65,44 @@ A provider timeout means the outcome is unknown. Reconciliation must observe bef
 - SQLite with embedded migrations;
 - local image content;
 - flat network provider;
-- stub compute provider, then CellHV;
+- `o3k-compute` on the compute host;
+- libvirt/KVM through the local `qemu:///system` socket as the primary real
+  backend;
+- fake compute for fast contract tests;
 - in-process reconciler;
 - OpenStack-compatible public ports plus health/metrics endpoints.
 
+The control plane must not connect directly to a local or remote libvirt
+socket. `o3k-compute` is the host-local boundary for libvirt and bounded
+privileged operations. It communicates with `o3kd` through the versioned
+provider protocol and reports host capabilities and observed state. See
+[ADR-0005](adr/ADR-0005-libvirt-primary-compute-backend.md).
+
 ## Growth path
 
-1. PostgreSQL adapter;
-2. S3 image content;
-3. CellHV compute/network/storage providers;
+1. real libvirt/KVM image boot, placement, host networking, DHCP, config-drive,
+   and Nova lifecycle evidence for `v0.2.0-alpha.1`;
+2. PostgreSQL adapter and S3 image content;
+3. CellHV compute/network/storage providers as optional later profiles;
 4. separate worker/reconciler deployment if measured need exists;
 5. small-cluster coordination and fencing only after an ADR and failure model.
+
+## Compute provider boundary
+
+```text
+OpenStack CLI / SDK -> o3kd -> versioned provider protocol -> o3k-compute
+                                                               |
+                                             local qemu:///system socket
+                                                               |
+                                                            QEMU/KVM
+```
+
+O3K owns OpenStack semantics, scheduling, placement, desired state, operation
+state, and reconciliation. The compute agent owns local libvirt connectivity,
+QEMU/KVM execution, image/overlay and config-drive operations, host networking,
+and provider-native observed state. `CellHvComputeProvider` remains available
+behind the same provider abstraction but is not part of the release-critical
+path.
 
 ## Shared Rust ecosystem with CellHV
 

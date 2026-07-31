@@ -10,5 +10,6 @@ O3K integrates with CellHV through a versioned protobuf provider contract. It do
 
 - independent repositories and release cycles;
 - contract compatibility tests required;
-- CellHV is preferred but not mandatory;
+- CellHV is optional and independently releasable; libvirt/KVM is the primary
+  real backend for `v0.2.0-alpha.1` (see ADR-0005);
 - shared utility crates require separate justification and versioning.

@@ -15,7 +15,8 @@ Traditional OpenStack deployments are powerful, but they can be too large and op
 - preserve useful OpenStack API compatibility;
 - use reconciliation instead of fragile procedural orchestration;
 - delegate VM, network, and storage execution to explicit providers;
-- integrate naturally with CellHV without making CellHV mandatory;
+- use standard QEMU/KVM through libvirt as the primary real compute backend;
+- integrate naturally with CellHV as an optional provider without making CellHV mandatory;
 - remain understandable enough for operators and LLM agents to reason about safely.
 
 ## Experienced ideas that guide the design
@@ -28,7 +29,7 @@ These are project principles derived from practical infrastructure experience. T
 4. **Keep the default small.** The initial profile uses one process, SQLite, local image storage, a flat network, and a provider adapter. PostgreSQL, S3, clustering, and advanced networking are opt-in steps.
 5. **Separate API semantics from infrastructure execution.** O3K owns OpenStack-facing resources and orchestration. Compute, storage, and network providers own execution.
 6. **Desired state and observed state must converge.** Operations are idempotent, retryable, observable, and safe after process or node failure.
-7. **CellHV is the preferred first real compute provider.** The integration uses a versioned contract. Neither repository imports the other's internal domain model.
+7. **Libvirt/KVM is the primary real compute backend.** `o3kd` delegates through a versioned provider contract to `o3k-compute`, which connects locally to `qemu:///system`. CellHV remains an optional provider behind the same contract; neither repository imports the other's internal domain model.
 8. **Failure paths are first-class features.** Restart, timeout, partial completion, duplicate request, stale state, rollback, and cleanup are tested before scale claims.
 9. **Security and operations begin on day one.** Structured audit events, least privilege, secret boundaries, health checks, metrics, tracing, signed releases, and SBOMs are not deferred polish.
 10. **A test environment is the first product.** Edge and SMB production profiles come only after the TestLab workflow is stable and measured.
@@ -44,7 +45,7 @@ The first vertical slice must support this workflow on a clean Linux host:
 3. create or discover an image;
 4. create a flat network and subnet;
 5. create a flavor;
-6. create a server through the stub provider, then CellHV;
+6. create a real server through the libvirt/KVM TestLab path (with the fake provider available for fast contract tests);
 7. list, inspect, stop, start, reboot, and delete the server;
 8. restart O3K and reconcile state;
 9. destroy and recreate the environment reproducibly.
@@ -74,7 +75,9 @@ OpenStack CLI / Terraform / SDKs
         /          |          \
    compute       network      storage
      |              |            |
-   CellHV        CellHV       CellHV/S3/local
+  libvirt/KVM   flat/local   local/S3
+       |             |
+  CellHV (optional provider for later profiles)
 ```
 
 O3K owns OpenStack-facing identity, catalog, image, network, compute, volume, placement, quota, policy, operation, and reconciliation semantics. Providers expose capabilities and execute bounded operations.
