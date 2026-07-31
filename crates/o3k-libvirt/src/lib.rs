@@ -184,6 +184,16 @@ pub fn discover_domain_xmls(domains: &[(String, String)]) -> Vec<DiscoveryResult
     results
 }
 
+fn managed_domain_names(domains: &[(String, String)], prefix: &str) -> Vec<String> {
+    discover_domain_xmls(domains)
+        .into_iter()
+        .filter_map(|result| match result {
+            DiscoveryResult::Owned { name, .. } if name.starts_with(prefix) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
 fn validate_metadata(metadata: &DomainMetadata) -> Result<(), LibvirtError> {
     for value in [
         &metadata.server_id,
@@ -685,11 +695,15 @@ fn backend_list(uri: &str, prefix: &str) -> Result<Vec<String>, LibvirtError> {
     let domains = connection
         .list_all_domains(0)
         .map_err(|_| LibvirtError::new(ErrorCategory::OperationFailed, "domain listing failed"))?;
-    Ok(domains
+    let inspected = domains
         .into_iter()
-        .filter_map(|domain| domain.get_name().ok())
-        .filter(|name| name.starts_with(prefix))
-        .collect())
+        .filter_map(|domain| {
+            let name = domain.get_name().ok()?;
+            let xml = domain.get_xml_desc(0).ok()?;
+            Some((name, xml))
+        })
+        .collect::<Vec<_>>();
+    Ok(managed_domain_names(&inspected, prefix))
 }
 
 #[cfg(feature = "libvirt")]
@@ -1114,6 +1128,52 @@ mod tests {
             discovered
                 .iter()
                 .all(|result| matches!(result, DiscoveryResult::Quarantined { .. }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_domain_listing_requires_valid_unique_ownership_metadata() -> Result<(), LibvirtError>
+    {
+        let owned_spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "listed-server".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image_path: None,
+            network_interfaces: Vec::new(),
+        };
+        let owned_xml = build_domain_xml(&owned_spec)?.xml;
+        let malformed_xml = "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" /></metadata></domain>";
+        let foreign_xml = "<domain><name>o3k-foreign</name></domain>";
+
+        assert_eq!(
+            managed_domain_names(
+                &[
+                    ("o3k-owned".to_owned(), owned_xml.clone()),
+                    ("o3k-foreign".to_owned(), foreign_xml.to_owned()),
+                    ("o3k-malformed".to_owned(), malformed_xml.to_owned()),
+                ],
+                "o3k-"
+            ),
+            vec!["o3k-owned"]
+        );
+
+        assert!(
+            managed_domain_names(
+                &[
+                    ("o3k-duplicate-a".to_owned(), owned_xml.clone()),
+                    ("o3k-duplicate-b".to_owned(), owned_xml),
+                ],
+                "o3k-"
+            )
+            .is_empty()
         );
         Ok(())
     }
