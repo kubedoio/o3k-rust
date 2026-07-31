@@ -202,9 +202,13 @@ import time
 print(int(time.time()))
 PY
 )"
-set_benchmark_raw_timestamp_only "$(python3 - <<'PY'
-import time
-print(int(time.time()) - 1)
+set_benchmark_raw_timestamp_only "$(python3 - "${ARTIFACT_DIR}/benchmark.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+summary = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+print(summary["finished_at"] + 1)
 PY
 )"
 if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
