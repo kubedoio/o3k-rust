@@ -17,6 +17,26 @@ use virt::{connect::Connect, domain::Domain, stream::Stream};
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
 pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
 
+// These values are the stable public libvirt virDomainState values. Keep the
+// projection explicit: treating every non-active domain as stopped would turn
+// paused, crashed, and unknown observations into a healthy state.
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_NO_STATE: u32 = 0;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_RUNNING: u32 = 1;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_BLOCKED: u32 = 2;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_PAUSED: u32 = 3;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_SHUTDOWN: u32 = 4;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_SHUTOFF: u32 = 5;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_CRASHED: u32 = 6;
+#[cfg(feature = "libvirt")]
+const LIBVIRT_STATE_PMSUSPENDED: u32 = 7;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DomainMetadata {
     pub server_id: String,
@@ -42,6 +62,36 @@ pub struct DomainNetworkInterface {
     /// Existing TAP device prepared and owned by the host network subsystem.
     pub tap_name: String,
     pub mac_address: String,
+}
+
+/// Project a libvirt observation into the provider lifecycle state.
+///
+/// The active bit is checked along with the libvirt state so an inconsistent
+/// observation cannot be reported as running. States that do not have a safe
+/// Nova-like projection are reported as `Error`; reconciliation can then
+/// inspect the retained provider message instead of making a destructive
+/// assumption.
+pub fn project_domain_state(active: bool, state: &str) -> o3k_provider::InstanceState {
+    match (active, state) {
+        (true, "running") => o3k_provider::InstanceState::Running,
+        (false, "shutdown" | "shutoff") => o3k_provider::InstanceState::Stopped,
+        _ => o3k_provider::InstanceState::Error,
+    }
+}
+
+#[cfg(feature = "libvirt")]
+fn domain_state_name(state: u32) -> &'static str {
+    match state {
+        LIBVIRT_STATE_NO_STATE => "no-state",
+        LIBVIRT_STATE_RUNNING => "running",
+        LIBVIRT_STATE_BLOCKED => "blocked",
+        LIBVIRT_STATE_PAUSED => "paused",
+        LIBVIRT_STATE_SHUTDOWN => "shutdown",
+        LIBVIRT_STATE_SHUTOFF => "shutoff",
+        LIBVIRT_STATE_CRASHED => "crashed",
+        LIBVIRT_STATE_PMSUSPENDED => "pmsuspended",
+        _ => "unknown",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,7 +707,7 @@ fn backend_inspect(uri: &str, name: &str) -> Result<DomainInspection, LibvirtErr
         name: name.to_owned(),
         active: domain.is_active().unwrap_or(false),
         persistent: domain.is_persistent().unwrap_or(false),
-        state: format!("{:?}", info.state),
+        state: domain_state_name(info.state).to_owned(),
         max_memory_kib: info.max_mem,
         vcpus: info.nr_virt_cpu,
         xml: domain.get_xml_desc(0).map_err(|_| {
@@ -902,11 +952,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             provider_instance_id: inspection.name,
             o3k_server_id: uuid::Uuid::parse_str(&metadata.server_id)
                 .map_err(|_| o3k_provider::ProviderError::Terminal)?,
-            state: if inspection.active {
-                o3k_provider::InstanceState::Running
-            } else {
-                o3k_provider::InstanceState::Stopped
-            },
+            state: project_domain_state(inspection.active, &inspection.state),
             observed_message: Some(inspection.state),
         })
     }
@@ -1104,6 +1150,46 @@ mod tests {
         assert!(xml.contains("mac address=\"02:00:00:00:00:01\""));
         assert!(xml.contains("target dev=\"o3ktap-a1b2c3d4\""));
         Ok(())
+    }
+
+    #[test]
+    fn domain_state_projection_fails_closed_for_non_running_states() {
+        use o3k_provider::InstanceState;
+
+        assert_eq!(
+            project_domain_state(true, "running"),
+            InstanceState::Running
+        );
+        assert_eq!(
+            project_domain_state(false, "shutdown"),
+            InstanceState::Stopped
+        );
+        assert_eq!(
+            project_domain_state(false, "shutoff"),
+            InstanceState::Stopped
+        );
+
+        for state in [
+            "no-state",
+            "blocked",
+            "paused",
+            "crashed",
+            "pmsuspended",
+            "unknown",
+        ] {
+            assert_eq!(project_domain_state(true, state), InstanceState::Error);
+            assert_eq!(project_domain_state(false, state), InstanceState::Error);
+        }
+        assert_eq!(
+            project_domain_state(false, "running"),
+            InstanceState::Error,
+            "an inconsistent active bit must not report a running instance"
+        );
+        assert_eq!(
+            project_domain_state(true, "shutoff"),
+            InstanceState::Error,
+            "an inconsistent active bit must not report a stopped instance"
+        );
     }
 
     #[test]
