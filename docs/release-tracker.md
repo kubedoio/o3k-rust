@@ -20,7 +20,7 @@ the real-libvirt acceptance evidence exists.
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, and fake command realization added; real artifact protocol/create and host evidence pending |
 | #48 | console log | merged | atomic writes and bounded offset reads added; guest boot output evidence pending |
 | #49 | real-libvirt harness | merged | preflight is skipped here |
-| #50 | OpenStack CLI workflow | merged | CLI/libvirt endpoint pending |
+| #50 | OpenStack CLI workflow | merged | CLI/libvirt endpoint pending; failure cleanup and diagnostic artifacts added |
 | #51 | clean-host packaging | merged | Ubuntu/Debian clean installs pending |
 | #52 | measurements | merged | fake control-plane measured; guest metrics pending |
 | #53 | release gate | merged | gate is blocked by the rows above |
@@ -65,6 +65,7 @@ and ADR-0020 (durable agent-event reconciliation), ADR-0021 (live agent-event co
 and ADR-0022 (atomic image overlays), ADR-0023 (fake command realization),
 and ADR-0024 (atomic config-drive publication), ADR-0025 (atomic DHCP publication),
 and ADR-0026 (TAP reuse ownership fencing), ADR-0027 (agent-targeted scheduling),
-and ADR-0028 (bounded console offset reads).
+and ADR-0028 (bounded console offset reads), and ADR-0029 (CLI harness failure
+cleanup).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.

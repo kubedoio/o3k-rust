@@ -28,6 +28,8 @@ jobs:
         run: for file in packaging/*.sh tests/*.sh; do bash -n "$file"; done
       - name: Test release evidence gate
         run: bash tests/release-gate.sh
+      - name: Test OpenStack CLI failure cleanup
+        run: bash tests/openstack-cli-cleanup.sh
       - name: Test packaging safety
         run: bash tests/packaging-safety.sh
       - name: Clippy
