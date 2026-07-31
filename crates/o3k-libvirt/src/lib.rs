@@ -807,6 +807,20 @@ fn provider_error(error: LibvirtError) -> o3k_provider::ProviderError {
     }
 }
 
+fn validate_create_request(
+    request: &o3k_provider::CreateInstanceRequest,
+) -> Result<(), o3k_provider::ProviderError> {
+    if request
+        .network_ids
+        .iter()
+        .any(|network_id| network_id.trim().is_empty())
+        || !request.network_ids.is_empty()
+    {
+        return Err(o3k_provider::ProviderError::InvalidRequest);
+    }
+    Ok(())
+}
+
 fn owned_metadata(
     inspection: &DomainInspection,
     expected_server_id: Option<&str>,
@@ -840,6 +854,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
         &self,
         request: o3k_provider::CreateInstanceRequest,
     ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+        validate_create_request(&request)?;
         let image_id = request
             .image_id
             .clone()
@@ -957,6 +972,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_provider::ComputeProvider;
 
     #[tokio::test]
     async fn default_build_reports_missing_libvirt_without_blocking() -> Result<(), LibvirtError> {
@@ -1285,6 +1301,51 @@ mod tests {
             owned_metadata(&owned, Some("different-server")),
             Err(o3k_provider::ProviderError::NotFound)
         );
+        Ok(())
+    }
+
+    fn create_request(network_ids: Vec<String>) -> o3k_provider::CreateInstanceRequest {
+        o3k_provider::CreateInstanceRequest {
+            operation_id: uuid::Uuid::now_v7(),
+            o3k_server_id: uuid::Uuid::now_v7(),
+            project_id: "project".to_owned(),
+            name: "server".to_owned(),
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: Some("/var/lib/o3k/image.qcow2".to_owned()),
+            network_ids,
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            idempotency_key: "create".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_network_ids_before_libvirt_definition() -> Result<(), LibvirtError> {
+        let adapter = LibvirtAdapter::new(LibvirtConfig::default())?;
+        let provider = LibvirtProvider::new(adapter);
+
+        for network_ids in [
+            vec!["network-1".to_owned()],
+            vec!["   ".to_owned()],
+            vec!["network-1".to_owned(), "".to_owned()],
+        ] {
+            let result = provider.create_instance(create_request(network_ids)).await;
+            assert_eq!(result, Err(o3k_provider::ProviderError::InvalidRequest));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_preserves_image_source_validation_after_network_validation()
+    -> Result<(), LibvirtError> {
+        let adapter = LibvirtAdapter::new(LibvirtConfig::default())?;
+        let provider = LibvirtProvider::new(adapter);
+        let mut request = create_request(Vec::new());
+        request.image_id = Some("../outside.qcow2".to_owned());
+
+        let result = provider.create_instance(request).await;
+        assert_eq!(result, Err(o3k_provider::ProviderError::InvalidRequest));
         Ok(())
     }
 }
