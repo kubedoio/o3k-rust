@@ -151,9 +151,14 @@ impl ComputeService {
         name: String,
         image_id: String,
         flavor_id: Uuid,
+        network_ids: Vec<String>,
         idempotency_key: String,
     ) -> Result<Server, ComputeError> {
-        if name.trim().is_empty() || image_id.trim().is_empty() || idempotency_key.trim().is_empty()
+        if name.trim().is_empty()
+            || image_id.trim().is_empty()
+            || network_ids.is_empty()
+            || network_ids.iter().any(|id| id.trim().is_empty())
+            || idempotency_key.trim().is_empty()
         {
             return Err(ComputeError::InvalidRequest);
         }
@@ -169,10 +174,12 @@ impl ComputeService {
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
             name: name.clone(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
             image_id: Some(image_id.clone()),
+            network_ids,
             idempotency_key,
         };
         let id = request.o3k_server_id;
@@ -294,12 +301,21 @@ impl ComputeService {
                 &format!("action-{id}-{target}"),
             )
             .await?;
+        let observed = self.provider.get_instance(provider_id).await?;
+        let observed_state = match observed.state {
+            o3k_provider::InstanceState::Running => "ACTIVE",
+            o3k_provider::InstanceState::Stopped => "STOPPED",
+            o3k_provider::InstanceState::Creating => "BUILD",
+            o3k_provider::InstanceState::Deleting => "DELETING",
+            o3k_provider::InstanceState::Deleted => "DELETED",
+            o3k_provider::InstanceState::Error => "ERROR",
+        };
         self.store
             .update_resource(
                 id,
                 resource.generation,
                 &resource.desired_state,
-                target,
+                observed_state,
                 resource.observed_generation,
                 Some(provider_id),
             )
@@ -362,6 +378,7 @@ mod tests {
                 "server".to_owned(),
                 "image-1".to_owned(),
                 flavor,
+                vec!["network-1".to_owned()],
                 "request-1".to_owned(),
             )
             .await?;

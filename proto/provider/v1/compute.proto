@@ -30,6 +30,8 @@ message CreateInstanceRequest {
   uint64 memory_mib = 5;
   string image_id = 6;
   string idempotency_key = 7;
+  string project_id = 8;
+  repeated string network_ids = 9;
 }
 
 // Field numbers are permanent. Removed fields must be reserved here.

@@ -1247,6 +1247,10 @@ async fn create_server(
             body.server.name,
             image,
             flavor,
+            networks
+                .into_iter()
+                .filter_map(|network| network.uuid)
+                .collect(),
             idempotency,
         )
         .await

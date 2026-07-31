@@ -19,10 +19,12 @@ pub struct Capabilities {
 pub struct CreateInstanceRequest {
     pub operation_id: Uuid,
     pub o3k_server_id: Uuid,
+    pub project_id: String,
     pub name: String,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub image_id: Option<String>,
+    pub network_ids: Vec<String>,
     pub idempotency_key: String,
 }
 
@@ -239,12 +241,14 @@ impl FakeComputeProvider {
 
     fn create_fingerprint(request: &CreateInstanceRequest) -> String {
         format!(
-            "{}:{}:{}:{}:{:?}",
+            "{}:{}:{}:{}:{}:{:?}:{:?}",
             request.o3k_server_id,
+            request.project_id,
             request.name,
             request.vcpus,
             request.memory_mib,
-            request.image_id
+            request.image_id,
+            request.network_ids
         )
     }
 
@@ -470,10 +474,12 @@ pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(
     let request = CreateInstanceRequest {
         operation_id: Uuid::now_v7(),
         o3k_server_id: Uuid::now_v7(),
+        project_id: "conformance-project".to_owned(),
         name: "conformance".to_owned(),
         vcpus: 1,
         memory_mib: 128,
         image_id: None,
+        network_ids: Vec::new(),
         idempotency_key: format!("conformance-{}", Uuid::now_v7()),
     };
     let operation = provider.create_instance(request.clone()).await?;
@@ -498,10 +504,12 @@ mod tests {
         CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
+            project_id: "project".to_owned(),
             name: "test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
             image_id: None,
+            network_ids: Vec::new(),
             idempotency_key: key.to_owned(),
         }
     }
