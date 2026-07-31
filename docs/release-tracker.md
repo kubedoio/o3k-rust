@@ -20,7 +20,7 @@ the real-libvirt acceptance evidence exists.
 | #47 | libvirt lifecycle backend | merged | distinct CellHV provider selection, durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, non-empty network validation, and lifecycle ownership fencing added; agent-backed artifact realization/create and host evidence pending |
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, serialized per-instance writes, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
-| #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, list coverage, and redacted evidence with discarded raw CLI errors added; real CLI/libvirt endpoint pending |
+| #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, validated show/list identity, verified deletion, and redacted evidence with discarded raw CLI errors; stronger script evidence does not replace a trusted real CLI/libvirt run |
 | #51 | clean-host packaging | merged | libvirt profile selects libvirt and reset stops both control-plane and compute services; Ubuntu/Debian clean installs pending |
 | #52 | measurements | merged | fake control-plane measured with configured-password authentication and finalized cleanup evidence; guest metrics pending |
 | #53 | release gate | merged | benchmark is now required and cleanup evidence finalizes consistently; gate remains blocked by real-host rows above |
@@ -77,8 +77,8 @@ conflict rejection), ADR-0066 (CellHV provider selection), ADR-0067
 validation), ADR-0069 (Placement refresh usage reconciliation), ADR-0070
 (bounded config-drive network/vendor data), ADR-0071 (serialized console
 writers), ADR-0072 (managed-domain listing ownership validation), and ADR-0073
-(duplicate-name scheduler allocation rollback), and ADR-0074 (durable agent
-administrative state).
+(duplicate-name scheduler allocation rollback), ADR-0074 (durable agent
+administrative state), and ADR-0075 (hardened CLI lifecycle evidence).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules

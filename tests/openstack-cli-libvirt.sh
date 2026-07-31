@@ -18,12 +18,77 @@ CREATED_NETWORK_ID=
 CREATED_SUBNET_ID=
 CREATED_FLAVOR_ID=
 CREATED_SERVER_ID=
+SERVER_NAME=o3k-testlab-server
+
+validate_server_json() {
+    local kind="$1" path="$2" expected_id="$3"
+    python3 - "${kind}" "${path}" "${expected_id}" <<'PY'
+import json
+import sys
+
+kind, path, expected_id = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    value = json.load(stream)
+
+if kind == "show":
+    if not isinstance(value, dict) or str(value.get("id", "")) != expected_id:
+        raise SystemExit("server show did not identify the created server")
+elif kind == "list":
+    if not isinstance(value, list) or not any(
+        isinstance(row, dict) and str(row.get("id", "")) == expected_id
+        for row in value
+    ):
+        raise SystemExit("server list did not contain the created server")
+else:
+    raise SystemExit(f"unknown server JSON validation kind: {kind}")
+PY
+}
+
+validate_server_absent_list() {
+    local path="$1" expected_id="$2"
+    python3 - "${path}" "${expected_id}" <<'PY'
+import json
+import sys
+
+path, expected_id = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    value = json.load(stream)
+if not isinstance(value, list):
+    raise SystemExit("server list response is not an array")
+if any(isinstance(row, dict) and str(row.get("id", "")) == expected_id for row in value):
+    raise SystemExit("server list still contains the deleted server")
+PY
+}
+
+server_is_absent() {
+    local server_id="$1"
+    local show_error="${DATA_DIR}/server-delete-show.error"
+    local list_output="${DATA_DIR}/server-delete-list.json"
+    local list_error="${DATA_DIR}/server-delete-list.error"
+
+    if openstack server show "${server_id}" -f json \
+        >"${DATA_DIR}/server-delete-show.json" 2>"${show_error}"; then
+        return 1
+    fi
+    if grep -Eiq 'not[ -]?found|could not find|no server|404' "${show_error}"; then
+        return 0
+    fi
+    if ! openstack server list --name "${SERVER_NAME}" -f json \
+        >"${list_output}" 2>"${list_error}"; then
+        return 1
+    fi
+    validate_server_absent_list "${list_output}" "${server_id}"
+}
 
 cleanup_resources() {
     local cleanup_ok=1
     if [[ -n "${SERVER_ID}" ]]; then
         openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        SERVER_ID=
+        if ! server_is_absent "${SERVER_ID}"; then
+            cleanup_ok=0
+        else
+            SERVER_ID=
+        fi
     fi
     if [[ -n "${FLAVOR_ID}" ]]; then
         openstack flavor delete "${FLAVOR_ID}" >/dev/null 2>&1 || cleanup_ok=0
@@ -152,10 +217,12 @@ SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 19
 CREATED_SUBNET_ID="${SUBNET_ID}"
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" o3k-testlab-server -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
-openstack server list --name o3k-testlab-server -f json >"${ARTIFACT_DIR}/server-list.json"
+validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
+openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
+validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
@@ -170,6 +237,10 @@ openstack server stop --wait "${SERVER_ID}"
 openstack server start --wait "${SERVER_ID}"
 openstack server reboot --hard --wait "${SERVER_ID}"
 openstack server delete --wait "${SERVER_ID}"
+if ! server_is_absent "${SERVER_ID}"; then
+    echo "server deletion was not verified" >&2
+    exit 1
+fi
 SERVER_ID=
 openstack flavor delete "${FLAVOR_ID}"
 FLAVOR_ID=
