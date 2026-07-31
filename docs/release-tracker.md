@@ -27,6 +27,7 @@ the real-libvirt acceptance evidence exists.
 | #54 | program tracker | this change | tracked here |
 | #77 | protected real-host validation | repository implementation complete; ADR-0084 and portable guard tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
 | #76 | protected runner capability probe | repository implementation complete; ADR-0085, redacted capability artifact, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
+| #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
 
 ## Current release gate
 
@@ -94,4 +95,6 @@ ADR-0083 records custom-prefix uninstall systemd cleanup safety.
 ADR-0084 records the protected real-host workflow and its fail-closed,
 redacted guard contract for issue #77. Repository tests do not substitute for
 a trusted host run. ADR-0085 records the read-only runner capability probe and
-its honest skipped/failed boundaries for issue #76.
+its honest skipped/failed boundaries for issue #76. ADR-0086 records the
+fail-closed rejection of the unimplemented direct libvirt daemon path for
+issue #78.

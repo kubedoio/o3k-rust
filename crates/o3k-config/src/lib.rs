@@ -182,6 +182,10 @@ pub enum ConfigError {
     InvalidLogFormat,
     #[error("provider must be `fake`, `cellhv`, or `libvirt`")]
     InvalidProvider,
+    #[error(
+        "the `libvirt` provider is unavailable in o3kd: no agent-backed provider path exists; use `fake` for local tests or `cellhv` with its configured endpoint, and do not start the real-libvirt profile until compute-agent wiring is available"
+    )]
+    DirectLibvirtProviderUnavailable,
     #[error("CellHV provider requires endpoint and expected version")]
     MissingCellHvConfiguration,
     #[error("bootstrap secret must not contain a newline")]
@@ -482,6 +486,9 @@ impl PartialConfig {
         {
             return Err(ConfigError::MissingCellHvConfiguration);
         }
+        if provider == Provider::Libvirt {
+            return Err(ConfigError::DirectLibvirtProviderUnavailable);
+        }
         if self
             .bootstrap_secret
             .as_deref()
@@ -618,6 +625,23 @@ mod tests {
             result,
             Err(ConfigError::MissingCellHvConfiguration)
         ));
+    }
+
+    #[test]
+    fn libvirt_mode_rejects_unsafe_direct_provider_path() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned(), "--provider=libvirt".to_owned()],
+            Vec::new(),
+        );
+
+        assert!(matches!(
+            &result,
+            Err(ConfigError::DirectLibvirtProviderUnavailable)
+        ));
+        if let Err(error) = result {
+            assert!(error.to_string().contains("agent-backed provider path"));
+            assert!(error.to_string().contains("use `fake`"));
+        }
     }
 
     #[test]

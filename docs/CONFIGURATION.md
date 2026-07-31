@@ -40,8 +40,11 @@ problem without printing secret values.
 | Compute client CA | `compute_client_ca` | `O3K_COMPUTE_CLIENT_CA` | `--compute-client-ca` | unset |
 | Authorized compute agents | `compute_authorized_agents` | `O3K_COMPUTE_AUTHORIZED_AGENTS` | `--compute-authorized-agents` | unset |
 
-`log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`,
-or `libvirt`.
+`log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
+Although `libvirt` remains a reserved profile value for packaging and release
+tracking, `o3kd` rejects it before startup because no agent-backed provider
+path exists. The daemon must never construct or open a local libvirt adapter;
+use `o3k-compute` only through a future agent-backed wiring path.
 The CellHV profile now connects to the configured versioned endpoint; HTTPS
 endpoints additionally require the CA, client certificate, and client key.
 The default address must remain loopback unless an operator explicitly changes

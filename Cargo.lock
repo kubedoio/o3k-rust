@@ -1217,7 +1217,6 @@ dependencies = [
  "o3k-console",
  "o3k-identity",
  "o3k-image",
- "o3k-libvirt",
  "o3k-network",
  "o3k-provider",
  "o3k-store",
