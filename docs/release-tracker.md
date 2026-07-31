@@ -35,6 +35,7 @@ the real-libvirt acceptance evidence exists.
 | #83 | libvirt lifecycle and observed Nova state | repository observed-state projection boundary complete; ADR-0091 and regression coverage fail closed for paused, crashed, blocked, suspended, unknown, and inconsistent libvirt observations | blocked until agent-backed lifecycle dispatch, real Nova/guest lifecycle evidence, restart/failure recovery, and trusted real-host artifact exist; no host acceptance claimed |
 | #84 | libvirt serial console and Nova console-log | repository console ownership fence complete; ADR-0092 and regression coverage require matching O3K domain metadata before opening a libvirt stream | blocked until actual CirrOS output, bounded restart persistence, cross-project CLI isolation, deletion evidence, and trusted real-host console artifact exist; no host acceptance claimed |
 | #86 | complete real CirrOS OpenStack CLI acceptance | repository-owned cleanup now verifies absence for every created resource after public CLI deletion; ADR-0093 and stateful no-op regression coverage added | blocked until a protected runner uploads `real-libvirt-e2e.json` with `status: passed`, including real CirrOS ACTIVE/config-drive/console/restart and leak evidence; no host acceptance claimed |
+| #87 | real-host failure injection and unknown-outcome recovery | repository action-recovery boundary complete; ADR-0094, deterministic action timeout injection, fingerprinted duplicate replay, and observation-based lifecycle convergence tests added | host-gated: all required crash, timeout, duplicate, partial-completion, corruption, disk-full, cleanup, and aggregate `failure-recovery.json` scenarios still require the protected self-hosted runner; no host acceptance claimed |
 
 ## Current release gate
 
@@ -118,4 +119,6 @@ ADR-0092 records the ownership fence before libvirt console streams are opened
 for issue #84; it does not substitute for actual guest output or host evidence.
 ADR-0093 records public-CLI absence verification for every resource owned by
 the issue #86 harness; it does not substitute for a real CirrOS or protected
-host run.
+host run. ADR-0094 records observation-based recovery for unknown lifecycle
+actions; it does not substitute for issue #87's real-host failure-injection
+matrix or aggregate recovery artifact.

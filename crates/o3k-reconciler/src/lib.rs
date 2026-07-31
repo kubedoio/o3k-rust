@@ -385,6 +385,29 @@ where
             }
             ProviderOperationState::UnknownOutcome => {
                 self.event(operation.id, resource.id, JournalEventKind::UnknownObserved);
+                if action != LifecycleAction::Delete {
+                    let instance = self.provider.get_instance(&provider_id).await?;
+                    let converged = match action {
+                        LifecycleAction::Start | LifecycleAction::Reboot => {
+                            instance.state == o3k_provider::InstanceState::Running
+                        }
+                        LifecycleAction::Stop => {
+                            instance.state == o3k_provider::InstanceState::Stopped
+                        }
+                        LifecycleAction::Delete => false,
+                    };
+                    if converged {
+                        return self
+                            .finish_lifecycle(
+                                operation.id,
+                                resource,
+                                action,
+                                provider_operation_id.to_owned(),
+                                provider_id,
+                            )
+                            .await;
+                    }
+                }
                 Ok(OperationState::UnknownOutcome)
             }
             ProviderOperationState::Retryable => {
@@ -442,7 +465,21 @@ where
                         .await?;
                     Ok(OperationState::Running)
                 }
-                ProviderOperationState::UnknownOutcome => Ok(OperationState::UnknownOutcome),
+                ProviderOperationState::UnknownOutcome => {
+                    let provider_operation_id =
+                        provider_operation.provider_operation_id.to_string();
+                    self.store
+                        .update_operation(
+                            operation.id,
+                            OperationState::UnknownOutcome,
+                            Some(&provider_operation_id),
+                            Some("unknown_outcome"),
+                            None,
+                        )
+                        .await?;
+                    self.event(operation.id, resource.id, JournalEventKind::RetryScheduled);
+                    Ok(OperationState::UnknownOutcome)
+                }
                 ProviderOperationState::Retryable => {
                     self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
                         .await
@@ -986,6 +1023,43 @@ mod tests {
         assert_eq!(
             store.get_resource(resource.id).await?.observed_state,
             "DELETED"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_action_is_observed_before_finishing_converged_state()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("action-unknown", 2).await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        provider.set_failure(FailureInjection::Timeout)?;
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Stop)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
+
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "STOPPED"
         );
         Ok(())
     }
