@@ -6,13 +6,40 @@ PROFILE="${O3K_MEASURE_PROFILE:-fake}"
 SAMPLES="${O3K_MEASURE_SAMPLES:-5}"
 ARTIFACT_DIR="${O3K_MEASURE_ARTIFACT_DIR:-${ROOT_DIR}/target/measurements}"
 BINARY="${O3K_MEASURE_BINARY:-}"
+PORT_CHECKER="${O3K_MEASURE_PORT_CHECKER:-}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-measure.XXXXXX")"
 PORT="${O3K_MEASURE_PORT:-$((19080 + ($$ % 500)))}"
 BASE_URL="http://127.0.0.1:${PORT}"
 LISTEN_ADDR="127.0.0.1:${PORT}"
 mkdir -p "$ARTIFACT_DIR"
-rm -f "$ARTIFACT_DIR/raw.json" "$ARTIFACT_DIR/summary.json" "$ARTIFACT_DIR/o3kd.log"
+rm -f "$ARTIFACT_DIR/raw.json" "$ARTIFACT_DIR/summary.json" "$ARTIFACT_DIR/diagnostic.json" "$ARTIFACT_DIR/o3kd.log"
 O3KD_PID=
+write_diagnostic() {
+  local reason="$1"
+  local detail="${2:-}"
+  python3 - "$ARTIFACT_DIR/diagnostic.json" "$PROFILE" "$LISTEN_ADDR" "$PORT" "${O3KD_PID:-}" "$reason" "$detail" <<'PY'
+import json
+import sys
+import time
+
+path, profile, listen_addr, port, pid, reason, detail = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as output:
+    json.dump({
+        "artifact_type": "benchmark-diagnostic",
+        "status": "failed",
+        "profile": profile,
+        "listen_addr": listen_addr,
+        "port": int(port),
+        "pid": int(pid) if pid else None,
+        "reason": reason,
+        "detail": detail,
+        "log": "o3kd.log",
+        "redacted": True,
+        "finished_at": int(time.time()),
+    }, output, indent=2, sort_keys=True)
+    output.write("\n")
+PY
+}
 cleanup() {
   local exit_code="$?"
   local cleanup_status=passed
@@ -59,6 +86,30 @@ fi
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
 [[ "$SAMPLES" =~ ^[1-9][0-9]*$ ]] || { echo "O3K_MEASURE_SAMPLES must be positive" >&2; exit 2; }
 
+if [[ -n "$PORT_CHECKER" ]]; then
+  if ! PORT_CHECK_DETAIL="$("$PORT_CHECKER" "$LISTEN_ADDR" "$PORT" 2>&1)"; then
+    write_diagnostic "port_occupied" "$PORT_CHECK_DETAIL"
+    echo "measurement port is occupied or unavailable: $LISTEN_ADDR" >&2
+    exit 1
+  fi
+elif ! PORT_CHECK_DETAIL="$(python3 - "127.0.0.1" "$PORT" <<'PY'
+import socket
+import sys
+
+address, port = sys.argv[1], int(sys.argv[2])
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+    try:
+        probe.bind((address, port))
+    except OSError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(1)
+PY
+)"; then
+  write_diagnostic "port_occupied" "$PORT_CHECK_DETAIL"
+  echo "measurement port is occupied or unavailable: $LISTEN_ADDR" >&2
+  exit 1
+fi
+
 if [[ -z "$BINARY" ]]; then
   cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd >/dev/null
   BINARY="$ROOT_DIR/target/release/o3kd"
@@ -69,12 +120,40 @@ SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-measurement-signing-key-with-at-least-32-b
 START_NS="$(date +%s%N)"
 O3K_BOOTSTRAP_PASSWORD="$PASSWORD" O3K_TOKEN_SIGNING_KEY="$SIGNING_KEY" "$BINARY" --listen-addr "$LISTEN_ADDR" --data-dir "$DATA_DIR" --log-filter warn >"$ARTIFACT_DIR/o3kd.log" 2>&1 &
 O3KD_PID=$!
+pid_is_alive() {
+  kill -0 "$O3KD_PID" 2>/dev/null || return 1
+  local state
+  state="$(ps -o stat= -p "$O3KD_PID" 2>/dev/null | tr -d '[:space:]')"
+  [[ -n "$state" && "${state:0:1}" != Z ]]
+}
+ensure_o3kd_alive() {
+  local reason="$1"
+  if ! pid_is_alive; then
+    write_diagnostic "$reason" "o3kd exited before the measurement checkpoint"
+    echo "o3kd child exited: $reason (see $ARTIFACT_DIR/diagnostic.json)" >&2
+    exit 1
+  fi
+}
 READY_NS=
 for _ in $(seq 1 200); do
-  if curl -fsS "$BASE_URL/readyz" >/dev/null 2>&1; then READY_NS="$(date +%s%N)"; break; fi
+  ensure_o3kd_alive "child_exited_during_readiness"
+  if curl -fsS "$BASE_URL/readyz" >/dev/null 2>&1; then
+    ensure_o3kd_alive "child_exited_during_readiness"
+    READY_NS="$(date +%s%N)"
+    break
+  fi
   sleep 0.01
 done
-[[ -n "$READY_NS" ]] || { echo "o3kd did not become ready" >&2; exit 1; }
+if [[ -z "$READY_NS" ]]; then
+  if kill -0 "$O3KD_PID" 2>/dev/null; then
+    echo "o3kd did not become ready" >&2
+  else
+    write_diagnostic "child_exited_during_readiness" "o3kd exited before readiness was observed"
+    echo "o3kd child exited during readiness (see $ARTIFACT_DIR/diagnostic.json)" >&2
+  fi
+  exit 1
+fi
+ensure_o3kd_alive "child_exited_before_token_samples"
 AUTH_BODY="$(MEASURE_PASSWORD="$PASSWORD" python3 - <<'PY'
 import json
 import os
@@ -90,14 +169,30 @@ print(json.dumps({
 }))
 PY
 )"
-TOKEN_HEADERS="$(curl -fsSi -X POST "$BASE_URL/v3/auth/tokens" -H 'content-type: application/json' --data "$AUTH_BODY")"
+if ! TOKEN_HEADERS="$(curl -fsSi -X POST "$BASE_URL/v3/auth/tokens" -H 'content-type: application/json' --data "$AUTH_BODY")"; then
+  ensure_o3kd_alive "child_exited_during_authentication"
+  echo "token issue failed" >&2
+  exit 1
+fi
+ensure_o3kd_alive "child_exited_after_authentication"
 TOKEN="$(python3 -c 'import sys; print(next((line.split(":",1)[1].strip() for line in sys.stdin.read().splitlines() if line.lower().startswith("x-subject-token:")), ""))' <<<"$TOKEN_HEADERS")"
-[[ -n "$TOKEN" ]] || { echo "token issue failed" >&2; exit 1; }
+if [[ -z "$TOKEN" ]]; then
+  ensure_o3kd_alive "child_exited_before_token_samples"
+  echo "token issue failed" >&2
+  exit 1
+fi
 TOKEN_TIMES=
 for _ in $(seq 1 "$SAMPLES"); do
-  TOKEN_TIMES+="$(curl -fsS -o /dev/null -w '%{time_total}' -X POST "$BASE_URL/v3/auth/tokens" -H 'content-type: application/json' --data "$AUTH_BODY") "
+  ensure_o3kd_alive "child_exited_during_token_samples"
+  if ! TOKEN_TIME="$(curl -fsS -o /dev/null -w '%{time_total}' -X POST "$BASE_URL/v3/auth/tokens" -H 'content-type: application/json' --data "$AUTH_BODY")"; then
+    ensure_o3kd_alive "child_exited_during_token_samples"
+    echo "token sample failed" >&2
+    exit 1
+  fi
+  TOKEN_TIMES+="$TOKEN_TIME "
 done
 READY_MS="$(( (READY_NS - START_NS) / 1000000 ))"
+ensure_o3kd_alive "child_exited_before_rss"
 RSS_KIB="$(awk '/VmRSS:/ {print $2}' "/proc/$O3KD_PID/status" 2>/dev/null || echo null)"
 BINARY_BYTES="$(stat -c %s "$BINARY")"
 export ARTIFACT_DIR PROFILE SAMPLES READY_MS RSS_KIB BINARY_BYTES TOKEN_TIMES

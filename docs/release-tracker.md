@@ -22,7 +22,7 @@ the real-libvirt acceptance evidence exists.
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
 | #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, validated show/list identity, verified deletion, and redacted evidence with discarded raw CLI errors; stronger script evidence does not replace a trusted real CLI/libvirt run |
 | #51 | clean-host packaging | merged | release bundles now install their bundled `bin/o3kd`/`bin/o3k-compute` binaries without Cargo; libvirt profile selects libvirt and reset stops both control-plane and compute services; Ubuntu/Debian clean installs pending |
-| #52 | measurements | merged | fake control-plane measured with configured-password authentication and finalized cleanup evidence; guest metrics pending |
+| #52 | measurements | merged | fake control-plane measurement now preflights the selected port, verifies launched-PID ownership through readiness/token/RSS checkpoints, and emits redacted diagnostics for port/child failures; guest metrics pending |
 | #53 | release gate | merged | benchmark and cleanup evidence are required; positive, non-future, seven-day freshness checks now reject stale artifacts; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
 
@@ -82,7 +82,8 @@ administrative state), ADR-0075 (hardened CLI lifecycle evidence), and ADR-0076
 (Placement registration usage reconciliation), and ADR-0077 (fail-closed libvirt
 create inputs), ADR-0078 (release-bundle installer binaries), and ADR-0079
 (release-evidence freshness).
-ADR-0037 through ADR-0061 record the
+ADR-0080 (measurement process ownership) records the benchmark attribution
+boundary. ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.

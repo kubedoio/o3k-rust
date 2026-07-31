@@ -56,6 +56,8 @@ jobs:
         run: bash tests/testlab.sh
       - name: Test measurement authentication input
         run: bash tests/measure-auth.sh
+      - name: Test measurement process ownership
+        run: bash tests/measure-process-ownership.sh
       - name: Generate candidate SBOM
         run: bash packaging/make-sbom.sh target/testlab-artifacts/sbom.spdx.json
       - name: Upload TestLab artifacts
