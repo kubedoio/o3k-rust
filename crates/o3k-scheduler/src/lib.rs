@@ -3,7 +3,7 @@
 use o3k_placement::{
     Allocation, DISK_GB, MEMORY_MB, PlacementError, PlacementLedger, ProviderState, VCPU,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,14 +62,30 @@ impl Scheduler {
         if agent_id.trim().is_empty() {
             return Err(SchedulerError::InvalidFlavor);
         }
-        self.schedule_internal(server_id, flavor, Some(agent_id))
+        self.schedule_internal(
+            server_id,
+            flavor,
+            Some(&BTreeSet::from([agent_id.to_owned()])),
+        )
+    }
+
+    /// Schedules only on the currently eligible agent identities supplied by
+    /// the control-plane registry. Placement remains authoritative for
+    /// provider state, capacity, generation, and atomic allocation.
+    pub fn schedule_for_agents(
+        &self,
+        agent_ids: &BTreeSet<String>,
+        server_id: &str,
+        flavor: Flavor,
+    ) -> Result<ScheduleDecision, SchedulerError> {
+        self.schedule_internal(server_id, flavor, Some(agent_ids))
     }
 
     fn schedule_internal(
         &self,
         server_id: &str,
         flavor: Flavor,
-        selected_provider: Option<&str>,
+        selected_providers: Option<&BTreeSet<String>>,
     ) -> Result<ScheduleDecision, SchedulerError> {
         if server_id.is_empty() || flavor.vcpus == 0 || flavor.memory_mb == 0 {
             return Err(SchedulerError::InvalidFlavor);
@@ -79,7 +95,7 @@ impl Scheduler {
             .providers()?
             .into_iter()
             .filter(|provider| {
-                selected_provider.is_none_or(|selected| provider.id == selected)
+                selected_providers.is_none_or(|selected| selected.contains(&provider.id))
                     && provider.state == ProviderState::Enabled
                     && provider
                         .inventories
@@ -248,6 +264,45 @@ mod tests {
         assert!(matches!(
             scheduler.schedule_for_agent(
                 "missing-agent",
+                "server-2",
+                Flavor {
+                    vcpus: 1,
+                    memory_mb: 512,
+                    disk_gb: 1,
+                }
+            ),
+            Err(SchedulerError::NoValidHost)
+        ));
+        std::fs::remove_dir_all(root)
+            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[test]
+    fn eligible_agent_set_is_fail_closed_and_deterministic() -> Result<(), SchedulerError> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-scheduler-eligible-{}", std::process::id()));
+        let placement = PlacementLedger::open(&root)?;
+        placement.register_provider("agent-a", inv(4))?;
+        placement.register_provider("agent-b", inv(4))?;
+        let scheduler = Scheduler::new(placement.clone());
+
+        let eligible = BTreeSet::from(["agent-b".to_owned()]);
+        let decision = scheduler.schedule_for_agents(
+            &eligible,
+            "server-1",
+            Flavor {
+                vcpus: 1,
+                memory_mb: 512,
+                disk_gb: 1,
+            },
+        )?;
+        assert_eq!(decision.provider_id, "agent-b");
+        scheduler.release_terminal(&decision)?;
+
+        assert!(matches!(
+            scheduler.schedule_for_agents(
+                &BTreeSet::new(),
                 "server-2",
                 Flavor {
                     vcpus: 1,

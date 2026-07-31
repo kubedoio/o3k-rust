@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use o3k_compute_agent::NodeRegistry;
+use o3k_compute_agent::{Availability, NodeRegistry};
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
@@ -12,6 +12,7 @@ use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{DurableStore, SqliteStore, StoreError};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -58,6 +59,7 @@ pub struct ComputeService {
     provider: Arc<ProviderBackend>,
     journal: OperationJournal<SqliteStore, ProviderBackend>,
     scheduler: Option<Scheduler>,
+    agent_registry: Option<NodeRegistry>,
 }
 
 #[derive(Clone)]
@@ -116,12 +118,22 @@ impl ComputeService {
             provider,
             journal,
             scheduler: None,
+            agent_registry: None,
         }
     }
 
     #[must_use]
     pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
         self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Restricts scheduler candidates to agents that are currently registered,
+    /// alive, and administratively enabled. The registry is intentionally
+    /// optional so direct fake-provider operation keeps its existing behavior.
+    #[must_use]
+    pub fn with_agent_registry(mut self, registry: NodeRegistry) -> Self {
+        self.agent_registry = Some(registry);
         self
     }
 
@@ -238,20 +250,36 @@ impl ComputeService {
             placement_allocation_id: None,
             idempotency_key: idempotency_key.clone(),
         };
-        let placement = self
-            .scheduler
-            .as_ref()
-            .map(|scheduler| {
-                scheduler.schedule(
+        let scheduler_flavor = SchedulerFlavor {
+            vcpus: flavor.vcpus as u64,
+            memory_mb: flavor.ram_mib,
+            disk_gb: flavor.disk_gib,
+        };
+        let placement = match (self.scheduler.as_ref(), self.agent_registry.as_ref()) {
+            (Some(scheduler), Some(registry)) => {
+                let eligible = registry
+                    .all()
+                    .await
+                    .into_iter()
+                    .filter(|node| {
+                        node.availability == Availability::Available
+                            && node.desired_state
+                                == o3k_provider_contract::compute_proto::AdministrativeState::Enabled
+                                    as i32
+                    })
+                    .map(|node| node.agent_id)
+                    .collect::<BTreeSet<_>>();
+                Some(scheduler.schedule_for_agents(
+                    &eligible,
                     &server_id.to_string(),
-                    SchedulerFlavor {
-                        vcpus: flavor.vcpus as u64,
-                        memory_mb: flavor.ram_mib,
-                        disk_gb: flavor.disk_gib,
-                    },
-                )
-            })
-            .transpose()?;
+                    scheduler_flavor,
+                )?)
+            }
+            (Some(scheduler), None) => {
+                Some(scheduler.schedule(&server_id.to_string(), scheduler_flavor)?)
+            }
+            (None, _) => None,
+        };
         let request = CreateInstanceRequest {
             placement_provider_id: placement
                 .as_ref()
@@ -497,6 +525,7 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_provider_contract::compute_proto as proto;
     use std::path::PathBuf;
 
     async fn service(label: &str) -> Result<ComputeService, ComputeError> {
@@ -714,6 +743,108 @@ mod tests {
                 .len(),
             0
         );
+        let _ = std::fs::remove_dir_all(placement_root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn registry_gate_excludes_unavailable_draining_and_disabled_agents()
+    -> Result<(), ComputeError> {
+        let placement_root =
+            PathBuf::from(format!("/tmp/o3k-placement-registry-{}", Uuid::now_v7()));
+        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let inventory = || {
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 8,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 8192,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ])
+        };
+        for agent in ["unavailable", "draining", "disabled", "enabled"] {
+            placement
+                .register_provider(agent, inventory())
+                .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        }
+
+        let registry = NodeRegistry::default();
+        for agent in ["unavailable", "draining", "disabled"] {
+            registry
+                .register(&proto::RegisterRequest {
+                    agent_id: agent.to_owned(),
+                    agent_epoch: "epoch".to_owned(),
+                    software_version: "test".to_owned(),
+                    host_label: agent.to_owned(),
+                    supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                    capabilities: Some(proto::Capabilities::default()),
+                })
+                .await
+                .map_err(|_| ComputeError::Conflict)?;
+        }
+        registry.mark_unavailable(std::time::Duration::ZERO).await;
+        registry
+            .register(&proto::RegisterRequest {
+                agent_id: "enabled".to_owned(),
+                agent_epoch: "epoch".to_owned(),
+                software_version: "test".to_owned(),
+                host_label: "enabled".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(proto::Capabilities::default()),
+            })
+            .await
+            .map_err(|_| ComputeError::Conflict)?;
+        registry
+            .set_desired_state("draining", proto::AdministrativeState::Draining)
+            .await
+            .map_err(|_| ComputeError::Conflict)?;
+        registry
+            .set_desired_state("disabled", proto::AdministrativeState::Disabled)
+            .await
+            .map_err(|_| ComputeError::Conflict)?;
+
+        let service = service("registry-gate")
+            .await?
+            .with_scheduler(Scheduler::new(placement.clone()))
+            .with_agent_registry(registry);
+        let server = service
+            .create_server(
+                "project-a",
+                "registry-gated".to_owned(),
+                "image-1".to_owned(),
+                service.flavors()[0].id,
+                vec!["network-1".to_owned()],
+                "registry-gated-request".to_owned(),
+            )
+            .await?;
+        let resource = service.store.get_resource(server.id).await?;
+        let request: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        assert_eq!(request.placement_provider_id.as_deref(), Some("enabled"));
+
         let _ = std::fs::remove_dir_all(placement_root);
         Ok(())
     }
