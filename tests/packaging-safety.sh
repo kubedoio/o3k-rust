@@ -25,7 +25,16 @@ bash "$ROOT_DIR/packaging/install.sh" \
   --profile fake --noninteractive --binary "$BINARY" \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
-bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/data" --log-dir "$WORK_DIR/log"
+mkdir -p "$WORK_DIR/fake-bin"
+cat >"$WORK_DIR/fake-bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
+EOF
+chmod +x "$WORK_DIR/fake-bin/systemctl"
+PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
+  bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/data" --log-dir "$WORK_DIR/log"
+grep -Fqx 'stop o3k-compute.service' "$WORK_DIR/systemctl.log"
+grep -Fqx 'stop o3kd.service' "$WORK_DIR/systemctl.log"
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/log/.o3k-owned" ]]
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
