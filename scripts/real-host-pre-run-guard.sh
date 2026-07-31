@@ -8,6 +8,7 @@ RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
 EXPECTED_REPOSITORY="kubedoio/o3k-rust"
 KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
 INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
+CAPABILITY_PATH="${O3K_REAL_HOST_CAPABILITY_OUTPUT:-${ARTIFACT_DIR}/runner-capabilities.json}"
 mkdir -p "${ARTIFACT_DIR}"
 
 blocked_reason=
@@ -30,6 +31,40 @@ with open(path, "w", encoding="utf-8") as output:
     output.write("\n")
 PY
     echo "real-host workflow guard blocked: ${blocked_reason}" >&2
+    exit 1
+fi
+
+capability_status=unavailable
+if [[ -r "${CAPABILITY_PATH}" ]]; then
+    capability_status="$(python3 - "${CAPABILITY_PATH}" <<'PY'
+import json, sys
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    print("unavailable")
+else:
+    print(value.get("status", "unavailable") if value.get("redacted") is True else "unavailable")
+PY
+)"
+fi
+if [[ "${capability_status}" != passed ]]; then
+    capability_result_status=blocked
+    capability_reason=capability_probe_unavailable
+    if [[ "${capability_status}" == failed ]]; then
+        capability_reason=capability_probe_failed
+    elif [[ "${capability_status}" == skipped ]]; then
+        capability_reason=capability_probe_skipped
+    fi
+    python3 - "${RESULT_PATH}" "${capability_result_status}" "${capability_reason}" <<'PY'
+import json, sys, time
+path, status, reason = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as output:
+    json.dump({"artifact_type": "real-host-workflow-result", "status": status,
+               "reason": reason, "redacted": True, "finished_at": int(time.time())},
+              output, indent=2)
+    output.write("\n")
+PY
+    echo "real-host capability probe did not pass; lifecycle blocked" >&2
     exit 1
 fi
 
