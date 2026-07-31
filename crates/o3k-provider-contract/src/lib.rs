@@ -2,6 +2,10 @@ pub mod proto {
     tonic::include_proto!("o3k.provider.v1");
 }
 
+pub mod compute_proto {
+    tonic::include_proto!("o3k.compute.v1");
+}
+
 pub mod mapping {
     use crate::proto;
     use o3k_provider::CreateInstanceRequest;

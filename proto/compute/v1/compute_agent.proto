@@ -120,6 +120,7 @@ message HeartbeatAck {
   AdministrativeState desired_state = 2;
   uint64 acknowledged_heartbeat_sequence = 3;
   uint64 highest_observation_sequence = 4;
+  uint64 transition_sequence = 5;
 }
 
 message Capabilities {
