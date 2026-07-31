@@ -43,6 +43,17 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
 
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    --e2e "${ARTIFACT_DIR}/e2e.json" \
+    --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
+    --install-debian "${ARTIFACT_DIR}/debian.json" \
+    --recovery "${ARTIFACT_DIR}/recovery.json" \
+    --output "${ARTIFACT_DIR}/missing-benchmark.json"; then
+    echo "release gate accepted missing benchmark evidence" >&2
+    exit 1
+fi
+grep -q 'benchmark: artifact path was not supplied' "${ARTIFACT_DIR}/missing-benchmark.json"
+
 python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as output:
