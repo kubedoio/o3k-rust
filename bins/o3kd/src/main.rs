@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
     )?;
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
+    let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
     let compute_service = match config.provider {
         o3k_config::Provider::Libvirt => {
             let adapter = o3k_libvirt::LibvirtAdapter::new(o3k_libvirt::LibvirtConfig::default())?;
@@ -90,11 +91,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_identity(identity)
             .with_image(image_service)
             .with_network(network_service)
+            .with_console(console_service.clone())
             .with_compute(compute_service)
     } else {
         o3k_api::AppState::new()
             .with_image(image_service)
             .with_network(network_service)
+            .with_console(console_service)
             .with_compute(compute_service)
     };
     state.set_ready(true);

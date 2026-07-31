@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
+use o3k_console::{ConsoleError, ConsoleService};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
@@ -40,6 +41,7 @@ pub struct AppState {
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
     compute: Option<Arc<ComputeService>>,
+    console: Option<Arc<ConsoleService>>,
 }
 
 impl AppState {
@@ -73,6 +75,12 @@ impl AppState {
     #[must_use]
     pub fn with_compute(mut self, service: ComputeService) -> Self {
         self.compute = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
+    pub fn with_console(mut self, service: ConsoleService) -> Self {
+        self.console = Some(Arc::new(service));
         self
     }
 
@@ -1343,6 +1351,33 @@ async fn server_action(
         .and_then(|object| object.keys().next())
         .map(String::as_str)
     {
+        Some("os-getConsoleOutput") => {
+            let Some(console) = state.console.as_ref() else {
+                return keystone_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service Unavailable",
+                    "console output is not configured",
+                );
+            };
+            if let Err(error) = service.show_server(&token.project_id, id).await {
+                return compute_error(error);
+            }
+            return match console.read(id) {
+                Ok(output) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"output": String::from_utf8_lossy(&output)})),
+                )
+                    .into_response(),
+                Err(ConsoleError::NotFound) => {
+                    (StatusCode::OK, Json(serde_json::json!({"output": ""}))).into_response()
+                }
+                Err(_) => keystone_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    "console output is unavailable",
+                ),
+            };
+        }
         Some("os-start") => InstanceAction::Start,
         Some("os-stop") => InstanceAction::Stop,
         Some("reboot") | Some("os-reboot") => InstanceAction::Reboot,

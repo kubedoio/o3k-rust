@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 axum.workspace = true
+o3k-console = { path = "../o3k-console" }
 o3k-identity = { path = "../o3k-identity" }
 o3k-compute = { path = "../o3k-compute" }
 o3k-image = { path = "../o3k-image" }
