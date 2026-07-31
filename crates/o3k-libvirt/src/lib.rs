@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(feature = "libvirt")]
-use virt::{connect::Connect, domain::Domain};
+use virt::{connect::Connect, domain::Domain, stream::Stream};
 
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
 pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
@@ -306,6 +306,8 @@ impl LibvirtCapabilities {
             max_vcpus: 0,
             max_memory_mib: self.total_memory_kib.unwrap_or_default() / 1024,
             lifecycle_actions: self.supported_operations.clone(),
+            console_log: true,
+            max_console_log_bytes: 64 * 1024,
             ..Default::default()
         }
     }
@@ -353,6 +355,21 @@ impl LibvirtAdapter {
     pub async fn capabilities(&self) -> Result<LibvirtCapabilities, LibvirtError> {
         let uri = self.config.uri.clone();
         run_blocking(move || backend_capabilities(&uri)).await
+    }
+
+    pub async fn read_console(
+        &self,
+        name: String,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, LibvirtError> {
+        if max_bytes == 0 || max_bytes > 64 * 1024 {
+            return Err(LibvirtError::new(
+                ErrorCategory::InvalidRequest,
+                "console read bound is invalid",
+            ));
+        }
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_read_console(&uri, &name, max_bytes)).await
     }
 
     pub async fn define(&self, definition: DomainDefinition) -> Result<(), LibvirtError> {
@@ -440,6 +457,10 @@ fn backend_action(_: &str, _: &str, _: DomainAction) -> Result<(), LibvirtError>
 }
 #[cfg(not(feature = "libvirt"))]
 fn backend_list(_: &str, _: &str) -> Result<Vec<String>, LibvirtError> {
+    unavailable()
+}
+#[cfg(not(feature = "libvirt"))]
+fn backend_read_console(_: &str, _: &str, _: usize) -> Result<Vec<u8>, LibvirtError> {
     unavailable()
 }
 #[cfg(not(feature = "libvirt"))]
@@ -577,6 +598,43 @@ fn backend_list(uri: &str, prefix: &str) -> Result<Vec<String>, LibvirtError> {
         .filter_map(|domain| domain.get_name().ok())
         .filter(|name| name.starts_with(prefix))
         .collect())
+}
+
+#[cfg(feature = "libvirt")]
+fn backend_read_console(uri: &str, name: &str, max_bytes: usize) -> Result<Vec<u8>, LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let stream = Stream::new(&connection, virt::sys::VIR_STREAM_NONBLOCK).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "console stream creation failed",
+        )
+    })?;
+    domain.open_console(None, &stream, 0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain console is unavailable",
+        )
+    })?;
+    let mut output = Vec::with_capacity(max_bytes);
+    let mut buffer = vec![0_u8; max_bytes.min(4096)];
+    for _ in 0..16 {
+        match stream.recv(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                output.extend_from_slice(&buffer[..count]);
+                if output.len() == max_bytes {
+                    break;
+                }
+            }
+            // A nonblocking stream reports no currently available bytes as an
+            // error. The bounded snapshot is still a valid observation.
+            Err(_) => break,
+        }
+    }
+    let _ = stream.abort();
+    Ok(output)
 }
 
 #[cfg(feature = "libvirt")]
