@@ -1,0 +1,12 @@
+clouds:
+  o3k-testlab:
+    auth:
+      auth_url: http://127.0.0.1:8080/v3
+      username: admin
+      password: CHANGE_ME
+      project_name: bootstrap-project
+      user_domain_name: Default
+      project_domain_name: Default
+    region_name: RegionOne
+    interface: public
+    identity_api_version: 3

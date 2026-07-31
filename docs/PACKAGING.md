@@ -8,6 +8,7 @@ The supported TestLab layout is:
 /var/lib/o3k            # SQLite and owned resource state
 /var/log/o3k             # daemon logs
 /etc/systemd/system/o3kd.service
+/etc/systemd/system/o3k-compute.service   # libvirt profile only
 ```
 
 Install from a checkout or release bundle with `packaging/install.sh
@@ -15,9 +16,11 @@ Install from a checkout or release bundle with `packaging/install.sh
 systemd hardening. For an unprivileged test installation, pass explicit
 `--prefix`, `--data-dir`, `--config-dir`, and `--log-dir` paths.
 
-`packaging/make-release.sh` builds a versioned fake-provider bundle with a
-manifest and SHA-256 checksum. Release artifacts are not claims of CellHV
-support; the CellHV profile remains separately environment-gated.
+`packaging/make-release.sh [version] [profile]` builds a versioned fake or
+libvirt bundle with a manifest and SHA-256 checksum. The libvirt profile also
+ships `o3k-compute`, preflight/diagnostics, certificate bootstrap, and the
+release gate. Release artifacts are not claims of CellHV support; the CellHV
+profile remains separately environment-gated.
 
 Reset is explicit and preserves credentials:
 
