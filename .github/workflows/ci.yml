@@ -24,6 +24,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Format
         run: cargo fmt --all -- --check
+      - name: Validate packaging scripts
+        run: for file in packaging/*.sh tests/*.sh; do bash -n "$file"; done
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
