@@ -1,6 +1,6 @@
 # SPEC-0015 — `o3k-compute` agent and control-plane protocol
 
-Status: Draft for issue #37
+Status: Accepted contract draft for issue #37; runtime implementation pending
 Version: `o3k.compute.v1` / wire revision 1
 
 ## 1. Scope and boundary

@@ -62,7 +62,8 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn create_dto_round_trips_and_maps_to_internal_request() {
+    fn create_dto_round_trips_and_maps_to_internal_request()
+    -> Result<(), Box<dyn std::error::Error>> {
         let request = proto::CreateInstanceRequest {
             operation_id: Uuid::nil().to_string(),
             o3k_server_id: Uuid::from_u128(7).to_string(),
@@ -75,22 +76,19 @@ mod tests {
             idempotency_key: "key".to_owned(),
         };
         let encoded = request.encode_to_vec();
-        let decoded = match proto::CreateInstanceRequest::decode(encoded.as_slice()) {
-            Ok(value) => value,
-            Err(_) => return,
-        };
-        let internal = match mapping::create_request(decoded) {
-            Ok(value) => value,
-            Err(_) => return,
-        };
+        let decoded = proto::CreateInstanceRequest::decode(encoded.as_slice())?;
+        let internal = mapping::create_request(decoded)
+            .map_err(|error| format!("valid create request must map: {error:?}"))?;
         assert_eq!(internal.vcpus, 2);
         assert_eq!(internal.image_id.as_deref(), Some("image"));
         assert_eq!(internal.project_id, "project");
         assert_eq!(internal.network_ids, vec!["network"]);
+        Ok(())
     }
 
     #[test]
-    fn unknown_enum_value_is_preserved_by_protobuf_wire_round_trip() {
+    fn unknown_enum_value_is_preserved_by_protobuf_wire_round_trip()
+    -> Result<(), Box<dyn std::error::Error>> {
         let operation = proto::Operation {
             provider_operation_id: String::new(),
             o3k_operation_id: String::new(),
@@ -99,11 +97,9 @@ mod tests {
             redacted_message: String::new(),
             provider_resource_id: String::new(),
         };
-        let decoded = match proto::Operation::decode(operation.encode_to_vec().as_slice()) {
-            Ok(value) => value,
-            Err(_) => return,
-        };
+        let decoded = proto::Operation::decode(operation.encode_to_vec().as_slice())?;
         assert_eq!(decoded.state, 99);
+        Ok(())
     }
 
     #[test]

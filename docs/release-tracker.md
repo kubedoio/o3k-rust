@@ -7,7 +7,7 @@ the real-libvirt acceptance evidence exists.
 | Issue | Scope | Repository state | Real-host evidence |
 |---:|---|---|---|
 | #36 | libvirt/KVM direction | merged | pending |
-| #37 | compute-agent protocol | merged | protocol tests passed |
+| #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
 | #38 | secure registration/heartbeat | merged | host deployment pending |
 | #39 | local libvirt adapter | merged | provider-backed daemon readiness added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | host discovery pending |
