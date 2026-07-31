@@ -1034,6 +1034,7 @@ dependencies = [
  "async-trait",
  "axum",
  "o3k-compute-agent",
+ "o3k-console",
  "o3k-libvirt",
  "o3k-provider-contract",
  "serde_json",

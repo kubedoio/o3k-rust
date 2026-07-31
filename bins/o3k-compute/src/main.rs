@@ -3,7 +3,8 @@ use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_compute_agent::{
-    AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor, TlsFiles,
+    AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor,
+    ConsoleLogResult, TlsFiles,
 };
 use o3k_libvirt::{LibvirtAdapter, LibvirtConfig, stable_domain_name};
 use o3k_provider_contract::compute_proto as proto;
@@ -93,9 +94,36 @@ impl CommandExecutor for LibvirtCommandExecutor {
             Some(proto::command::Action::Create(_)) => Err(AgentError::Protocol(
                 "create command requires a resolved domain definition".to_owned(),
             )),
-            Some(proto::command::Action::ConsoleLog(_)) => Err(AgentError::Protocol(
-                "console log is not supported by the local executor".to_owned(),
-            )),
+            Some(proto::command::Action::ConsoleLog(request)) => {
+                if request.offset > 0 {
+                    return Err(AgentError::Protocol(
+                        "libvirt console snapshots only support offset zero".to_owned(),
+                    ));
+                }
+                let max_bytes = usize::try_from(request.max_bytes)
+                    .map_err(|_| AgentError::Protocol("console bound is invalid".to_owned()))?
+                    .min(o3k_console::MAX_CONSOLE_BYTES);
+                if max_bytes == 0 {
+                    return Err(AgentError::Protocol("console bound is invalid".to_owned()));
+                }
+                let bytes = self
+                    .adapter
+                    .read_console(name.clone(), max_bytes)
+                    .await
+                    .map_err(agent_error)?;
+                Ok(CommandExecutionResult {
+                    state: proto::OperationState::Succeeded as i32,
+                    error_category: proto::ErrorCategory::Unspecified as i32,
+                    redacted_message: "libvirt console output read".to_owned(),
+                    provider_resource_id: name,
+                    console_log: Some(ConsoleLogResult {
+                        truncated: bytes.len() == max_bytes,
+                        complete: bytes.len() < max_bytes,
+                        offset: 0,
+                        bytes,
+                    }),
+                })
+            }
             None => Err(AgentError::Protocol("command action is missing".to_owned())),
         }
     }
