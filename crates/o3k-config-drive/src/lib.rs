@@ -139,33 +139,43 @@ fn generate_at(
     let directory = root.join(&input.instance_id);
     let temporary = root.join(format!(".{}-tmp-{}", input.instance_id, Uuid::now_v7()));
     fs::create_dir_all(&temporary).map_err(ConfigDriveError::Storage)?;
-    write(
-        &temporary.join("openstack/latest/meta_data.json"),
-        &meta_data,
-    )?;
-    write(
-        &temporary.join("openstack/latest/network_data.json"),
-        &network_data,
-    )?;
-    write(
-        &temporary.join("openstack/latest/user_data"),
-        &input.user_data,
-    )?;
-    if let Some(vendor) = &input.vendor_data {
-        write(&temporary.join("openstack/latest/vendor_data.json"), vendor)?;
+    let preparation = (|| {
+        write(
+            &temporary.join("openstack/latest/meta_data.json"),
+            &meta_data,
+        )?;
+        write(
+            &temporary.join("openstack/latest/network_data.json"),
+            &network_data,
+        )?;
+        write(
+            &temporary.join("openstack/latest/user_data"),
+            &input.user_data,
+        )?;
+        if let Some(vendor) = &input.vendor_data {
+            write(&temporary.join("openstack/latest/vendor_data.json"), vendor)?;
+        }
+        let manifest = OwnershipManifest {
+            schema_version: 1,
+            managed_by: MANAGED_BY.to_owned(),
+            instance_id: input.instance_id.clone(),
+            fingerprint_sha256: fingerprint_sha256.clone(),
+        };
+        let manifest =
+            serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?;
+        write(&temporary.join(MANIFEST_NAME), &manifest)
+    })();
+    if let Err(error) = preparation {
+        let _ = fs::remove_dir_all(&temporary);
+        return Err(error);
     }
-    let manifest = OwnershipManifest {
-        schema_version: 1,
-        managed_by: MANAGED_BY.to_owned(),
-        instance_id: input.instance_id.clone(),
-        fingerprint_sha256: fingerprint_sha256.clone(),
-    };
-    let manifest = serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?;
-    write(&temporary.join(MANIFEST_NAME), &manifest)?;
     let backup = root.join(format!(".{}-old-{}", input.instance_id, Uuid::now_v7()));
     let had_previous = directory.exists() || directory.is_symlink();
     if had_previous {
-        validate_owned_directory(&directory, &input.instance_id)?;
+        if let Err(error) = validate_owned_directory(&directory, &input.instance_id) {
+            let _ = fs::remove_dir_all(&temporary);
+            return Err(error);
+        }
         fs::rename(&directory, &backup).map_err(|error| {
             let _ = fs::remove_dir_all(&temporary);
             ConfigDriveError::Storage(error)
@@ -355,6 +365,35 @@ mod tests {
             Err(ConfigDriveError::UnownedPath)
         ));
         assert!(unowned.join("keep").exists());
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_generation_removes_unpublished_temporary_directory() -> Result<(), ConfigDriveError> {
+        let root = std::env::temp_dir().join(format!("o3k-drive-temp-{}", Uuid::now_v7()));
+        let unowned = root.join("instance-1");
+        fs::create_dir_all(&unowned).map_err(ConfigDriveError::Storage)?;
+        fs::write(unowned.join("keep"), b"do not remove").map_err(ConfigDriveError::Storage)?;
+
+        let store = ConfigDriveStore::open(&root)?;
+        assert!(matches!(
+            store.generate(&input()),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        let temporary_count = fs::read_dir(&root)
+            .map_err(ConfigDriveError::Storage)?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(".instance-1-tmp-"))
+            })
+            .count();
+        assert_eq!(temporary_count, 0);
+        assert!(unowned.join("keep").exists());
+
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }

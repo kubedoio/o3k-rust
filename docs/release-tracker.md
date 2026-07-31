@@ -29,6 +29,7 @@ the real-libvirt acceptance evidence exists.
 | #76 | protected runner capability probe | repository implementation complete; ADR-0085, redacted capability artifact, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
 | #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
 | #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087, regular-file checks and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
+| #80 | config-drive attachment | repository failed-generation cleanup complete; ADR-0088 and regression coverage remove unpublished temporary directories while preserving unowned destinations | blocked until ISO/VFAT media, libvirt/agent attachment, guest cloud-init evidence, and trusted real-host evidence exist |
 
 ## Current release gate
 
@@ -99,4 +100,5 @@ a trusted host run. ADR-0085 records the read-only runner capability probe and
 its honest skipped/failed boundaries for issue #76. ADR-0086 records the
 fail-closed rejection of the unimplemented direct libvirt daemon path for
 issue #78. ADR-0087 records the regular-file and symlink safety boundary for
-the image cache and overlays in issue #79.
+the image cache and overlays in issue #79. ADR-0088 records cleanup of failed
+config-drive publication temporaries for issue #80.
