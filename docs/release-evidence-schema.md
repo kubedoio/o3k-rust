@@ -53,7 +53,9 @@ non-skipped lifecycle error and records the cleanup result; this is diagnostic
 evidence only and remains ineligible for the release gate.
 
 For `openstack-cli-e2e` artifacts, every created resource must be
-`verified_absent` when `cleanup.status` is `passed`. A failed cleanup retains
+`verified_absent` when `cleanup.status` is `passed`. The CLI workflow includes
+the created keypair and records its verified absence alongside image, network,
+subnet, flavor, and server cleanup. A failed cleanup retains
 the owned resource's `not_verified` or `pending` disposition instead of
 implying that an unsuccessful delete command established absence.
 

@@ -180,6 +180,7 @@ for name, (path, artifact_type) in required.items():
         cleanup_resources = cleanup.get("resources") if isinstance(cleanup, dict) else None
         expected_cleanup_resources = {
             "image_id": "image",
+            "keypair_id": "keypair",
             "network_id": "network",
             "subnet_id": "subnet",
             "flavor_id": "flavor",
@@ -187,7 +188,7 @@ for name, (path, artifact_type) in required.items():
         }
         created_resources = value.get("resources")
         if not isinstance(created_resources, dict) or set(created_resources) != set(expected_cleanup_resources):
-            errors.append(f"{name}: resources must identify image/network/subnet/flavor/server")
+            errors.append(f"{name}: resources must identify image/keypair/network/subnet/flavor/server")
         elif not isinstance(cleanup_resources, dict) or set(cleanup_resources) != set(expected_cleanup_resources.values()):
             errors.append(f"{name}: cleanup.resources must identify every created resource")
         elif any(cleanup_resources[resource] != "verified_absent" for resource in expected_cleanup_resources.values()):
