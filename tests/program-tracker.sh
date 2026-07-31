@@ -8,7 +8,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" \
   --input "${ROOT_DIR}/docs/release-tracker.md"
 
-python3 - "${ROOT_DIR}/docs/release-tracker.md" "${WORK_DIR}/ready.md" "${WORK_DIR}/claimed.md" <<'PY'
+python3 - "${ROOT_DIR}/docs/release-tracker.md" "${WORK_DIR}/ready.md" "${WORK_DIR}/claimed.md" "${WORK_DIR}/release-ready.md" <<'PY'
 import pathlib
 import sys
 
@@ -21,6 +21,10 @@ pathlib.Path(sys.argv[3]).write_text(
     source.replace("no program closure is claimed", "program closure is claimed"),
     encoding="utf-8",
 )
+pathlib.Path(sys.argv[4]).write_text(
+    source.replace("blocked: real host evidence", "release-ready: true"),
+    encoding="utf-8",
+)
 PY
 
 if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/ready.md"; then
@@ -29,6 +33,10 @@ if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}
 fi
 if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/claimed.md"; then
   echo "accepted program closure claim" >&2
+  exit 1
+fi
+if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/release-ready.md"; then
+  echo "accepted release-ready claim" >&2
   exit 1
 fi
 

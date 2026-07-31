@@ -78,9 +78,17 @@ for line in text.splitlines():
         errors.append(f"issue #{issue} appears more than once")
     rows[issue] = cells
 
-for issue in (94,):
+for issue in (93, 94):
     if issue not in rows:
         errors.append(f"required closure row #{issue} is missing")
+
+row_93 = rows.get(93)
+if row_93:
+    value = " | ".join(row_93).lower()
+    if "blocked" not in value or "no release-ready" not in value:
+        errors.append("issue #93 row must remain explicitly blocked and non-claiming")
+    if any(word in value for word in ("release-ready: true", "published: true", "signed: true")):
+        errors.append("issue #93 row contains a forbidden positive release claim")
 
 row_94 = rows.get(94)
 if row_94:
