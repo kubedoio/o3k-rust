@@ -9,7 +9,7 @@ BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging"
 for file in \
   install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
-  bootstrap-certs.sh release-gate.sh o3k-compute.service; do
+  bootstrap-certs.sh release-gate.sh validate-human-review.sh o3k-compute.service; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
 

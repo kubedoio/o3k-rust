@@ -28,6 +28,18 @@ artifacts = {
     "debian.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "debian", "install": {"status": "passed"}},
     "recovery.json": {**common, "artifact_type": "failure-recovery", "status": "passed", "failures": ["agent-restart"]},
     "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}},
+    "human-review.json": {
+        "artifact_type": "human-architecture-security-review",
+        "schema_version": 1,
+        "status": "approved",
+        "reviewer": {"name": "Example Reviewer", "organization": "Example Security", "role": "Independent reviewer", "is_implementing_agent": False},
+        "reviewed_commit": "0123456789abcdef0123456789abcdef01234567",
+        "review_record_url": "https://example.invalid/review/93",
+        "scope": ["release gate"],
+        "findings": [{"id": "SEC-001", "severity": "low", "disposition": "fixed"}],
+        "approvals": {"release_blocking_findings": True, "destructive_cleanup": True},
+        "unresolved_risks": ["Real-host evidence is still required."],
+    },
 }
 raw = artifacts["benchmark-raw.json"]
 (root / "benchmark-raw.json").write_text(json.dumps(raw), encoding="utf-8")
@@ -37,6 +49,8 @@ for name, value in artifacts.items():
     (root / name).write_text(json.dumps(value), encoding="utf-8")
 PY
 
+SOURCE_COMMIT=0123456789abcdef0123456789abcdef01234567
+HUMAN_REVIEW="${ARTIFACT_DIR}/human-review.json"
 OUTPUT="${ARTIFACT_DIR}/valid-release.json"
 bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --e2e "${ARTIFACT_DIR}/e2e.json" \
@@ -45,6 +59,8 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --recovery "${ARTIFACT_DIR}/recovery.json" \
     --benchmark "${ARTIFACT_DIR}/benchmark.json" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+    --human-review "${HUMAN_REVIEW}" \
+    --source-commit "${SOURCE_COMMIT}" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
 
@@ -53,7 +69,23 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
     --install-debian "${ARTIFACT_DIR}/debian.json" \
     --recovery "${ARTIFACT_DIR}/recovery.json" \
+    --benchmark "${ARTIFACT_DIR}/benchmark.json" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+    --source-commit "${SOURCE_COMMIT}" \
+    --output "${ARTIFACT_DIR}/missing-human-review.json"; then
+    echo "release gate accepted missing human review evidence" >&2
+    exit 1
+fi
+grep -q 'human_review: artifact path was not supplied' "${ARTIFACT_DIR}/missing-human-review.json"
+
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    --e2e "${ARTIFACT_DIR}/e2e.json" \
+    --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
+    --install-debian "${ARTIFACT_DIR}/debian.json" \
+    --recovery "${ARTIFACT_DIR}/recovery.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+    --human-review "${HUMAN_REVIEW}" \
+    --source-commit "${SOURCE_COMMIT}" \
     --output "${ARTIFACT_DIR}/missing-benchmark.json"; then
     echo "release gate accepted missing benchmark evidence" >&2
     exit 1
@@ -67,7 +99,30 @@ GATE_ARGS=(
     --recovery "${ARTIFACT_DIR}/recovery.json"
     --benchmark "${ARTIFACT_DIR}/benchmark.json"
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json"
+    --human-review "${HUMAN_REVIEW}"
+    --source-commit "${SOURCE_COMMIT}"
 )
+
+python3 - "${HUMAN_REVIEW}" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["reviewed_commit"] = "fedcba9876543210fedcba9876543210fedcba98"
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/mismatched-review.json"; then
+    echo "release gate accepted human review for a different commit" >&2
+    exit 1
+fi
+grep -q 'human_review: reviewed_commit must match source_commit' "${ARTIFACT_DIR}/mismatched-review.json"
+python3 - "${HUMAN_REVIEW}" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["reviewed_commit"] = "0123456789abcdef0123456789abcdef01234567"
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
 
 set_e2e_finished_at() {
     python3 - "${ARTIFACT_DIR}/e2e.json" "$1" <<'PY'

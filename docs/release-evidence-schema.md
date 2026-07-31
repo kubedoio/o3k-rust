@@ -25,6 +25,13 @@ The required artifact types are:
 | `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`, all evaluated targets true, and `raw_sha256` binding the summary to `--benchmark-raw` |
 | `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
 
+The gate also requires `--human-review` and `--source-commit`. The human
+review path must pass
+`packaging/validate-human-review.sh --require-approved`, and its
+`reviewed_commit` must equal the supplied 40-character lowercase
+`--source-commit`. This is a governance artifact, not host evidence: the gate
+does not establish reviewer identity, judgment, signatures, or publication.
+
 The benchmark summary and raw artifact are separate required inputs. Their
 `artifact_type`, `status`, `profile`, `samples`, `finished_at`, `control_plane`,
 and `guest_and_libvirt` values must be identical. Both artifacts' `finished_at`
