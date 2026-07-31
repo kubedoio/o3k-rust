@@ -41,7 +41,7 @@ until the independent evidence and decisions listed below exist.
 | #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087/0104, regular-file checks, post-create qcow2/backing verification, cleanup, and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
 | #80 | config-drive attachment | repository failed-generation cleanup and manifest-integrity validation complete; ADR-0088, ADR-0105, and regression coverage remove unpublished temporary directories and reject altered, symlinked, or unexpected published content | blocked until ISO/VFAT media, libvirt/agent attachment, guest cloud-init evidence, and trusted real-host evidence exist |
 | #81 | Neutron/TAP/bridge/DHCP lifecycle | repository link-kind and bounded rollback safety complete; ADR-0089/ADR-0106, deterministic failure-injection coverage, and reverse-order cleanup of O3K-created bridge/TAP resources added | blocked until agent-backed create, real TAP/bridge/libvirt/DHCP orchestration, guest fixed-IP evidence, cleanup/restart evidence, and trusted real-host artifact exist; no host acceptance claimed |
-| #82 | Placement scheduling and allocations | repository publication rollback boundary complete; ADR-0090 and regression coverage restore in-memory state after failed ledger publication | blocked until agent-backed provider inventory/create/delete wiring, real guest allocation evidence, restart recovery, and trusted real-host scheduling artifact exist; no host acceptance claimed |
+| #82 | Placement scheduling and allocations | repository publication rollback, post-delete release-retry, and pre-journal create-conflict boundaries complete; ADR-0090/0107/0108 and regression coverage restore in-memory state after failed ledger publication, retry release after provider deletion, and avoid allocation on known durable conflicts | blocked until agent-backed provider inventory/create/delete wiring, real guest allocation evidence, restart recovery, and trusted real-host scheduling artifact exist; no host acceptance claimed |
 | #83 | libvirt lifecycle and observed Nova state | repository observed-state projection boundary complete; ADR-0091 and regression coverage fail closed for paused, crashed, blocked, suspended, unknown, and inconsistent libvirt observations | blocked until agent-backed lifecycle dispatch, real Nova/guest lifecycle evidence, restart/failure recovery, and trusted real-host artifact exist; no host acceptance claimed |
 | #84 | libvirt serial console and Nova console-log | repository console ownership fence complete; ADR-0092 and regression coverage require matching O3K domain metadata before opening a libvirt stream | blocked until actual CirrOS output, bounded restart persistence, cross-project CLI isolation, deletion evidence, and trusted real-host console artifact exist; no host acceptance claimed |
 | #86 | complete real CirrOS OpenStack CLI acceptance | repository-owned cleanup now verifies absence for every created resource after public CLI deletion; ADR-0093 and stateful no-op regression coverage added | blocked until a protected runner uploads `real-libvirt-e2e.json` with `status: passed`, including real CirrOS ACTIVE/config-drive/console/restart and leak evidence; no host acceptance claimed |
@@ -136,6 +136,13 @@ publication fails for issue #82; it does not substitute for real Placement,
 agent, or host scheduling evidence. ADR-0091 records the fail-closed
 projection of libvirt lifecycle observations for issue #83; it does not
 substitute for real libvirt, guest, Nova, or host evidence.
+ADR-0107 records retry of a recorded Placement release after provider deletion
+when the first publication fails; it does not substitute for agent-backed
+Placement wiring, restart recovery, or trusted real-host scheduling evidence.
+ADR-0108 records checking durable create conflicts before Placement allocation
+and retaining rollback on other pre-journal paths; it does not substitute for
+agent-backed Placement wiring, restart recovery, or trusted real-host
+scheduling evidence.
 ADR-0092 records the ownership fence before libvirt console streams are opened
 for issue #84; it does not substitute for actual guest output or host evidence.
 ADR-0093 records public-CLI absence verification for every resource owned by
