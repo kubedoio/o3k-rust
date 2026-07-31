@@ -25,6 +25,7 @@ the real-libvirt acceptance evidence exists.
 | #52 | measurements / release-evidence integrity | merged | fake control-plane measurement now preflights the selected port, verifies launched-PID ownership through readiness/token/RSS checkpoints, emits redacted diagnostics for port/child failures, and binds summary to canonical raw JSON; fake artifacts are explicitly non-release evidence; guest metrics pending |
 | #53 | release gate | merged | benchmark and cleanup evidence are required; positive, non-future, seven-day freshness checks now reject stale artifacts; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
+| #77 | protected real-host validation | repository implementation complete; ADR-0084 and portable guard tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
 
 ## Current release gate
 
@@ -89,3 +90,6 @@ measurement decisions. Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
 ADR-0082 records complete, foreign-path-safe uninstall helper cleanup.
 ADR-0083 records custom-prefix uninstall systemd cleanup safety.
+ADR-0084 records the protected real-host workflow and its fail-closed,
+redacted guard contract for issue #77. Repository tests do not substitute for
+a trusted host run.
