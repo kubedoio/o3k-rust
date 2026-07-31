@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 o3k-provider-contract = { path = "../o3k-provider-contract" }
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 virt = { version = "0.4.3", optional = true }
