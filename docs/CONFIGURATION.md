@@ -35,7 +35,8 @@ problem without printing secret values.
 | Compute client CA | `compute_client_ca` | `O3K_COMPUTE_CLIENT_CA` | `--compute-client-ca` | unset |
 | Authorized compute agents | `compute_authorized_agents` | `O3K_COMPUTE_AUTHORIZED_AGENTS` | `--compute-authorized-agents` | unset |
 
-`log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
+`log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`,
+or `libvirt`.
 The default address must remain loopback unless an operator explicitly changes
 it. Secrets have redacted `Debug` and `Display` representations and must not be
 included in logs, errors, or command output.

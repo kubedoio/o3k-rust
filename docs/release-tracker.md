@@ -8,7 +8,7 @@ the real-libvirt acceptance evidence exists.
 |---:|---|---|---|
 | #36 | libvirt/KVM direction | merged | pending |
 | #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
-| #38 | secure registration/heartbeat | merged | host deployment pending |
+| #38 | secure registration/heartbeat | merged | control-plane startup failures now clear readiness; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | host discovery pending |
 | #41 | image cache/overlays | merged | atomic/idempotent publication and verified project-scoped artifact resolution with digest revalidation added; host qemu-img evidence pending |

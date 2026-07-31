@@ -81,35 +81,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or_default();
 
-    let control_task = match (
-        config.compute_server_certificate.clone(),
-        config.compute_server_private_key.clone(),
-        config.compute_client_ca.clone(),
-    ) {
-        (Some(server_certificate), Some(server_private_key), Some(client_ca_certificate)) => {
-            let server = o3k_compute_agent::ControlPlaneServer {
-                registry: registry.clone(),
-                address: config.compute_control_addr,
-                tls: o3k_compute_agent::ControlPlaneTls {
-                    server_certificate,
-                    server_private_key,
-                    client_ca_certificate,
-                },
-                authorized_agents,
-            };
-            info!(address = %config.compute_control_addr, "compute-agent control plane enabled");
-            Some(tokio::spawn(async move {
-                server.serve(control_shutdown_signal()).await
-            }))
-        }
-        _ => {
-            info!(
-                "compute-agent control plane disabled; configure all compute TLS paths to enable it"
-            );
-            None
-        }
-    };
-
     let state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
@@ -127,6 +98,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_compute(compute_service)
     };
     state.set_ready(compute_ready);
+    let control_task = match (
+        config.compute_server_certificate.clone(),
+        config.compute_server_private_key.clone(),
+        config.compute_client_ca.clone(),
+    ) {
+        (Some(server_certificate), Some(server_private_key), Some(client_ca_certificate)) => {
+            let server = o3k_compute_agent::ControlPlaneServer {
+                registry: registry.clone(),
+                address: config.compute_control_addr,
+                tls: o3k_compute_agent::ControlPlaneTls {
+                    server_certificate,
+                    server_private_key,
+                    client_ca_certificate,
+                },
+                authorized_agents,
+            };
+            let readiness = state.clone();
+            info!(address = %config.compute_control_addr, "compute-agent control plane enabled");
+            Some(tokio::spawn(async move {
+                let result = server.serve(control_shutdown_signal()).await;
+                if let Err(error) = &result {
+                    readiness.set_ready(false);
+                    tracing::error!(%error, "compute-agent control plane stopped before shutdown");
+                }
+                result
+            }))
+        }
+        _ => {
+            info!(
+                "compute-agent control plane disabled; configure all compute TLS paths to enable it"
+            );
+            None
+        }
+    };
     let shutdown_state = state.clone();
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
