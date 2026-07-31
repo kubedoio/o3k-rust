@@ -877,6 +877,15 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
     Ok(())
 }
 
+fn matches_stream_identity(
+    message_agent_id: &str,
+    message_agent_epoch: &str,
+    stream_agent_id: &str,
+    stream_agent_epoch: &str,
+) -> bool {
+    message_agent_id == stream_agent_id && message_agent_epoch == stream_agent_epoch
+}
+
 fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
     if request.agent_id.trim().is_empty()
         || request.agent_id.len() > MAX_AGENT_ID
@@ -1119,6 +1128,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
             while let Ok(Some(message)) = inbound.get_mut().message().await {
                 match message.body {
                     Some(proto::control_request::Body::Heartbeat(heartbeat)) => {
+                        if !matches_stream_identity(
+                            &heartbeat.agent_id,
+                            &heartbeat.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         match registry.heartbeat(&heartbeat).await {
                             Ok(ack) => {
                                 if tx
@@ -1138,6 +1160,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         }
                     }
                     Some(proto::control_request::Body::AgentStateAck(ack)) => {
+                        if !matches_stream_identity(
+                            &ack.agent_id,
+                            &ack.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         if let Err(error) = registry.acknowledge_state(&ack).await {
                             let _ = tx.send(Err(error)).await;
                             break;
@@ -1147,6 +1182,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         registry.publish_event(AgentEvent::Operation(operation));
                     }
                     Some(proto::control_request::Body::Observation(observation)) => {
+                        if !matches_stream_identity(
+                            &observation.agent_id,
+                            &observation.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         registry.publish_event(AgentEvent::Observation(observation));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
@@ -1862,6 +1910,19 @@ mod tests {
         assert!(matches!(
             validate_register(&request),
             Err(ref error) if error.code() == tonic::Code::InvalidArgument
+        ));
+    }
+
+    #[test]
+    fn identity_bearing_stream_messages_are_fenced_to_registration() {
+        assert!(matches_stream_identity(
+            "node-a", "epoch-a", "node-a", "epoch-a"
+        ));
+        assert!(!matches_stream_identity(
+            "node-b", "epoch-a", "node-a", "epoch-a"
+        ));
+        assert!(!matches_stream_identity(
+            "node-a", "epoch-b", "node-a", "epoch-a"
         ));
     }
 
