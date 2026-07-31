@@ -25,11 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = o3k_compute_agent::NodeRegistry::default();
     let compute_service = match config.provider {
         o3k_config::Provider::Libvirt => {
-            let adapter = o3k_libvirt::LibvirtAdapter::new(o3k_libvirt::LibvirtConfig::default())?;
-            o3k_compute::ComputeService::new(
-                store,
-                Arc::new(o3k_libvirt::LibvirtProvider::new(adapter)),
-            )
+            return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
         }
         o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
             store,
