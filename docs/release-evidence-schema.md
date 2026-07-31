@@ -23,4 +23,6 @@ The required artifact types are:
 Paths must be distinct. Preflight, skipped, fake-profile, stale, or reused
 artifacts are rejected. Test scripts remove their prior result files before
 starting so an interrupted run cannot leave a previous pass available to the
-gate.
+gate. The CLI harness also writes a redacted `failed` artifact after a
+non-skipped lifecycle error and records the cleanup result; this is diagnostic
+evidence only and remains ineligible for the release gate.
