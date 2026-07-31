@@ -21,11 +21,14 @@ access remains an explicit `skipped` result; a non-skipped lifecycle failure
 preserves the failed artifact and its cleanup status.
 
 The runner does not provision daemons or claim fake-provider results as real
-libvirt evidence. Operators must first install and configure the libvirt
-profile, then point the OpenStack client at that control plane.
+libvirt evidence. It validates the delegated artifact before publishing it.
+Operators must first install and configure the libvirt profile, then point the
+OpenStack client at that control plane.
 
 ## Consequences
 
-The real-libvirt entry point now produces release-gate-compatible lifecycle
-evidence on a configured host, while remaining safe and diagnostic on an
-unconfigured host. A clean-host run is still required for release acceptance.
+The real-libvirt entry point now produces validated lifecycle evidence on a
+configured host, while remaining safe and diagnostic on an unconfigured host.
+The wrapper does not implement isolated daemon/restart/failure scenarios or
+guest boot verification; those remain dependent follow-up work for the full
+release gate.

@@ -60,6 +60,38 @@ if [[ ! -f "${ARTIFACT_DIR}/openstack-cli-result.json" ]]; then
     write_result failed "lifecycle harness did not produce an evidence artifact"
     exit 1
 fi
+if ! python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
+import json, sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    result = json.load(stream)
+if not isinstance(result, dict):
+    raise SystemExit("lifecycle artifact root is not an object")
+if result.get("artifact_type") != "openstack-cli-e2e":
+    raise SystemExit("lifecycle artifact type is invalid")
+if result.get("profile") != "libvirt" or result.get("redacted") is not True:
+    raise SystemExit("lifecycle artifact profile or redaction marker is invalid")
+if not isinstance(result.get("finished_at"), int):
+    raise SystemExit("lifecycle artifact timestamp is invalid")
+cleanup = result.get("cleanup")
+if not isinstance(cleanup, dict) or cleanup.get("status") not in {"passed", "failed", "not_run"}:
+    raise SystemExit("lifecycle artifact cleanup status is invalid")
+status = result.get("status")
+if status not in {"passed", "failed", "skipped"}:
+    raise SystemExit("lifecycle artifact status is invalid")
+if status == "passed":
+    lifecycle = result.get("lifecycle")
+    expected = {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
+    if not isinstance(lifecycle, dict) or set(lifecycle) != expected or not all(lifecycle.values()):
+        raise SystemExit("passed lifecycle artifact does not prove every public operation")
+if status == "failed" and cleanup.get("status") != "passed":
+    raise SystemExit("failed lifecycle artifact does not prove cleanup")
+PY
+then
+    write_result failed "lifecycle harness produced an invalid evidence artifact"
+    exit 1
+fi
 cp "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/libvirt-result.json"
 if [[ ${status} -ne 0 ]]; then
     echo "real-libvirt lifecycle harness failed; see ${ARTIFACT_DIR}/libvirt-result.json" >&2
