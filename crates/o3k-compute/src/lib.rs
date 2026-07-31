@@ -268,6 +268,17 @@ impl ComputeService {
             Err(StoreError::ResourceNotFound) => {}
             Err(error) => return Err(ComputeError::Store(error)),
         }
+        // A name conflict is deterministic control-plane state. Reject it
+        // before reserving Placement capacity; the second check below still
+        // protects against a concurrent create racing this read.
+        if self
+            .list_servers(project_id)
+            .await?
+            .iter()
+            .any(|server| server.name == name && server.status != "DELETED")
+        {
+            return Err(ComputeError::Conflict);
+        }
         let scheduler_flavor = SchedulerFlavor {
             vcpus: flavor.vcpus as u64,
             memory_mb: flavor.ram_mib,
@@ -856,6 +867,10 @@ mod tests {
                 "initial-request".to_owned(),
             )
             .await?;
+        let generation_after_initial_create = placement
+            .provider("node-a")
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+            .generation;
 
         for attempt in 0..3 {
             assert!(matches!(
@@ -878,6 +893,13 @@ mod tests {
                     .allocations
                     .len(),
                 1
+            );
+            assert_eq!(
+                placement
+                    .provider("node-a")
+                    .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+                    .generation,
+                generation_after_initial_create
             );
         }
 
