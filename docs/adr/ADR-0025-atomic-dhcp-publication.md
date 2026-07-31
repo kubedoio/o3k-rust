@@ -18,8 +18,9 @@ write and rename failure, and publishes only through a successful rename. The
 durable state and rendered dnsmasq configuration retain their existing
 validation and ownership root.
 
-This slice does not add dnsmasq process supervision, restart/reload handling,
-TAP/libvirt integration, or privileged-host DHCP evidence.
+Process supervision and restart/reload handling are covered separately by
+ADR-0030. This slice does not add TAP/libvirt integration or privileged-host
+DHCP evidence.
 
 ## Consequences
 
