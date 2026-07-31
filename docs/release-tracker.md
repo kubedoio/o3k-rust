@@ -10,7 +10,7 @@ the real-libvirt acceptance evidence exists.
 | #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
 | #38 | secure registration/heartbeat | merged | control-plane startup failures clear readiness and identity-bearing stream messages are fenced to the authenticated registration; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
-| #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
+| #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs, rejects unsafe source inputs, and validates ownership metadata before managed-domain listing; host discovery pending |
 | #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication, bounded network/vendor payloads, and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication, allocation-preserving provider synchronization, and refresh usage reconciliation added; daemon capability publication and disk-capacity policy pending |
@@ -75,8 +75,8 @@ ADR-0064 (required benchmark release gate), and ADR-0065 (DHCP gateway-binding
 conflict rejection), ADR-0066 (CellHV provider selection), ADR-0067
 (authenticated stream identity binding), ADR-0068 (existing bridge/uplink
 validation), ADR-0069 (Placement refresh usage reconciliation), ADR-0070
-(bounded config-drive network/vendor data), and ADR-0071 (serialized console
-writers).
+(bounded config-drive network/vendor data), ADR-0071 (serialized console
+writers), and ADR-0072 (managed-domain listing ownership validation).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
