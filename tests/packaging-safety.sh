@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-packaging.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 BINARY="${O3K_PACKAGING_BINARY:-${ROOT_DIR}/target/debug/o3kd}"
+if [[ ! -x "$BINARY" ]]; then
+  cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd >/dev/null
+fi
 [[ -x "$BINARY" ]] || { echo "packaging test binary is missing: $BINARY" >&2; exit 2; }
 
 mkdir -p "$WORK_DIR/preexisting"
