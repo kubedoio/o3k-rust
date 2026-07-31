@@ -113,15 +113,22 @@ impl ImageCache {
         }
         let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
         let path = self.root.join("base").join(format!("{checksum}.{format}"));
-        if path.exists() {
-            let cached = fs::read(&path).map_err(ImageError::Storage)?;
-            if cached.len() as u64 <= self.max_bytes
-                && cached.len() == content.len()
-                && format!("{:x}", Sha256::digest(&cached)) == checksum
-            {
-                return Ok(path);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(ImageError::InvalidPath);
+                }
+                let cached = fs::read(&path).map_err(ImageError::Storage)?;
+                if cached.len() as u64 <= self.max_bytes
+                    && cached.len() == content.len()
+                    && format!("{:x}", Sha256::digest(&cached)) == checksum
+                {
+                    return Ok(path);
+                }
+                fs::remove_file(&path).map_err(ImageError::Storage)?;
             }
-            fs::remove_file(&path).map_err(ImageError::Storage)?;
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ImageError::Storage(error)),
         }
         let temporary = self
             .root
@@ -138,6 +145,11 @@ impl ImageCache {
     }
 
     pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
+        let base_is_regular = match fs::symlink_metadata(base) {
+            Ok(metadata) => metadata.file_type().is_file(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(ImageError::Storage(error)),
+        };
         if instance_id.is_empty()
             || instance_id
                 != Path::new(instance_id)
@@ -145,7 +157,7 @@ impl ImageCache {
                     .and_then(|v| v.to_str())
                     .unwrap_or_default()
             || !base.starts_with(self.root.join("base"))
-            || !base.is_file()
+            || !base_is_regular
         {
             return Err(ImageError::InvalidPath);
         }
@@ -154,8 +166,15 @@ impl ImageCache {
             .root
             .join("overlays")
             .join(format!("{instance_id}.qcow2"));
-        if overlay.exists() {
-            return Ok(overlay);
+        match fs::symlink_metadata(&overlay) {
+            Ok(metadata) => {
+                if !metadata.file_type().is_file() {
+                    return Err(ImageError::InvalidPath);
+                }
+                return Ok(overlay);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ImageError::Storage(error)),
         }
         let temporary = self
             .root
@@ -174,9 +193,19 @@ impl ImageCache {
             let _ = fs::remove_file(&temporary);
             return Err(ImageError::OverlayFailed);
         }
-        if overlay.exists() {
-            let _ = fs::remove_file(&temporary);
-            return Ok(overlay);
+        match fs::symlink_metadata(&overlay) {
+            Ok(metadata) => {
+                let _ = fs::remove_file(&temporary);
+                if metadata.file_type().is_file() {
+                    return Ok(overlay);
+                }
+                return Err(ImageError::InvalidPath);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                return Err(ImageError::Storage(error));
+            }
         }
         if let Err(error) = fs::rename(&temporary, &overlay) {
             let _ = fs::remove_file(&temporary);
@@ -562,6 +591,56 @@ mod tests {
         let _ = cache.create_overlay("test-instance", &base);
         assert!(!temporary.exists());
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_rejects_symlinked_base_and_overlay_escape() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let path = root("cache-symlink-safety");
+        let cache = ImageCache::open(&path, 1024)?;
+        let content = b"verified-image";
+        let checksum = format!("{:x}", Sha256::digest(content));
+        let outside = path.with_file_name(format!("o3k-image-outside-{}", std::process::id()));
+        fs::write(&outside, content)?;
+
+        let cached_base = path.join("base").join(format!("{checksum}.qcow2"));
+        symlink(&outside, &cached_base)?;
+        assert!(matches!(
+            cache.cache_base(&checksum, "qcow2", content),
+            Err(ImageError::InvalidPath)
+        ));
+        assert_eq!(fs::read(&outside)?, content);
+
+        fs::remove_file(&cached_base)?;
+        let base = cache.cache_base(&checksum, "qcow2", content)?;
+        let symlinked_base = path.join("base").join("symlinked-base.qcow2");
+        symlink(&outside, &symlinked_base)?;
+        assert!(matches!(
+            cache.create_overlay("symlinked-base", &symlinked_base),
+            Err(ImageError::InvalidPath)
+        ));
+        fs::remove_file(&symlinked_base)?;
+
+        let escaped_overlay = path.join("overlays").join("instance.qcow2");
+        symlink(&outside, &escaped_overlay)?;
+        assert!(matches!(
+            cache.create_overlay("instance", &base),
+            Err(ImageError::InvalidPath)
+        ));
+        assert_eq!(fs::read(&outside)?, content);
+
+        fs::remove_file(&escaped_overlay)?;
+        fs::create_dir(&escaped_overlay)?;
+        assert!(matches!(
+            cache.create_overlay("instance", &base),
+            Err(ImageError::InvalidPath)
+        ));
+
+        fs::remove_dir_all(path)?;
+        fs::remove_file(outside)?;
         Ok(())
     }
 }
