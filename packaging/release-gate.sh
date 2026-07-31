@@ -166,6 +166,8 @@ for name, (path, artifact_type) in required.items():
     if name == "benchmark":
         if status != "measured":
             errors.append(f"{name}: status must be measured, got {status!r}")
+        if value.get("release_eligible") is not True:
+            errors.append(f"{name}: release_eligible must be true")
         guest = value.get("guest_and_libvirt")
         if not isinstance(guest, dict) or guest.get("status") != "measured":
             errors.append(f"{name}: guest_and_libvirt.status must be measured")
@@ -279,6 +281,8 @@ if isinstance(benchmark_raw, dict):
         errors.append("benchmark_raw: profile must be 'libvirt'")
     if benchmark_raw.get("redacted") is not True:
         errors.append("benchmark_raw: redacted must be true")
+    if benchmark_raw.get("release_eligible") is not True:
+        errors.append("benchmark_raw: release_eligible must be true")
     raw_finished_at = benchmark_raw.get("finished_at")
     if isinstance(raw_finished_at, bool) or not isinstance(raw_finished_at, int):
         errors.append("benchmark_raw: finished_at must be an integer epoch timestamp")
@@ -326,7 +330,13 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
         expected_sha256 = hashlib.sha256(canonical_raw).hexdigest()
         if raw_sha256 != expected_sha256:
             errors.append("benchmark: raw_sha256 does not match benchmark_raw")
-    for field in ("samples", "finished_at", "control_plane", "guest_and_libvirt"):
+    for field in (
+        "samples",
+        "finished_at",
+        "control_plane",
+        "guest_and_libvirt",
+        "release_eligible",
+    ):
         if benchmark_summary.get(field) != benchmark_raw.get(field):
             errors.append(f"benchmark: {field} must match benchmark_raw.{field}")
 

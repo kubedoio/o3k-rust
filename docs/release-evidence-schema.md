@@ -24,8 +24,8 @@ The required artifact types are:
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | `scenarios` object contains every required scenario key, each with `status: passed` |
-| `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`, all evaluated targets true, and `raw_sha256` binding the summary to `--benchmark-raw` |
-| `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
+| `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`; `release_eligible: true`; all evaluated targets true; and `raw_sha256` binding the summary to `--benchmark-raw` |
+| `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; `release_eligible: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
 
 The gate also requires `--human-review` and `--source-commit`. The human
 review path must pass
@@ -36,7 +36,7 @@ does not establish reviewer identity, judgment, signatures, or publication.
 
 The benchmark summary and raw artifact are separate required inputs. Their
 `artifact_type`, `status`, `profile`, `samples`, `finished_at`, `control_plane`,
-and `guest_and_libvirt` values must be identical. Both artifacts' `finished_at`
+`guest_and_libvirt`, and `release_eligible` values must be identical. Both artifacts' `finished_at`
 values are checked against the same gate timestamp and age policy. The summary's `raw_sha256` must
 be 64 lowercase hexadecimal characters and equal the SHA-256 digest of the
 raw artifact's canonical UTF-8 JSON: object keys sorted recursively, no
