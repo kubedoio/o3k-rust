@@ -23,6 +23,10 @@ before scheduling. Known conflicts therefore do not acquire a new Placement
 allocation; duplicate-name and pre-journal store-error paths release any
 allocation acquired by the current request.
 
+The duplicate-name pre-check now runs before scheduling as well as after it.
+The latter remains a race fence; the former avoids a reservation/release cycle
+for a conflict already visible in durable control-plane state.
+
 ## Evidence
 
 - `o3k-placement` regression coverage forces the final publication rename to
@@ -33,6 +37,8 @@ allocation acquired by the current request.
   allocation.
 - `o3k-compute` regression coverage verifies a conflicting durable create does
   not acquire an allocation before returning `Conflict`.
+- `o3k-compute` regression coverage verifies repeated duplicate-name conflicts
+  leave the provider generation and allocation set unchanged.
 - The normal workspace tests continue to cover idempotency, stale-generation
   fencing, rollback, restart persistence, and reported-usage reconciliation.
 - No real OpenStack Placement service, agent-backed Nova lifecycle, or
