@@ -308,6 +308,10 @@ impl ComputeService {
             .iter()
             .any(|server| server.name == name && server.status != "DELETED")
         {
+            if let (Some(scheduler), Some(decision)) = (self.scheduler.as_ref(), placement.as_ref())
+            {
+                scheduler.release_terminal(decision)?;
+            }
             return Err(ComputeError::Conflict);
         }
         let request = CreateInstanceRequest {
@@ -758,6 +762,92 @@ mod tests {
                 .len(),
             0
         );
+        let _ = std::fs::remove_dir_all(placement_root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_server_names_release_each_new_placement_allocation()
+    -> Result<(), ComputeError> {
+        let placement_root = PathBuf::from(format!(
+            "/tmp/o3k-placement-duplicate-name-{}",
+            Uuid::now_v7()
+        ));
+        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 2,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 1024,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 20,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let service = service("duplicate-name")
+            .await?
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let flavor = service.flavors()[0].id;
+        service
+            .create_server(
+                "project-a",
+                "duplicate-name".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "initial-request".to_owned(),
+            )
+            .await?;
+
+        for attempt in 0..3 {
+            assert!(matches!(
+                service
+                    .create_server(
+                        "project-a",
+                        "duplicate-name".to_owned(),
+                        "image-1".to_owned(),
+                        flavor,
+                        vec!["network-1".to_owned()],
+                        format!("conflicting-request-{attempt}"),
+                    )
+                    .await,
+                Err(ComputeError::Conflict)
+            ));
+            assert_eq!(
+                placement
+                    .provider("node-a")
+                    .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+                    .allocations
+                    .len(),
+                1
+            );
+        }
+
         let _ = std::fs::remove_dir_all(placement_root);
         Ok(())
     }
