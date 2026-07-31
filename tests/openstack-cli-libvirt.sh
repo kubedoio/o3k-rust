@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_TESTLAB_ARTIFACT_DIR:-${ROOT_DIR}/target/testlab-artifacts}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-cli.XXXXXX")"
 mkdir -p "${ARTIFACT_DIR}"
+rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
+    "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/console.log"
 trap 'rm -rf "${DATA_DIR}"' EXIT
 
 write_result() {
@@ -12,8 +14,23 @@ write_result() {
     python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${status}" "${reason}" <<'PY'
 import json, sys, time
 path, status, reason = sys.argv[1:]
+result = {
+    "artifact_type": "openstack-cli-e2e",
+    "status": status,
+    "reason": reason,
+    "profile": "libvirt",
+    "public_api_only": True,
+    "redacted": True,
+    "cleanup": {"status": "passed" if status == "passed" else "not_run"},
+    "finished_at": int(time.time()),
+}
+if status == "passed":
+    result["lifecycle"] = {
+        "create": True, "show": True, "list": True, "stop": True,
+        "start": True, "reboot": True, "console": True, "delete": True,
+    }
 with open(path, "w", encoding="utf-8") as output:
-    json.dump({"status": status, "reason": reason, "profile": "libvirt", "public_api_only": True, "finished_at": int(time.time())}, output, indent=2)
+    json.dump(result, output, indent=2)
     output.write("\n")
 PY
 }

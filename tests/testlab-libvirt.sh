@@ -6,6 +6,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_TESTLAB_ARTIFACT_DIR:-${ROOT_DIR}/target/testlab-artifacts}"
 mkdir -p "${ARTIFACT_DIR}"
+rm -f "${ARTIFACT_DIR}/libvirt-result.json"
 
 write_result() {
     local status="$1" reason="$2"
@@ -13,7 +14,11 @@ write_result() {
 import json, sys, time
 path, status, reason = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as output:
-    json.dump({"status": status, "reason": reason, "profile": "libvirt", "finished_at": int(time.time())}, output, indent=2)
+    json.dump({
+        "artifact_type": "libvirt-preflight", "status": status,
+        "reason": reason, "profile": "libvirt", "redacted": True,
+        "cleanup": {"status": "not_run"}, "finished_at": int(time.time()),
+    }, output, indent=2)
     output.write("\n")
 PY
 }
