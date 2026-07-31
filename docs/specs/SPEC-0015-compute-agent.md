@@ -150,12 +150,20 @@ Every command envelope has:
   the canonical payload described below.
 
 The mutation set is create, inspect, start, stop, reboot, delete, and
-console-log retrieval. Create includes only an opaque O3K server ID and
-validated resource references plus the selected flavor-independent execution
-inputs needed by the later implementation. It does not contain XML, paths,
-shell text, secrets, or provider-specific models. Inspect and console-log are
-queries but still carry request identity and authorization context; lifecycle
-mutations always carry both operation identities.
+console-log retrieval. Create includes only an opaque O3K server ID, logical
+resource references, and a `resolved` message with:
+
+- immutable image artifact ID, SHA-256 digest, and `raw`/`qcow2` format;
+- bounded vCPU, memory-MiB, and disk-GiB values;
+- config-drive artifact ID and SHA-256 digest;
+- network attachments containing port ID, MAC, and fixed IPv4 address.
+
+References are bounded opaque identifiers; they cannot contain paths, shell
+text, credentials, XML, or arbitrary URIs. The command builder rejects invalid
+digests, formats, resource bounds, addresses, MACs, and duplicate ports before
+computing the canonical fingerprint. Inspect and console-log are queries but
+still carry request identity and authorization context; lifecycle mutations
+always carry both operation identities.
 
 The agent replies with `CommandAccepted` containing the same operation identity
 and an agent-side operation record. Acceptance means only that the command was
@@ -178,7 +186,9 @@ are exactly `operation_id` (field 1), `resource_id` (field 2), and the action
 oneof discriminator/payload in fields 3–9 (`create`, `inspect`, `start`,
 `stop`, `reboot`, `delete`, `console_log`). Deterministic serialization uses
 ascending field numbers, omits unknown fields, encodes absent proto3 scalar
-values as their default, and preserves repeated `network_port_ids` order.
+values as their default, and preserves repeated attachment order. The legacy
+`network_port_ids` field remains wire-compatible and is derived from the
+validated attachment list by the command builder.
 `command_id`, `idempotency_key`, `agent_epoch`, `deadline_unix_ms`,
 `protocol_version`, and the fingerprint itself are excluded from the digest.
 The control plane computes and sends the same digest; the agent rejects a

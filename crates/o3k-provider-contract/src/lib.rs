@@ -2,6 +2,10 @@ pub mod proto {
     tonic::include_proto!("o3k.provider.v1");
 }
 
+// Generated protobuf oneofs may legitimately contain a larger create payload
+// than their small lifecycle alternatives. Keep the generated wire model
+// intact rather than boxing fields and changing the public Rust shape.
+#[allow(clippy::large_enum_variant)]
 pub mod compute_proto {
     tonic::include_proto!("o3k.compute.v1");
 }
