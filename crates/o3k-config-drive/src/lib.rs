@@ -1,6 +1,6 @@
 //! Deterministic, filesystem-backed OpenStack config-drive content.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 pub const MAX_USER_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
+const MANIFEST_NAME: &str = "o3k-ownership.json";
+const MANAGED_BY: &str = "o3k-config-drive";
 
 #[derive(Debug, Error)]
 pub enum ConfigDriveError {
@@ -25,6 +27,8 @@ pub enum ConfigDriveError {
     Storage(#[source] io::Error),
     #[error("config-drive serialization failed")]
     Serialization(#[source] serde_json::Error),
+    #[error("config-drive path is not owned by o3k")]
+    UnownedPath,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +58,53 @@ struct MetaData<'a> {
     meta: &'a BTreeMap<String, String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct OwnershipManifest {
+    schema_version: u32,
+    managed_by: String,
+    instance_id: String,
+    fingerprint_sha256: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigDriveStore {
+    root: PathBuf,
+}
+
+impl ConfigDriveStore {
+    pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConfigDriveError> {
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(ConfigDriveError::Storage)?;
+        Ok(Self { root })
+    }
+
+    pub fn generate(
+        &self,
+        input: &ConfigDriveInput,
+    ) -> Result<ConfigDriveResult, ConfigDriveError> {
+        generate_at(&self.root, input)
+    }
+
+    pub fn cleanup(&self, instance_id: &str) -> Result<(), ConfigDriveError> {
+        if !valid_instance_id(instance_id) {
+            return Err(ConfigDriveError::InvalidInput);
+        }
+        cleanup(&self.root.join(instance_id))
+    }
+}
+
 pub fn generate(
     root: impl AsRef<Path>,
     input: &ConfigDriveInput,
 ) -> Result<ConfigDriveResult, ConfigDriveError> {
+    ConfigDriveStore::open(root.as_ref())?.generate(input)
+}
+
+fn generate_at(
+    root: &Path,
+    input: &ConfigDriveInput,
+) -> Result<ConfigDriveResult, ConfigDriveError> {
     validate(input)?;
-    let root = root.as_ref();
     fs::create_dir_all(root).map_err(ConfigDriveError::Storage)?;
     let metadata = MetaData {
         uuid: &input.instance_id,
@@ -103,9 +148,18 @@ pub fn generate(
     if let Some(vendor) = &input.vendor_data {
         write(&temporary.join("openstack/latest/vendor_data.json"), vendor)?;
     }
+    let manifest = OwnershipManifest {
+        schema_version: 1,
+        managed_by: MANAGED_BY.to_owned(),
+        instance_id: input.instance_id.clone(),
+        fingerprint_sha256: fingerprint_sha256.clone(),
+    };
+    let manifest = serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?;
+    write(&temporary.join(MANIFEST_NAME), &manifest)?;
     let backup = root.join(format!(".{}-old-{}", input.instance_id, Uuid::now_v7()));
-    let had_previous = directory.exists();
+    let had_previous = directory.exists() || directory.is_symlink();
     if had_previous {
+        validate_owned_directory(&directory, &input.instance_id)?;
         fs::rename(&directory, &backup).map_err(|error| {
             let _ = fs::remove_dir_all(&temporary);
             ConfigDriveError::Storage(error)
@@ -128,27 +182,55 @@ pub fn generate(
 }
 
 pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
-    if path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .is_none_or(|name| name.starts_with('.'))
-    {
+    let Some(instance_id) = path.file_name().and_then(|value| value.to_str()) else {
+        return Err(ConfigDriveError::InvalidInput);
+    };
+    if instance_id.starts_with('.') || path.is_symlink() {
         return Err(ConfigDriveError::InvalidInput);
     }
-    if path.exists() {
-        fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
+    if !path.exists() {
+        return Ok(());
+    }
+    validate_owned_directory(path, instance_id)?;
+    fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
+    Ok(())
+}
+
+fn validate_owned_directory(path: &Path, instance_id: &str) -> Result<(), ConfigDriveError> {
+    if path.is_symlink() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let manifest: OwnershipManifest = serde_json::from_slice(
+        &fs::read(path.join(MANIFEST_NAME)).map_err(|_| ConfigDriveError::UnownedPath)?,
+    )
+    .map_err(|_| ConfigDriveError::UnownedPath)?;
+    if manifest.schema_version != 1
+        || manifest.managed_by != MANAGED_BY
+        || manifest.instance_id != instance_id
+        || manifest.fingerprint_sha256.len() != 64
+        || !manifest
+            .fingerprint_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ConfigDriveError::UnownedPath);
     }
     Ok(())
 }
 
-fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
-    if input.instance_id.is_empty()
-        || input.instance_id
-            != Path::new(&input.instance_id)
+fn valid_instance_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            == Path::new(value)
                 .file_name()
                 .and_then(|v| v.to_str())
                 .unwrap_or_default()
-        || input.instance_id.len() > 128
+        && value.len() <= 128
+        && !value.starts_with('.')
+}
+
+fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
+    if !valid_instance_id(&input.instance_id)
         || input.hostname.is_empty()
         || input.hostname.len() > 255
         || input
@@ -196,13 +278,15 @@ mod tests {
     fn generation_is_deterministic_and_layout_is_openstack_compatible()
     -> Result<(), ConfigDriveError> {
         let root = std::env::temp_dir().join(format!("o3k-drive-{}", Uuid::now_v7()));
-        let first = generate(&root, &input())?;
+        let store = ConfigDriveStore::open(&root)?;
+        let first = store.generate(&input())?;
         let bytes = fs::read(first.directory.join("openstack/latest/user_data"))
             .map_err(ConfigDriveError::Storage)?;
         assert_eq!(bytes, input().user_data);
-        let second = generate(&root, &input())?;
+        let second = store.generate(&input())?;
         assert_eq!(first.fingerprint_sha256, second.fingerprint_sha256);
-        cleanup(&second.directory)?;
+        store.cleanup("instance-1")?;
+        store.cleanup("instance-1")?;
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }
@@ -220,5 +304,27 @@ mod tests {
             generate(std::env::temp_dir(), &value),
             Err(ConfigDriveError::UserDataTooLarge)
         ));
+    }
+
+    #[test]
+    fn cleanup_and_replacement_fail_closed_for_unowned_paths() -> Result<(), ConfigDriveError> {
+        let root = std::env::temp_dir().join(format!("o3k-drive-owner-{}", Uuid::now_v7()));
+        let unowned = root.join("instance-1");
+        fs::create_dir_all(&unowned).map_err(ConfigDriveError::Storage)?;
+        fs::write(unowned.join("keep"), b"do not remove").map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            cleanup(&unowned),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(unowned.exists());
+
+        let store = ConfigDriveStore::open(&root)?;
+        assert!(matches!(
+            store.generate(&input()),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(unowned.join("keep").exists());
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
     }
 }
