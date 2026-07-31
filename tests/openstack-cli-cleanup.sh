@@ -46,8 +46,8 @@ if bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
   exit 1
 fi
 
-python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
-import json, sys
+python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}" <<'PY'
+import json, pathlib, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == "passed"
@@ -58,6 +58,7 @@ assert result["resources"] == {
     "flavor_id": "flavor-id",
     "server_id": "server-id",
 }
+assert not (pathlib.Path(sys.argv[2]) / "console-error.log").exists()
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
                 "subnet delete subnet-id" "network delete network-id" "image delete image-id"; do

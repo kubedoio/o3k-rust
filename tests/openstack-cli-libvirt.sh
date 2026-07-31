@@ -7,7 +7,7 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-cli.XXXXXX")"
 mkdir -p "${ARTIFACT_DIR}"
 rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
     "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
-    "${ARTIFACT_DIR}/console.log"
+    "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log"
 IMAGE_ID=
 NETWORK_ID=
 SUBNET_ID=
@@ -135,7 +135,7 @@ if [[ -z "${OS_PASSWORD:-}" ]]; then
     exit 0
 fi
 
-if ! openstack token issue >/dev/null 2>"${ARTIFACT_DIR}/openstack-cli-error.log"; then
+if ! openstack token issue >/dev/null 2>&1; then
     write_result skipped "OpenStack endpoint is unavailable or authentication failed"
     echo "OpenStack CLI workflow skipped: endpoint/authentication unavailable" >&2
     exit 0
@@ -157,7 +157,7 @@ CREATED_SERVER_ID="${SERVER_ID}"
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 openstack server list --name o3k-testlab-server -f json >"${ARTIFACT_DIR}/server-list.json"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
-    if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>"${ARTIFACT_DIR}/console-error.log" \
+    if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
         break
     fi
