@@ -10,6 +10,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -45,6 +46,122 @@ pub enum ImageError {
     Storage(#[source] io::Error),
     #[error("image metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
+    #[error("image format is not supported")]
+    UnsupportedFormat,
+    #[error("image checksum does not match")]
+    ChecksumMismatch,
+    #[error("image path is invalid")]
+    InvalidPath,
+    #[error("image overlay tool is unavailable or failed")]
+    OverlayFailed,
+}
+
+#[derive(Clone)]
+pub struct ImageCache {
+    root: PathBuf,
+    max_bytes: u64,
+    lock: Arc<Mutex<()>>,
+}
+
+impl ImageCache {
+    pub fn open(root: impl Into<PathBuf>, max_bytes: u64) -> Result<Self, ImageError> {
+        let root = root.into();
+        fs::create_dir_all(root.join("base")).map_err(ImageError::Storage)?;
+        fs::create_dir_all(root.join("overlays")).map_err(ImageError::Storage)?;
+        for entry in fs::read_dir(&root).map_err(ImageError::Storage)? {
+            let entry = entry.map_err(ImageError::Storage)?;
+            if entry.file_name().to_string_lossy().contains(".tmp-") && entry.path().is_file() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(Self {
+            root,
+            max_bytes,
+            lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    pub fn cache_base(
+        &self,
+        checksum: &str,
+        format: &str,
+        content: &[u8],
+    ) -> Result<PathBuf, ImageError> {
+        if content.len() as u64 > self.max_bytes || !matches!(format, "qcow2" | "raw") {
+            return Err(if !matches!(format, "qcow2" | "raw") {
+                ImageError::UnsupportedFormat
+            } else {
+                ImageError::TooLarge
+            });
+        }
+        if !is_checksum(checksum) {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        let actual = format!("{:x}", Sha256::digest(content));
+        if actual != checksum {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
+        let path = self.root.join("base").join(format!("{checksum}.{format}"));
+        if path.exists() {
+            return Ok(path);
+        }
+        let temporary = self
+            .root
+            .join(format!("base-{checksum}.tmp-{}", std::process::id()));
+        fs::write(&temporary, content).map_err(ImageError::Storage)?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            ImageError::Storage(error)
+        })?;
+        Ok(path)
+    }
+
+    pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
+        if instance_id.is_empty()
+            || instance_id
+                != Path::new(instance_id)
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or_default()
+            || !base.starts_with(self.root.join("base"))
+            || !base.is_file()
+        {
+            return Err(ImageError::InvalidPath);
+        }
+        let overlay = self
+            .root
+            .join("overlays")
+            .join(format!("{instance_id}.qcow2"));
+        let status = std::process::Command::new("qemu-img")
+            .args(["create", "-f", "qcow2", "-b"])
+            .arg(base)
+            .arg(&overlay)
+            .status()
+            .map_err(|_| ImageError::OverlayFailed)?;
+        if !status.success() {
+            return Err(ImageError::OverlayFailed);
+        }
+        Ok(overlay)
+    }
+
+    pub fn delete_overlay(&self, instance_id: &str) -> Result<(), ImageError> {
+        if instance_id.is_empty() || instance_id.contains('/') || instance_id.contains('\\') {
+            return Err(ImageError::InvalidPath);
+        }
+        let path = self
+            .root
+            .join("overlays")
+            .join(format!("{instance_id}.qcow2"));
+        if path.exists() {
+            fs::remove_file(path).map_err(ImageError::Storage)?;
+        }
+        Ok(())
+    }
+}
+
+fn is_checksum(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[derive(Clone)]
@@ -245,6 +362,32 @@ mod tests {
         ));
         service.delete("project-a", image.id)?;
         assert!(!path.join("outside").exists());
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn content_addressed_cache_is_atomic_and_rejects_bad_inputs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("cache");
+        let cache = ImageCache::open(&path, 1024)?;
+        let content = b"verified-image";
+        let checksum = format!("{:x}", Sha256::digest(content));
+        let first = cache.cache_base(&checksum, "qcow2", content)?;
+        let second = cache.cache_base(&checksum, "qcow2", content)?;
+        assert_eq!(first, second);
+        assert!(matches!(
+            cache.cache_base(&checksum, "vmdk", content),
+            Err(ImageError::UnsupportedFormat)
+        ));
+        assert!(matches!(
+            cache.cache_base(&"0".repeat(64), "qcow2", content),
+            Err(ImageError::ChecksumMismatch)
+        ));
+        assert!(matches!(
+            cache.create_overlay("../escape", &first),
+            Err(ImageError::InvalidPath)
+        ));
         fs::remove_dir_all(path)?;
         Ok(())
     }

@@ -322,6 +322,18 @@ fn image_error(error: ImageError) -> axum::response::Response {
             "Request Entity Too Large",
             "image upload exceeds the configured limit",
         ),
+        ImageError::UnsupportedFormat | ImageError::ChecksumMismatch | ImageError::InvalidPath => {
+            keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "image content or path is invalid",
+            )
+        }
+        ImageError::OverlayFailed => keystone_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Internal Server Error",
+            "image overlay creation failed",
+        ),
         ImageError::Storage(_) | ImageError::CorruptMetadata(_) => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
