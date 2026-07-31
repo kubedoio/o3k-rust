@@ -20,7 +20,7 @@ the real-libvirt acceptance evidence exists.
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, non-empty network validation, and lifecycle ownership fencing added; agent-backed artifact realization/create and host evidence pending |
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
-| #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, list coverage, and redacted evidence added; real CLI/libvirt endpoint pending |
+| #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, list coverage, and redacted evidence with discarded raw CLI errors added; real CLI/libvirt endpoint pending |
 | #51 | clean-host packaging | merged | libvirt profile now selects libvirt; Ubuntu/Debian clean installs pending |
 | #52 | measurements | merged | fake control-plane measured with configured-password authentication; guest metrics pending |
 | #53 | release gate | merged | gate is blocked by the rows above |
