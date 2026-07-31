@@ -43,4 +43,6 @@ openssl x509 -in "$TLS_DIR/agent.pem" -noout -checkend 0
 grep -q 'DNS:o3k-control-plane' <(openssl x509 -in "$TLS_DIR/server.pem" -noout -text)
 grep -q 'URI:urn:o3k:compute:agent:compute-agent' <(openssl x509 -in "$TLS_DIR/agent.pem" -noout -text)
 [[ "$(wc -c <"$TLS_DIR/agent-fingerprint")" -ge 64 ]]
+
+grep -Fq '"O3K_PROVIDER=libvirt"' "$ROOT_DIR/packaging/install.sh"
 echo "packaging safety tests passed"
