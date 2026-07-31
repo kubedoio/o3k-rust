@@ -35,6 +35,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 error_category: proto::ErrorCategory::Unspecified as i32,
                 redacted_message: message.to_owned(),
                 provider_resource_id: name.clone(),
+                console_log: None,
             })
         };
         match command.action.as_ref() {

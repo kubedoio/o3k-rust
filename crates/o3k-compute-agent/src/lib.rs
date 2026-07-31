@@ -1170,6 +1170,15 @@ pub struct CommandExecutionResult {
     pub error_category: i32,
     pub redacted_message: String,
     pub provider_resource_id: String,
+    pub console_log: Option<ConsoleLogResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleLogResult {
+    pub bytes: Vec<u8>,
+    pub offset: u64,
+    pub complete: bool,
+    pub truncated: bool,
 }
 
 #[async_trait::async_trait]
@@ -1190,6 +1199,7 @@ struct FakeResource {
     fingerprint: String,
     artifacts: Vec<String>,
     active: bool,
+    console_log: Vec<u8>,
 }
 
 /// Stateful command executor for protocol and failure-recovery tests.
@@ -1295,6 +1305,7 @@ impl CommandExecutor for FakeCommandExecutor {
                         fingerprint: command.payload_fingerprint_sha256.clone(),
                         artifacts,
                         active: true,
+                        console_log: b"fake boot output\n".to_vec(),
                     },
                 );
                 Ok(fake_success(provider_resource_id))
@@ -1340,7 +1351,35 @@ impl CommandExecutor for FakeCommandExecutor {
                 }
                 Ok(result)
             }
-            Some(proto::command::Action::ConsoleLog(_)) | None => Err(Self::failure()),
+            Some(proto::command::Action::ConsoleLog(request)) => {
+                let resources = self
+                    .resources
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?;
+                let resource = resources.get(&resource_key).ok_or_else(Self::failure)?;
+                let start = usize::try_from(request.offset)
+                    .unwrap_or(usize::MAX)
+                    .min(resource.console_log.len());
+                let max_bytes = usize::try_from(request.max_bytes)
+                    .unwrap_or(usize::MAX)
+                    .min(64 * 1024);
+                let end = start
+                    .saturating_add(max_bytes)
+                    .min(resource.console_log.len());
+                Ok(CommandExecutionResult {
+                    state: proto::OperationState::Succeeded as i32,
+                    error_category: proto::ErrorCategory::Unspecified as i32,
+                    redacted_message: "fake console output read".to_owned(),
+                    provider_resource_id,
+                    console_log: Some(ConsoleLogResult {
+                        bytes: resource.console_log[start..end].to_vec(),
+                        offset: start as u64,
+                        complete: end == resource.console_log.len(),
+                        truncated: end < resource.console_log.len(),
+                    }),
+                })
+            }
+            None => Err(Self::failure()),
         }
     }
 }
@@ -1359,6 +1398,7 @@ fn fake_success(provider_resource_id: String) -> CommandExecutionResult {
         error_category: proto::ErrorCategory::Unspecified as i32,
         redacted_message: "fake operation succeeded".to_owned(),
         provider_resource_id,
+        console_log: None,
     }
 }
 
@@ -1565,6 +1605,36 @@ impl AgentClient {
                             .await
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                             let result = executor.execute(&command).await;
+                            if let Ok(result) = &result {
+                                if let Some(console_log) = result.console_log.as_ref() {
+                                    tx.send(proto::ControlRequest {
+                                    body: Some(proto::control_request::Body::Observation(
+                                        proto::Observation {
+                                            agent_id: agent_id.to_owned(),
+                                            agent_epoch: epoch.clone(),
+                                            resource_id: command.resource_id.clone(),
+                                            provider_resource_id: result
+                                                .provider_resource_id
+                                                .clone(),
+                                            operation_id: command.operation_id.clone(),
+                                            operation_state: result.state,
+                                            observation_sequence: operation_sequence,
+                                            observed_at_unix_ms: unix_ms(),
+                                            redacted_message: result.redacted_message.clone(),
+                                            console_log_bytes: console_log.bytes.clone(),
+                                            console_log_offset: console_log.offset,
+                                            console_log_complete: console_log.complete,
+                                            console_log_truncated: console_log.truncated,
+                                            ..Default::default()
+                                        },
+                                    )),
+                                    })
+                                    .await
+                                    .map_err(|_| {
+                                        AgentError::Protocol("control stream closed".to_owned())
+                                    })?;
+                                }
+                            }
                             let update = match result {
                                 Ok(result) => proto::OperationUpdate {
                                     operation_id: command.operation_id,
@@ -1861,6 +1931,29 @@ mod tests {
         }
         assert!(executor.execute(&command).await.is_err());
         assert_eq!(executor.resource_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_executor_reads_bounded_console_output() -> Result<(), AgentError> {
+        let executor = FakeCommandExecutor::default();
+        let create = fake_create_command()?;
+        executor.execute(&create).await?;
+        let mut console = create;
+        console.action = Some(proto::command::Action::ConsoleLog(
+            proto::ConsoleLogCommand {
+                offset: 5,
+                max_bytes: 4,
+            },
+        ));
+        let result = executor.execute(&console).await?;
+        let output = result.console_log.ok_or_else(|| {
+            AgentError::Protocol("fake console output was not returned".to_owned())
+        })?;
+        assert_eq!(output.bytes, b"boot");
+        assert_eq!(output.offset, 5);
+        assert!(output.truncated);
+        assert!(!output.complete);
         Ok(())
     }
 
