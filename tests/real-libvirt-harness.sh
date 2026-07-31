@@ -30,15 +30,30 @@ SH
 cat >"${MOCK_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+state_file="${O3K_MOCK_STATE:?}"
 case "$*" in
   token\ issue*) exit 0;;
   image\ create*) echo image-id;;
   network\ create*) echo network-id;;
   subnet\ create*) echo subnet-id;;
   flavor\ create*) echo flavor-id;;
-  server\ create*) echo server-id;;
-  server\ show*) echo '{}';;
-  server\ list*) echo '[]';;
+  server\ create*) : >"${state_file}"; echo server-id;;
+  server\ show*)
+    if [[ -e "${state_file}" ]]; then
+      echo '{"id":"server-id","name":"o3k-testlab-server"}'
+    else
+      echo 'No server with a name or ID was found' >&2
+      exit 1
+    fi
+    ;;
+  server\ list*)
+    if [[ -e "${state_file}" ]]; then
+      echo '[{"id":"server-id","name":"o3k-testlab-server"}]'
+    else
+      echo '[]'
+    fi
+    ;;
+  server\ delete*) rm -f -- "${state_file}";;
   console\ log\ show*) echo 'boot output';;
   *) exit 0;;
 esac
@@ -46,6 +61,7 @@ SH
 chmod +x "${MOCK_BIN}"/*
 
 export PATH="${MOCK_BIN}:${PATH}"
+export O3K_MOCK_STATE="${WORK_DIR}/server-present"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
 export O3K_TESTLAB_PROFILE=libvirt
 export OS_PASSWORD=test-password
