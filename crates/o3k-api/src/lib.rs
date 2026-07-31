@@ -1337,7 +1337,19 @@ async fn delete_server(
         Err(response) => return response,
     };
     match service.delete_server(&token.project_id, id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            if let Some(console) = state.console.as_ref() {
+                if let Err(error) = console.cleanup(id) {
+                    tracing::warn!(%error, server_id = %id, "deleted server console cleanup failed");
+                    return keystone_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Internal Server Error",
+                        "server console cleanup failed",
+                    );
+                }
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(error) => compute_error(error),
     }
 }

@@ -4,7 +4,7 @@ use o3k_compute::ComputeService;
 use o3k_identity::{Secret, TokenService};
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use o3k_network::NetworkService;
-use o3k_provider::FakeComputeProvider;
+use o3k_provider::{FailureInjection, FakeComputeProvider};
 use o3k_store::SqliteStore;
 use serde_json::Value;
 use std::time::Duration;
@@ -311,9 +311,12 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         Duration::from_secs(3600),
     )?;
     let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
-    let compute = ComputeService::new(store, std::sync::Arc::new(FakeComputeProvider::new()));
-    let console =
-        o3k_console::ConsoleService::open(format!("/tmp/o3k-api-console-{}", std::process::id()))?;
+    let provider = std::sync::Arc::new(FakeComputeProvider::new());
+    let compute = ComputeService::new(store, provider.clone());
+    let console = o3k_console::ConsoleService::open(format!(
+        "/tmp/o3k-api-console-{}",
+        uuid::Uuid::now_v7()
+    ))?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_compute(compute)
@@ -410,7 +413,58 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
-    console.cleanup(server_uuid)?;
+    assert!(matches!(
+        console.read(server_uuid),
+        Err(o3k_console::ConsoleError::NotFound)
+    ));
+
+    let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
+    let second_created = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/bootstrap-project/servers")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "nova-failed-delete-request")
+                .body(Body::from(second_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(second_created.status(), StatusCode::ACCEPTED);
+    let second_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(second_created.into_body(), 8192).await?)?;
+    let second_id = second_json["server"]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("second server missing"))?;
+    let second_uuid = second_id.parse::<uuid::Uuid>()?;
+    console.write(second_uuid, b"failed-delete-console")?;
+    provider.set_failure(FailureInjection::Transient)?;
+    let failed_delete = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.1/bootstrap-project/servers/{second_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(failed_delete.status(), StatusCode::CONFLICT);
+    assert_eq!(console.read(second_uuid)?, b"failed-delete-console");
+
+    let repeated_delete = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.1/bootstrap-project/servers/{server_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(repeated_delete.status(), StatusCode::NO_CONTENT);
+    assert!(matches!(
+        console.read(server_uuid),
+        Err(o3k_console::ConsoleError::NotFound)
+    ));
     std::fs::remove_file(path)?;
     Ok(())
 }
