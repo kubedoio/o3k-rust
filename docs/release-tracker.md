@@ -13,7 +13,7 @@ the real-libvirt acceptance evidence exists.
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
 | #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
-| #43 | Placement | merged | unique atomic state publication and allocation-preserving provider synchronization added; daemon capability publication and disk-capacity policy pending |
+| #43 | Placement | merged | unique atomic state publication, allocation-preserving provider synchronization, and refresh usage reconciliation added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
 | #45 | bridge/TAP | merged | TAP reuse ownership fencing, existing bridge/uplink validation, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication, owned dnsmasq supervision, and gateway/binding conflict rejection added; TAP/dnsmasq/guest IP evidence pending |
@@ -73,8 +73,8 @@ resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
 ADR-0062 (image-cache hit revalidation), ADR-0063 (reset service cleanup), and
 ADR-0064 (required benchmark release gate), and ADR-0065 (DHCP gateway-binding
 conflict rejection), ADR-0066 (CellHV provider selection), ADR-0067
-(authenticated stream identity binding), and ADR-0068 (existing bridge/uplink
-validation).
+(authenticated stream identity binding), ADR-0068 (existing bridge/uplink
+validation), and ADR-0069 (Placement refresh usage reconciliation).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules

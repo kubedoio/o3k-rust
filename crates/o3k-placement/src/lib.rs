@@ -128,12 +128,22 @@ impl PlacementLedger {
         &self,
         provider_id: &str,
         generation: u64,
-        inventories: BTreeMap<String, Inventory>,
+        mut inventories: BTreeMap<String, Inventory>,
     ) -> Result<ResourceProvider, PlacementError> {
         let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
         let provider = state.get_mut(provider_id).ok_or(PlacementError::NotFound)?;
         if generation != provider.generation {
             return Err(PlacementError::StaleGeneration);
+        }
+        for inventory in inventories.values_mut() {
+            inventory.used = 0;
+        }
+        for allocation in provider.allocations.values() {
+            for (class, amount) in &allocation.resources {
+                if let Some(inventory) = inventories.get_mut(class) {
+                    inventory.used = inventory.used.saturating_add(*amount);
+                }
+            }
         }
         provider.inventories = inventories;
         provider.generation = provider.generation.saturating_add(1);
@@ -386,6 +396,37 @@ mod tests {
             ),
             Err(PlacementError::NotSchedulable)
         ));
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn refresh_inventory_preserves_durable_allocation_usage() -> Result<(), PlacementError> {
+        let root = std::env::temp_dir().join(format!("o3k-placement-refresh-{}", Uuid::now_v7()));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.register_provider("node-1", inventory())?;
+        ledger.allocate(
+            "node-1",
+            "allocation-1",
+            "server-1",
+            BTreeMap::from([(VCPU.to_owned(), 2)]),
+            provider.generation,
+        )?;
+        let current = ledger.provider("node-1")?;
+        let refreshed = ledger.refresh_inventory("node-1", current.generation, inventory())?;
+        assert_eq!(refreshed.inventories[VCPU].used, 2);
+        assert!(matches!(
+            ledger.allocate(
+                "node-1",
+                "allocation-2",
+                "server-2",
+                BTreeMap::from([(VCPU.to_owned(), 3)]),
+                refreshed.generation
+            ),
+            Err(PlacementError::OverCapacity)
+        ));
+        let reopened = PlacementLedger::open(&root)?;
+        assert_eq!(reopened.provider("node-1")?.inventories[VCPU].used, 2);
         fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
         Ok(())
     }
