@@ -363,6 +363,8 @@ impl NodeRegistry {
         timeout: Duration,
     ) -> Result<proto::Observation, AgentError> {
         let mut events = self.subscribe_events();
+        let agent_id = command.agent_id.clone();
+        let agent_epoch = command.agent_epoch.clone();
         let resource_id = command.resource_id.clone();
         let operation_id = command.operation_id.clone();
         self.dispatch_command(command).await?;
@@ -370,7 +372,9 @@ impl NodeRegistry {
             loop {
                 match events.recv().await {
                     Ok(AgentEvent::Observation(observation))
-                        if observation.resource_id == resource_id
+                        if observation.agent_id == agent_id
+                            && observation.agent_epoch == agent_epoch
+                            && observation.resource_id == resource_id
                             && observation.operation_id == operation_id =>
                     {
                         return Ok(observation);
