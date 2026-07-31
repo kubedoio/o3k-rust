@@ -1052,6 +1052,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-dhcp"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "o3k-domain"
 version = "0.1.0-alpha.0"
 dependencies = [
