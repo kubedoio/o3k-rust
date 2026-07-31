@@ -14,7 +14,7 @@ the real-libvirt acceptance evidence exists.
 | #41 | image cache/overlays | merged | atomic/idempotent publication for base, upload, metadata, and overlays added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication added; integration allocation pending |
-| #44 | scheduler | merged | agent-targeted scheduling contract added; integration dispatch pending |
+| #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
 | #45 | bridge/TAP | merged | TAP reuse ownership fencing and unique network metadata publication added; privileged host network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication and owned dnsmasq supervision added; TAP/dnsmasq/guest IP evidence pending |
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, and typed resolved create inputs added; real artifact realization/create and host evidence pending |
