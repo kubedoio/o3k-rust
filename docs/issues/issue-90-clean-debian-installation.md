@@ -11,11 +11,17 @@ and O3K ownership marker before stopping, disabling, or reloading systemd.
 An invalid or foreign target therefore cannot cause a service-state mutation.
 The behavior is covered by a portable fake-`systemctl` regression test.
 
+The preflight disk-space check also fails closed when `df` produces no
+parseable capacity row, rather than treating missing evidence as sufficient
+free space. A portable fake-`df` regression test covers this boundary.
+
 ## Explicit non-goals
 
 - no Debian package installation or host execution;
 - no real libvirt, CirrOS, systemd, reset/reinstall, or lifecycle evidence;
 - no claim that `clean-debian-install.json` exists or reports `passed`;
 - no change to the documented default-layout service boundary or purge data policy.
+- no Debian-host disk-space, package, or lifecycle acceptance claim.
 
 Decision: [ADR-0097](../adr/ADR-0097-uninstall-precondition-order.md).
+The preflight boundary is recorded in [ADR-0111](../adr/ADR-0111-preflight-disk-space-evidence.md).
