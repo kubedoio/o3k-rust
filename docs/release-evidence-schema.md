@@ -14,7 +14,7 @@ The required artifact types are:
 
 | Gate input | `artifact_type` | Additional proof |
 |---|---|---|
-| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true |
+| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; redacted `resources` IDs may be included |
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | non-empty `failures` list |
