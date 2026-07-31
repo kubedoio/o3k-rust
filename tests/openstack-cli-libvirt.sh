@@ -106,6 +106,12 @@ if [[ "${O3K_TESTLAB_PROFILE:-libvirt}" != libvirt ]]; then
     write_result skipped "O3K_TESTLAB_PROFILE is not libvirt"
     exit 0
 fi
+IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-}"
+if [[ -z "${IMAGE_PATH}" || ! -f "${IMAGE_PATH}" ]]; then
+    write_result skipped "O3K_TESTLAB_IMAGE_PATH must point to a local guest image"
+    echo "OpenStack CLI workflow skipped: configure O3K_TESTLAB_IMAGE_PATH" >&2
+    exit 0
+fi
 
 CLOUDS_FILE="${DATA_DIR}/clouds.yaml"
 cat >"${CLOUDS_FILE}" <<EOF
@@ -138,7 +144,7 @@ fi
 # The remainder deliberately uses only OpenStack CLI calls. Resource IDs are
 # captured in the redacted artifact; credentials and response bodies are not
 # uploaded. The public CLI does not expose operation IDs here.
-IMAGE_ID="$(openstack image create o3k-testlab-image --disk-format raw --container-format bare -f value -c id)"
+IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --disk-format raw --container-format bare -f value -c id)"
 CREATED_IMAGE_ID="${IMAGE_ID}"
 NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"
 CREATED_NETWORK_ID="${NETWORK_ID}"
@@ -146,14 +152,23 @@ SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 19
 CREATED_SUBNET_ID="${SUBNET_ID}"
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
-SERVER_ID="$(openstack server create --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" o3k-testlab-server -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" o3k-testlab-server -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 openstack server list --name o3k-testlab-server -f json >"${ARTIFACT_DIR}/server-list.json"
-openstack console log show "${SERVER_ID}" -f value | tail -c 65536 >"${ARTIFACT_DIR}/console.log"
-openstack server stop "${SERVER_ID}"
-openstack server start "${SERVER_ID}"
-openstack server reboot --hard "${SERVER_ID}"
+for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
+    if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>"${ARTIFACT_DIR}/console-error.log" \
+        && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
+        break
+    fi
+    sleep "${O3K_TESTLAB_CONSOLE_INTERVAL_SECONDS:-1}"
+done
+[[ -s "${ARTIFACT_DIR}/console.log" ]]
+tail -c 65536 "${ARTIFACT_DIR}/console.log" >"${ARTIFACT_DIR}/console.log.tmp"
+mv "${ARTIFACT_DIR}/console.log.tmp" "${ARTIFACT_DIR}/console.log"
+openstack server stop --wait "${SERVER_ID}"
+openstack server start --wait "${SERVER_ID}"
+openstack server reboot --hard --wait "${SERVER_ID}"
 openstack server delete --wait "${SERVER_ID}"
 SERVER_ID=
 openstack flavor delete "${FLAVOR_ID}"

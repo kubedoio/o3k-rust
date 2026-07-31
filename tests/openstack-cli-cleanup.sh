@@ -38,6 +38,9 @@ export PATH="${MOCK_BIN}:${PATH}"
 export O3K_MOCK_LOG="${WORK_DIR}/commands.log"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
 export O3K_TESTLAB_PROFILE=libvirt OS_PASSWORD=test-password
+IMAGE_PATH="${WORK_DIR}/cirros.img"
+printf 'test image\n' >"${IMAGE_PATH}"
+export O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH}" O3K_TESTLAB_CONSOLE_ATTEMPTS=1
 if bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
   echo "CLI harness unexpectedly passed" >&2
   exit 1
@@ -70,5 +73,10 @@ assert result["lifecycle"]["list"] is True
 assert result["resources"]["server_id"] == "server-id"
 PY
 grep -Fq "server list --name o3k-testlab-server -f json" "${O3K_MOCK_LOG}"
+grep -Fq "image create o3k-testlab-image --file" "${O3K_MOCK_LOG}"
+grep -Fq "server create --wait" "${O3K_MOCK_LOG}"
+grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
+grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
+grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
 
 echo "OpenStack CLI cleanup test passed"

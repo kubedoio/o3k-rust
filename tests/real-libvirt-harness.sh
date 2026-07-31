@@ -49,6 +49,9 @@ export PATH="${MOCK_BIN}:${PATH}"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
 export O3K_TESTLAB_PROFILE=libvirt
 export OS_PASSWORD=test-password
+IMAGE_PATH="${WORK_DIR}/cirros.img"
+printf 'test image\n' >"${IMAGE_PATH}"
+export O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH}" O3K_TESTLAB_CONSOLE_ATTEMPTS=1
 
 bash "${ROOT_DIR}/tests/testlab-libvirt.sh"
 python3 - "${ARTIFACT_DIR}/libvirt-result.json" <<'PY'
