@@ -48,7 +48,21 @@ for _ in $(seq 1 200); do
   sleep 0.01
 done
 [[ -n "$READY_NS" ]] || { echo "o3kd did not become ready" >&2; exit 1; }
-AUTH_BODY='{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"measurement-password"}}},"scope":{"project":{"name":"admin"}}}}'
+AUTH_BODY="$(MEASURE_PASSWORD="$PASSWORD" python3 - <<'PY'
+import json
+import os
+
+print(json.dumps({
+    "auth": {
+        "identity": {
+            "methods": ["password"],
+            "password": {"user": {"name": "admin", "password": os.environ["MEASURE_PASSWORD"]}},
+        },
+        "scope": {"project": {"name": "admin"}},
+    }
+}))
+PY
+)"
 TOKEN_HEADERS="$(curl -fsSi -X POST "$BASE_URL/v3/auth/tokens" -H 'content-type: application/json' --data "$AUTH_BODY")"
 TOKEN="$(python3 -c 'import sys; print(next((line.split(":",1)[1].strip() for line in sys.stdin.read().splitlines() if line.lower().startswith("x-subject-token:")), ""))' <<<"$TOKEN_HEADERS")"
 [[ -n "$TOKEN" ]] || { echo "token issue failed" >&2; exit 1; }

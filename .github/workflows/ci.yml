@@ -52,6 +52,8 @@ jobs:
         run: buf breaking --against '.git#branch=main,subdir=proto'
       - name: TestLab fake-provider workflow
         run: bash tests/testlab.sh
+      - name: Test measurement authentication input
+        run: bash tests/measure-auth.sh
       - name: Generate candidate SBOM
         run: bash packaging/make-sbom.sh target/testlab-artifacts/sbom.spdx.json
       - name: Upload TestLab artifacts
