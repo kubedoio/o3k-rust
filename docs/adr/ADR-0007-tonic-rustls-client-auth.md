@@ -30,6 +30,12 @@ The control plane also requires an explicit authorized-agent mapping in
 enrollment record: the certificate URI SAN must match the requested agent ID
 and the leaf certificate SHA-256 must match the configured mapping.
 
+Because tonic's public TLS builders intentionally use rustls safe defaults,
+the compute stream uses a small tokio-rustls adapter around tonic's generic
+transport instead. Both sides build rustls configurations with only TLS 1.3;
+this makes the minimum explicit while retaining tonic's gRPC service and
+channel implementation.
+
 ## Evidence
 
 - Direct rustls handshake with the repository fixtures passed before the
@@ -40,6 +46,8 @@ and the leaf certificate SHA-256 must match the configured mapping.
   `Attempting client auth` followed by successful registration and heartbeat.
 - The negative integration test leaves the registry empty when the client CA
   is not trusted by the control plane.
+- Rustls performs certificate chain, validity, and key-usage verification
+  before the application registration method runs.
 
 ## Consequences
 

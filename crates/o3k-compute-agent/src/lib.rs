@@ -6,26 +6,41 @@
 
 use std::{
     collections::HashMap,
-    fs,
+    fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use hyper_util::rt::TokioIo;
 use o3k_provider_contract::compute_proto as proto;
+use rustls::{
+    ClientConfig, RootCertStore, ServerConfig,
+    pki_types::{
+        CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+        ServerName,
+    },
+    server::WebPkiClientVerifier,
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     sync::{RwLock, mpsc},
     time,
 };
-use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_stream::{
+    StreamExt,
+    wrappers::{ReceiverStream, TcpListenerStream},
+};
 use tonic::{
     Request, Response, Status, Streaming,
-    transport::{Certificate, ClientTlsConfig, Endpoint, Identity, Server, ServerTlsConfig},
+    transport::{Endpoint, Server},
 };
+use tower::service_fn;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -274,6 +289,11 @@ impl NodeRegistry {
         let highest = nodes
             .get(&request.agent_id)
             .map_or(0, |n| n.last_heartbeat_sequence);
+        let applied = nodes
+            .get(&request.agent_id)
+            .map_or(proto::AdministrativeState::Unspecified as i32, |n| {
+                n.applied_state
+            });
         let snapshot = NodeSnapshot {
             agent_id: request.agent_id.clone(),
             agent_epoch: request.agent_epoch.clone(),
@@ -281,7 +301,7 @@ impl NodeRegistry {
             software_version: request.software_version.clone(),
             capabilities: request.capabilities.clone().unwrap_or_default(),
             desired_state: desired,
-            applied_state: desired,
+            applied_state: applied,
             availability: Availability::Available,
             active_operation_count: 0,
             last_heartbeat_sequence: 0,
@@ -531,6 +551,55 @@ fn der_tlv(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     (end <= input.len()).then(|| (tag, &input[header..end], &input[end..]))
 }
 
+fn pem_blocks(input: &[u8], label: &str) -> Result<Vec<Vec<u8>>, AgentError> {
+    let text = std::str::from_utf8(input).map_err(|_| AgentError::TlsMaterial)?;
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let mut remaining = text;
+    let mut blocks = Vec::new();
+    while let Some(start) = remaining.find(&begin) {
+        let body = &remaining[start + begin.len()..];
+        let finish = body.find(&end).ok_or(AgentError::TlsMaterial)?;
+        let encoded: String = body[..finish]
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        blocks.push(
+            BASE64
+                .decode(encoded)
+                .map_err(|_| AgentError::TlsMaterial)?,
+        );
+        remaining = &body[finish + end.len()..];
+    }
+    if blocks.is_empty() {
+        return Err(AgentError::TlsMaterial);
+    }
+    Ok(blocks)
+}
+
+fn pem_certificates(input: &[u8]) -> Result<Vec<CertificateDer<'static>>, AgentError> {
+    pem_blocks(input, "CERTIFICATE")
+        .map(|blocks| blocks.into_iter().map(CertificateDer::from).collect())
+}
+
+fn pem_private_key(input: &[u8]) -> Result<PrivateKeyDer<'static>, AgentError> {
+    for (label, constructor) in [
+        ("PRIVATE KEY", 0_u8),
+        ("RSA PRIVATE KEY", 1_u8),
+        ("EC PRIVATE KEY", 2_u8),
+    ] {
+        if let Ok(mut blocks) = pem_blocks(input, label) {
+            let key = blocks.pop().ok_or(AgentError::TlsMaterial)?;
+            return Ok(match constructor {
+                0 => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+                1 => PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(key)),
+                _ => PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(key)),
+            });
+        }
+    }
+    Err(AgentError::TlsMaterial)
+}
+
 pub struct ComputeAgentService {
     registry: NodeRegistry,
 }
@@ -661,15 +730,46 @@ impl ControlPlaneServer {
         listener: tokio::net::TcpListener,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), AgentError> {
+        install_crypto_provider();
         for agent in &self.authorized_agents {
             self.registry.authorize_agent(agent.clone()).await?;
         }
-        let cert = fs::read(&self.tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?;
-        let key = fs::read(&self.tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?;
-        let ca = fs::read(&self.tls.client_ca_certificate).map_err(|_| AgentError::TlsMaterial)?;
-        let tls = ServerTlsConfig::new()
-            .identity(Identity::from_pem(cert, key))
-            .client_ca_root(Certificate::from_pem(ca));
+        let cert = pem_certificates(
+            &fs::read(&self.tls.server_certificate).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let key = pem_private_key(
+            &fs::read(&self.tls.server_private_key).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let ca = pem_certificates(
+            &fs::read(&self.tls.client_ca_certificate).map_err(|_| AgentError::TlsMaterial)?,
+        )?;
+        let mut roots = RootCertStore::empty();
+        for certificate in ca {
+            roots
+                .add(certificate)
+                .map_err(|_| AgentError::TlsMaterial)?;
+        }
+        let verifier = WebPkiClientVerifier::builder(roots.into())
+            .build()
+            .map_err(|_| AgentError::TlsMaterial)?;
+        let tls = ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| AgentError::TlsMaterial)?
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(cert, key)
+        .map_err(|_| AgentError::TlsMaterial)?;
+        let acceptor = TlsAcceptor::from(std::sync::Arc::new(tls));
+        let incoming = TcpListenerStream::new(listener).then(move |connection| {
+            let acceptor = acceptor.clone();
+            async move {
+                match connection {
+                    Ok(stream) => acceptor.accept(stream).await.map_err(io::Error::other),
+                    Err(error) => Err(error),
+                }
+            }
+        });
         let registry = self.registry.clone();
         let monitor = tokio::spawn(async move {
             let mut tick = time::interval(DEFAULT_HEARTBEAT_INTERVAL);
@@ -679,8 +779,6 @@ impl ControlPlaneServer {
             }
         });
         let result = Server::builder()
-            .tls_config(tls)
-            .map_err(AgentError::Transport)?
             .add_service(
                 proto::compute_agent_server::ComputeAgentServer::new(ComputeAgentService::new(
                     self.registry,
@@ -688,7 +786,7 @@ impl ControlPlaneServer {
                 .max_decoding_message_size(MAX_MESSAGE_SIZE)
                 .max_encoding_message_size(MAX_MESSAGE_SIZE),
             )
-            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
+            .serve_with_incoming_shutdown(incoming, shutdown)
             .await
             .map_err(AgentError::Transport);
         monitor.abort();
@@ -726,7 +824,7 @@ impl AgentClient {
         loop {
             self.ready
                 .store(false, std::sync::atomic::Ordering::Release);
-            let result = tokio::select! { result = self.connect_once(&agent_id) => result, () = &mut shutdown => return Ok(()) };
+            let result = self.connect_once(&agent_id, shutdown.as_mut()).await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
@@ -738,20 +836,62 @@ impl AgentClient {
         }
     }
 
-    async fn connect_once(&self, agent_id: &str) -> Result<(), AgentError> {
+    async fn connect_once<F>(
+        &self,
+        agent_id: &str,
+        mut shutdown: Pin<&mut F>,
+    ) -> Result<(), AgentError>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
+        install_crypto_provider();
         let material = self.config.tls.read()?;
-        let endpoint = Endpoint::from_shared(self.config.endpoint.clone())
+        let endpoint_uri = self.config.endpoint.replacen("https://", "http://", 1);
+        let endpoint = Endpoint::from_shared(endpoint_uri)
             .map_err(|_| AgentError::InvalidConfiguration("endpoint is invalid"))?
-            .tls_config(
-                ClientTlsConfig::new()
-                    .domain_name(self.config.server_name.clone())
-                    .ca_certificate(Certificate::from_pem(material.ca))
-                    .identity(Identity::from_pem(material.cert, material.key)),
-            )
-            .map_err(|_| AgentError::InvalidConfiguration("client TLS configuration is invalid"))?;
-        let mut client = proto::compute_agent_client::ComputeAgentClient::connect(endpoint)
+            .connect_timeout(Duration::from_secs(10));
+        let mut roots = RootCertStore::empty();
+        for certificate in pem_certificates(&material.ca)? {
+            roots
+                .add(certificate)
+                .map_err(|_| AgentError::TlsMaterial)?;
+        }
+        let client_tls = ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|_| AgentError::TlsMaterial)?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            pem_certificates(&material.cert)?,
+            pem_private_key(&material.key)?,
+        )
+        .map_err(|_| AgentError::TlsMaterial)?;
+        let connector = TlsConnector::from(std::sync::Arc::new(client_tls));
+        let server_name = self.config.server_name.clone();
+        let connector_service = service_fn(move |uri: http::Uri| {
+            let connector = connector.clone();
+            let server_name = server_name.clone();
+            async move {
+                let authority = uri.authority().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "endpoint authority is missing")
+                })?;
+                let stream = tokio::net::TcpStream::connect(authority.as_str()).await?;
+                let name = ServerName::try_from(server_name).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "server name is invalid")
+                })?;
+                connector
+                    .connect(name, stream)
+                    .await
+                    .map(TokioIo::new)
+                    .map_err(io::Error::other)
+            }
+        });
+        let channel = endpoint
+            .connect_with_connector(connector_service)
             .await
-            .map_err(AgentError::Transport)?
+            .map_err(AgentError::Transport)?;
+        let mut client = proto::compute_agent_client::ComputeAgentClient::new(channel)
             .max_decoding_message_size(MAX_MESSAGE_SIZE)
             .max_encoding_message_size(MAX_MESSAGE_SIZE);
         let (tx, rx) = mpsc::channel(32);
@@ -777,32 +917,76 @@ impl AgentClient {
         let mut responses = response.into_inner();
         let mut sequence = 0_u64;
         let mut applied_state = proto::AdministrativeState::Enabled as i32;
+        let mut state_ack_pending = true;
         let mut interval = time::interval(self.config.heartbeat_interval);
         loop {
             tokio::select! {
+                () = &mut shutdown => return Ok(()),
                 _ = interval.tick() => { sequence = sequence.saturating_add(1); tx.send(proto::ControlRequest { body: Some(proto::control_request::Body::Heartbeat(proto::Heartbeat { agent_id: agent_id.to_owned(), agent_epoch: epoch.clone(), sequence, sent_at_unix_ms: unix_ms(), state: applied_state, active_operation_count: 0, highest_observation_sequence: 0 })) }).await.map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?; }
-                message = responses.message() => match message.map_err(|status| AgentError::Protocol(status.to_string()))? { Some(response) => match response.body {
-                    Some(proto::control_response::Body::Register(register)) => { if register.agent_id != agent_id || register.agent_epoch != epoch { return Err(AgentError::Protocol("registration identity mismatch".to_owned())); } applied_state = register.desired_state; self.ready.store(true, std::sync::atomic::Ordering::Release); }
-                    Some(proto::control_response::Body::Heartbeat(ack)) => { if ack.desired_state != applied_state { applied_state = ack.desired_state; tx.send(proto::ControlRequest { body: Some(proto::control_request::Body::AgentStateAck(proto::AgentStateAck { agent_id: agent_id.to_owned(), agent_epoch: epoch.clone(), applied_state, transition_sequence: ack.transition_sequence, active_operation_count: 0 })) }).await.map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?; } }
-                    Some(proto::control_response::Body::Command(_)) | Some(proto::control_response::Body::DesiredState(_)) | Some(proto::control_response::Body::ObservationAck(_)) | Some(proto::control_response::Body::Resync(_)) | Some(proto::control_response::Body::Error(_)) | None => {}
-                }, None => return Err(AgentError::Protocol("control stream ended".to_owned())) }
+                message = responses.message() => match message.map_err(|status| AgentError::Protocol(status.to_string()))? {
+                    Some(response) => match response.body {
+                        Some(proto::control_response::Body::Register(register)) => {
+                            if register.agent_id != agent_id || register.agent_epoch != epoch {
+                                return Err(AgentError::Protocol("registration identity mismatch".to_owned()));
+                            }
+                            self.ready.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        Some(proto::control_response::Body::Heartbeat(ack)) => {
+                            if ack.desired_state != applied_state {
+                                applied_state = ack.desired_state;
+                                state_ack_pending = true;
+                            }
+                            if state_ack_pending {
+                                tx.send(proto::ControlRequest {
+                                    body: Some(proto::control_request::Body::AgentStateAck(
+                                        proto::AgentStateAck {
+                                            agent_id: agent_id.to_owned(),
+                                            agent_epoch: epoch.clone(),
+                                            applied_state,
+                                            transition_sequence: ack.transition_sequence,
+                                            active_operation_count: 0,
+                                        },
+                                    )),
+                                })
+                                .await
+                                .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+                                state_ack_pending = false;
+                            }
+                        }
+                        Some(proto::control_response::Body::Command(_))
+                        | Some(proto::control_response::Body::DesiredState(_))
+                        | Some(proto::control_response::Body::ObservationAck(_))
+                        | Some(proto::control_response::Body::Resync(_))
+                        | Some(proto::control_response::Body::Error(_))
+                        | None => {}
+                    },
+                    None => return Err(AgentError::Protocol("control stream ended".to_owned())),
+                }
             }
         }
     }
 }
 
+fn install_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 pub fn load_or_create_identity(path: &Path) -> Result<String, AgentError> {
-    if let Ok(value) = fs::read_to_string(path) {
-        let value = value.trim();
-        if !value.is_empty()
-            && value.len() <= MAX_AGENT_ID
-            && !value.chars().any(char::is_whitespace)
-        {
-            return Ok(value.to_owned());
+    match fs::read_to_string(path) {
+        Ok(value) => {
+            let value = value.trim();
+            if !value.is_empty()
+                && value.len() <= MAX_AGENT_ID
+                && !value.chars().any(char::is_whitespace)
+            {
+                return Ok(value.to_owned());
+            }
+            return Err(AgentError::InvalidConfiguration(
+                "identity file contains an invalid identity",
+            ));
         }
-        return Err(AgentError::InvalidConfiguration(
-            "identity file contains an invalid identity",
-        ));
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AgentError::IdentityStore(error)),
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(AgentError::IdentityStore)?;
@@ -935,6 +1119,12 @@ mod tests {
         assert!(!format!("{first:?}").contains("private"));
         fs::remove_file(path)?;
         Ok(())
+    }
+
+    #[test]
+    fn malformed_tls_material_is_rejected_before_transport_start() {
+        assert!(pem_certificates(b"not a certificate").is_err());
+        assert!(pem_private_key(b"not a private key").is_err());
     }
 
     #[test]
