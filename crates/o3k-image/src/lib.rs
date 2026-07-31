@@ -145,6 +145,8 @@ impl ImageCache {
     }
 
     pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
+        let base_dir = self.root.join("base");
+        let base_is_owned = base.parent() == Some(base_dir.as_path());
         let base_is_regular = match fs::symlink_metadata(base) {
             Ok(metadata) => metadata.file_type().is_file(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -156,7 +158,7 @@ impl ImageCache {
                     .file_name()
                     .and_then(|v| v.to_str())
                     .unwrap_or_default()
-            || !base.starts_with(self.root.join("base"))
+            || !base_is_owned
             || !base_is_regular
         {
             return Err(ImageError::InvalidPath);
@@ -624,6 +626,15 @@ mod tests {
         ));
         fs::remove_file(&symlinked_base)?;
 
+        let sibling_base_dir = path.with_file_name("base-evil");
+        fs::create_dir(&sibling_base_dir)?;
+        let sibling_base = sibling_base_dir.join("sibling.qcow2");
+        fs::write(&sibling_base, content)?;
+        assert!(matches!(
+            cache.create_overlay("sibling", &sibling_base),
+            Err(ImageError::InvalidPath)
+        ));
+
         let escaped_overlay = path.join("overlays").join("instance.qcow2");
         symlink(&outside, &escaped_overlay)?;
         assert!(matches!(
@@ -640,6 +651,7 @@ mod tests {
         ));
 
         fs::remove_dir_all(path)?;
+        fs::remove_dir_all(sibling_base_dir)?;
         fs::remove_file(outside)?;
         Ok(())
     }
