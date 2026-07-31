@@ -129,18 +129,39 @@ impl ImageCache {
         {
             return Err(ImageError::InvalidPath);
         }
+        let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
         let overlay = self
             .root
             .join("overlays")
             .join(format!("{instance_id}.qcow2"));
+        if overlay.exists() {
+            return Ok(overlay);
+        }
+        let temporary = self
+            .root
+            .join("overlays")
+            .join(format!(".{instance_id}.tmp-{}", std::process::id()));
+        let _ = fs::remove_file(&temporary);
         let status = std::process::Command::new("qemu-img")
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
-            .arg(&overlay)
+            .arg(&temporary)
             .status()
-            .map_err(|_| ImageError::OverlayFailed)?;
+            .map_err(|_| {
+                let _ = fs::remove_file(&temporary);
+                ImageError::OverlayFailed
+            })?;
         if !status.success() {
+            let _ = fs::remove_file(&temporary);
             return Err(ImageError::OverlayFailed);
+        }
+        if overlay.exists() {
+            let _ = fs::remove_file(&temporary);
+            return Ok(overlay);
+        }
+        if let Err(error) = fs::rename(&temporary, &overlay) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ImageError::Storage(error));
         }
         Ok(overlay)
     }
@@ -388,6 +409,13 @@ mod tests {
             cache.create_overlay("../escape", &first),
             Err(ImageError::InvalidPath)
         ));
+        let base = path.join("base").join("test.qcow2");
+        fs::write(&base, b"not-a-real-qcow2")?;
+        let temporary = path
+            .join("overlays")
+            .join(format!(".test-instance.tmp-{}", std::process::id()));
+        let _ = cache.create_overlay("test-instance", &base);
+        assert!(!temporary.exists());
         fs::remove_dir_all(path)?;
         Ok(())
     }
