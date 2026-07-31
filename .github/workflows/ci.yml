@@ -13,6 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.85.0
@@ -26,6 +28,19 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Validate compute-agent protobuf draft
+        run: |
+          protoc --proto_path=proto \
+            --descriptor_set_out=/tmp/o3k-compute-agent-v1.pb \
+            proto/compute/v1/compute_agent.proto
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.50.0
+      - name: Fetch protobuf compatibility baseline
+        run: git fetch origin main:refs/heads/main
+      - name: Check protobuf compatibility
+        run: buf breaking --against '.git#branch=main,subdir=proto'
       - name: TestLab fake-provider workflow
         run: bash tests/testlab.sh
       - name: Generate candidate SBOM

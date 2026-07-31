@@ -1,9 +1,10 @@
 # Contract Governance
 
-O3K has two public contract families:
+O3K has three public contract families:
 
 1. OpenStack-facing HTTP contracts under `contracts/openapi/`;
-2. provider contracts under `proto/provider/`.
+2. provider contracts under `proto/provider/`;
+3. the compute-host boundary draft under `proto/compute/`.
 
 ## HTTP contracts
 
@@ -30,12 +31,18 @@ committed files under `proto/provider/` during every clean build. Generated
 code is build output and is not hand-edited or committed. The Rust-native
 `o3k-provider` types remain independent; `mapping` is the explicit transport
 boundary. CI must run `cargo fmt --all -- --check`, protobuf generation through
-`cargo test --workspace`, and a breaking-change checker such as `buf breaking`
-when the buf tool is available.
+`cargo test --workspace`, descriptor validation, and `buf breaking` against the
+default branch. The initial compute-agent package is additive relative to the
+existing provider package, so the first comparison establishes the baseline;
+future incompatible changes require a new package version.
 
-Contract versioning is package-based (`o3k.provider.v1`). Additive fields are
-compatible; removed fields must be reserved and field numbers are never
-reused. A behavior or wire incompatibility requires a new package version.
+Contract versioning is package-based (`o3k.provider.v1` and
+`o3k.compute.v1`). Additive fields are compatible; removed fields must be
+reserved and field numbers are never reused. A behavior or wire incompatibility
+requires a new package version. The compute-agent draft is specified in
+[`SPEC-0015`](../specs/SPEC-0015-compute-agent.md) and its boundary decision in
+[`ADR-0006`](../adr/ADR-0006-compute-agent-boundary.md); it is not generated
+into the runtime workspace until the agent implementation issue is approved.
 
 ## Error model
 
