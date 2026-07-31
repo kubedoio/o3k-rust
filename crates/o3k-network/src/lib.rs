@@ -16,9 +16,38 @@ pub struct HostNetworkConfig {
     pub uplink: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NetworkCommandOutput {
+    success: bool,
+    stdout: String,
+}
+
+trait NetworkCommand: Send + Sync {
+    fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput>;
+    fn status(&self, args: &[&str]) -> io::Result<bool>;
+}
+
+struct SystemNetworkCommand;
+
+impl NetworkCommand for SystemNetworkCommand {
+    fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput> {
+        let output = Command::new("ip").args(args).output()?;
+        Ok(NetworkCommandOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        })
+    }
+
+    fn status(&self, args: &[&str]) -> io::Result<bool> {
+        Ok(Command::new("ip").args(args).status()?.success())
+    }
+}
+
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod host_network_tests {
     use super::*;
+    use std::collections::VecDeque;
 
     #[test]
     fn validates_names_and_generates_stable_interface_identity() -> Result<(), HostNetworkError> {
@@ -96,6 +125,183 @@ mod host_network_tests {
             "3: o3k-br0: <BROADCAST,UP> mtu 1500 state UP\n\tbridge-helper foreign-name"
         ));
     }
+
+    #[test]
+    fn bridge_creation_failure_removes_only_the_new_bridge() {
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::status(false),
+            Response::status(true),
+        ]);
+        let manager = test_manager(command.clone(), Some("eth0"));
+
+        assert!(matches!(
+            manager.ensure_bridge(),
+            Err(HostNetworkError::CommandFailed)
+        ));
+        assert_eq!(
+            command.calls(),
+            vec![
+                vec!["link", "show", "dev", "o3k-br0"],
+                vec!["link", "add", "name", "o3k-br0", "type", "bridge"],
+                vec!["link", "set", "dev", "o3k-br0", "up"],
+                vec!["link", "set", "dev", "eth0", "master", "o3k-br0"],
+                vec!["link", "del", "dev", "o3k-br0"],
+            ]
+        );
+    }
+
+    #[test]
+    fn tap_setup_failure_removes_new_tap_and_bridge() {
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(false),
+            Response::status(true),
+            Response::status(true),
+        ]);
+        let manager = test_manager(command.clone(), None);
+        let spec = TapSpec {
+            instance_id: "instance-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+
+        assert!(matches!(
+            manager.create_tap(&spec),
+            Err(HostNetworkError::CommandFailed)
+        ));
+        let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
+        assert_eq!(
+            command.calls(),
+            vec![
+                vec!["link", "show", "dev", "o3k-br0"],
+                vec!["link", "add", "name", "o3k-br0", "type", "bridge"],
+                vec!["link", "set", "dev", "o3k-br0", "up"],
+                vec!["link", "show", "dev", &tap],
+                vec!["tuntap", "add", "dev", &tap, "mode", "tap"],
+                vec!["link", "set", "dev", &tap, "address", "02:00:00:00:00:01"],
+                vec!["link", "del", "dev", &tap],
+                vec!["link", "del", "dev", "o3k-br0"],
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_existing_tap_is_never_deleted() {
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "3: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "3: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true),
+            Response::output(true, "2: o3ktap-abcd: <BROADCAST>"),
+            Response::output(
+                true,
+                "2: o3ktap-abcd: <BROADCAST> master o3k-br0 link/ether 02:00:00:00:00:02",
+            ),
+        ]);
+        let manager = test_manager(command.clone(), None);
+        let spec = TapSpec {
+            instance_id: "instance-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+
+        assert!(matches!(
+            manager.create_tap(&spec),
+            Err(HostNetworkError::ForeignInterface)
+        ));
+        assert!(
+            !command
+                .calls()
+                .iter()
+                .any(|args| args == &["link", "del", "dev", "o3ktap-abcd"])
+        );
+    }
+
+    #[derive(Clone)]
+    struct FakeNetworkCommand {
+        responses: Arc<Mutex<VecDeque<Response>>>,
+        calls: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    #[derive(Clone)]
+    enum Response {
+        Output(bool, String),
+        Status(bool),
+    }
+
+    impl Response {
+        fn output(success: bool, stdout: &str) -> Self {
+            Self::Output(success, stdout.to_owned())
+        }
+
+        fn status(success: bool) -> Self {
+            Self::Status(success)
+        }
+    }
+
+    impl FakeNetworkCommand {
+        fn new(responses: impl IntoIterator<Item = Response>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn next(&self, args: &[&str]) -> Response {
+            self.calls
+                .lock()
+                .expect("test calls mutex")
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            self.responses
+                .lock()
+                .expect("test responses mutex")
+                .pop_front()
+                .expect("test response for every command")
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().expect("test calls mutex").clone()
+        }
+    }
+
+    impl NetworkCommand for FakeNetworkCommand {
+        fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput> {
+            match self.next(args) {
+                Response::Output(success, stdout) => Ok(NetworkCommandOutput { success, stdout }),
+                Response::Status(_) => panic!("test output response expected"),
+            }
+        }
+
+        fn status(&self, args: &[&str]) -> io::Result<bool> {
+            match self.next(args) {
+                Response::Status(success) => Ok(success),
+                Response::Output(_, _) => panic!("test status response expected"),
+            }
+        }
+    }
+
+    fn test_manager(command: FakeNetworkCommand, uplink: Option<&str>) -> HostNetworkManager {
+        HostNetworkManager::with_command(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: uplink.map(str::to_owned),
+            },
+            Arc::new(command),
+        )
+        .expect("valid test network configuration")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,6 +323,8 @@ pub enum HostNetworkError {
     InvalidMac,
     #[error("existing TAP interface is not owned by the requested O3K network")]
     ForeignInterface,
+    #[error("host network rollback failed after an operation error")]
+    RollbackFailed,
 }
 
 impl HostNetworkConfig {
@@ -131,12 +339,25 @@ impl HostNetworkConfig {
 
 pub struct HostNetworkManager {
     config: HostNetworkConfig,
+    command: Arc<dyn NetworkCommand>,
 }
 
 impl HostNetworkManager {
     pub fn new(config: HostNetworkConfig) -> Result<Self, HostNetworkError> {
         config.validate()?;
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            command: Arc::new(SystemNetworkCommand),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_command(
+        config: HostNetworkConfig,
+        command: Arc<dyn NetworkCommand>,
+    ) -> Result<Self, HostNetworkError> {
+        config.validate()?;
+        Ok(Self { config, command })
     }
     pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
         if port_id.trim().is_empty() {
@@ -163,35 +384,29 @@ impl HostNetworkManager {
         ))
     }
     pub fn ensure_bridge(&self) -> Result<(), HostNetworkError> {
-        if link_exists(&self.config.bridge_name) {
-            let output = Command::new("ip")
-                .args(["-d", "link", "show", "dev", &self.config.bridge_name])
-                .output()
-                .map_err(|_| HostNetworkError::CommandFailed)?;
-            if !output.status.success()
-                || !interface_output_is_bridge(&String::from_utf8_lossy(&output.stdout))
-            {
+        self.ensure_bridge_with_ownership().map(|_| ())
+    }
+
+    fn ensure_bridge_with_ownership(&self) -> Result<bool, HostNetworkError> {
+        if self.link_exists(&self.config.bridge_name) {
+            let output =
+                self.command_output(["-d", "link", "show", "dev", &self.config.bridge_name])?;
+            if !output.success || !interface_output_is_bridge(&output.stdout) {
                 return Err(HostNetworkError::ForeignInterface);
             }
-            run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
+            self.run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
             if let Some(uplink) = &self.config.uplink {
-                let output = Command::new("ip")
-                    .args(["-o", "link", "show", "dev", uplink])
-                    .output()
-                    .map_err(|_| HostNetworkError::CommandFailed)?;
-                if !output.status.success() {
+                let output = self.command_output(["-o", "link", "show", "dev", uplink])?;
+                if !output.success {
                     return Err(HostNetworkError::CommandFailed);
                 }
-                if !interface_is_attached_to(
-                    &String::from_utf8_lossy(&output.stdout),
-                    &self.config.bridge_name,
-                ) {
+                if !interface_is_attached_to(&output.stdout, &self.config.bridge_name) {
                     return Err(HostNetworkError::ForeignInterface);
                 }
             }
-            return Ok(());
+            return Ok(false);
         }
-        run_ip([
+        self.run_ip([
             "link",
             "add",
             "name",
@@ -199,32 +414,52 @@ impl HostNetworkManager {
             "type",
             "bridge",
         ])?;
-        run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
-        if let Some(uplink) = &self.config.uplink {
-            run_ip([
-                "link",
-                "set",
-                "dev",
-                uplink,
-                "master",
-                &self.config.bridge_name,
-            ])?;
+        let setup = (|| {
+            self.run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
+            if let Some(uplink) = &self.config.uplink {
+                self.run_ip([
+                    "link",
+                    "set",
+                    "dev",
+                    uplink,
+                    "master",
+                    &self.config.bridge_name,
+                ])?;
+            }
+            Ok::<(), HostNetworkError>(())
+        })();
+        if let Err(error) = setup {
+            return Err(self.rollback_bridge(error));
         }
-        Ok(())
+        Ok(true)
     }
+
     pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
         validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
         validate_mac(&spec.mac)?;
-        self.ensure_bridge()?;
+        let bridge_created = self.ensure_bridge_with_ownership()?;
         let name = Self::tap_name(&spec.port_id)?;
-        if link_exists(&name) {
-            if !interface_is_owned(&name, &spec.mac, &self.config.bridge_name)? {
+        if self.link_exists(&name) {
+            if !interface_is_owned_with(&*self.command, &name, &spec.mac, &self.config.bridge_name)?
+            {
+                if bridge_created {
+                    return Err(self.rollback_bridge(HostNetworkError::ForeignInterface));
+                }
                 return Err(HostNetworkError::ForeignInterface);
             }
-        } else {
-            run_ip(["tuntap", "add", "dev", &name, "mode", "tap"])?;
-            run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
-            run_ip([
+            return Ok(name);
+        }
+        let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
+        if let Err(error) = created_tap {
+            return Err(if bridge_created {
+                self.rollback_bridge(error)
+            } else {
+                error
+            });
+        }
+        let setup = (|| {
+            self.run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
+            self.run_ip([
                 "link",
                 "set",
                 "dev",
@@ -232,8 +467,11 @@ impl HostNetworkManager {
                 "master",
                 &self.config.bridge_name,
             ])?;
-            run_ip(["link", "set", "dev", &name, "up"])?;
-            return Ok(name);
+            self.run_ip(["link", "set", "dev", &name, "up"])?;
+            Ok::<(), HostNetworkError>(())
+        })();
+        if let Err(error) = setup {
+            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
         Ok(name)
     }
@@ -242,23 +480,22 @@ impl HostNetworkManager {
         validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
         validate_mac(&spec.mac)?;
         let name = Self::tap_name(&spec.port_id)?;
-        if link_exists(&name) {
-            if !interface_is_owned(&name, &spec.mac, &self.config.bridge_name)? {
+        if self.link_exists(&name) {
+            if !interface_is_owned_with(&*self.command, &name, &spec.mac, &self.config.bridge_name)?
+            {
                 return Err(HostNetworkError::ForeignInterface);
             }
-            run_ip(["link", "del", "dev", &name])?;
+            self.run_ip(["link", "del", "dev", &name])?;
         }
         Ok(())
     }
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
-        let output = Command::new("ip")
-            .args(["-o", "link", "show"])
-            .output()
-            .map_err(|_| HostNetworkError::CommandFailed)?;
-        if !output.status.success() {
+        let output = self.command_output(["-o", "link", "show"])?;
+        if !output.success {
             return Err(HostNetworkError::CommandFailed);
         }
-        Ok(String::from_utf8_lossy(&output.stdout)
+        Ok(output
+            .stdout
             .lines()
             .filter_map(|line| {
                 line.split_once(": ")
@@ -266,6 +503,60 @@ impl HostNetworkManager {
             })
             .filter(|name| name.starts_with("o3ktap-"))
             .collect())
+    }
+
+    fn link_exists(&self, name: &str) -> bool {
+        self.command
+            .output(["link", "show", "dev", name].as_slice())
+            .map(|output| output.success)
+            .unwrap_or(false)
+    }
+
+    fn command_output<'a, I>(&self, args: I) -> Result<NetworkCommandOutput, HostNetworkError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let args = args.into_iter().collect::<Vec<_>>();
+        self.command
+            .output(&args)
+            .map_err(|_| HostNetworkError::CommandFailed)
+    }
+
+    fn run_ip<'a, I>(&self, args: I) -> Result<(), HostNetworkError>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let args = args.into_iter().collect::<Vec<_>>();
+        match self.command.status(&args) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(HostNetworkError::CommandFailed),
+        }
+    }
+
+    fn rollback_bridge(&self, original: HostNetworkError) -> HostNetworkError {
+        if self
+            .run_ip(["link", "del", "dev", &self.config.bridge_name])
+            .is_ok()
+        {
+            original
+        } else {
+            HostNetworkError::RollbackFailed
+        }
+    }
+
+    fn rollback_tap_and_bridge(
+        &self,
+        tap_name: &str,
+        bridge_created: bool,
+        original: HostNetworkError,
+    ) -> HostNetworkError {
+        if self.run_ip(["link", "del", "dev", tap_name]).is_err() {
+            return HostNetworkError::RollbackFailed;
+        }
+        if bridge_created {
+            return self.rollback_bridge(original);
+        }
+        original
     }
 }
 
@@ -291,28 +582,23 @@ fn validate_mac(mac: &str) -> Result<(), HostNetworkError> {
     }
     Ok(())
 }
-fn link_exists(name: &str) -> bool {
-    Command::new("ip")
-        .args(["link", "show", "dev", name])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn interface_is_owned(
+fn interface_is_owned_with(
+    command: &dyn NetworkCommand,
     name: &str,
     expected_mac: &str,
     bridge_name: &str,
 ) -> Result<bool, HostNetworkError> {
-    let output = Command::new("ip")
-        .args(["-o", "link", "show", "dev", name])
-        .output()
+    let output = command
+        .output(["-o", "link", "show", "dev", name].as_slice())
         .map_err(|_| HostNetworkError::CommandFailed)?;
-    if !output.status.success() {
+    if !output.success {
         return Err(HostNetworkError::CommandFailed);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(interface_output_is_owned(&text, expected_mac, bridge_name))
+    Ok(interface_output_is_owned(
+        &output.stdout,
+        expected_mac,
+        bridge_name,
+    ))
 }
 
 fn interface_output_is_owned(output: &str, expected_mac: &str, bridge_name: &str) -> bool {
@@ -330,21 +616,6 @@ fn interface_output_is_bridge(output: &str) -> bool {
     output
         .lines()
         .any(|line| line.trim_start().starts_with("bridge "))
-}
-
-fn run_ip<'a, I>(args: I) -> Result<(), HostNetworkError>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let status = Command::new("ip")
-        .args(args)
-        .status()
-        .map_err(|_| HostNetworkError::CommandFailed)?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(HostNetworkError::CommandFailed)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

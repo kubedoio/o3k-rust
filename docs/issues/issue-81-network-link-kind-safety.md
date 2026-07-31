@@ -11,9 +11,17 @@ read-only `ip -d link show` inspection identifies it as a Linux bridge. This
 prevents bringing up or otherwise reusing a foreign non-bridge link that merely
 has the configured bridge name.
 
+The manager now also tracks resources created by the current setup operation.
+If a later bridge or TAP command fails, it rolls back the newly created TAP and
+then bridge, while never deleting pre-existing foreign resources. A distinct
+rollback error is returned if cleanup fails.
+
 ## Evidence
 
 - `o3k-network` unit tests cover bridge-kind and non-bridge output parsing.
+- deterministic command-injection tests cover uplink failure, TAP setup
+  failure, exact reverse-order cleanup, and foreign TAP preservation;
+  `ADR-0106` records the rollback decision.
 - No privileged host networking, libvirt attachment, dnsmasq process, guest
   boot, or real-host acceptance is claimed.
 
