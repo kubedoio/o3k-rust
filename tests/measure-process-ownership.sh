@@ -61,6 +61,7 @@ summary = json.loads(summary_path.read_text(encoding="utf-8"))
 raw = json.loads((summary_path.parent / "raw.json").read_text(encoding="utf-8"))
 assert summary["status"] == "measured"
 assert raw["profile"] == "fake"
+assert isinstance(raw["finished_at"], int) and raw["finished_at"] == summary["finished_at"]
 assert raw["release_eligible"] is False
 assert raw["release_exclusion_reason"] == "fake profile does not provide libvirt guest measurements"
 assert summary["release_eligible"] is False

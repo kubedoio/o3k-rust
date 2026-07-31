@@ -80,6 +80,39 @@ path.write_text(json.dumps(value), encoding="utf-8")
 PY
 }
 
+set_benchmark_raw_finished_at() {
+    python3 - "${ARTIFACT_DIR}/benchmark-raw.json" "${ARTIFACT_DIR}/benchmark.json" "$1" <<'PY'
+import hashlib, json, pathlib, sys
+
+raw_path = pathlib.Path(sys.argv[1])
+summary_path = pathlib.Path(sys.argv[2])
+raw = json.loads(raw_path.read_text(encoding="utf-8"))
+raw["finished_at"] = int(sys.argv[3])
+raw_path.write_text(json.dumps(raw), encoding="utf-8")
+canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+summary["finished_at"] = int(sys.argv[3])
+summary["raw_sha256"] = hashlib.sha256(canonical).hexdigest()
+summary_path.write_text(json.dumps(summary), encoding="utf-8")
+PY
+}
+
+set_benchmark_raw_timestamp_only() {
+    python3 - "${ARTIFACT_DIR}/benchmark-raw.json" "${ARTIFACT_DIR}/benchmark.json" "$1" <<'PY'
+import hashlib, json, pathlib, sys
+
+raw_path = pathlib.Path(sys.argv[1])
+summary_path = pathlib.Path(sys.argv[2])
+raw = json.loads(raw_path.read_text(encoding="utf-8"))
+raw["finished_at"] = int(sys.argv[3])
+raw_path.write_text(json.dumps(raw), encoding="utf-8")
+canonical = json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+summary["raw_sha256"] = hashlib.sha256(canonical).hexdigest()
+summary_path.write_text(json.dumps(summary), encoding="utf-8")
+PY
+}
+
 set_e2e_finished_at "$(python3 - <<'PY'
 import time
 print(int(time.time()) - 3_601)
@@ -91,6 +124,45 @@ if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release
     exit 1
 fi
 grep -q 'older than the configured maximum age' "${ARTIFACT_DIR}/stale-release.json"
+
+set_e2e_finished_at "$(python3 - <<'PY'
+import time
+print(int(time.time()))
+PY
+)"
+
+set_benchmark_raw_timestamp_only "$(python3 - <<'PY'
+import time
+print(int(time.time()) - 3_601)
+PY
+)"
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/stale-raw-release.json"; then
+    echo "release gate accepted stale raw benchmark evidence" >&2
+    exit 1
+fi
+grep -q 'benchmark_raw: finished_at is older than the configured maximum age' "${ARTIFACT_DIR}/stale-raw-release.json"
+set_benchmark_raw_finished_at "$(python3 - <<'PY'
+import time
+print(int(time.time()))
+PY
+)"
+set_benchmark_raw_timestamp_only "$(python3 - <<'PY'
+import time
+print(int(time.time()) - 1)
+PY
+)"
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/mismatched-benchmark-timestamps.json"; then
+    echo "release gate accepted mismatched benchmark timestamps" >&2
+    exit 1
+fi
+grep -q 'benchmark: finished_at must match benchmark_raw.finished_at' "${ARTIFACT_DIR}/mismatched-benchmark-timestamps.json"
+set_benchmark_raw_finished_at "$(python3 - <<'PY'
+import time
+print(int(time.time()))
+PY
+)"
 
 set_e2e_finished_at -1
 if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \

@@ -172,6 +172,18 @@ if isinstance(benchmark_raw, dict):
         errors.append("benchmark_raw: profile must be 'libvirt'")
     if benchmark_raw.get("redacted") is not True:
         errors.append("benchmark_raw: redacted must be true")
+    raw_finished_at = benchmark_raw.get("finished_at")
+    if isinstance(raw_finished_at, bool) or not isinstance(raw_finished_at, int):
+        errors.append("benchmark_raw: finished_at must be an integer epoch timestamp")
+    elif raw_finished_at <= 0:
+        errors.append("benchmark_raw: finished_at must be positive")
+    elif raw_finished_at > now:
+        errors.append("benchmark_raw: finished_at cannot be in the future")
+    elif now - raw_finished_at > max_age_seconds:
+        errors.append(
+            "benchmark_raw: finished_at is older than the configured maximum age "
+            f"({max_age_seconds} seconds)"
+        )
     environment = benchmark_raw.get("environment")
     if not isinstance(environment, dict):
         errors.append("benchmark_raw: environment must be an object")
@@ -207,7 +219,7 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
         expected_sha256 = hashlib.sha256(canonical_raw).hexdigest()
         if raw_sha256 != expected_sha256:
             errors.append("benchmark: raw_sha256 does not match benchmark_raw")
-    for field in ("samples", "control_plane", "guest_and_libvirt"):
+    for field in ("samples", "finished_at", "control_plane", "guest_and_libvirt"):
         if benchmark_summary.get(field) != benchmark_raw.get(field):
             errors.append(f"benchmark: {field} must match benchmark_raw.{field}")
 

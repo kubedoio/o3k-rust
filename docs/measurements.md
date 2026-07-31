@@ -7,7 +7,8 @@ count and artifact directory:
       O3K_MEASURE_ARTIFACT_DIR=target/measurements \
       bash tests/measure-testlab.sh
 
-raw.json includes environment metadata, binary size, startup/readiness,
+raw.json includes environment metadata, a measurement completion timestamp,
+binary size, startup/readiness,
 token samples/p95, and idle RSS. summary.json evaluates the initial targets
 without hiding failures and carries `raw_sha256`, a SHA-256 digest of the
 canonical raw JSON. The digest is calculated after `raw.json` is written,
