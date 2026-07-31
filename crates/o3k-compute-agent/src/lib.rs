@@ -1349,6 +1349,9 @@ pub struct AgentClient {
 pub struct CommandExecutionResult {
     pub state: i32,
     pub error_category: i32,
+    /// Provider resource state observed after the command completed.
+    /// `UNSPECIFIED` is intentionally invalid for a state-bearing observation.
+    pub resource_state: i32,
     pub redacted_message: String,
     pub provider_resource_id: String,
     pub console_log: Option<ConsoleLogResult>,
@@ -1457,7 +1460,10 @@ impl CommandExecutor for FakeCommandExecutor {
                             "fake create idempotency conflict".to_owned(),
                         ));
                     }
-                    return Ok(fake_success(provider_resource_id));
+                    return Ok(fake_success(
+                        provider_resource_id,
+                        proto::ResourceState::Running as i32,
+                    ));
                 }
                 let mut artifacts = Vec::new();
                 artifacts.push(format!("image:{}", create.image_id));
@@ -1489,14 +1495,20 @@ impl CommandExecutor for FakeCommandExecutor {
                         console_log: b"fake boot output\n".to_vec(),
                     },
                 );
-                Ok(fake_success(provider_resource_id))
+                Ok(fake_success(
+                    provider_resource_id,
+                    proto::ResourceState::Running as i32,
+                ))
             }
             Some(proto::command::Action::Delete(_)) => {
                 self.resources
                     .lock()
                     .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?
                     .remove(&resource_key);
-                Ok(fake_success(provider_resource_id))
+                Ok(fake_success(
+                    provider_resource_id,
+                    proto::ResourceState::Deleted as i32,
+                ))
             }
             Some(proto::command::Action::Inspect(_))
             | Some(proto::command::Action::Start(_))
@@ -1518,7 +1530,12 @@ impl CommandExecutor for FakeCommandExecutor {
                 ) {
                     resource.active = false;
                 }
-                let mut result = fake_success(provider_resource_id);
+                let resource_state = if resource.active {
+                    proto::ResourceState::Running as i32
+                } else {
+                    proto::ResourceState::Stopped as i32
+                };
+                let mut result = fake_success(provider_resource_id, resource_state);
                 if matches!(
                     command.action.as_ref(),
                     Some(proto::command::Action::Inspect(_))
@@ -1550,6 +1567,11 @@ impl CommandExecutor for FakeCommandExecutor {
                 Ok(CommandExecutionResult {
                     state: proto::OperationState::Succeeded as i32,
                     error_category: proto::ErrorCategory::Unspecified as i32,
+                    resource_state: if resource.active {
+                        proto::ResourceState::Running as i32
+                    } else {
+                        proto::ResourceState::Stopped as i32
+                    },
                     redacted_message: "fake console output read".to_owned(),
                     provider_resource_id,
                     console_log: Some(ConsoleLogResult {
@@ -1573,10 +1595,11 @@ fn stable_fake_resource_id(resource_id: &str) -> String {
     .to_string()
 }
 
-fn fake_success(provider_resource_id: String) -> CommandExecutionResult {
+fn fake_success(provider_resource_id: String, resource_state: i32) -> CommandExecutionResult {
     CommandExecutionResult {
         state: proto::OperationState::Succeeded as i32,
         error_category: proto::ErrorCategory::Unspecified as i32,
+        resource_state,
         redacted_message: "fake operation succeeded".to_owned(),
         provider_resource_id,
         console_log: None,
@@ -1598,6 +1621,7 @@ fn observation_from_result(
         provider_resource_id: result.provider_resource_id.clone(),
         operation_id: command.operation_id.clone(),
         operation_state: result.state,
+        state: result.resource_state,
         observation_sequence,
         observed_at_unix_ms: unix_ms(),
         redacted_message: result.redacted_message.clone(),
@@ -1605,7 +1629,6 @@ fn observation_from_result(
         console_log_offset: console_log.map_or(0, |value| value.offset),
         console_log_complete: console_log.is_some_and(|value| value.complete),
         console_log_truncated: console_log.is_some_and(|value| value.truncated),
-        ..Default::default()
     }
 }
 
@@ -2345,6 +2368,10 @@ mod tests {
             lifecycle_observation.operation_state,
             proto::OperationState::Succeeded as i32
         );
+        assert_eq!(
+            lifecycle_observation.state,
+            proto::ResourceState::Running as i32
+        );
         assert!(lifecycle_observation.console_log_bytes.is_empty());
         assert_eq!(lifecycle_observation.console_log_offset, 0);
         assert!(!lifecycle_observation.console_log_complete);
@@ -2361,6 +2388,10 @@ mod tests {
         let console_result = executor.execute(&console).await?;
         let console_observation =
             observation_from_result("node", "epoch", &console, &console_result, 8);
+        assert_eq!(
+            console_observation.state,
+            proto::ResourceState::Running as i32
+        );
         assert_eq!(console_observation.console_log_bytes, b"boot");
         assert_eq!(console_observation.console_log_offset, 5);
         assert!(!console_observation.console_log_complete);

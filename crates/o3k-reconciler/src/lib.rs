@@ -275,6 +275,72 @@ where
         Ok(durable_state)
     }
 
+    /// Applies the provider state carried by an authenticated agent
+    /// observation. Operation updates describe command progress; observations
+    /// are the only live input that may change the durable resource state.
+    /// Unspecified or non-successful observations are rejected so an incomplete
+    /// message cannot make Nova project a healthy state.
+    pub async fn apply_agent_observation(
+        &self,
+        observation: &agent_proto::Observation,
+    ) -> Result<(), ReconcileError> {
+        let operation_id = Uuid::parse_str(&observation.operation_id)
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let resource_id =
+            Uuid::parse_str(&observation.resource_id).map_err(|_| ReconcileError::InvalidIntent)?;
+        let operation = self.store.get_operation(operation_id).await?;
+        if operation.resource_id != resource_id {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let operation_state = agent_proto::OperationState::try_from(observation.operation_state)
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        if operation_state != agent_proto::OperationState::Succeeded {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let observed_state = agent_resource_state(observation.state)?;
+        let resource = self.store.get_resource(resource_id).await?;
+        let provider_id = (!observation.provider_resource_id.is_empty())
+            .then_some(observation.provider_resource_id.as_str())
+            .or(resource.provider_id.as_deref());
+        if resource.observed_state == observed_state
+            && resource.provider_id.as_deref() == provider_id
+        {
+            return Ok(());
+        }
+        if let Some(provider_resource_id) = provider_id {
+            match self
+                .store
+                .get_provider_reference(resource_id, "compute-agent")
+                .await
+            {
+                Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
+                Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
+                Err(StoreError::ProviderReferenceNotFound) => {
+                    self.store
+                        .attach_provider_reference(&ProviderReference {
+                            resource_id,
+                            provider_name: "compute-agent".to_owned(),
+                            provider_resource_id: provider_resource_id.to_owned(),
+                        })
+                        .await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        self.store
+            .update_resource(
+                resource_id,
+                resource.generation,
+                &resource.desired_state,
+                observed_state,
+                resource.generation,
+                provider_id,
+            )
+            .await?;
+        self.event(operation_id, resource_id, JournalEventKind::UnknownObserved);
+        Ok(())
+    }
+
     pub async fn reconcile_lifecycle_once(
         &self,
         operation_id: Uuid,
@@ -821,6 +887,18 @@ fn agent_error_category(value: i32) -> Result<&'static str, ReconcileError> {
     }
 }
 
+fn agent_resource_state(value: i32) -> Result<&'static str, ReconcileError> {
+    match agent_proto::ResourceState::try_from(value).map_err(|_| ReconcileError::InvalidIntent)? {
+        agent_proto::ResourceState::Creating => Ok("BUILD"),
+        agent_proto::ResourceState::Running => Ok("ACTIVE"),
+        agent_proto::ResourceState::Stopped => Ok("SHUTOFF"),
+        agent_proto::ResourceState::Deleting => Ok("DELETING"),
+        agent_proto::ResourceState::Deleted => Ok("DELETED"),
+        agent_proto::ResourceState::Error => Ok("ERROR"),
+        agent_proto::ResourceState::Unspecified => Err(ReconcileError::InvalidIntent),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -923,6 +1001,49 @@ mod tests {
                 .provider_resource_id,
             "agent-domain-1"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_observation_projects_nova_state_and_replays_without_mutation()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-observation", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let observation = o3k_provider_contract::compute_proto::Observation {
+            resource_id: request.o3k_server_id.to_string(),
+            provider_resource_id: "agent-domain-stopped".to_owned(),
+            operation_id: operation_id.to_string(),
+            operation_state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            state: o3k_provider_contract::compute_proto::ResourceState::Stopped as i32,
+            ..Default::default()
+        };
+        journal.apply_agent_observation(&observation).await?;
+        let first = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(first.observed_state, "SHUTOFF");
+        assert_eq!(first.provider_id.as_deref(), Some("agent-domain-stopped"));
+        journal.apply_agent_observation(&observation).await?;
+        let replay = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(replay.generation, first.generation);
+        assert_eq!(replay.observed_state, "SHUTOFF");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_observation_rejects_unspecified_resource_state() -> Result<(), ReconcileError> {
+        let (journal, _, _) = journal("agent-observation-invalid", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let observation = o3k_provider_contract::compute_proto::Observation {
+            resource_id: request.o3k_server_id.to_string(),
+            operation_id: operation_id.to_string(),
+            operation_state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            ..Default::default()
+        };
+        assert!(matches!(
+            journal.apply_agent_observation(&observation).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
         Ok(())
     }
 
