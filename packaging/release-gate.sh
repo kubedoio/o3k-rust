@@ -175,6 +175,21 @@ for name, (path, artifact_type) in required.items():
     elif status != "passed":
         errors.append(f"{name}: status must be passed, got {status!r}")
     if name == "real_libvirt_e2e":
+        cleanup_resources = cleanup.get("resources") if isinstance(cleanup, dict) else None
+        expected_cleanup_resources = {
+            "image_id": "image",
+            "network_id": "network",
+            "subnet_id": "subnet",
+            "flavor_id": "flavor",
+            "server_id": "server",
+        }
+        created_resources = value.get("resources")
+        if not isinstance(created_resources, dict) or set(created_resources) != set(expected_cleanup_resources):
+            errors.append(f"{name}: resources must identify image/network/subnet/flavor/server")
+        elif not isinstance(cleanup_resources, dict) or set(cleanup_resources) != set(expected_cleanup_resources.values()):
+            errors.append(f"{name}: cleanup.resources must identify every created resource")
+        elif any(cleanup_resources[resource] != "verified_absent" for resource in expected_cleanup_resources.values()):
+            errors.append(f"{name}: cleanup.resources must prove every resource absent")
         lifecycle = value.get("lifecycle")
         expected = {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
         if not isinstance(lifecycle, dict) or set(lifecycle) != expected or not all(lifecycle.values()):

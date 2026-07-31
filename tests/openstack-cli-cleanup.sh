@@ -120,6 +120,8 @@ result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
 assert result["resources"]["server_id"] == "server-id"
+assert set(result["cleanup"]["resources"]) == {"image", "network", "subnet", "flavor", "server"}
+assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
 PY
 grep -Fq "server list --name o3k-testlab-server -f json" "${O3K_MOCK_LOG}"
 grep -Fq "image create o3k-testlab-image --file" "${O3K_MOCK_LOG}"
@@ -148,6 +150,7 @@ import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == "failed"
+assert result["cleanup"]["resources"]["flavor"] == "not_verified"
 PY
 
 echo "OpenStack CLI cleanup test passed"
