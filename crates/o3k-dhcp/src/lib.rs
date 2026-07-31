@@ -169,7 +169,7 @@ impl DhcpService {
     pub fn configure(&mut self, config: DhcpConfig) -> Result<(), DhcpError> {
         validate_config(&config)?;
         for binding in self.state.bindings.values() {
-            if !valid_host(&config.subnet, binding.address) {
+            if !valid_host(&config.subnet, binding.address) || binding.address == config.gateway {
                 return Err(DhcpError::InvalidConfig);
             }
         }
@@ -363,6 +363,29 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_reconfiguration_rejects_existing_binding() -> Result<(), DhcpError> {
+        let root = std::env::temp_dir().join(format!("o3k-dhcp-gateway-{}", uuid::Uuid::now_v7()));
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        let binding_address = "192.0.2.10".parse().map_err(|_| DhcpError::InvalidConfig)?;
+        service.upsert_binding(Binding {
+            port_id: "gateway-conflict".into(),
+            mac: "02:00:00:00:00:10".into(),
+            address: binding_address,
+        })?;
+
+        let mut conflicting = config()?;
+        conflicting.gateway = binding_address;
+        assert!(matches!(
+            service.configure(conflicting),
+            Err(DhcpError::InvalidConfig)
+        ));
+        assert!(service.render_config()?.contains("dhcp-option=3,192.0.2.1"));
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
         Ok(())
     }
     #[test]
