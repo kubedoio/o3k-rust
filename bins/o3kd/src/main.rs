@@ -58,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let event_task = compute_service.spawn_agent_event_consumer(registry.clone());
+    let console_event_task =
+        spawn_console_event_consumer(registry.clone(), console_service.clone());
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
             "bootstrap-user".to_owned(),
@@ -138,7 +140,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     event_task.abort();
     let _ = event_task.await;
+    console_event_task.abort();
+    let _ = console_event_task.await;
     Ok(())
+}
+
+fn spawn_console_event_consumer(
+    registry: o3k_compute_agent::NodeRegistry,
+    console: o3k_console::ConsoleService,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = registry.subscribe_events();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(o3k_compute_agent::AgentEvent::Observation(observation))
+                    if !observation.console_log_bytes.is_empty() =>
+                {
+                    let Ok(instance_id) = observation.resource_id.parse::<uuid::Uuid>() else {
+                        tracing::warn!(resource_id = %observation.resource_id, "agent console observation has invalid resource id");
+                        continue;
+                    };
+                    if let Err(error) = console.write_chunk(
+                        instance_id,
+                        observation.console_log_offset,
+                        &observation.console_log_bytes,
+                    ) {
+                        tracing::warn!(%error, resource_id = %observation.resource_id, "agent console observation was rejected");
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::warn!(count, "console observation consumer lagged");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 async fn control_shutdown_signal() {
