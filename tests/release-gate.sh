@@ -6,7 +6,7 @@ ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-release-gate.XXXXXX")"
 trap 'rm -rf -- "${ARTIFACT_DIR}"' EXIT
 
 python3 - "${ARTIFACT_DIR}" <<'PY'
-import json, pathlib, sys, time
+import hashlib, json, pathlib, sys, time
 
 root = pathlib.Path(sys.argv[1])
 finished_at = int(time.time())
@@ -27,8 +27,12 @@ artifacts = {
     "ubuntu.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "ubuntu", "install": {"status": "passed"}},
     "debian.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "debian", "install": {"status": "passed"}},
     "recovery.json": {**common, "artifact_type": "failure-recovery", "status": "passed", "failures": ["agent-restart"]},
-    "benchmark.json": {**common, "artifact_type": "benchmark", "status": "measured", "guest_and_libvirt": {"status": "measured"}, "targets_evaluated": {"startup": True, "rss": True, "token_p95": True}},
+    "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}},
 }
+raw = artifacts["benchmark-raw.json"]
+(root / "benchmark-raw.json").write_text(json.dumps(raw), encoding="utf-8")
+raw_sha256 = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+artifacts["benchmark.json"] = {**common, "artifact_type": "benchmark", "status": "measured", "samples": raw["samples"], "control_plane": raw["control_plane"], "guest_and_libvirt": raw["guest_and_libvirt"], "targets_evaluated": {"startup": True, "rss": True, "token_p95": True}, "raw_sha256": raw_sha256}
 for name, value in artifacts.items():
     (root / name).write_text(json.dumps(value), encoding="utf-8")
 PY
@@ -40,6 +44,7 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --install-debian "${ARTIFACT_DIR}/debian.json" \
     --recovery "${ARTIFACT_DIR}/recovery.json" \
     --benchmark "${ARTIFACT_DIR}/benchmark.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
 
@@ -48,6 +53,7 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
     --install-debian "${ARTIFACT_DIR}/debian.json" \
     --recovery "${ARTIFACT_DIR}/recovery.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --output "${ARTIFACT_DIR}/missing-benchmark.json"; then
     echo "release gate accepted missing benchmark evidence" >&2
     exit 1
@@ -60,6 +66,7 @@ GATE_ARGS=(
     --install-debian "${ARTIFACT_DIR}/debian.json"
     --recovery "${ARTIFACT_DIR}/recovery.json"
     --benchmark "${ARTIFACT_DIR}/benchmark.json"
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json"
 )
 
 set_e2e_finished_at() {
@@ -124,10 +131,55 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --install-debian "${ARTIFACT_DIR}/debian.json" \
     --recovery "${ARTIFACT_DIR}/recovery.json" \
     --benchmark "${ARTIFACT_DIR}/benchmark.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --output "${ARTIFACT_DIR}/invalid-release.json"; then
     echo "release gate accepted an underspecified artifact" >&2
     exit 1
 fi
+
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["environment"]["rustc"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/missing-environment.json"; then
+    echo "release gate accepted raw benchmark without required environment metadata" >&2
+    exit 1
+fi
+grep -q 'benchmark_raw: environment.rustc must be a non-empty string' "${ARTIFACT_DIR}/missing-environment.json"
+
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["environment"]["rustc"] = "rustc 1.85.0"
+value["samples"] = 6
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/inconsistent-release.json"; then
+    echo "release gate accepted inconsistent benchmark summary/raw" >&2
+    exit 1
+fi
+grep -q 'benchmark: samples must match benchmark_raw.samples' "${ARTIFACT_DIR}/inconsistent-release.json"
+
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["samples"] = 5
+value["control_plane"]["startup_readiness_ms"] = 101
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/tampered-release.json"; then
+    echo "release gate accepted cryptographically unbound raw benchmark" >&2
+    exit 1
+fi
+grep -q 'benchmark: raw_sha256 does not match benchmark_raw' "${ARTIFACT_DIR}/tampered-release.json"
 
 PREFLIGHT_ARTIFACT_DIR="${ARTIFACT_DIR}/preflight"
 O3K_TESTLAB_ARTIFACT_DIR="${PREFLIGHT_ARTIFACT_DIR}" bash "${ROOT_DIR}/tests/testlab-libvirt.sh"
