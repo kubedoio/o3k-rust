@@ -438,6 +438,7 @@ where
                     .map_err(|_| ReconcileError::InvalidIntent)?,
             )
             .await?;
+        validate_provider_operation_owner(operation.id, &provider_operation)?;
         match provider_operation.state {
             ProviderOperationState::Succeeded => {
                 self.finish_lifecycle(
@@ -508,62 +509,65 @@ where
         result: Result<o3k_provider::Operation, ProviderError>,
     ) -> Result<OperationState, ReconcileError> {
         match result {
-            Ok(provider_operation) => match provider_operation.state {
-                ProviderOperationState::Succeeded => {
-                    self.finish_lifecycle(
-                        operation.id,
-                        resource,
-                        action,
-                        provider_operation.provider_operation_id.to_string(),
-                        provider_id,
-                    )
-                    .await
-                }
-                ProviderOperationState::Accepted | ProviderOperationState::Running => {
-                    self.store
-                        .update_operation(
+            Ok(provider_operation) => {
+                validate_provider_operation_owner(operation.id, &provider_operation)?;
+                match provider_operation.state {
+                    ProviderOperationState::Succeeded => {
+                        self.finish_lifecycle(
                             operation.id,
-                            OperationState::Running,
-                            Some(&provider_operation.provider_operation_id.to_string()),
-                            None,
-                            None,
+                            resource,
+                            action,
+                            provider_operation.provider_operation_id.to_string(),
+                            provider_id,
                         )
-                        .await?;
-                    Ok(OperationState::Running)
-                }
-                ProviderOperationState::UnknownOutcome => {
-                    let provider_operation_id =
-                        provider_operation.provider_operation_id.to_string();
-                    self.store
-                        .update_operation(
-                            operation.id,
-                            OperationState::UnknownOutcome,
-                            Some(&provider_operation_id),
-                            Some("unknown_outcome"),
-                            None,
-                        )
-                        .await?;
-                    self.event(operation.id, resource.id, JournalEventKind::RetryScheduled);
-                    Ok(OperationState::UnknownOutcome)
-                }
-                ProviderOperationState::Retryable => {
-                    self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
                         .await
+                    }
+                    ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                        self.store
+                            .update_operation(
+                                operation.id,
+                                OperationState::Running,
+                                Some(&provider_operation.provider_operation_id.to_string()),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        Ok(OperationState::Running)
+                    }
+                    ProviderOperationState::UnknownOutcome => {
+                        let provider_operation_id =
+                            provider_operation.provider_operation_id.to_string();
+                        self.store
+                            .update_operation(
+                                operation.id,
+                                OperationState::UnknownOutcome,
+                                Some(&provider_operation_id),
+                                Some("unknown_outcome"),
+                                None,
+                            )
+                            .await?;
+                        self.event(operation.id, resource.id, JournalEventKind::RetryScheduled);
+                        Ok(OperationState::UnknownOutcome)
+                    }
+                    ProviderOperationState::Retryable => {
+                        self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
+                            .await
+                    }
+                    ProviderOperationState::Failed => {
+                        self.store
+                            .update_operation(
+                                operation.id,
+                                OperationState::Failed,
+                                Some(&provider_operation.provider_operation_id.to_string()),
+                                Some("terminal"),
+                                Some("provider operation failed"),
+                            )
+                            .await?;
+                        self.event(operation.id, resource.id, JournalEventKind::Failed);
+                        Ok(OperationState::Failed)
+                    }
                 }
-                ProviderOperationState::Failed => {
-                    self.store
-                        .update_operation(
-                            operation.id,
-                            OperationState::Failed,
-                            Some(&provider_operation.provider_operation_id.to_string()),
-                            Some("terminal"),
-                            Some("provider operation failed"),
-                        )
-                        .await?;
-                    self.event(operation.id, resource.id, JournalEventKind::Failed);
-                    Ok(OperationState::Failed)
-                }
-            },
+            }
             Err(ProviderError::UnknownOutcome { operation_id }) => {
                 self.store
                     .update_operation(
@@ -695,6 +699,7 @@ where
         self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
         match self.provider.create_instance(request).await {
             Ok(provider_operation) => {
+                validate_provider_operation_owner(operation_id, &provider_operation)?;
                 self.finish(
                     operation_id,
                     resource,
@@ -749,6 +754,7 @@ where
             .provider
             .get_operation(Uuid::parse_str(provider_id).map_err(|_| ReconcileError::InvalidIntent)?)
             .await?;
+        validate_provider_operation_owner(operation.id, &provider_operation)?;
         self.event(operation.id, resource.id, JournalEventKind::UnknownObserved);
         if provider_operation.state == ProviderOperationState::UnknownOutcome {
             if let Some(resource_id) = provider_operation.provider_resource_id {
@@ -899,6 +905,16 @@ fn agent_resource_state(value: i32) -> Result<&'static str, ReconcileError> {
     }
 }
 
+fn validate_provider_operation_owner(
+    operation_id: Uuid,
+    provider_operation: &o3k_provider::Operation,
+) -> Result<(), ReconcileError> {
+    if provider_operation.o3k_operation_id != operation_id {
+        return Err(ReconcileError::InvalidIntent);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,6 +963,76 @@ mod tests {
         ))
     }
 
+    struct ForeignOperationProvider {
+        inner: FakeComputeProvider,
+    }
+
+    impl ForeignOperationProvider {
+        fn new() -> Self {
+            Self {
+                inner: FakeComputeProvider::new(),
+            }
+        }
+
+        fn foreign(mut operation: o3k_provider::Operation) -> o3k_provider::Operation {
+            operation.o3k_operation_id = Uuid::now_v7();
+            operation
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for ForeignOperationProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.create_instance(request).await.map(Self::foreign)
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await.map(Self::foreign)
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+                .map(Self::foreign)
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .get_operation(provider_operation_id)
+                .await
+                .map(Self::foreign)
+        }
+    }
+
     #[tokio::test]
     async fn intent_and_provider_success_are_durable() -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("success", 2).await?;
@@ -964,6 +1050,60 @@ mod tests {
             "active"
         );
         assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_rejects_provider_operation_owned_by_another_request()
+    -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-foreign-create-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let provider = Arc::new(ForeignOperationProvider::new());
+        let journal = OperationJournal::new(store.clone(), provider, 2);
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+
+        assert!(matches!(
+            journal.reconcile_once(operation_id).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_recovery_rejects_foreign_provider_operation() -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-foreign-unknown-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let provider = Arc::new(ForeignOperationProvider::new());
+        provider.inner.set_failure(FailureInjection::Timeout)?;
+        let journal = OperationJournal::new(store.clone(), provider, 2);
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        assert!(matches!(
+            journal.reconcile_once(operation_id).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
         Ok(())
     }
 

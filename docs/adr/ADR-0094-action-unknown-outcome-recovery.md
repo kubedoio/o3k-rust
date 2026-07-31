@@ -24,10 +24,17 @@ operation and instance. It marks the action successful only when observation
 proves the requested state; otherwise it remains `UNKNOWN_OUTCOME` and does not
 issue an unproven duplicate action.
 
+The journal also verifies that every provider operation returned by a command
+or loaded during recovery carries the same O3K operation identity as the
+durable journal record. A provider-operation UUID alone is not sufficient
+evidence: a mismatched or stale operation is rejected as invalid intent and
+cannot complete the resource transition.
+
 ## Consequences
 
-- Repository tests cover timeout-after-action, duplicate delivery, and
-  observation-based convergence.
+- Repository tests cover timeout-after-action, duplicate delivery,
+  observation-based convergence, and rejection of foreign provider-operation
+  identities.
 - Unknown actions are fail-closed when observation does not prove convergence;
   a later policy may create a fresh operation identity after an explicit
   recovery decision.

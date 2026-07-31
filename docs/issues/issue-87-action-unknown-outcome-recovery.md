@@ -17,11 +17,21 @@ otherwise it remains unknown and does not repeat an unproven mutation.
 Regression tests cover timeout-after-stop, duplicate action delivery, durable
 unknown state, and observation-based completion.
 
+The journal now applies an ownership invariant during both command completion
+and unknown-outcome recovery: the provider operation's embedded O3K operation
+ID must equal the durable journal operation ID. A mismatched provider record is
+rejected without changing the operation or resource state, preventing stale
+or cross-wired provider observations from being accepted as convergence.
+
 The release gate now also rejects an incomplete or failed aggregate recovery
 artifact: all required crash, restart, interruption, timeout, duplicate,
 image, host-tool, and cleanup scenario keys must be present with a passed
 machine-readable result. This validates evidence shape only and does not claim
 that any real-host scenario has run.
+
+The gate currently validates the required scenario key set and each result's
+`status`; richer host evidence remains the responsibility of the failure
+injection harness and is not inferred from those fields.
 
 ## Explicit non-goals
 
