@@ -17,7 +17,7 @@ the real-libvirt acceptance evidence exists.
 | #44 | scheduler | merged | integration dispatch pending |
 | #45 | bridge/TAP | merged | privileged host network pending |
 | #46 | DHCP/fixed IP | merged | dnsmasq/guest IP pending |
-| #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, and live control-plane event consumer added; create realization and real evidence pending |
+| #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, and fake command realization added; real artifact protocol/create and host evidence pending |
 | #48 | console log | merged | guest boot output pending |
 | #49 | real-libvirt harness | merged | preflight is skipped here |
 | #50 | OpenStack CLI workflow | merged | CLI/libvirt endpoint pending |
@@ -62,6 +62,6 @@ boundaries), ADR-0014 (Nova create idempotency), ADR-0015 (agent command dispatc
 and ADR-0016 (durable lifecycle operations), ADR-0017 (agent command router),
 and ADR-0018 (scheduler and Placement intent), ADR-0019 (canonical create command),
 and ADR-0020 (durable agent-event reconciliation), ADR-0021 (live agent-event consumer),
-and ADR-0022 (atomic image overlays).
+and ADR-0022 (atomic image overlays), and ADR-0023 (fake command realization).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.

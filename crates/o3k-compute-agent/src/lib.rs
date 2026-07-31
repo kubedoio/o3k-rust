@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -1041,6 +1041,189 @@ pub trait CommandExecutor: Send + Sync {
     -> Result<CommandExecutionResult, AgentError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FakeFailureStage {
+    Image,
+    Network,
+    Domain,
+}
+
+#[derive(Debug, Clone)]
+struct FakeResource {
+    fingerprint: String,
+    artifacts: Vec<String>,
+    active: bool,
+}
+
+/// Stateful command executor for protocol and failure-recovery tests.
+///
+/// It models the ownership shape of a host realization without claiming that
+/// fake artifacts are libvirt, network, or image evidence. Every successful
+/// create owns all staged artifacts; an injected failure removes them in
+/// reverse order before returning the generic execution error.
+#[derive(Clone, Default)]
+pub struct FakeCommandExecutor {
+    resources: Arc<Mutex<HashMap<String, FakeResource>>>,
+    failure_stage: Arc<Mutex<Option<FakeFailureStage>>>,
+}
+
+impl FakeCommandExecutor {
+    pub fn set_failure_stage(&self, stage: Option<FakeFailureStage>) -> Result<(), AgentError> {
+        self.failure_stage
+            .lock()
+            .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))
+            .map(|mut value| *value = stage)
+    }
+
+    #[must_use]
+    pub fn resource_count(&self) -> usize {
+        self.resources
+            .lock()
+            .map(|resources| resources.len())
+            .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn artifact_count(&self) -> usize {
+        self.resources
+            .lock()
+            .map(|resources| {
+                resources
+                    .values()
+                    .map(|resource| resource.artifacts.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn should_fail(&self, stage: FakeFailureStage) -> Result<bool, AgentError> {
+        self.failure_stage
+            .lock()
+            .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))
+            .map(|value| *value == Some(stage))
+    }
+
+    fn failure() -> AgentError {
+        AgentError::Protocol("fake realization failed".to_owned())
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandExecutor for FakeCommandExecutor {
+    async fn execute(
+        &self,
+        command: &proto::Command,
+    ) -> Result<CommandExecutionResult, AgentError> {
+        let resource_key = command.resource_id.clone();
+        let provider_resource_id = format!("fake-{}", stable_fake_resource_id(&resource_key));
+        match command.action.as_ref() {
+            Some(proto::command::Action::Create(create)) => {
+                let mut resources = self
+                    .resources
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?;
+                if let Some(existing) = resources.get(&resource_key) {
+                    if existing.fingerprint != command.payload_fingerprint_sha256 {
+                        return Err(AgentError::Protocol(
+                            "fake create idempotency conflict".to_owned(),
+                        ));
+                    }
+                    return Ok(fake_success(provider_resource_id));
+                }
+                let mut artifacts = Vec::new();
+                artifacts.push(format!("image:{}", create.image_id));
+                if self.should_fail(FakeFailureStage::Image)? {
+                    artifacts.clear();
+                    return Err(Self::failure());
+                }
+                artifacts.extend(
+                    create
+                        .network_port_ids
+                        .iter()
+                        .map(|port| format!("network:{port}")),
+                );
+                if self.should_fail(FakeFailureStage::Network)? {
+                    artifacts.clear();
+                    return Err(Self::failure());
+                }
+                artifacts.push(format!("domain:{provider_resource_id}"));
+                if self.should_fail(FakeFailureStage::Domain)? {
+                    artifacts.clear();
+                    return Err(Self::failure());
+                }
+                resources.insert(
+                    resource_key,
+                    FakeResource {
+                        fingerprint: command.payload_fingerprint_sha256.clone(),
+                        artifacts,
+                        active: true,
+                    },
+                );
+                Ok(fake_success(provider_resource_id))
+            }
+            Some(proto::command::Action::Delete(_)) => {
+                self.resources
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?
+                    .remove(&resource_key);
+                Ok(fake_success(provider_resource_id))
+            }
+            Some(proto::command::Action::Inspect(_))
+            | Some(proto::command::Action::Start(_))
+            | Some(proto::command::Action::Stop(_))
+            | Some(proto::command::Action::Reboot(_)) => {
+                let mut resources = self
+                    .resources
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?;
+                let resource = resources.get_mut(&resource_key).ok_or_else(Self::failure)?;
+                if matches!(
+                    command.action.as_ref(),
+                    Some(proto::command::Action::Start(_))
+                ) {
+                    resource.active = true;
+                } else if matches!(
+                    command.action.as_ref(),
+                    Some(proto::command::Action::Stop(_))
+                ) {
+                    resource.active = false;
+                }
+                let mut result = fake_success(provider_resource_id);
+                if matches!(
+                    command.action.as_ref(),
+                    Some(proto::command::Action::Inspect(_))
+                ) {
+                    result.redacted_message = if resource.active {
+                        "fake resource is active"
+                    } else {
+                        "fake resource is stopped"
+                    }
+                    .to_owned();
+                }
+                Ok(result)
+            }
+            Some(proto::command::Action::ConsoleLog(_)) | None => Err(Self::failure()),
+        }
+    }
+}
+
+fn stable_fake_resource_id(resource_id: &str) -> String {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k-fake:{resource_id}").as_bytes(),
+    )
+    .to_string()
+}
+
+fn fake_success(provider_resource_id: String) -> CommandExecutionResult {
+    CommandExecutionResult {
+        state: proto::OperationState::Succeeded as i32,
+        error_category: proto::ErrorCategory::Unspecified as i32,
+        redacted_message: "fake operation succeeded".to_owned(),
+        provider_resource_id,
+    }
+}
+
 struct RejectingCommandExecutor;
 
 #[async_trait::async_trait]
@@ -1454,6 +1637,62 @@ mod tests {
         let mut fenced = command;
         fenced.agent_epoch = "old-epoch".to_owned();
         assert!(registry.dispatch_command(fenced).await.is_err());
+        Ok(())
+    }
+
+    fn fake_create_command() -> Result<proto::Command, AgentError> {
+        build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            operation_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"fake-operation").to_string(),
+            resource_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"fake-resource").to_string(),
+            idempotency_key: "fake-create".to_owned(),
+            deadline_unix_ms: unix_ms().saturating_add(10_000),
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            network_port_ids: vec!["port-1".to_owned()],
+        })
+    }
+
+    #[tokio::test]
+    async fn fake_create_is_idempotent_and_delete_is_absent_safe()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let executor = FakeCommandExecutor::default();
+        let command = fake_create_command()?;
+        let first = executor.execute(&command).await?;
+        let second = executor.execute(&command).await?;
+        assert_eq!(first, second);
+        assert_eq!(executor.resource_count(), 1);
+        assert_eq!(executor.artifact_count(), 3);
+
+        let mut changed = command.clone();
+        changed.payload_fingerprint_sha256 = "changed-fingerprint".to_owned();
+        assert!(executor.execute(&changed).await.is_err());
+        let delete = proto::Command {
+            action: Some(proto::command::Action::Delete(proto::DeleteCommand {})),
+            ..command
+        };
+        executor.execute(&delete).await?;
+        executor.execute(&delete).await?;
+        assert_eq!(executor.resource_count(), 0);
+        assert_eq!(executor.artifact_count(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_create_failure_cleans_each_owned_stage() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for stage in [
+            FakeFailureStage::Image,
+            FakeFailureStage::Network,
+            FakeFailureStage::Domain,
+        ] {
+            let executor = FakeCommandExecutor::default();
+            executor.set_failure_stage(Some(stage))?;
+            assert!(executor.execute(&fake_create_command()?).await.is_err());
+            assert_eq!(executor.resource_count(), 0);
+            assert_eq!(executor.artifact_count(), 0);
+        }
         Ok(())
     }
 
