@@ -13,7 +13,7 @@ the real-libvirt acceptance evidence exists.
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
 | #41 | image cache/overlays | merged | atomic/idempotent publication and verified project-scoped artifact resolution with digest revalidation added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
-| #43 | Placement | merged | unique atomic state publication added; integration allocation pending |
+| #43 | Placement | merged | unique atomic state publication and allocation-preserving provider synchronization added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
 | #45 | bridge/TAP | merged | TAP reuse ownership fencing and unique network metadata publication added; privileged host network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication and owned dnsmasq supervision added; TAP/dnsmasq/guest IP evidence pending |
