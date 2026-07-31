@@ -57,7 +57,7 @@ artifacts = {
             )
         },
     },
-    "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}},
+    "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}, "release_eligible": True},
     "human-review.json": {
         "artifact_type": "human-architecture-security-review",
         "schema_version": 1,
@@ -74,7 +74,7 @@ artifacts = {
 raw = artifacts["benchmark-raw.json"]
 (root / "benchmark-raw.json").write_text(json.dumps(raw), encoding="utf-8")
 raw_sha256 = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
-artifacts["benchmark.json"] = {**common, "artifact_type": "benchmark", "status": "measured", "samples": raw["samples"], "control_plane": raw["control_plane"], "guest_and_libvirt": raw["guest_and_libvirt"], "targets_evaluated": {"startup": True, "rss": True, "token_p95": True}, "raw_sha256": raw_sha256}
+artifacts["benchmark.json"] = {**common, "artifact_type": "benchmark", "status": "measured", "samples": raw["samples"], "control_plane": raw["control_plane"], "guest_and_libvirt": raw["guest_and_libvirt"], "targets_evaluated": {"startup": True, "rss": True, "token_p95": True}, "release_eligible": raw["release_eligible"], "raw_sha256": raw_sha256}
 for name, value in artifacts.items():
     (root / name).write_text(json.dumps(value), encoding="utf-8")
 PY
@@ -252,6 +252,42 @@ import time
 print(int(time.time()))
 PY
 )"
+
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" "${ARTIFACT_DIR}/benchmark.json" <<'PY'
+import hashlib, json, pathlib, sys
+
+raw_path, summary_path = map(pathlib.Path, sys.argv[1:])
+raw = json.loads(raw_path.read_text(encoding="utf-8"))
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+raw["release_eligible"] = False
+summary["release_eligible"] = False
+raw_path.write_text(json.dumps(raw), encoding="utf-8")
+summary["raw_sha256"] = hashlib.sha256(
+    json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+).hexdigest()
+summary_path.write_text(json.dumps(summary), encoding="utf-8")
+PY
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/ineligible-benchmark.json"; then
+    echo "release gate accepted an ineligible benchmark" >&2
+    exit 1
+fi
+grep -q 'benchmark: release_eligible must be true' "${ARTIFACT_DIR}/ineligible-benchmark.json"
+grep -q 'benchmark_raw: release_eligible must be true' "${ARTIFACT_DIR}/ineligible-benchmark.json"
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" "${ARTIFACT_DIR}/benchmark.json" <<'PY'
+import hashlib, json, pathlib, sys
+
+raw_path, summary_path = map(pathlib.Path, sys.argv[1:])
+raw = json.loads(raw_path.read_text(encoding="utf-8"))
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+raw["release_eligible"] = True
+summary["release_eligible"] = True
+raw_path.write_text(json.dumps(raw), encoding="utf-8")
+summary["raw_sha256"] = hashlib.sha256(
+    json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+).hexdigest()
+summary_path.write_text(json.dumps(summary), encoding="utf-8")
+PY
 
 set_e2e_finished_at -1
 if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
