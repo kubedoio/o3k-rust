@@ -25,6 +25,11 @@ rollback error is returned if cleanup fails.
 - No privileged host networking, libvirt attachment, dnsmasq process, guest
   boot, or real-host acceptance is claimed.
 
+The Neutron-facing port record now also persists and exposes one authoritative
+deterministic locally-administered MAC address derived from the port UUID.
+Existing metadata without a MAC is migrated on open, and the API returns the
+binding for later TAP/libvirt/DHCP orchestration.
+
 ## Remaining blockers
 
 - agent-backed create path and issue #78 dependency;

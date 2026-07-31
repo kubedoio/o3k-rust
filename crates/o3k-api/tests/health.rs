@@ -288,6 +288,7 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     assert_eq!(response.status(), StatusCode::CREATED);
     let port: Value =
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    assert!(port["port"]["mac_address"].as_str().is_some());
     assert_eq!(port["port"]["fixed_ips"][0]["ip_address"], "192.0.2.2");
     std::fs::remove_dir_all(root)?;
     Ok(())
