@@ -163,6 +163,38 @@ impl ComputeService {
             return Err(ComputeError::InvalidRequest);
         }
         let flavor = self.flavor(flavor_id)?;
+        let server_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:server:{project_id}:{idempotency_key}").as_bytes(),
+        );
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:operation:{project_id}:{idempotency_key}").as_bytes(),
+        );
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: server_id,
+            project_id: project_id.to_owned(),
+            name: name.clone(),
+            vcpus: flavor.vcpus,
+            memory_mib: flavor.ram_mib,
+            image_id: Some(image_id.clone()),
+            network_ids: network_ids.clone(),
+            idempotency_key: idempotency_key.clone(),
+        };
+        match self.store.get_resource(server_id).await {
+            Ok(existing) => {
+                let existing_request: CreateInstanceRequest =
+                    serde_json::from_str(&existing.desired_state)
+                        .map_err(|_| ComputeError::Conflict)?;
+                if existing_request == request {
+                    return self.show_server(project_id, server_id).await;
+                }
+                return Err(ComputeError::Conflict);
+            }
+            Err(StoreError::ResourceNotFound) => {}
+            Err(error) => return Err(ComputeError::Store(error)),
+        }
         if self
             .list_servers(project_id)
             .await?
@@ -172,18 +204,24 @@ impl ComputeService {
             return Err(ComputeError::Conflict);
         }
         let request = CreateInstanceRequest {
-            operation_id: Uuid::now_v7(),
-            o3k_server_id: Uuid::now_v7(),
-            project_id: project_id.to_owned(),
-            name: name.clone(),
-            vcpus: flavor.vcpus,
-            memory_mib: flavor.ram_mib,
-            image_id: Some(image_id.clone()),
             network_ids,
-            idempotency_key,
+            ..request
         };
         let id = request.o3k_server_id;
-        self.journal.begin_create(project_id, &request).await?;
+        match self.journal.begin_create(project_id, &request).await {
+            Ok(_) => {}
+            Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
+                let existing = self.store.get_resource(id).await?;
+                let existing_request: CreateInstanceRequest =
+                    serde_json::from_str(&existing.desired_state)
+                        .map_err(|_| ComputeError::Conflict)?;
+                if existing_request != request {
+                    return Err(ComputeError::Conflict);
+                }
+                return self.show_server(project_id, id).await;
+            }
+            Err(error) => return Err(ComputeError::Reconcile(error)),
+        }
         let _ = self.journal.reconcile_once(request.operation_id).await?;
         self.show_server(project_id, id).await
     }
@@ -382,6 +420,30 @@ mod tests {
                 "request-1".to_owned(),
             )
             .await?;
+        let retry = service
+            .create_server(
+                "project-a",
+                "server".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "request-1".to_owned(),
+            )
+            .await?;
+        assert_eq!(retry.id, server.id);
+        assert!(matches!(
+            service
+                .create_server(
+                    "project-a",
+                    "different-name".to_owned(),
+                    "image-1".to_owned(),
+                    flavor,
+                    vec!["network-1".to_owned()],
+                    "request-1".to_owned(),
+                )
+                .await,
+            Err(ComputeError::Conflict)
+        ));
         assert_eq!(server.status, "ACTIVE");
         assert_eq!(
             service
