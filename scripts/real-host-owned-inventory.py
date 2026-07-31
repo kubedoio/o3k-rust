@@ -18,13 +18,14 @@ import tempfile
 from pathlib import Path
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-RESOURCES = ("server", "image", "network", "subnet", "flavor")
+RESOURCES = ("server", "image", "network", "subnet", "flavor", "keypair")
 RESOURCE_COMMANDS = {
     "server": ("server", "list", "--name", "o3k-testlab-server", "-f", "value", "-c", "ID"),
     "image": ("image", "list", "--name", "o3k-testlab-image", "-f", "value", "-c", "ID"),
     "network": ("network", "list", "--name", "o3k-testlab-network", "-f", "value", "-c", "ID"),
     "subnet": ("subnet", "list", "--name", "o3k-testlab-subnet", "-f", "value", "-c", "ID"),
     "flavor": ("flavor", "list", "--name", "o3k-testlab-flavor", "-f", "value", "-c", "ID"),
+    "keypair": ("keypair", "list", "--name", "o3k-testlab-keypair", "-f", "value", "-c", "ID"),
 }
 
 

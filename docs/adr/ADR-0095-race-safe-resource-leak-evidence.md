@@ -22,7 +22,8 @@ publication uses a same-directory temporary file and
 `os.replace`, so an interrupted writer cannot leave a result that looks like a
 complete snapshot.
 
-The inventory includes O3K-owned domain and provider identities. Foreign
+The inventory includes O3K-owned domain and provider identities, including
+keypairs created by the public CLI workflow. Foreign
 libvirt domain names and non-O3K link records are represented only by sorted
 SHA-256 digests; their raw identities are never written to the artifact. The
 post-run guard compares those digests and emits
