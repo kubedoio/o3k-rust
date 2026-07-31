@@ -22,8 +22,8 @@ the real-libvirt acceptance evidence exists.
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
 | #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, list coverage, and redacted evidence with discarded raw CLI errors added; real CLI/libvirt endpoint pending |
 | #51 | clean-host packaging | merged | libvirt profile now selects libvirt; Ubuntu/Debian clean installs pending |
-| #52 | measurements | merged | fake control-plane measured with configured-password authentication; guest metrics pending |
-| #53 | release gate | merged | gate is blocked by the rows above |
+| #52 | measurements | merged | fake control-plane measured with configured-password authentication and finalized cleanup evidence; guest metrics pending |
+| #53 | release gate | merged | benchmark cleanup evidence now finalizes consistently; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
 
 ## Current release gate
