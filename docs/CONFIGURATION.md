@@ -26,6 +26,11 @@ problem without printing secret values.
 | Log format | `log_format` | `O3K_LOG_FORMAT` | `--log-format` | `json` |
 | Log filter | `log_filter` | `O3K_LOG_FILTER` | `--log-filter` | `info` |
 | Provider | `provider` | `O3K_PROVIDER` | `--provider` | `fake` |
+| CellHV endpoint | `cellhv_endpoint` | `O3K_CELLHV_ENDPOINT` | `--cellhv-endpoint` | required for `cellhv` |
+| CellHV expected version | `cellhv_expected_version` | `O3K_CELLHV_EXPECTED_VERSION` | `--cellhv-expected-version` | required for `cellhv` |
+| CellHV CA certificate | `cellhv_ca_certificate` | `O3K_CELLHV_CA_CERTIFICATE` | `--cellhv-ca-certificate` | unset |
+| CellHV client certificate | `cellhv_client_certificate` | `O3K_CELLHV_CLIENT_CERTIFICATE` | `--cellhv-client-certificate` | unset |
+| CellHV client key | `cellhv_client_key` | `O3K_CELLHV_CLIENT_KEY` | `--cellhv-client-key` | unset |
 | Bootstrap secret | `bootstrap_secret` | `O3K_BOOTSTRAP_SECRET` | `--bootstrap-secret` | unset |
 | Bootstrap password | `bootstrap_password` | `O3K_BOOTSTRAP_PASSWORD` | `--bootstrap-password` | unset |
 | Token signing key | `token_signing_key` | `O3K_TOKEN_SIGNING_KEY` | `--token-signing-key` | unset |
@@ -37,6 +42,8 @@ problem without printing secret values.
 
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`,
 or `libvirt`.
+The CellHV profile now connects to the configured versioned endpoint; HTTPS
+endpoints additionally require the CA, client certificate, and client key.
 The default address must remain loopback unless an operator explicitly changes
 it. Secrets have redacted `Debug` and `Display` representations and must not be
 included in logs, errors, or command output.

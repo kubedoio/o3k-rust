@@ -31,11 +31,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(o3k_libvirt::LibvirtProvider::new(adapter)),
             )
         }
-        o3k_config::Provider::Fake | o3k_config::Provider::CellHv => {
-            o3k_compute::ComputeService::new(
-                store,
-                Arc::new(o3k_provider::FakeComputeProvider::new()),
-            )
+        o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
+            store,
+            Arc::new(o3k_provider::FakeComputeProvider::new()),
+        ),
+        o3k_config::Provider::CellHv => {
+            let provider = o3k_cellhv::CellHvProvider::connect(&o3k_cellhv::CellHvConfig {
+                endpoint: config
+                    .cellhv_endpoint
+                    .clone()
+                    .ok_or("missing CellHV endpoint")?,
+                expected_version: config
+                    .cellhv_expected_version
+                    .clone()
+                    .ok_or("missing CellHV expected version")?,
+                ca_certificate: config.cellhv_ca_certificate.clone(),
+                client_certificate: config.cellhv_client_certificate.clone(),
+                client_key: config.cellhv_client_key.clone(),
+            })
+            .await?;
+            o3k_compute::ComputeService::new(store, Arc::new(provider))
         }
     };
     let compute_ready = match tokio::time::timeout(
