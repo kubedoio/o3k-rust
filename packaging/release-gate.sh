@@ -20,7 +20,26 @@ while (($#)); do
 done
 export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK OUTPUT
 python3 <<'PY'
-import json, os, sys
+import json, os, sys, time
+
+DEFAULT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+max_age_text = os.environ.get(
+    "O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS",
+    str(DEFAULT_MAX_AGE_SECONDS),
+)
+try:
+    max_age_seconds = int(max_age_text)
+except ValueError:
+    max_age_seconds = DEFAULT_MAX_AGE_SECONDS
+    max_age_error = (
+        "O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS must be a positive integer"
+    )
+else:
+    max_age_error = None
+    if max_age_seconds <= 0:
+        max_age_error = (
+            "O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS must be a positive integer"
+        )
 required = {
     "real_libvirt_e2e": (os.environ["E2E"], "openstack-cli-e2e"),
     "clean_ubuntu_install": (os.environ["INSTALL_UBUNTU"], "clean-install"),
@@ -29,8 +48,11 @@ required = {
 }
 required["benchmark"] = (os.environ["BENCHMARK"], "benchmark")
 errors = []
+if max_age_error:
+    errors.append(max_age_error)
 evidence = {}
 paths = {}
+now = int(time.time())
 for name, (path, artifact_type) in required.items():
     if not path:
         errors.append(f"{name}: artifact path was not supplied")
@@ -62,8 +84,18 @@ for name, (path, artifact_type) in required.items():
         errors.append(f"{name}: profile must be 'libvirt'")
     if value.get("redacted") is not True:
         errors.append(f"{name}: redacted must be true")
-    if not isinstance(value.get("finished_at"), int):
+    finished_at = value.get("finished_at")
+    if isinstance(finished_at, bool) or not isinstance(finished_at, int):
         errors.append(f"{name}: finished_at must be an integer epoch timestamp")
+    elif finished_at <= 0:
+        errors.append(f"{name}: finished_at must be positive")
+    elif finished_at > now:
+        errors.append(f"{name}: finished_at cannot be in the future")
+    elif now - finished_at > max_age_seconds:
+        errors.append(
+            f"{name}: finished_at is older than the configured maximum age "
+            f"({max_age_seconds} seconds)"
+        )
     cleanup = value.get("cleanup")
     if not isinstance(cleanup, dict) or cleanup.get("status") != "passed":
         errors.append(f"{name}: cleanup.status must be 'passed'")

@@ -54,6 +54,65 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
 fi
 grep -q 'benchmark: artifact path was not supplied' "${ARTIFACT_DIR}/missing-benchmark.json"
 
+GATE_ARGS=(
+    --e2e "${ARTIFACT_DIR}/e2e.json"
+    --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json"
+    --install-debian "${ARTIFACT_DIR}/debian.json"
+    --recovery "${ARTIFACT_DIR}/recovery.json"
+    --benchmark "${ARTIFACT_DIR}/benchmark.json"
+)
+
+set_e2e_finished_at() {
+    python3 - "${ARTIFACT_DIR}/e2e.json" "$1" <<'PY'
+import json, pathlib, sys
+
+path = pathlib.Path(sys.argv[1])
+value = json.loads(path.read_text(encoding="utf-8"))
+value["finished_at"] = int(sys.argv[2])
+path.write_text(json.dumps(value), encoding="utf-8")
+PY
+}
+
+set_e2e_finished_at "$(python3 - <<'PY'
+import time
+print(int(time.time()) - 3_601)
+PY
+)"
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/stale-release.json"; then
+    echo "release gate accepted stale evidence" >&2
+    exit 1
+fi
+grep -q 'older than the configured maximum age' "${ARTIFACT_DIR}/stale-release.json"
+
+set_e2e_finished_at -1
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/negative-release.json"; then
+    echo "release gate accepted a negative evidence timestamp" >&2
+    exit 1
+fi
+grep -q 'finished_at must be positive' "${ARTIFACT_DIR}/negative-release.json"
+
+set_e2e_finished_at 0
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/zero-release.json"; then
+    echo "release gate accepted a zero evidence timestamp" >&2
+    exit 1
+fi
+grep -q 'finished_at must be positive' "${ARTIFACT_DIR}/zero-release.json"
+
+set_e2e_finished_at "$(python3 - <<'PY'
+import time
+print(int(time.time()) + 1)
+PY
+)"
+if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/future-release.json"; then
+    echo "release gate accepted future-dated evidence" >&2
+    exit 1
+fi
+grep -q 'finished_at cannot be in the future' "${ARTIFACT_DIR}/future-release.json"
+
 python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as output:
