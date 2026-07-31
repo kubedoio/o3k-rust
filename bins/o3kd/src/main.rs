@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
+    let registry = o3k_compute_agent::NodeRegistry::default();
     let compute_service = match config.provider {
         o3k_config::Provider::Libvirt => {
             let adapter = o3k_libvirt::LibvirtAdapter::new(o3k_libvirt::LibvirtConfig::default())?;
@@ -36,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         }
     };
+    let event_task = compute_service.spawn_agent_event_consumer(registry.clone());
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
             "bootstrap-user".to_owned(),
@@ -64,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ) {
         (Some(server_certificate), Some(server_private_key), Some(client_ca_certificate)) => {
             let server = o3k_compute_agent::ControlPlaneServer {
-                registry: o3k_compute_agent::NodeRegistry::default(),
+                registry: registry.clone(),
                 address: config.compute_control_addr,
                 tls: o3k_compute_agent::ControlPlaneTls {
                     server_certificate,
@@ -114,6 +116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = task.await;
         }
     }
+    event_task.abort();
+    let _ = event_task.await;
     Ok(())
 }
 

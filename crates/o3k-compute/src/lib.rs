@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use o3k_compute_agent::NodeRegistry;
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
@@ -127,6 +128,48 @@ impl ComputeService {
     #[must_use]
     pub fn provider(&self) -> Arc<ProviderBackend> {
         self.provider.clone()
+    }
+
+    /// Applies a live authenticated agent result through the durable journal.
+    /// The control-plane event consumer owns subscription and retry policy.
+    pub async fn apply_agent_update(
+        &self,
+        update: &o3k_provider_contract::compute_proto::OperationUpdate,
+    ) -> Result<o3k_store::OperationState, ComputeError> {
+        Ok(self.journal.apply_agent_update(update).await?)
+    }
+
+    /// Starts the in-memory event bridge used by the control-plane binary.
+    /// The journal remains the recovery authority; this task only applies live
+    /// updates received from an authenticated agent connection.
+    pub fn spawn_agent_event_consumer(
+        &self,
+        registry: NodeRegistry,
+    ) -> tokio::task::JoinHandle<()> {
+        let mut events = registry.subscribe_events();
+        let service = self.clone();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(o3k_compute_agent::AgentEvent::Operation(update)) => {
+                        if let Err(error) = service.apply_agent_update(&update).await {
+                            tracing::warn!(%error, "agent operation update rejected");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(
+                            count,
+                            "agent event consumer lagged; durable recovery required"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::warn!("agent event stream closed");
+                        break;
+                    }
+                }
+            }
+        })
     }
 
     #[must_use]
@@ -530,6 +573,53 @@ mod tests {
             service.show_server("project-a", server.id).await,
             Err(ComputeError::NotFound)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_update_forwarding_uses_durable_journal() -> Result<(), ComputeError> {
+        let service = service("agent-forwarding").await?;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "agent-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            image_id: Some("image-1".to_owned()),
+            network_ids: vec!["network-1".to_owned()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            idempotency_key: "agent-forwarding".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            operation_id: request.operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            provider_resource_id: "agent-domain-1".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            service.apply_agent_update(&update).await?,
+            o3k_store::OperationState::Succeeded
+        );
+        assert_eq!(
+            service.apply_agent_update(&update).await?,
+            o3k_store::OperationState::Succeeded
+        );
+        assert_eq!(
+            service
+                .store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "active"
+        );
         Ok(())
     }
 
