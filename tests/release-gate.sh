@@ -28,7 +28,35 @@ artifacts = {
     },
     "ubuntu.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "ubuntu", "install": {"status": "passed"}},
     "debian.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "debian", "install": {"status": "passed"}},
-    "recovery.json": {**common, "artifact_type": "failure-recovery", "status": "passed", "failures": ["agent-restart"]},
+    "recovery.json": {
+        **common,
+        "artifact_type": "failure-recovery",
+        "status": "passed",
+        "scenarios": {
+            scenario: {"status": "passed"}
+            for scenario in (
+                "control-plane-crash-before-dispatch",
+                "control-plane-crash-after-dispatch",
+                "compute-agent-crash-before-mutation",
+                "compute-agent-crash-after-domain-definition-or-start",
+                "libvirt-daemon-restart",
+                "agent-control-plane-network-interruption",
+                "timeout-after-accepted-mutation",
+                "duplicate-create-delivery",
+                "duplicate-action-delivery",
+                "duplicate-delete-delivery",
+                "corrupted-truncated-image",
+                "image-checksum-mismatch",
+                "qemu-img-failure",
+                "config-drive-failure",
+                "tap-failure",
+                "dnsmasq-failure",
+                "disk-full",
+                "repeated-delete",
+                "partial-cleanup",
+            )
+        },
+    },
     "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}},
     "human-review.json": {
         "artifact_type": "human-architecture-security-review",
@@ -314,6 +342,34 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     exit 1
 fi
 grep -q 'benchmark: raw_sha256 does not match benchmark_raw' "${ARTIFACT_DIR}/tampered-release.json"
+
+python3 - "${ARTIFACT_DIR}/recovery.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["scenarios"]["partial-cleanup"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/missing-recovery-scenario.json"; then
+    echo "release gate accepted an incomplete failure-recovery artifact" >&2
+    exit 1
+fi
+grep -q 'failure_recovery: scenarios missing required keys: partial-cleanup' "${ARTIFACT_DIR}/missing-recovery-scenario.json"
+
+python3 - "${ARTIFACT_DIR}/recovery.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["scenarios"]["partial-cleanup"] = {"status": "failed"}
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/failed-recovery-scenario.json"; then
+    echo "release gate accepted a failed failure-recovery scenario" >&2
+    exit 1
+fi
+grep -q "failure_recovery: scenarios.partial-cleanup.status must be 'passed'" "${ARTIFACT_DIR}/failed-recovery-scenario.json"
 
 PREFLIGHT_ARTIFACT_DIR="${ARTIFACT_DIR}/preflight"
 O3K_TESTLAB_ARTIFACT_DIR="${PREFLIGHT_ARTIFACT_DIR}" bash "${ROOT_DIR}/tests/testlab-libvirt.sh"
