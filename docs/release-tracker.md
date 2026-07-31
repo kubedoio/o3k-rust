@@ -11,7 +11,7 @@ the real-libvirt acceptance evidence exists.
 | #38 | secure registration/heartbeat | merged | control-plane startup failures now clear readiness; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
-| #41 | image cache/overlays | merged | atomic/idempotent publication and verified project-scoped artifact resolution with digest revalidation added; host qemu-img evidence pending |
+| #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication and allocation-preserving provider synchronization added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
@@ -69,6 +69,8 @@ and ADR-0028 (bounded console offset reads), ADR-0029 (CLI harness failure
 cleanup), ADR-0030 (dnsmasq supervision), ADR-0031 (typed resolved create
 inputs), ADR-0032 (measurement authentication input), ADR-0033 (CLI list and
 resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
-(image publication temporaries), and ADR-0036 (network metadata publication).
-Release policy and evidence rules
+(image publication temporaries), ADR-0036 (network metadata publication), and
+ADR-0062 (image-cache hit revalidation). ADR-0037 through ADR-0061 record the
+subsequent provider, console, lifecycle, network, placement, CLI, and
+measurement decisions. Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
