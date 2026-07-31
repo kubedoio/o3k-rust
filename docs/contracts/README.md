@@ -4,7 +4,7 @@ O3K has three public contract families:
 
 1. OpenStack-facing HTTP contracts under `contracts/openapi/`;
 2. provider contracts under `proto/provider/`;
-3. the compute-host boundary draft under `proto/compute/`.
+3. the accepted compute-host boundary contract under `proto/compute/`.
 
 ## HTTP contracts
 
@@ -39,10 +39,11 @@ future incompatible changes require a new package version.
 Contract versioning is package-based (`o3k.provider.v1` and
 `o3k.compute.v1`). Additive fields are compatible; removed fields must be
 reserved and field numbers are never reused. A behavior or wire incompatibility
-requires a new package version. The compute-agent draft is specified in
+requires a new package version. The compute-agent contract is specified in
 [`SPEC-0015`](../specs/SPEC-0015-compute-agent.md) and its boundary decision in
-[`ADR-0006`](../adr/ADR-0006-compute-agent-boundary.md); it is not generated
-into the runtime workspace until the agent implementation issue is approved.
+[`ADR-0006`](../adr/ADR-0006-compute-agent-boundary.md). It remains a contract
+and is not evidence that the agent implementation or real-host deployment is
+complete.
 
 ## Error model
 

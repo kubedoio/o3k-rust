@@ -1,6 +1,6 @@
 # ADR-0006 — `o3k-compute` agent boundary and protocol
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -78,6 +78,22 @@ plane before dispatch; the agent rejects commands for another `agent_id` or
 malformed resource/operation identity. Payloads are bounded and diagnostic
 details are redacted. Private keys, bootstrap tokens, certificates, user-data,
 and guest credentials are never logged.
+
+## Acceptance review
+
+The issue-#37 acceptance review confirms that the committed protobuf defines
+registration, heartbeat, capabilities, administrative state, lifecycle and
+console-log commands, durable operation identities, observations, replay, and
+resynchronization. The specification documents restart, timeout, duplicate
+delivery, version skew, remote-libvirt prohibition, and certificate,
+authorization, replay, injection, disclosure, and resource-exhaustion
+controls. Descriptor generation, workspace tests, clippy, and protobuf
+compatibility validation are CI gates.
+
+This acceptance applies to the contract and architecture decision only. It
+does not claim that certificate enrollment, the agent runtime, libvirt
+execution, or real-host security evidence has been implemented; those are
+covered by issues #38 onward and remain release-gate evidence requirements.
 
 ## Public references and provenance
 

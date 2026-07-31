@@ -1835,6 +1835,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registration_rejects_protocol_version_without_matching_wire_revision() {
+        let mut request = register("node", "epoch");
+        request.supported_versions = vec![proto::ProtocolVersion {
+            major: PROTOCOL_VERSION.major,
+            minor: PROTOCOL_VERSION.minor,
+            wire_revision: PROTOCOL_VERSION.wire_revision + 1,
+        }];
+        assert!(matches!(
+            validate_register(&request),
+            Err(ref error) if error.code() == tonic::Code::FailedPrecondition
+        ));
+    }
+
+    #[test]
+    fn registration_requires_capabilities_and_identity() {
+        let mut request = register("node", "epoch");
+        request.capabilities = None;
+        assert!(matches!(
+            validate_register(&request),
+            Err(ref error) if error.code() == tonic::Code::InvalidArgument
+        ));
+
+        let request = register("", "epoch");
+        assert!(matches!(
+            validate_register(&request),
+            Err(ref error) if error.code() == tonic::Code::InvalidArgument
+        ));
+    }
+
     #[tokio::test]
     async fn reconnect_reuses_stable_node_and_retains_inventory_on_timeout()
     -> Result<(), Box<dyn std::error::Error>> {
