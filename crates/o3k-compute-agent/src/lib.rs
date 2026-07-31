@@ -1583,6 +1583,32 @@ fn fake_success(provider_resource_id: String) -> CommandExecutionResult {
     }
 }
 
+fn observation_from_result(
+    agent_id: &str,
+    agent_epoch: &str,
+    command: &proto::Command,
+    result: &CommandExecutionResult,
+    observation_sequence: u64,
+) -> proto::Observation {
+    let console_log = result.console_log.as_ref();
+    proto::Observation {
+        agent_id: agent_id.to_owned(),
+        agent_epoch: agent_epoch.to_owned(),
+        resource_id: command.resource_id.clone(),
+        provider_resource_id: result.provider_resource_id.clone(),
+        operation_id: command.operation_id.clone(),
+        operation_state: result.state,
+        observation_sequence,
+        observed_at_unix_ms: unix_ms(),
+        redacted_message: result.redacted_message.clone(),
+        console_log_bytes: console_log.map_or_else(Vec::new, |value| value.bytes.clone()),
+        console_log_offset: console_log.map_or(0, |value| value.offset),
+        console_log_complete: console_log.is_some_and(|value| value.complete),
+        console_log_truncated: console_log.is_some_and(|value| value.truncated),
+        ..Default::default()
+    }
+}
+
 struct RejectingCommandExecutor;
 
 #[async_trait::async_trait]
@@ -1820,34 +1846,21 @@ impl AgentClient {
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                             let result = executor.execute(&command).await;
                             if let Ok(result) = &result {
-                                if let Some(console_log) = result.console_log.as_ref() {
-                                    tx.send(proto::ControlRequest {
+                                tx.send(proto::ControlRequest {
                                     body: Some(proto::control_request::Body::Observation(
-                                        proto::Observation {
-                                            agent_id: agent_id.to_owned(),
-                                            agent_epoch: epoch.clone(),
-                                            resource_id: command.resource_id.clone(),
-                                            provider_resource_id: result
-                                                .provider_resource_id
-                                                .clone(),
-                                            operation_id: command.operation_id.clone(),
-                                            operation_state: result.state,
-                                            observation_sequence: operation_sequence,
-                                            observed_at_unix_ms: unix_ms(),
-                                            redacted_message: result.redacted_message.clone(),
-                                            console_log_bytes: console_log.bytes.clone(),
-                                            console_log_offset: console_log.offset,
-                                            console_log_complete: console_log.complete,
-                                            console_log_truncated: console_log.truncated,
-                                            ..Default::default()
-                                        },
+                                        observation_from_result(
+                                            agent_id,
+                                            &epoch,
+                                            &command,
+                                            result,
+                                            operation_sequence,
+                                        ),
                                     )),
-                                    })
-                                    .await
-                                    .map_err(|_| {
-                                        AgentError::Protocol("control stream closed".to_owned())
-                                    })?;
-                                }
+                                })
+                                .await
+                                .map_err(|_| {
+                                    AgentError::Protocol("control stream closed".to_owned())
+                                })?;
                             }
                             let update = match result {
                                 Ok(result) => proto::OperationUpdate {
@@ -2306,6 +2319,52 @@ mod tests {
         assert_eq!(output.offset, 5);
         assert!(output.truncated);
         assert!(!output.complete);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successful_command_results_become_complete_observations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let executor = FakeCommandExecutor::default();
+        let create = fake_create_command()?;
+        executor.execute(&create).await?;
+
+        let mut start = create.clone();
+        start.operation_id = "start-operation".to_owned();
+        start.action = Some(proto::command::Action::Start(proto::StartCommand {}));
+        let lifecycle_result = executor.execute(&start).await?;
+        let lifecycle_observation =
+            observation_from_result("node", "epoch", &start, &lifecycle_result, 7);
+        assert_eq!(lifecycle_observation.operation_id, "start-operation");
+        assert_eq!(lifecycle_observation.resource_id, start.resource_id);
+        assert_eq!(
+            lifecycle_observation.provider_resource_id,
+            lifecycle_result.provider_resource_id
+        );
+        assert_eq!(
+            lifecycle_observation.operation_state,
+            proto::OperationState::Succeeded as i32
+        );
+        assert!(lifecycle_observation.console_log_bytes.is_empty());
+        assert_eq!(lifecycle_observation.console_log_offset, 0);
+        assert!(!lifecycle_observation.console_log_complete);
+        assert!(!lifecycle_observation.console_log_truncated);
+
+        let mut console = create;
+        console.operation_id = "console-operation".to_owned();
+        console.action = Some(proto::command::Action::ConsoleLog(
+            proto::ConsoleLogCommand {
+                offset: 5,
+                max_bytes: 4,
+            },
+        ));
+        let console_result = executor.execute(&console).await?;
+        let console_observation =
+            observation_from_result("node", "epoch", &console, &console_result, 8);
+        assert_eq!(console_observation.console_log_bytes, b"boot");
+        assert_eq!(console_observation.console_log_offset, 5);
+        assert!(!console_observation.console_log_complete);
+        assert!(console_observation.console_log_truncated);
         Ok(())
     }
 
