@@ -47,7 +47,11 @@ is blocked.
 4. Run the measurement harness, attach raw data and environment metadata, and
    review target failures honestly.
 5. Run the release gate, human-review the security/destructive-cleanup
-   surfaces, then create and verify the signed tag/artifacts.
+surfaces, then create and verify the signed tag/artifacts.
+
+The exact machine-readable artifact contract is documented in
+`docs/release-evidence-schema.md`; a preflight or skipped result is not release
+evidence.
 
 ## Decision log
 

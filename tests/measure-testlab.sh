@@ -11,6 +11,7 @@ PORT="${O3K_MEASURE_PORT:-$((19080 + ($$ % 500)))}"
 BASE_URL="http://127.0.0.1:${PORT}"
 LISTEN_ADDR="127.0.0.1:${PORT}"
 mkdir -p "$ARTIFACT_DIR"
+rm -f "$ARTIFACT_DIR/raw.json" "$ARTIFACT_DIR/summary.json" "$ARTIFACT_DIR/o3kd.log"
 O3KD_PID=
 trap 'set +e; [[ -n "${O3KD_PID}" ]] && kill -TERM "${O3KD_PID}" 2>/dev/null && wait "${O3KD_PID}" 2>/dev/null || true; rm -rf -- "${DATA_DIR}"' EXIT
 
@@ -18,7 +19,11 @@ if [[ "$PROFILE" == libvirt ]] && { [[ ! -e /dev/kvm ]] || ! command -v virsh >/
   python3 - "$ARTIFACT_DIR/summary.json" <<'PY'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as output:
-    json.dump({"status": "skipped", "profile": "libvirt", "reason": "virsh or /dev/kvm unavailable"}, output, indent=2)
+    json.dump({
+        "artifact_type": "benchmark", "status": "skipped", "profile": "libvirt",
+        "reason": "virsh or /dev/kvm unavailable", "redacted": True,
+        "cleanup": {"status": "not_run"}, "finished_at": int(__import__("time").time()),
+    }, output, indent=2)
     output.write("\n")
 PY
   echo "measurement skipped: real libvirt prerequisites unavailable" >&2
@@ -56,21 +61,21 @@ RSS_KIB="$(awk '/VmRSS:/ {print $2}' "/proc/$O3KD_PID/status" 2>/dev/null || ech
 BINARY_BYTES="$(stat -c %s "$BINARY")"
 export ARTIFACT_DIR PROFILE SAMPLES READY_MS RSS_KIB BINARY_BYTES TOKEN_TIMES
 python3 <<'PY'
-import json, os, platform, subprocess
+import json, math, os, platform, subprocess
 times = [float(value) for value in os.environ["TOKEN_TIMES"].split()]
 ordered = sorted(times)
-p95 = ordered[min(len(ordered) - 1, max(0, int(len(ordered) * 0.95) - 1))]
+p95 = ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.95) - 1))]
 raw = {
-    "status": "measured", "profile": os.environ["PROFILE"], "samples": int(os.environ["SAMPLES"]),
+    "artifact_type": "benchmark", "status": "measured", "profile": os.environ["PROFILE"], "samples": int(os.environ["SAMPLES"]), "redacted": True,
     "environment": {"uname": platform.platform(), "rustc": subprocess.run(["rustc", "--version"], capture_output=True, text=True).stdout.strip()},
     "control_plane": {"startup_readiness_ms": int(os.environ["READY_MS"]), "token_seconds": times, "token_p95_seconds": p95, "idle_rss_kib": None if os.environ["RSS_KIB"] == "null" else int(os.environ["RSS_KIB"]), "o3kd_binary_bytes": int(os.environ["BINARY_BYTES"])},
-    "guest_and_libvirt": {"status": "not_measured", "reason": "fake profile does not claim real guest coverage"},
+    "guest_and_libvirt": {"status": "not_measured", "reason": "control-plane harness does not claim real guest coverage"},
     "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100},
 }
 with open(os.path.join(os.environ["ARTIFACT_DIR"], "raw.json"), "w", encoding="utf-8") as output:
     json.dump(raw, output, indent=2, sort_keys=True); output.write("\n")
 control = raw["control_plane"]
-summary = {"status": "measured", "profile": raw["profile"], "samples": raw["samples"], "control_plane": control, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
+summary = {"artifact_type": "benchmark", "status": "measured", "profile": raw["profile"], "samples": raw["samples"], "redacted": True, "finished_at": int(__import__("time").time()), "control_plane": control, "guest_and_libvirt": raw["guest_and_libvirt"], "cleanup": {"status": "not_measured"}, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
 with open(os.path.join(os.environ["ARTIFACT_DIR"], "summary.json"), "w", encoding="utf-8") as output:
     json.dump(summary, output, indent=2, sort_keys=True); output.write("\n")
 PY
