@@ -37,6 +37,24 @@ grep -Fqx 'stop o3k-compute.service' "$WORK_DIR/systemctl.log"
 grep -Fqx 'stop o3kd.service' "$WORK_DIR/systemctl.log"
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/log/.o3k-owned" ]]
 
+# A custom-prefix/release-bundle uninstall must not operate on the host's
+# systemd units. The rm sentinel fails if either unrelated unit is targeted;
+# this keeps the assertion deterministic without creating files under /etc.
+cat >"$WORK_DIR/fake-bin/rm" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in
+    /etc/systemd/system/o3kd.service|/etc/systemd/system/o3k-compute.service)
+      echo "unrelated system unit targeted: $arg" >&2
+      exit 97
+      ;;
+  esac
+done
+exec /bin/rm "$@"
+EOF
+chmod +x "$WORK_DIR/fake-bin/rm"
+: >"$WORK_DIR/systemctl.log"
+
 printf '%s\n' 'foreign helper' >"$WORK_DIR/prefix/share/o3k/foreign-helper.sh"
 PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
   bash "$WORK_DIR/prefix/share/o3k/uninstall.sh" \
@@ -48,6 +66,7 @@ done
 [[ ! -e "$WORK_DIR/prefix/bin/o3kd" && ! -e "$WORK_DIR/prefix/bin/o3k-compute" ]]
 [[ -f "$WORK_DIR/prefix/share/o3k/foreign-helper.sh" ]]
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/config/o3kd.env" && -f "$WORK_DIR/log/.o3k-owned" ]]
+[[ ! -s "$WORK_DIR/systemctl.log" ]]
 
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
