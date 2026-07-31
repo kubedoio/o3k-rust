@@ -2,12 +2,233 @@ use std::{
     fs, io,
     net::Ipv4Addr,
     path::PathBuf,
+    process::Command,
     sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostNetworkConfig {
+    pub bridge_name: String,
+    pub uplink: Option<String>,
+}
+
+#[cfg(test)]
+mod host_network_tests {
+    use super::*;
+
+    #[test]
+    fn validates_names_and_generates_stable_interface_identity() -> Result<(), HostNetworkError> {
+        let manager = HostNetworkManager::new(HostNetworkConfig {
+            bridge_name: "o3k-br0".to_owned(),
+            uplink: None,
+        })?;
+        assert_eq!(
+            HostNetworkManager::tap_name("port-1")?,
+            HostNetworkManager::tap_name("port-1")?
+        );
+        assert_eq!(
+            HostNetworkManager::deterministic_mac("port-1")?,
+            HostNetworkManager::deterministic_mac("port-1")?
+        );
+        assert!(matches!(
+            HostNetworkManager::new(HostNetworkConfig {
+                bridge_name: "../../escape".to_owned(),
+                uplink: None
+            }),
+            Err(HostNetworkError::InvalidName)
+        ));
+        assert!(matches!(
+            manager.create_tap(&TapSpec {
+                instance_id: "instance-1".to_owned(),
+                port_id: "port-1".to_owned(),
+                mac: "bad".to_owned()
+            }),
+            Err(HostNetworkError::InvalidMac)
+        ));
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapSpec {
+    pub instance_id: String,
+    pub port_id: String,
+    pub mac: String,
+}
+
+#[derive(Debug, Error)]
+pub enum HostNetworkError {
+    #[error("host network configuration is invalid")]
+    InvalidConfiguration,
+    #[error("host network operation failed")]
+    CommandFailed,
+    #[error("host network interface name is invalid")]
+    InvalidName,
+    #[error("host network MAC address is invalid")]
+    InvalidMac,
+}
+
+impl HostNetworkConfig {
+    pub fn validate(&self) -> Result<(), HostNetworkError> {
+        validate_ifname(&self.bridge_name)?;
+        if let Some(uplink) = &self.uplink {
+            validate_ifname(uplink)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct HostNetworkManager {
+    config: HostNetworkConfig,
+}
+
+impl HostNetworkManager {
+    pub fn new(config: HostNetworkConfig) -> Result<Self, HostNetworkError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+    pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
+        if port_id.trim().is_empty() {
+            return Err(HostNetworkError::InvalidName);
+        }
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(port_id.as_bytes());
+        let mut suffix = String::with_capacity(8);
+        for byte in digest.iter().take(4) {
+            use std::fmt::Write as _;
+            let _ = write!(&mut suffix, "{byte:02x}");
+        }
+        Ok(format!("o3ktap-{suffix}"))
+    }
+    pub fn deterministic_mac(port_id: &str) -> Result<String, HostNetworkError> {
+        if port_id.trim().is_empty() {
+            return Err(HostNetworkError::InvalidName);
+        }
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(port_id.as_bytes());
+        Ok(format!(
+            "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            digest[0], digest[1], digest[2], digest[3], digest[4]
+        ))
+    }
+    pub fn ensure_bridge(&self) -> Result<(), HostNetworkError> {
+        if link_exists(&self.config.bridge_name) {
+            return Ok(());
+        }
+        run_ip([
+            "link",
+            "add",
+            "name",
+            &self.config.bridge_name,
+            "type",
+            "bridge",
+        ])?;
+        run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
+        if let Some(uplink) = &self.config.uplink {
+            run_ip([
+                "link",
+                "set",
+                "dev",
+                uplink,
+                "master",
+                &self.config.bridge_name,
+            ])?;
+        }
+        Ok(())
+    }
+    pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
+        validate_mac(&spec.mac)?;
+        self.ensure_bridge()?;
+        let name = Self::tap_name(&spec.port_id)?;
+        if !link_exists(&name) {
+            run_ip(["tuntap", "add", "dev", &name, "mode", "tap"])?;
+        }
+        run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
+        run_ip([
+            "link",
+            "set",
+            "dev",
+            &name,
+            "master",
+            &self.config.bridge_name,
+        ])?;
+        run_ip(["link", "set", "dev", &name, "up"])?;
+        Ok(name)
+    }
+    pub fn delete_tap(&self, port_id: &str) -> Result<(), HostNetworkError> {
+        let name = Self::tap_name(port_id)?;
+        if link_exists(&name) {
+            run_ip(["link", "del", "dev", &name])?;
+        }
+        Ok(())
+    }
+    pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
+        let output = Command::new("ip")
+            .args(["-o", "link", "show"])
+            .output()
+            .map_err(|_| HostNetworkError::CommandFailed)?;
+        if !output.status.success() {
+            return Err(HostNetworkError::CommandFailed);
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                line.split_once(": ")
+                    .map(|(_, rest)| rest.split(':').next().unwrap_or_default().to_owned())
+            })
+            .filter(|name| name.starts_with("o3ktap-"))
+            .collect())
+    }
+}
+
+fn validate_ifname(name: &str) -> Result<(), HostNetworkError> {
+    if name.is_empty()
+        || name.len() > 15
+        || name
+            .bytes()
+            .any(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+    {
+        return Err(HostNetworkError::InvalidName);
+    }
+    Ok(())
+}
+fn validate_mac(mac: &str) -> Result<(), HostNetworkError> {
+    if mac.len() != 17
+        || mac.split(':').count() != 6
+        || !mac
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err(HostNetworkError::InvalidMac);
+    }
+    Ok(())
+}
+fn link_exists(name: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", "dev", name])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+fn run_ip<'a, I>(args: I) -> Result<(), HostNetworkError>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let status = Command::new("ip")
+        .args(args)
+        .status()
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(HostNetworkError::CommandFailed)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NetworkRecord {
