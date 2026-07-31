@@ -40,6 +40,7 @@ the real-libvirt acceptance evidence exists.
 | #89 | clean Ubuntu installation and TestLab lifecycle | repository clean-install input validation complete; ADR-0096 and packaging regression coverage reject unsafe paths and incomplete libvirt TLS before filesystem publication | host-gated: clean Ubuntu install, dependency/bootstrap validation, real CirrOS lifecycle, reset/reinstall/uninstall/purge, and trusted leak-free `clean-ubuntu-install.json` remain outstanding; no host acceptance claimed |
 | #90 | clean Debian installation and full TestLab lifecycle | repository uninstall precondition ordering complete; ADR-0097 and portable packaging coverage ensure rejected purges do not mutate systemd state | host-gated: clean Debian install, dependency/bootstrap validation, real CirrOS lifecycle, reset/reinstall/uninstall/purge, foreign-state preservation, and trusted leak-free `clean-debian-install.json` remain outstanding; no host acceptance claimed |
 | #91 | real libvirt footprint and lifecycle measurements | repository benchmark freshness boundary complete; ADR-0098 and regression coverage require the raw benchmark's timestamp to be fresh and identical to the reviewed summary | host-gated: real CirrOS/libvirt measurements, raw samples, host/kernel/libvirt/QEMU/Rust metadata, and `real-libvirt-benchmark.json` with `status: measured` remain outstanding; no host measurement claimed |
+| #92 | independent architecture and security review | repository review package complete; ADR-0099, threat-model checklist, versioned evidence schema, and fail-closed validator added | human-gated: an identified non-LLM reviewer must inspect the exact release commit, record findings/dispositions, approve release-blocking and destructive-cleanup protections, and publish `human-review.json`; no human review or approval claimed |
 
 ## Current release gate
 
@@ -137,3 +138,6 @@ release evidence artifact.
 ADR-0098 records freshness validation for both the benchmark summary and its
 bound raw measurement artifact for issue #91; it does not substitute for real
 libvirt execution or host measurement evidence.
+ADR-0099 records the versioned human architecture/security review package and
+fail-closed validator for issue #92; it does not identify a reviewer or
+substitute automated evidence for independent human approval.
