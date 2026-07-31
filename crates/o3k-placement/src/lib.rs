@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
+use uuid::Uuid;
 
 pub const VCPU: &str = "VCPU";
 pub const MEMORY_MB: &str = "MEMORY_MB";
@@ -244,16 +245,17 @@ impl PlacementLedger {
 }
 
 fn persist(root: &Path, state: &BTreeMap<String, ResourceProvider>) -> Result<(), PlacementError> {
-    let temporary = root.join(format!("placement.json.tmp-{}", std::process::id()));
-    fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(state).map_err(PlacementError::Corrupt)?,
-    )
-    .map_err(PlacementError::Storage)?;
-    fs::rename(&temporary, root.join("placement.json")).map_err(|error| {
+    let temporary = root.join(format!("placement.json.tmp-{}", Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(state).map_err(PlacementError::Corrupt)?;
+    if let Err(error) = fs::write(&temporary, bytes) {
         let _ = fs::remove_file(&temporary);
-        PlacementError::Storage(error)
-    })
+        return Err(PlacementError::Storage(error));
+    }
+    if let Err(error) = fs::rename(&temporary, root.join("placement.json")) {
+        let _ = fs::remove_file(&temporary);
+        return Err(PlacementError::Storage(error));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
