@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "bins/o3kd",
+    "bins/o3k-compute",
     "crates/o3k-api",
     "crates/o3k-config",
     "crates/o3k-domain",
@@ -12,6 +13,7 @@ members = [
     "crates/o3k-provider-contract",
     "crates/o3k-compute",
     "crates/o3k-cellhv",
+    "crates/o3k-compute-agent",
     "crates/o3k-store",
 ]
 resolver = "2"
@@ -29,6 +31,7 @@ async-trait = "0.1"
 base64 = "0.22"
 hmac = "0.12"
 http = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -36,9 +39,12 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 thiserror = "2"
 toml = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 prost = "0.13"
-tonic = { version = "0.12", features = ["transport", "tls-native-roots"] }
-tonic-build = "0.12"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26"
+tonic = { version = "0.13", features = ["transport", "tls-native-roots", "tls-ring"] }
+tonic-build = "0.13"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

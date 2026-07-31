@@ -25,18 +25,18 @@ dependencies are intentionally allowed; the source gate rejects unknown
 external registries and git sources.
 
 The current advisory exceptions are:
-
-- RustSec RUSTSEC-2025-0134 for the unmaintained `rustls-pemfile` 2.2.0 pulled
-  by tonic 0.12.3. It is not a vulnerability, has no safe upgrade in that
-  dependency line, and is isolated to provider transport certificate
-  handling.
 - RustSec RUSTSEC-2023-0071 for `rsa` 0.9.10, which is retained only in the
   lockfile through SQLx's optional MySQL support. This workspace enables SQLite
   only; `cargo tree` has no active RSA path. It must be reconsidered if another
   SQLx database feature is enabled.
 
-Both IDs are passed explicitly to `cargo audit`; all other advisories fail CI.
-The exceptions are reviewed whenever tonic or SQLx features change.
+The remaining ID is passed explicitly to `cargo audit`; all other advisories
+fail CI. The exception is reviewed whenever SQLx features change.
+
+Tonic 0.13.1 is intentionally used instead of 0.12.3: its rustls PEM
+conversion fixes the mTLS client-identity failure covered by the compute-agent
+black-box test. The upgrade also removes the former rustls-pemfile advisory
+exception.
 
 Local `o3k-*` crates are owned by this repository and use the workspace
 Apache-2.0 license. A new direct dependency must add an owner and justification

@@ -29,6 +29,11 @@ problem without printing secret values.
 | Bootstrap secret | `bootstrap_secret` | `O3K_BOOTSTRAP_SECRET` | `--bootstrap-secret` | unset |
 | Bootstrap password | `bootstrap_password` | `O3K_BOOTSTRAP_PASSWORD` | `--bootstrap-password` | unset |
 | Token signing key | `token_signing_key` | `O3K_TOKEN_SIGNING_KEY` | `--token-signing-key` | unset |
+| Compute control address | `compute_control_addr` | `O3K_COMPUTE_CONTROL_ADDR` | `--compute-control-addr` | `127.0.0.1:50051` |
+| Compute server certificate | `compute_server_certificate` | `O3K_COMPUTE_SERVER_CERTIFICATE` | `--compute-server-certificate` | unset |
+| Compute server private key | `compute_server_private_key` | `O3K_COMPUTE_SERVER_PRIVATE_KEY` | `--compute-server-private-key` | unset |
+| Compute client CA | `compute_client_ca` | `O3K_COMPUTE_CLIENT_CA` | `--compute-client-ca` | unset |
+| Authorized compute agents | `compute_authorized_agents` | `O3K_COMPUTE_AUTHORIZED_AGENTS` | `--compute-authorized-agents` | unset |
 
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
 The default address must remain loopback unless an operator explicitly changes
@@ -39,6 +44,13 @@ The Keystone bootstrap token route is enabled only when both
 `bootstrap_password` and a random `token_signing_key` (at least 32 bytes) are
 configured. Keep both values outside the TOML file when possible, for example
 in a protected environment or secret manager.
+
+The compute control plane is disabled when all compute TLS settings are unset.
+When enabled, all three certificate paths and at least one authorized-agent
+mapping are required. `compute_authorized_agents` is a comma-separated list of
+`agent_id=sha256(certificate-DER)` entries; the certificate URI SAN must also
+be `urn:o3k:compute:agent:<agent_id>`. Partial or unlisted compute TLS
+configuration fails validation before any listener opens.
 
 Example:
 

@@ -1,0 +1,11 @@
+[server_ext]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:o3k-control-plane
+
+[agent_ext]
+basicConstraints = critical, CA:false
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth
+subjectAltName = URI:urn:o3k:compute:agent:node-test

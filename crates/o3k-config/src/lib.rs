@@ -10,6 +10,7 @@ use thiserror::Error;
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_DATA_DIR: &str = "./data";
 const DEFAULT_LOG_FILTER: &str = "info";
+const DEFAULT_COMPUTE_CONTROL_ADDR: &str = "127.0.0.1:50051";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -53,6 +54,11 @@ pub struct Config {
     pub log_format: LogFormat,
     pub log_filter: String,
     pub provider: Provider,
+    pub compute_control_addr: SocketAddr,
+    pub compute_server_certificate: Option<PathBuf>,
+    pub compute_server_private_key: Option<PathBuf>,
+    pub compute_client_ca: Option<PathBuf>,
+    pub compute_authorized_agents: Option<String>,
     bootstrap_secret: Option<Secret>,
     bootstrap_password: Option<Secret>,
     token_signing_key: Option<Secret>,
@@ -68,6 +74,20 @@ impl fmt::Debug for Config {
             .field("log_format", &self.log_format)
             .field("log_filter", &self.log_filter)
             .field("provider", &self.provider)
+            .field("compute_control_addr", &self.compute_control_addr)
+            .field(
+                "compute_server_certificate",
+                &self.compute_server_certificate,
+            )
+            .field("compute_server_private_key", &"<redacted>")
+            .field("compute_client_ca", &self.compute_client_ca)
+            .field(
+                "compute_authorized_agents",
+                &self
+                    .compute_authorized_agents
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
             .field("bootstrap_secret", &self.bootstrap_secret)
             .field("bootstrap_password", &self.bootstrap_password)
             .field("token_signing_key", &self.token_signing_key)
@@ -137,6 +157,12 @@ pub enum ConfigError {
     ParseFile { path: PathBuf },
     #[error("listen address is invalid")]
     InvalidListenAddress,
+    #[error("compute control address is invalid")]
+    InvalidComputeControlAddress,
+    #[error("compute TLS requires server certificate, private key, and client CA together")]
+    IncompleteComputeTls,
+    #[error("compute TLS requires at least one authorized agent fingerprint")]
+    MissingComputeAuthorization,
     #[error("data directory must be non-empty and must not be the filesystem root")]
     InvalidDataDirectory,
     #[error("log filter must be non-empty")]
@@ -164,6 +190,11 @@ struct PartialConfig {
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
     token_signing_key: Option<String>,
+    compute_control_addr: Option<String>,
+    compute_server_certificate: Option<String>,
+    compute_server_private_key: Option<String>,
+    compute_client_ca: Option<String>,
+    compute_authorized_agents: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -177,6 +208,11 @@ struct FileConfig {
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
     token_signing_key: Option<String>,
+    compute_control_addr: Option<String>,
+    compute_server_certificate: Option<String>,
+    compute_server_private_key: Option<String>,
+    compute_client_ca: Option<String>,
+    compute_authorized_agents: Option<String>,
 }
 
 impl From<FileConfig> for PartialConfig {
@@ -190,6 +226,11 @@ impl From<FileConfig> for PartialConfig {
             bootstrap_secret: file.bootstrap_secret,
             bootstrap_password: file.bootstrap_password,
             token_signing_key: file.token_signing_key,
+            compute_control_addr: file.compute_control_addr,
+            compute_server_certificate: file.compute_server_certificate,
+            compute_server_private_key: file.compute_server_private_key,
+            compute_client_ca: file.compute_client_ca,
+            compute_authorized_agents: file.compute_authorized_agents,
             ..Self::default()
         }
     }
@@ -224,6 +265,21 @@ impl PartialConfig {
         if other.token_signing_key.is_some() {
             self.token_signing_key = other.token_signing_key;
         }
+        if other.compute_control_addr.is_some() {
+            self.compute_control_addr = other.compute_control_addr;
+        }
+        if other.compute_server_certificate.is_some() {
+            self.compute_server_certificate = other.compute_server_certificate;
+        }
+        if other.compute_server_private_key.is_some() {
+            self.compute_server_private_key = other.compute_server_private_key;
+        }
+        if other.compute_client_ca.is_some() {
+            self.compute_client_ca = other.compute_client_ca;
+        }
+        if other.compute_authorized_agents.is_some() {
+            self.compute_authorized_agents = other.compute_authorized_agents;
+        }
     }
 
     fn from_environment(environment: &[(String, String)]) -> Self {
@@ -236,6 +292,17 @@ impl PartialConfig {
             bootstrap_secret: value_from_env(environment, "O3K_BOOTSTRAP_SECRET"),
             bootstrap_password: value_from_env(environment, "O3K_BOOTSTRAP_PASSWORD"),
             token_signing_key: value_from_env(environment, "O3K_TOKEN_SIGNING_KEY"),
+            compute_control_addr: value_from_env(environment, "O3K_COMPUTE_CONTROL_ADDR"),
+            compute_server_certificate: value_from_env(
+                environment,
+                "O3K_COMPUTE_SERVER_CERTIFICATE",
+            ),
+            compute_server_private_key: value_from_env(
+                environment,
+                "O3K_COMPUTE_SERVER_PRIVATE_KEY",
+            ),
+            compute_client_ca: value_from_env(environment, "O3K_COMPUTE_CLIENT_CA"),
+            compute_authorized_agents: value_from_env(environment, "O3K_COMPUTE_AUTHORIZED_AGENTS"),
             ..Self::default()
         }
     }
@@ -271,6 +338,21 @@ impl PartialConfig {
                 "--token-signing-key" => {
                     result.token_signing_key = Some(value("--token-signing-key")?)
                 }
+                "--compute-control-addr" => {
+                    result.compute_control_addr = Some(value("--compute-control-addr")?)
+                }
+                "--compute-server-certificate" => {
+                    result.compute_server_certificate = Some(value("--compute-server-certificate")?)
+                }
+                "--compute-server-private-key" => {
+                    result.compute_server_private_key = Some(value("--compute-server-private-key")?)
+                }
+                "--compute-client-ca" => {
+                    result.compute_client_ca = Some(value("--compute-client-ca")?)
+                }
+                "--compute-authorized-agents" => {
+                    result.compute_authorized_agents = Some(value("--compute-authorized-agents")?)
+                }
                 option if option == "--help" || option == "-h" => {
                     return Err(ConfigError::UnknownOption(option.to_owned()));
                 }
@@ -289,6 +371,11 @@ impl PartialConfig {
             .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_owned())
             .parse()
             .map_err(|_| ConfigError::InvalidListenAddress)?;
+        let compute_control_addr = self
+            .compute_control_addr
+            .unwrap_or_else(|| DEFAULT_COMPUTE_CONTROL_ADDR.to_owned())
+            .parse()
+            .map_err(|_| ConfigError::InvalidComputeControlAddress)?;
         let data_dir = PathBuf::from(self.data_dir.unwrap_or_else(|| DEFAULT_DATA_DIR.to_owned()));
         if data_dir.as_os_str().is_empty() || data_dir == Path::new("/") {
             return Err(ConfigError::InvalidDataDirectory);
@@ -343,6 +430,32 @@ impl PartialConfig {
         {
             return Err(ConfigError::WeakTokenSigningKey);
         }
+        let compute_tls_paths = [
+            self.compute_server_certificate.as_ref(),
+            self.compute_server_private_key.as_ref(),
+            self.compute_client_ca.as_ref(),
+        ];
+        if compute_tls_paths
+            .iter()
+            .filter(|path| path.is_some())
+            .count()
+            != 0
+            && compute_tls_paths.iter().any(Option::is_none)
+        {
+            return Err(ConfigError::IncompleteComputeTls);
+        }
+        if compute_tls_paths.iter().any(Option::is_some)
+            && self
+                .compute_authorized_agents
+                .as_deref()
+                .is_none_or(|agents| agents.trim().is_empty())
+        {
+            return Err(ConfigError::MissingComputeAuthorization);
+        }
+        if compute_tls_paths.iter().all(Option::is_none) && self.compute_authorized_agents.is_some()
+        {
+            return Err(ConfigError::IncompleteComputeTls);
+        }
 
         Ok(Config {
             config_path,
@@ -351,6 +464,11 @@ impl PartialConfig {
             log_format,
             log_filter,
             provider,
+            compute_control_addr,
+            compute_server_certificate: self.compute_server_certificate.map(PathBuf::from),
+            compute_server_private_key: self.compute_server_private_key.map(PathBuf::from),
+            compute_client_ca: self.compute_client_ca.map(PathBuf::from),
+            compute_authorized_agents: self.compute_authorized_agents,
             bootstrap_secret: self.bootstrap_secret.map(Secret),
             bootstrap_password: self.bootstrap_password.map(Secret),
             token_signing_key: self.token_signing_key.map(Secret),
@@ -450,5 +568,18 @@ mod tests {
             ]),
         );
         assert!(matches!(result, Err(ConfigError::WeakTokenSigningKey)));
+    }
+
+    #[test]
+    fn compute_tls_configuration_cannot_be_partial() {
+        let result = Config::from_sources(
+            [
+                "o3kd".to_owned(),
+                "--compute-server-certificate".to_owned(),
+                "server.pem".to_owned(),
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(ConfigError::IncompleteComputeTls)));
     }
 }

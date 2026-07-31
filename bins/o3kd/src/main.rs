@@ -36,6 +36,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(address = %config.listen_addr, data_dir = %config.data_dir.display(), provider = ?config.provider, "o3kd listening");
+    let authorized_agents = config
+        .compute_authorized_agents
+        .as_deref()
+        .map(o3k_compute_agent::parse_authorized_agents)
+        .transpose()?
+        .unwrap_or_default();
+
+    let control_task = match (
+        config.compute_server_certificate.clone(),
+        config.compute_server_private_key.clone(),
+        config.compute_client_ca.clone(),
+    ) {
+        (Some(server_certificate), Some(server_private_key), Some(client_ca_certificate)) => {
+            let server = o3k_compute_agent::ControlPlaneServer {
+                registry: o3k_compute_agent::NodeRegistry::default(),
+                address: config.compute_control_addr,
+                tls: o3k_compute_agent::ControlPlaneTls {
+                    server_certificate,
+                    server_private_key,
+                    client_ca_certificate,
+                },
+                authorized_agents,
+            };
+            info!(address = %config.compute_control_addr, "compute-agent control plane enabled");
+            Some(tokio::spawn(async move {
+                server.serve(control_shutdown_signal()).await
+            }))
+        }
+        _ => {
+            info!(
+                "compute-agent control plane disabled; configure all compute TLS paths to enable it"
+            );
+            None
+        }
+    };
 
     let state = if let Some(identity) = identity {
         o3k_api::AppState::new()
@@ -54,7 +89,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
+    if let Some(mut task) = control_task {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
     Ok(())
+}
+
+async fn control_shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            let _ = signal.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
 }
 
 async fn shutdown_signal(state: o3k_api::AppState) {
