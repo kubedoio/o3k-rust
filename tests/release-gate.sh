@@ -59,4 +59,8 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     exit 1
 fi
 
+PREFLIGHT_ARTIFACT_DIR="${ARTIFACT_DIR}/preflight"
+O3K_TESTLAB_ARTIFACT_DIR="${PREFLIGHT_ARTIFACT_DIR}" bash "${ROOT_DIR}/tests/testlab-libvirt.sh"
+grep -q '"status": "skipped"' "${PREFLIGHT_ARTIFACT_DIR}/libvirt-result.json"
+
 echo "release gate schema tests passed"
