@@ -45,4 +45,6 @@ provider-specific payloads and diagnostics are not part of the public error.
 
 ## CellHV
 
-CellHV is the preferred first real provider. O3K depends on the public protobuf contract, not CellHV internal crates or database schemas.
+CellHV is an optional provider behind this contract. Libvirt/KVM is the primary
+real backend for `v0.2.0-alpha.1`; O3K depends on public provider contracts, not
+CellHV internal crates or database schemas.

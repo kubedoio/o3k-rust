@@ -23,7 +23,9 @@ Deliver one complete OpenStack-compatible workflow on a single Linux host using 
 - duplicate create request does not create duplicate provider resources;
 - process restart at defined failure points converges or exposes a terminal error;
 - unsupported fields/extensions are documented;
-- stub and CellHV providers implement the same provider contract;
+- fake and libvirt providers implement the same provider contract for the
+  release-critical path; CellHV may implement the same contract as an
+  optional provider;
 - E2E test produces logs and compatibility evidence.
 
 ## Non-goals

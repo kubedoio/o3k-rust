@@ -12,6 +12,9 @@ A complete small workflow provides earlier user value, faster compatibility feed
 
 ## Consequences
 
-- SQLite, local image storage, flat networking, and stub/CellHV providers first;
+- SQLite, local image storage, flat networking, and fake/libvirt providers
+  first;
+- libvirt/KVM is the primary real backend for `v0.2.0-alpha.1`; CellHV is an
+  optional later provider behind the same boundary;
 - endpoint breadth is deferred;
 - production claims require separate evidence and ADRs.

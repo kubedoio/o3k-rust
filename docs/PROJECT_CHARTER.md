@@ -11,7 +11,10 @@ O3K Rust provides a lightweight OpenStack-compatible control plane for reproduci
 - make unsupported behavior explicit;
 - recover safely from interruption and retry;
 - separate orchestration from provider execution;
-- integrate with CellHV through versioned public contracts;
+- use libvirt/KVM as the primary real compute backend through a versioned
+  provider contract;
+- integrate with CellHV through the same contract as an optional later
+  provider;
 - remain operable by small infrastructure teams;
 - publish evidence for compatibility, performance, security, and recovery claims.
 
@@ -24,7 +27,12 @@ O3K Rust provides a lightweight OpenStack-compatible control plane for reproduci
 
 ## First release outcome
 
-A user can install O3K TestLab on one Linux node, use standard OpenStack CLI commands to authenticate and manage a minimal image/network/server workflow, execute through a stub provider and CellHV provider, restart the control plane, reconcile, and remove the environment.
+A user can install O3K TestLab on one supported Linux node, use standard
+OpenStack CLI commands to authenticate and manage a minimal
+image/network/server workflow, execute a real QEMU/KVM guest through
+`o3k-compute` and local `qemu:///system`, restart the control plane and compute
+agent, reconcile, and remove the environment. CellHV remains an optional later
+provider.
 
 ## Governance
 
