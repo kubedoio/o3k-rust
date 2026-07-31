@@ -234,7 +234,8 @@ for needle in ("workflow_dispatch:",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
                "Probe runner capabilities", "runner-capabilities.json",
                "contents: read",
-               "if: always()", "actions/upload-artifact@v4"):
+               "if: always()", "actions/upload-artifact@v4",
+               "retention-days: 14"):
     assert needle in text, needle
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 PY

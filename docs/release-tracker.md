@@ -35,7 +35,7 @@ until the independent evidence and decisions listed below exist.
 | #53 | release gate | merged | benchmark and cleanup evidence are required; positive, non-future, seven-day freshness checks now reject stale artifacts; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
 | #94 | program closure and provenance tracker | repository contract guarded; ADR-0100 | blocked until every required real-host artifact and independent human decision is recorded; no program closure is claimed |
-| #77 | protected real-host validation | repository implementation complete; ADR-0084 and portable guard tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
+| #77 | protected real-host validation | repository implementation complete; ADR-0084/0103, protected workflow guards, 14-day redacted artifact retention, and portable tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
 | #76 | protected runner capability probe | repository implementation complete; ADR-0085/0102, redacted atomically published artifact fenced to workflow run/attempt/source commit, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
 | #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
 | #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087, regular-file checks and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
@@ -164,3 +164,5 @@ release publication.
 ADR-0102 records the atomic, workflow-attempt-bound capability artifact fence
 for issue #76; it does not provide real runner capability evidence or host
 acceptance.
+ADR-0103 records the explicit 14-day retention for protected real-host
+artifacts; it does not provide a runner, host evidence, or issue closure.

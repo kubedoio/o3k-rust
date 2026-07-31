@@ -11,6 +11,7 @@ Implemented on the repository branch:
 - read-only pre-run owned-resource baseline and post-run leak comparison for
   O3K-owned libvirt domains and safely queryable TestLab OpenStack resources;
 - redacted pre-run/post-run result and unconditional artifact upload;
+- explicit 14-day retention for the complete redacted artifact bundle;
 - portable guard, redaction, skipped-result, and workflow-shape tests;
 - [ADR-0084](../adr/ADR-0084-protected-real-host-validation.md).
 
