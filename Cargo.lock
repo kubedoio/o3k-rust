@@ -1106,6 +1106,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-placement"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "o3k-provider"
 version = "0.1.0-alpha.0"
 dependencies = [
