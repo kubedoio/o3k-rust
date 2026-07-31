@@ -41,5 +41,5 @@ if ! virsh -c qemu:///system uri >/dev/null 2>&1; then
     exit 0
 fi
 
-write_result ready "preflight passed; lifecycle harness requires a TestLab image and managed network permissions"
-echo "real-libvirt preflight passed; run the host lifecycle harness with O3K_TESTLAB_PROFILE=libvirt" 
+write_result skipped "preflight passed; lifecycle harness requires a TestLab image and managed network permissions"
+echo "real-libvirt preflight passed; lifecycle harness is not implemented in this runner"
