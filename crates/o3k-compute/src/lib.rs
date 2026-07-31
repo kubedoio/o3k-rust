@@ -151,6 +151,16 @@ impl ComputeService {
         Ok(self.journal.apply_agent_update(update).await?)
     }
 
+    /// Applies an authenticated provider observation to the durable resource
+    /// projection. This is separate from operation progress because a command
+    /// may succeed while the provider remains stopped, deleting, or errored.
+    pub async fn apply_agent_observation(
+        &self,
+        observation: &o3k_provider_contract::compute_proto::Observation,
+    ) -> Result<(), ComputeError> {
+        Ok(self.journal.apply_agent_observation(observation).await?)
+    }
+
     /// Starts the in-memory event bridge used by the control-plane binary.
     /// The journal remains the recovery authority; this task only applies live
     /// updates received from an authenticated agent connection.
@@ -166,6 +176,11 @@ impl ComputeService {
                     Ok(o3k_compute_agent::AgentEvent::Operation(update)) => {
                         if let Err(error) = service.apply_agent_update(&update).await {
                             tracing::warn!(%error, "agent operation update rejected");
+                        }
+                    }
+                    Ok(o3k_compute_agent::AgentEvent::Observation(observation)) => {
+                        if let Err(error) = service.apply_agent_observation(&observation).await {
+                            tracing::warn!(%error, "agent resource observation rejected");
                         }
                     }
                     Ok(_) => {}

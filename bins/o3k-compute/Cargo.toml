@@ -19,6 +19,7 @@ axum.workspace = true
 o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
 o3k-console = { path = "../../crates/o3k-console" }
 o3k-libvirt = { path = "../../crates/o3k-libvirt" }
+o3k-provider = { path = "../../crates/o3k-provider" }
 o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
 serde_json.workspace = true
 tokio.workspace = true

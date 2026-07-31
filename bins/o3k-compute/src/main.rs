@@ -30,10 +30,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
         command: &proto::Command,
     ) -> Result<CommandExecutionResult, AgentError> {
         let name = stable_domain_name(&command.resource_id);
-        let success = |message: &str| {
+        let success = |message: &str, resource_state: proto::ResourceState| {
             Ok(CommandExecutionResult {
                 state: proto::OperationState::Succeeded as i32,
                 error_category: proto::ErrorCategory::Unspecified as i32,
+                resource_state: resource_state as i32,
                 redacted_message: message.to_owned(),
                 provider_resource_id: name.clone(),
                 console_log: None,
@@ -47,11 +48,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .await
                     .map_err(agent_error)?;
                 verify_owned_domain(&inspection, &command.resource_id)?;
-                success(if inspection.active {
-                    "domain is active"
-                } else {
-                    "domain is inactive"
-                })
+                success(
+                    if inspection.active {
+                        "domain is active"
+                    } else {
+                        "domain is inactive"
+                    },
+                    resource_state(&inspection),
+                )
             }
             Some(proto::command::Action::Start(_)) => {
                 let inspection = self
@@ -64,7 +68,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .start(name.clone())
                     .await
                     .map_err(agent_error)?;
-                success("domain started")
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                success("domain started", resource_state(&inspection))
             }
             Some(proto::command::Action::Stop(_)) => {
                 let inspection = self
@@ -77,7 +87,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .shutdown(name.clone())
                     .await
                     .map_err(agent_error)?;
-                success("domain stopped")
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                success("domain stopped", resource_state(&inspection))
             }
             Some(proto::command::Action::Reboot(_)) => {
                 let inspection = self
@@ -90,7 +106,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .reboot(name.clone())
                     .await
                     .map_err(agent_error)?;
-                success("domain rebooted")
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                success("domain rebooted", resource_state(&inspection))
             }
             Some(proto::command::Action::Delete(_)) => {
                 let inspection = self
@@ -109,7 +131,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .undefine(name.clone())
                     .await
                     .map_err(agent_error)?;
-                success("domain deleted")
+                success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => Err(AgentError::Protocol(
                 "create command requires a resolved domain definition".to_owned(),
@@ -140,6 +162,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 Ok(CommandExecutionResult {
                     state: proto::OperationState::Succeeded as i32,
                     error_category: proto::ErrorCategory::Unspecified as i32,
+                    resource_state: resource_state(&inspection) as i32,
                     redacted_message: "libvirt console output read".to_owned(),
                     provider_resource_id: name,
                     console_log: Some(ConsoleLogResult {
@@ -152,6 +175,17 @@ impl CommandExecutor for LibvirtCommandExecutor {
             }
             None => Err(AgentError::Protocol("command action is missing".to_owned())),
         }
+    }
+}
+
+fn resource_state(inspection: &o3k_libvirt::DomainInspection) -> proto::ResourceState {
+    match o3k_libvirt::project_domain_state(inspection.active, &inspection.state) {
+        o3k_provider::InstanceState::Running => proto::ResourceState::Running,
+        o3k_provider::InstanceState::Stopped => proto::ResourceState::Stopped,
+        o3k_provider::InstanceState::Creating => proto::ResourceState::Creating,
+        o3k_provider::InstanceState::Deleting => proto::ResourceState::Deleting,
+        o3k_provider::InstanceState::Deleted => proto::ResourceState::Deleted,
+        o3k_provider::InstanceState::Error => proto::ResourceState::Error,
     }
 }
 

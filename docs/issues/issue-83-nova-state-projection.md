@@ -8,3 +8,9 @@ internal `Stopped` state, while the reconciler and compute API expose Nova's
 This does not claim agent-backed lifecycle dispatch, real guest execution,
 restart recovery, or real-host acceptance. Those remain blocked requirements
 for issue #83.
+
+The compute-agent command result now carries an explicit provider resource
+state, and successful fake/libvirt command paths populate observations with
+that state rather than leaving the protobuf field unspecified. This is a
+protocol-to-agent evidence slice only; it does not prove a real domain
+observation.
