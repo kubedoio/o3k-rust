@@ -1,8 +1,12 @@
-use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use o3k_compute_agent::{AgentClient, AgentConfig, TlsFiles};
-use o3k_libvirt::{LibvirtAdapter, LibvirtConfig};
+use o3k_compute_agent::{
+    AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor, TlsFiles,
+};
+use o3k_libvirt::{LibvirtAdapter, LibvirtConfig, stable_domain_name};
+use o3k_provider_contract::compute_proto as proto;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -12,6 +16,92 @@ struct HealthState {
     agent: AgentClient,
     libvirt_ready: bool,
     libvirt_error: Option<String>,
+}
+
+struct LibvirtCommandExecutor {
+    adapter: LibvirtAdapter,
+}
+
+#[async_trait]
+impl CommandExecutor for LibvirtCommandExecutor {
+    async fn execute(
+        &self,
+        command: &proto::Command,
+    ) -> Result<CommandExecutionResult, AgentError> {
+        let name = stable_domain_name(&command.resource_id);
+        let success = |message: &str| {
+            Ok(CommandExecutionResult {
+                state: proto::OperationState::Succeeded as i32,
+                error_category: proto::ErrorCategory::Unspecified as i32,
+                redacted_message: message.to_owned(),
+                provider_resource_id: name.clone(),
+            })
+        };
+        match command.action.as_ref() {
+            Some(proto::command::Action::Inspect(_)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                success(if inspection.active {
+                    "domain is active"
+                } else {
+                    "domain is inactive"
+                })
+            }
+            Some(proto::command::Action::Start(_)) => {
+                self.adapter
+                    .start(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                success("domain started")
+            }
+            Some(proto::command::Action::Stop(_)) => {
+                self.adapter
+                    .shutdown(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                success("domain stopped")
+            }
+            Some(proto::command::Action::Reboot(_)) => {
+                self.adapter
+                    .reboot(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                success("domain rebooted")
+            }
+            Some(proto::command::Action::Delete(_)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                if inspection.active {
+                    self.adapter
+                        .force_stop(name.clone())
+                        .await
+                        .map_err(agent_error)?;
+                }
+                self.adapter
+                    .undefine(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                success("domain deleted")
+            }
+            Some(proto::command::Action::Create(_)) => Err(AgentError::Protocol(
+                "create command requires a resolved domain definition".to_owned(),
+            )),
+            Some(proto::command::Action::ConsoleLog(_)) => Err(AgentError::Protocol(
+                "console log is not supported by the local executor".to_owned(),
+            )),
+            None => Err(AgentError::Protocol("command action is missing".to_owned())),
+        }
+    }
+}
+
+fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
+    AgentError::Protocol("libvirt command failed".to_owned())
 }
 
 #[tokio::main]
@@ -34,6 +124,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let agent = AgentClient::new(config.clone())?;
+    let executor = Arc::new(LibvirtCommandExecutor {
+        adapter: libvirt.clone(),
+    });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9100".to_owned())
@@ -45,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let health_server = axum::serve(TcpListener::bind(health_addr).await?, health_router(state));
     tokio::select! {
-        result = agent.run(shutdown_signal()) => { result?; }
+        result = agent.run_with_executor(shutdown_signal(), executor) => { result?; }
         result = health_server.with_graceful_shutdown(shutdown_signal()) => { result?; }
     }
     info!("o3k-compute stopped");

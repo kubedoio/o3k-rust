@@ -1002,6 +1002,7 @@ dependencies = [
 name = "o3k-compute-agent"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "base64",
  "http",
  "hyper-util",
@@ -1023,6 +1024,7 @@ dependencies = [
 name = "o3k-compute-bin"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "axum",
  "o3k-compute-agent",
  "o3k-libvirt",

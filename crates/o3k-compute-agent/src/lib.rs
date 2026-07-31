@@ -800,6 +800,34 @@ pub struct AgentClient {
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandExecutionResult {
+    pub state: i32,
+    pub error_category: i32,
+    pub redacted_message: String,
+    pub provider_resource_id: String,
+}
+
+#[async_trait::async_trait]
+pub trait CommandExecutor: Send + Sync {
+    async fn execute(&self, command: &proto::Command)
+    -> Result<CommandExecutionResult, AgentError>;
+}
+
+struct RejectingCommandExecutor;
+
+#[async_trait::async_trait]
+impl CommandExecutor for RejectingCommandExecutor {
+    async fn execute(
+        &self,
+        _command: &proto::Command,
+    ) -> Result<CommandExecutionResult, AgentError> {
+        Err(AgentError::Protocol(
+            "no command executor is configured".to_owned(),
+        ))
+    }
+}
+
 impl AgentClient {
     pub fn new(config: AgentConfig) -> Result<Self, AgentError> {
         config.validate()?;
@@ -818,13 +846,27 @@ impl AgentClient {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        self.run_with_executor(shutdown, Arc::new(RejectingCommandExecutor))
+            .await
+    }
+
+    pub async fn run_with_executor<F>(
+        &self,
+        shutdown: F,
+        executor: Arc<dyn CommandExecutor>,
+    ) -> Result<(), AgentError>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
         tokio::pin!(shutdown);
         let agent_id = load_or_create_identity(&self.config.identity_file)?;
         let mut delay = Duration::from_millis(250);
         loop {
             self.ready
                 .store(false, std::sync::atomic::Ordering::Release);
-            let result = self.connect_once(&agent_id, shutdown.as_mut()).await;
+            let result = self
+                .connect_once(&agent_id, shutdown.as_mut(), executor.clone())
+                .await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(error) => {
@@ -840,6 +882,7 @@ impl AgentClient {
         &self,
         agent_id: &str,
         mut shutdown: Pin<&mut F>,
+        executor: Arc<dyn CommandExecutor>,
     ) -> Result<(), AgentError>
     where
         F: std::future::Future<Output = ()> + Send,
@@ -918,6 +961,7 @@ impl AgentClient {
         let mut sequence = 0_u64;
         let mut applied_state = proto::AdministrativeState::Enabled as i32;
         let mut state_ack_pending = true;
+        let mut operation_sequence = 0_u64;
         let mut interval = time::interval(self.config.heartbeat_interval);
         loop {
             tokio::select! {
@@ -953,8 +997,53 @@ impl AgentClient {
                                 state_ack_pending = false;
                             }
                         }
-                        Some(proto::control_response::Body::Command(_))
-                        | Some(proto::control_response::Body::DesiredState(_))
+                        Some(proto::control_response::Body::Command(command)) => {
+                            if command.agent_id != agent_id || command.agent_epoch != epoch {
+                                return Err(AgentError::Protocol(
+                                    "command identity does not match registration".to_owned(),
+                                ));
+                            }
+                            operation_sequence = operation_sequence.saturating_add(1);
+                            tx.send(proto::ControlRequest {
+                                body: Some(proto::control_request::Body::CommandAccepted(
+                                    proto::CommandAccepted {
+                                        command_id: command.command_id.clone(),
+                                        operation_id: command.operation_id.clone(),
+                                        state: proto::OperationState::Accepted as i32,
+                                        operation_sequence,
+                                    },
+                                )),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+                            let result = executor.execute(&command).await;
+                            let update = match result {
+                                Ok(result) => proto::OperationUpdate {
+                                    operation_id: command.operation_id,
+                                    resource_id: command.resource_id,
+                                    state: result.state,
+                                    error_category: result.error_category,
+                                    redacted_message: result.redacted_message,
+                                    operation_sequence,
+                                    provider_resource_id: result.provider_resource_id,
+                                },
+                                Err(_) => proto::OperationUpdate {
+                                    operation_id: command.operation_id,
+                                    resource_id: command.resource_id,
+                                    state: proto::OperationState::Failed as i32,
+                                    error_category: proto::ErrorCategory::Terminal as i32,
+                                    redacted_message: "command execution failed".to_owned(),
+                                    operation_sequence,
+                                    provider_resource_id: String::new(),
+                                },
+                            };
+                            tx.send(proto::ControlRequest {
+                                body: Some(proto::control_request::Body::Operation(update)),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+                        }
+                        Some(proto::control_response::Body::DesiredState(_))
                         | Some(proto::control_response::Body::ObservationAck(_))
                         | Some(proto::control_response::Body::Resync(_))
                         | Some(proto::control_response::Body::Error(_))
