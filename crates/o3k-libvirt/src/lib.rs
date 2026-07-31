@@ -80,7 +80,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
     let name = stable_domain_name(&spec.metadata.server_id);
     let m = &spec.metadata;
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk></devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk></devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -838,6 +838,10 @@ mod tests {
         let second = build_domain_xml(&spec)?;
         assert_eq!(first, second);
         assert!(first.xml.contains("project&amp;1"));
+        assert!(
+            first.xml.contains("<console type=\"pty\">")
+                && first.xml.contains("<serial type=\"pty\">")
+        );
         assert_eq!(
             discover_domain_xml(&first.name, &first.xml),
             DiscoveryResult::Owned {
