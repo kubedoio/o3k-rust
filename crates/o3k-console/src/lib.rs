@@ -98,7 +98,16 @@ impl ConsoleService {
         let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
         let current = self.read(instance_id).unwrap_or_default();
         if offset == 0 {
-            return self.write_unlocked(instance_id, output);
+            if current.is_empty() {
+                return self.write_unlocked(instance_id, output);
+            }
+            if current == output {
+                return Ok(());
+            }
+            if output.starts_with(&current) {
+                return self.write_unlocked(instance_id, output);
+            }
+            return Err(ConsoleError::InvalidInput);
         }
         if offset > current.len() || output.len() > self.max_bytes.saturating_sub(offset) {
             return Err(ConsoleError::InvalidInput);
@@ -205,9 +214,15 @@ mod tests {
         let service = service()?;
         let id = Uuid::now_v7();
         service.write_chunk(id, 0, b"boot ")?;
+        service.write_chunk(id, 0, b"boot ")?;
+        service.write_chunk(id, 0, b"boot output\n")?;
         service.write_chunk(id, 5, b"output\n")?;
         service.write_chunk(id, 5, b"output\n")?;
         assert_eq!(service.read(id)?, b"boot output\n");
+        assert!(matches!(
+            service.write_chunk(id, 0, b"stale"),
+            Err(ConsoleError::InvalidInput)
+        ));
         assert!(matches!(
             service.write_chunk(id, 2, b"stale"),
             Err(ConsoleError::InvalidInput)
