@@ -38,7 +38,7 @@ until the independent evidence and decisions listed below exist.
 | #77 | protected real-host validation | repository implementation complete; ADR-0084/0103, protected workflow guards, 14-day redacted artifact retention, and portable tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
 | #76 | protected runner capability probe | repository implementation complete; ADR-0085/0102, redacted atomically published artifact fenced to workflow run/attempt/source commit, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
 | #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
-| #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087, regular-file checks and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
+| #79 | image cache and overlay safety boundary | repository safety boundary complete; ADR-0087/0104, regular-file checks, post-create qcow2/backing verification, cleanup, and symlink/outside-target regression coverage added | blocked until Glance/agent-backed image realization and real-host qemu-img evidence exist; no host evidence claimed |
 | #80 | config-drive attachment | repository failed-generation cleanup complete; ADR-0088 and regression coverage remove unpublished temporary directories while preserving unowned destinations | blocked until ISO/VFAT media, libvirt/agent attachment, guest cloud-init evidence, and trusted real-host evidence exist |
 | #81 | Neutron/TAP/bridge/DHCP lifecycle | repository link-kind safety boundary complete; ADR-0089 and parser regression coverage reject existing non-bridge links before host mutation | blocked until agent-backed create, real TAP/bridge/libvirt/DHCP orchestration, guest fixed-IP evidence, cleanup/restart evidence, and trusted real-host artifact exist; no host acceptance claimed |
 | #82 | Placement scheduling and allocations | repository publication rollback boundary complete; ADR-0090 and regression coverage restore in-memory state after failed ledger publication | blocked until agent-backed provider inventory/create/delete wiring, real guest allocation evidence, restart recovery, and trusted real-host scheduling artifact exist; no host acceptance claimed |
@@ -126,7 +126,8 @@ a trusted host run. ADR-0085 records the read-only runner capability probe and
 its honest skipped/failed boundaries for issue #76. ADR-0086 records the
 fail-closed rejection of the unimplemented direct libvirt daemon path for
 issue #78. ADR-0087 records the regular-file and symlink safety boundary for
-the image cache and overlays in issue #79. ADR-0088 records cleanup of failed
+the image cache and overlays in issue #79. ADR-0104 records post-create
+qcow2/backing verification and cleanup for issue #79. ADR-0088 records cleanup of failed
 config-drive publication temporaries for issue #80.
 ADR-0089 records the existing-link bridge-kind fence for issue #81; this
 portable guard does not substitute for real network or guest evidence.

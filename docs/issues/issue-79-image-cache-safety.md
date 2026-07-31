@@ -8,6 +8,11 @@ This bounded repository change hardens the existing image-cache boundary:
   symlinks;
 - overlay bases must be regular files inside the managed `base` directory;
 - existing overlay destinations must be regular files before they are returned;
+- newly-created overlays must pass `qemu-img info --output=json` verification
+  before publication: exactly `qcow2` with a backing path resolving to the
+  managed base file;
+- malformed, wrong-format, missing-backing, and foreign-backed temporary
+  outputs are removed and never published;
 - symlink, directory, and other non-regular destinations fail with
   `InvalidPath` without touching an outside target;
 - atomic temporary publication remains unchanged for new base and overlay
@@ -15,7 +20,8 @@ This bounded repository change hardens the existing image-cache boundary:
 - regression coverage proves symlinked bases, symlinked overlays, and an
   outside target are rejected.
 
-See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md).
+See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
+[ADR-0104](../adr/ADR-0104-image-overlay-backing-verification.md).
 
 ## Explicit boundary
 

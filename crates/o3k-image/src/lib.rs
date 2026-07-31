@@ -71,10 +71,19 @@ pub struct ImageCache {
     root: PathBuf,
     max_bytes: u64,
     lock: Arc<Mutex<()>>,
+    qemu_img: PathBuf,
 }
 
 impl ImageCache {
     pub fn open(root: impl Into<PathBuf>, max_bytes: u64) -> Result<Self, ImageError> {
+        Self::open_with_qemu_img(root, max_bytes, Path::new("qemu-img"))
+    }
+
+    fn open_with_qemu_img(
+        root: impl Into<PathBuf>,
+        max_bytes: u64,
+        qemu_img: &Path,
+    ) -> Result<Self, ImageError> {
         let root = root.into();
         fs::create_dir_all(root.join("base")).map_err(ImageError::Storage)?;
         fs::create_dir_all(root.join("overlays")).map_err(ImageError::Storage)?;
@@ -88,6 +97,7 @@ impl ImageCache {
             root,
             max_bytes,
             lock: Arc::new(Mutex::new(())),
+            qemu_img: qemu_img.to_owned(),
         })
     }
 
@@ -182,7 +192,7 @@ impl ImageCache {
             .root
             .join("overlays")
             .join(format!(".{instance_id}.tmp-{}", Uuid::now_v7()));
-        let status = std::process::Command::new("qemu-img")
+        let status = std::process::Command::new(&self.qemu_img)
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
             .arg(&temporary)
@@ -192,6 +202,10 @@ impl ImageCache {
                 ImageError::OverlayFailed
             })?;
         if !status.success() {
+            let _ = fs::remove_file(&temporary);
+            return Err(ImageError::OverlayFailed);
+        }
+        if verify_overlay(&self.qemu_img, &temporary, base).is_err() {
             let _ = fs::remove_file(&temporary);
             return Err(ImageError::OverlayFailed);
         }
@@ -229,6 +243,46 @@ impl ImageCache {
         }
         Ok(())
     }
+}
+
+fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), ImageError> {
+    let expected_base = fs::canonicalize(base).map_err(|_| ImageError::OverlayFailed)?;
+    let output = std::process::Command::new(qemu_img)
+        .args(["info", "--output=json"])
+        .arg(overlay)
+        .output()
+        .map_err(|_| ImageError::OverlayFailed)?;
+    if !output.status.success() {
+        return Err(ImageError::OverlayFailed);
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| ImageError::OverlayFailed)?;
+    if info.get("format").and_then(serde_json::Value::as_str) != Some("qcow2") {
+        return Err(ImageError::OverlayFailed);
+    }
+
+    let mut backing_paths = Vec::new();
+    for field in ["backing-filename", "full-backing-filename"] {
+        if let Some(backing) = info.get(field).and_then(serde_json::Value::as_str) {
+            backing_paths.push(backing);
+        }
+    }
+    if backing_paths.is_empty() {
+        return Err(ImageError::OverlayFailed);
+    }
+    let overlay_parent = overlay.parent().ok_or(ImageError::OverlayFailed)?;
+    for backing in backing_paths {
+        let reported = Path::new(backing);
+        let resolved = if reported.is_absolute() {
+            reported.to_path_buf()
+        } else {
+            overlay_parent.join(reported)
+        };
+        if fs::canonicalize(resolved).map_err(|_| ImageError::OverlayFailed)? != expected_base {
+            return Err(ImageError::OverlayFailed);
+        }
+    }
+    Ok(())
 }
 
 fn is_checksum(value: &str) -> bool {
@@ -449,6 +503,9 @@ fn persist(inner: &Inner) -> Result<(), ImageError> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     fn root(label: &str) -> PathBuf {
         PathBuf::from(format!("/tmp/o3k-image-{label}-{}", std::process::id()))
     }
@@ -594,6 +651,75 @@ mod tests {
         assert!(!temporary.exists());
         fs::remove_dir_all(path)?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlay_requires_verified_qcow2_backing_and_cleans_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("cache-qemu-verification");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  create)
+    : > "$6"
+    ;;
+  info)
+    backing="../base/base.qcow2"
+    case "$(basename "$3")" in
+      *wrong-format*) format=raw; reported="$backing" ;;
+      *wrong-backing*) format=qcow2; reported="/tmp/o3k-foreign-base" ;;
+      *) format=qcow2; reported="$backing" ;;
+    esac
+    case "$(basename "$3")" in
+      *missing-backing*) printf '{"format":"qcow2"}\n' ;;
+      *) printf '{"format":"%s","backing-filename":"%s"}\n' "$format" "$reported" ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
+            let base = path.join("base").join("base.qcow2");
+            fs::write(&base, b"base")?;
+
+            let overlay = cache.create_overlay("valid", &base)?;
+            assert!(overlay.is_file());
+
+            for instance in ["wrong-format", "wrong-backing", "missing-backing"] {
+                assert!(matches!(
+                    cache.create_overlay(instance, &base),
+                    Err(ImageError::OverlayFailed)
+                ));
+                assert!(
+                    !path
+                        .join("overlays")
+                        .join(format!("{instance}.qcow2"))
+                        .exists()
+                );
+                assert!(
+                    !fs::read_dir(path.join("overlays"))?.flatten().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(&format!(".{instance}.tmp-"))
+                    })
+                );
+            }
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&path);
+        result
     }
 
     #[cfg(unix)]
