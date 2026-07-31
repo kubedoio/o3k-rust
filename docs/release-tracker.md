@@ -15,7 +15,7 @@ the real-libvirt acceptance evidence exists.
 | #42 | config-drive | merged | atomic replacement publication and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication and allocation-preserving provider synchronization added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; production inventory wiring and integration dispatch pending |
-| #45 | bridge/TAP | merged | TAP reuse ownership fencing, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
+| #45 | bridge/TAP | merged | TAP reuse ownership fencing, existing bridge/uplink validation, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication, owned dnsmasq supervision, and gateway/binding conflict rejection added; TAP/dnsmasq/guest IP evidence pending |
 | #47 | libvirt lifecycle backend | merged | distinct CellHV provider selection, durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, non-empty network validation, and lifecycle ownership fencing added; agent-backed artifact realization/create and host evidence pending |
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
@@ -72,8 +72,9 @@ resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
 (image publication temporaries), ADR-0036 (network metadata publication),
 ADR-0062 (image-cache hit revalidation), ADR-0063 (reset service cleanup), and
 ADR-0064 (required benchmark release gate), and ADR-0065 (DHCP gateway-binding
-conflict rejection), ADR-0066 (CellHV provider selection), and ADR-0067
-(authenticated stream identity binding).
+conflict rejection), ADR-0066 (CellHV provider selection), ADR-0067
+(authenticated stream identity binding), and ADR-0068 (existing bridge/uplink
+validation).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
