@@ -95,6 +95,7 @@ if [[ "$PROFILE" == libvirt ]]; then
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
   for setting in \
+    "O3K_PROVIDER=libvirt" \
     "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
     "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
     "O3K_COMPUTE_CLIENT_CA=$TLS_DIR/ca.pem" \

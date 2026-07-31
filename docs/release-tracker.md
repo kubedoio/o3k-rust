@@ -21,7 +21,7 @@ the real-libvirt acceptance evidence exists.
 | #48 | console log | merged | atomic writes and bounded offset reads added; guest boot output evidence pending |
 | #49 | real-libvirt harness | merged | preflight is skipped here |
 | #50 | OpenStack CLI workflow | merged | CLI/libvirt endpoint pending; failure cleanup, list coverage, and redacted resource evidence added |
-| #51 | clean-host packaging | merged | Ubuntu/Debian clean installs pending |
+| #51 | clean-host packaging | merged | libvirt profile now selects libvirt; Ubuntu/Debian clean installs pending |
 | #52 | measurements | merged | fake control-plane measured with configured-password authentication; guest metrics pending |
 | #53 | release gate | merged | gate is blocked by the rows above |
 | #54 | program tracker | this change | tracked here |
