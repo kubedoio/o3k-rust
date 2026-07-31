@@ -34,6 +34,14 @@ pub struct DomainSpec {
     pub image_id: String,
     /// Host path to an O3K-owned, materialized config-drive image.
     pub config_drive_image_path: Option<String>,
+    pub network_interfaces: Vec<DomainNetworkInterface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainNetworkInterface {
+    /// Existing TAP device prepared and owned by the host network subsystem.
+    pub tap_name: String,
+    pub mac_address: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +85,10 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
             .config_drive_image_path
             .as_deref()
             .is_some_and(|path| validate_image_source(path).is_err())
+        || spec.network_interfaces.iter().any(|interface| {
+            validate_tap_name(&interface.tap_name).is_err()
+                || validate_mac_address(&interface.mac_address).is_err()
+        })
     {
         return Err(LibvirtError::new(
             ErrorCategory::InvalidRequest,
@@ -95,8 +107,18 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
             )
         })
         .unwrap_or_default();
+    let mut network_interfaces = String::new();
+    for interface in &spec.network_interfaces {
+        use std::fmt::Write as _;
+        let _ = write!(
+            network_interfaces,
+            "<interface type=\"ethernet\"><mac address=\"{}\" /><target dev=\"{}\" /><model type=\"virtio\" /></interface>",
+            xml_escape(&interface.mac_address),
+            xml_escape(&interface.tap_name)
+        );
+    }
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}</devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -108,7 +130,8 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         xml_escape(&m.operation_id),
         xml_escape(&m.managed_by),
         xml_escape(&spec.image_id),
-        config_drive
+        config_drive,
+        network_interfaces
     );
     Ok(BuiltDomainXml { name, xml })
 }
@@ -191,6 +214,31 @@ fn validate_image_source(value: &str) -> Result<(), ()> {
         || std::path::Path::new(value)
             .components()
             .any(|component| component == Component::ParentDir)
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_tap_name(value: &str) -> Result<(), ()> {
+    if value.is_empty()
+        || value.len() > 15
+        || !value.starts_with("o3ktap-")
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_mac_address(value: &str) -> Result<(), ()> {
+    if value.len() != 17
+        || value.split(':').count() != 6
+        || value
+            .split(':')
+            .any(|octet| octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
     {
         return Err(());
     }
@@ -794,6 +842,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             memory_mib: request.memory_mib,
             image_id,
             config_drive_image_path: None,
+            network_interfaces: Vec::new(),
         })
         .map_err(provider_error)?;
         self.adapter
@@ -956,6 +1005,7 @@ mod tests {
             memory_mib: 512,
             image_id: "/var/lib/o3k/disk&1.qcow2".to_owned(),
             config_drive_image_path: None,
+            network_interfaces: Vec::new(),
         };
         let first = build_domain_xml(&spec)?;
         let second = build_domain_xml(&spec)?;
@@ -991,11 +1041,38 @@ mod tests {
             config_drive_image_path: Some(
                 "/var/lib/o3k/config-drive/server-config-drive.iso".to_owned(),
             ),
+            network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
         assert!(xml.contains("device=\"cdrom\""));
         assert!(xml.contains("source file=\"/var/lib/o3k/config-drive/server-config-drive.iso\""));
         assert!(xml.contains("<target dev=\"sda\" bus=\"sata\" /><readonly />"));
+        Ok(())
+    }
+
+    #[test]
+    fn domain_xml_attaches_owned_tap_with_mac() -> Result<(), LibvirtError> {
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "server-network".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image_path: None,
+            network_interfaces: vec![DomainNetworkInterface {
+                tap_name: "o3ktap-a1b2c3d4".to_owned(),
+                mac_address: "02:00:00:00:00:01".to_owned(),
+            }],
+        };
+        let xml = build_domain_xml(&spec)?.xml;
+        assert!(xml.contains("<interface type=\"ethernet\">"));
+        assert!(xml.contains("mac address=\"02:00:00:00:00:01\""));
+        assert!(xml.contains("target dev=\"o3ktap-a1b2c3d4\""));
         Ok(())
     }
 
@@ -1026,6 +1103,7 @@ mod tests {
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
             config_drive_image_path: None,
+            network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
         let discovered = discover_domain_xmls(&[
@@ -1057,6 +1135,7 @@ mod tests {
                     memory_mib: 128,
                     image_id: image_id.to_owned(),
                     config_drive_image_path: None,
+                    network_interfaces: Vec::new(),
                 })
                 .is_err()
             );
@@ -1073,6 +1152,29 @@ mod tests {
                     memory_mib: 128,
                     image_id: "/var/lib/o3k/image.qcow2".to_owned(),
                     config_drive_image_path: Some(config_drive_image_path.to_owned()),
+                    network_interfaces: Vec::new(),
+                })
+                .is_err()
+            );
+        }
+        for network_interface in [
+            DomainNetworkInterface {
+                tap_name: "eth0".to_owned(),
+                mac_address: "02:00:00:00:00:01".to_owned(),
+            },
+            DomainNetworkInterface {
+                tap_name: "o3ktap-owned".to_owned(),
+                mac_address: "not-a-mac".to_owned(),
+            },
+        ] {
+            assert!(
+                build_domain_xml(&DomainSpec {
+                    metadata: metadata.clone(),
+                    vcpus: 1,
+                    memory_mib: 128,
+                    image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+                    config_drive_image_path: None,
+                    network_interfaces: vec![network_interface],
                 })
                 .is_err()
             );
@@ -1107,6 +1209,7 @@ mod tests {
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
             config_drive_image_path: None,
+            network_interfaces: Vec::new(),
         };
         let built = build_domain_xml(&spec)?;
         let owned = DomainInspection {
