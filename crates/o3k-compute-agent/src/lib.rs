@@ -28,7 +28,7 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, mpsc},
+    sync::{RwLock, broadcast, mpsc},
     time,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -237,10 +237,37 @@ pub fn parse_authorized_agents(value: &str) -> Result<Vec<AuthorizedAgent>, Agen
     Ok(agents)
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    CommandAccepted(proto::CommandAccepted),
+    Operation(proto::OperationUpdate),
+    Observation(proto::Observation),
+    Error(proto::ProtocolError),
+}
+
+struct AgentConnection {
+    epoch: String,
+    sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
+}
+
+#[derive(Clone)]
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
+    connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
+    events: broadcast::Sender<AgentEvent>,
+}
+
+impl Default for NodeRegistry {
+    fn default() -> Self {
+        let (events, _) = broadcast::channel(256);
+        Self {
+            nodes: Arc::new(RwLock::new(HashMap::new())),
+            authorized_agents: Arc::new(RwLock::new(HashMap::new())),
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            events,
+        }
+    }
 }
 
 impl NodeRegistry {
@@ -250,6 +277,84 @@ impl NodeRegistry {
 
     pub async fn all(&self) -> Vec<NodeSnapshot> {
         self.nodes.read().await.values().cloned().collect()
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<AgentEvent> {
+        self.events.subscribe()
+    }
+
+    async fn attach_connection(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+        sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
+    ) -> Result<(), Status> {
+        let node = self
+            .nodes
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| Status::unauthenticated("agent is not registered"))?;
+        if node.agent_epoch != agent_epoch {
+            return Err(Status::permission_denied("agent epoch is fenced"));
+        }
+        self.connections.write().await.insert(
+            agent_id.to_owned(),
+            AgentConnection {
+                epoch: agent_epoch.to_owned(),
+                sender,
+            },
+        );
+        Ok(())
+    }
+
+    async fn detach_connection(&self, agent_id: &str, agent_epoch: &str) {
+        let mut connections = self.connections.write().await;
+        if connections
+            .get(agent_id)
+            .is_some_and(|connection| connection.epoch == agent_epoch)
+        {
+            connections.remove(agent_id);
+        }
+    }
+
+    pub async fn dispatch_command(&self, command: proto::Command) -> Result<(), AgentError> {
+        validate_command(&command)?;
+        let node = self
+            .snapshot(&command.agent_id)
+            .await
+            .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?;
+        if node.agent_epoch != command.agent_epoch {
+            return Err(AgentError::Protocol("agent epoch is fenced".to_owned()));
+        }
+        if node.availability != Availability::Available
+            || node.desired_state != proto::AdministrativeState::Enabled as i32
+        {
+            return Err(AgentError::Protocol(
+                "agent is unavailable or not enabled".to_owned(),
+            ));
+        }
+        let sender = self
+            .connections
+            .read()
+            .await
+            .get(&command.agent_id)
+            .filter(|connection| connection.epoch == command.agent_epoch)
+            .map(|connection| connection.sender.clone())
+            .ok_or_else(|| {
+                AgentError::Protocol("agent control stream is unavailable".to_owned())
+            })?;
+        sender
+            .send(Ok(proto::ControlResponse {
+                body: Some(proto::control_response::Body::Command(command)),
+            }))
+            .await
+            .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))
+    }
+
+    fn publish_event(&self, event: AgentEvent) {
+        let _ = self.events.send(event);
     }
 
     pub async fn authorize_agent(&self, agent: AuthorizedAgent) -> Result<(), AgentError> {
@@ -418,6 +523,37 @@ fn valid_admin_state(state: i32) -> bool {
             || value == proto::AdministrativeState::Draining as i32
             || value == proto::AdministrativeState::Disabled as i32
     )
+}
+
+fn validate_command(command: &proto::Command) -> Result<(), AgentError> {
+    if command.command_id.trim().is_empty()
+        || command.operation_id.trim().is_empty()
+        || command.idempotency_key.trim().is_empty()
+        || command.agent_id.trim().is_empty()
+        || command.agent_epoch.trim().is_empty()
+        || command.resource_id.trim().is_empty()
+        || command.action.is_none()
+    {
+        return Err(AgentError::Protocol(
+            "command identity, action, and idempotency key are required".to_owned(),
+        ));
+    }
+    let Some(version) = command.protocol_version.as_ref() else {
+        return Err(AgentError::Protocol(
+            "command protocol version is required".to_owned(),
+        ));
+    };
+    if version != &PROTOCOL_VERSION {
+        return Err(AgentError::Protocol(
+            "command protocol version is unsupported".to_owned(),
+        ));
+    }
+    if command.deadline_unix_ms <= unix_ms() {
+        return Err(AgentError::Protocol(
+            "command deadline has expired".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
@@ -647,12 +783,17 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
         }
         let response = self.registry.register(&register).await?;
         let (tx, rx) = mpsc::channel(32);
+        self.registry
+            .attach_connection(&register.agent_id, &register.agent_epoch, tx.clone())
+            .await?;
         tx.send(Ok(proto::ControlResponse {
             body: Some(proto::control_response::Body::Register(response)),
         }))
         .await
         .map_err(|_| Status::unavailable("response stream closed"))?;
         let registry = self.registry.clone();
+        let agent_id = register.agent_id;
+        let agent_epoch = register.agent_epoch;
         tokio::spawn(async move {
             while let Ok(Some(message)) = inbound.get_mut().message().await {
                 match message.body {
@@ -681,12 +822,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                             break;
                         }
                     }
-                    Some(proto::control_request::Body::Operation(_))
-                    | Some(proto::control_request::Body::Observation(_))
-                    | Some(proto::control_request::Body::CommandAccepted(_))
-                    | Some(proto::control_request::Body::ResyncSnapshot(_))
-                    | Some(proto::control_request::Body::Error(_))
-                    | None => {}
+                    Some(proto::control_request::Body::Operation(operation)) => {
+                        registry.publish_event(AgentEvent::Operation(operation));
+                    }
+                    Some(proto::control_request::Body::Observation(observation)) => {
+                        registry.publish_event(AgentEvent::Observation(observation));
+                    }
+                    Some(proto::control_request::Body::CommandAccepted(accepted)) => {
+                        registry.publish_event(AgentEvent::CommandAccepted(accepted));
+                    }
+                    Some(proto::control_request::Body::ResyncSnapshot(_)) | None => {}
+                    Some(proto::control_request::Body::Error(error)) => {
+                        registry.publish_event(AgentEvent::Error(error));
+                    }
                     Some(proto::control_request::Body::Register(_)) => {
                         let _ = tx
                             .send(Err(Status::invalid_argument("duplicate registration")))
@@ -695,6 +843,7 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                     }
                 }
             }
+            registry.detach_connection(&agent_id, &agent_epoch).await;
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -1195,6 +1344,38 @@ mod tests {
             registry.snapshot("node").await.ok_or("node")?.applied_state,
             proto::AdministrativeState::Draining as i32
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_dispatch_is_fenced_and_stream_bound() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let command = proto::Command {
+            command_id: "command-1".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            idempotency_key: "request-1".to_owned(),
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            deadline_unix_ms: unix_ms().saturating_add(10_000),
+            protocol_version: Some(PROTOCOL_VERSION),
+            payload_fingerprint_sha256: "fingerprint".to_owned(),
+            action: Some(proto::command::Action::Inspect(proto::InspectCommand {})),
+        };
+        registry.dispatch_command(command.clone()).await?;
+        let response = receiver.recv().await.ok_or("command response")??;
+        assert!(matches!(
+            response.body,
+            Some(proto::control_response::Body::Command(received))
+                if received.command_id == "command-1"
+        ));
+        let mut fenced = command;
+        fenced.agent_epoch = "old-epoch".to_owned();
+        assert!(registry.dispatch_command(fenced).await.is_err());
         Ok(())
     }
 
