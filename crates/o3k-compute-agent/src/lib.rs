@@ -55,6 +55,7 @@ pub const DEFAULT_LEASE: Duration = Duration::from_secs(15);
 const MAX_AGENT_ID: usize = 128;
 const MAX_HOST_LABEL: usize = 255;
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+const ADMINISTRATIVE_STATE_FILE_EXTENSION: &str = "state";
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -165,6 +166,7 @@ pub struct NodeSnapshot {
     pub last_heartbeat_sequence: u64,
     pub last_heartbeat_at: SystemTime,
     pub transition_sequence: u64,
+    pub last_heartbeat_state: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +248,7 @@ pub enum AgentEvent {
     Error(proto::ProtocolError),
 }
 
+#[derive(Clone)]
 struct AgentConnection {
     epoch: String,
     sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
@@ -456,6 +459,7 @@ impl NodeRegistry {
             last_heartbeat_sequence: 0,
             last_heartbeat_at: now,
             transition_sequence: 0,
+            last_heartbeat_state: proto::AdministrativeState::Unspecified as i32,
         };
         nodes.insert(request.agent_id.clone(), snapshot);
         info!(agent_id = %request.agent_id, epoch = %request.agent_epoch, "compute agent registered");
@@ -477,6 +481,9 @@ impl NodeRegistry {
         if heartbeat.agent_id.trim().is_empty() || heartbeat.agent_epoch.trim().is_empty() {
             return Err(Status::invalid_argument("agent identity is required"));
         }
+        if !valid_admin_state(heartbeat.state) {
+            return Err(Status::invalid_argument("administrative state is invalid"));
+        }
         let mut nodes = self.nodes.write().await;
         let node = nodes
             .get_mut(&heartbeat.agent_id)
@@ -490,6 +497,7 @@ impl NodeRegistry {
         node.last_heartbeat_sequence = heartbeat.sequence;
         node.last_heartbeat_at = SystemTime::now();
         node.active_operation_count = heartbeat.active_operation_count;
+        node.last_heartbeat_state = heartbeat.state;
         node.availability = Availability::Available;
         Ok(proto::HeartbeatAck {
             received_at_unix_ms: unix_ms(),
@@ -521,7 +529,26 @@ impl NodeRegistry {
             .ok_or(AgentError::Protocol("agent is not registered".to_owned()))?;
         node.transition_sequence = node.transition_sequence.saturating_add(1);
         node.desired_state = state as i32;
-        Ok(node.transition_sequence)
+        let transition_sequence = node.transition_sequence;
+        drop(nodes);
+
+        let connection = self.connections.read().await.get(agent_id).cloned();
+        if let Some(connection) = connection {
+            connection
+                .sender
+                .send(Ok(proto::ControlResponse {
+                    body: Some(proto::control_response::Body::DesiredState(
+                        proto::DesiredAgentState {
+                            state: state as i32,
+                            reason: "administrative state transition".to_owned(),
+                            transition_sequence,
+                        },
+                    )),
+                }))
+                .await
+                .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))?;
+        }
+        Ok(transition_sequence)
     }
 
     async fn acknowledge_state(&self, ack: &proto::AgentStateAck) -> Result<(), Status> {
@@ -1629,6 +1656,8 @@ impl AgentClient {
     where
         F: std::future::Future<Output = ()> + Send,
     {
+        let persisted_state =
+            load_administrative_state(&administrative_state_file(&self.config.identity_file))?;
         install_crypto_provider();
         let material = self.config.tls.read()?;
         let endpoint_uri = self.config.endpoint.replacen("https://", "http://", 1);
@@ -1700,8 +1729,37 @@ impl AgentClient {
             .await
             .map_err(|status| AgentError::Protocol(status.to_string()))?;
         let mut responses = response.into_inner();
+        let register = tokio::select! {
+            () = &mut shutdown => return Ok(()),
+            message = responses.message() => message
+                .map_err(|status| AgentError::Protocol(status.to_string()))?
+                .ok_or_else(|| AgentError::Protocol("control stream ended before registration".to_owned()))?,
+        };
+        let register = match register.body {
+            Some(proto::control_response::Body::Register(register)) => register,
+            _ => {
+                return Err(AgentError::Protocol(
+                    "registration response is required".to_owned(),
+                ));
+            }
+        };
+        validate_register_response(&register, agent_id, &epoch)?;
+        let state = administrative_state_from_i32(register.desired_state)?;
+        persist_administrative_state(
+            &administrative_state_file(&self.config.identity_file),
+            state,
+        )?;
+        self.ready.store(true, std::sync::atomic::Ordering::Release);
         let mut sequence = 0_u64;
-        let mut applied_state = proto::AdministrativeState::Enabled as i32;
+        // Registration is the fenced control-plane authority for the current
+        // epoch; the persisted state is still loaded before transport setup so
+        // restart/reconnect rejects corruption and retains the last state until
+        // that authoritative response arrives.
+        let mut applied_state = if persisted_state == state {
+            persisted_state as i32
+        } else {
+            state as i32
+        };
         let mut state_ack_pending = true;
         let mut operation_sequence = 0_u64;
         let mut interval = time::interval(self.config.heartbeat_interval);
@@ -1711,15 +1769,17 @@ impl AgentClient {
                 _ = interval.tick() => { sequence = sequence.saturating_add(1); tx.send(proto::ControlRequest { body: Some(proto::control_request::Body::Heartbeat(proto::Heartbeat { agent_id: agent_id.to_owned(), agent_epoch: epoch.clone(), sequence, sent_at_unix_ms: unix_ms(), state: applied_state, active_operation_count: 0, highest_observation_sequence: 0 })) }).await.map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?; }
                 message = responses.message() => match message.map_err(|status| AgentError::Protocol(status.to_string()))? {
                     Some(response) => match response.body {
-                        Some(proto::control_response::Body::Register(register)) => {
-                            if register.agent_id != agent_id || register.agent_epoch != epoch {
-                                return Err(AgentError::Protocol("registration identity mismatch".to_owned()));
-                            }
-                            self.ready.store(true, std::sync::atomic::Ordering::Release);
+                        Some(proto::control_response::Body::Register(_)) => {
+                            return Err(AgentError::Protocol("duplicate registration".to_owned()));
                         }
                         Some(proto::control_response::Body::Heartbeat(ack)) => {
                             if ack.desired_state != applied_state {
-                                applied_state = ack.desired_state;
+                                let state = administrative_state_from_i32(ack.desired_state)?;
+                                persist_administrative_state(
+                                    &administrative_state_file(&self.config.identity_file),
+                                    state,
+                                )?;
+                                applied_state = state as i32;
                                 state_ack_pending = true;
                             }
                             if state_ack_pending {
@@ -1815,7 +1875,28 @@ impl AgentClient {
                             .await
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                         }
-                        Some(proto::control_response::Body::DesiredState(_))
+                        Some(proto::control_response::Body::DesiredState(desired)) => {
+                            let state = administrative_state_from_i32(desired.state)?;
+                            persist_administrative_state(
+                                &administrative_state_file(&self.config.identity_file),
+                                state,
+                            )?;
+                            applied_state = state as i32;
+                            state_ack_pending = false;
+                            tx.send(proto::ControlRequest {
+                                body: Some(proto::control_request::Body::AgentStateAck(
+                                    proto::AgentStateAck {
+                                        agent_id: agent_id.to_owned(),
+                                        agent_epoch: epoch.clone(),
+                                        applied_state,
+                                        transition_sequence: desired.transition_sequence,
+                                        active_operation_count: 0,
+                                    },
+                                )),
+                            })
+                            .await
+                            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+                        }
                         | Some(proto::control_response::Body::ObservationAck(_))
                         | Some(proto::control_response::Body::Resync(_))
                         | Some(proto::control_response::Body::Error(_))
@@ -1857,6 +1938,72 @@ pub fn load_or_create_identity(path: &Path) -> Result<String, AgentError> {
     fs::write(&temporary, format!("{value}\n")).map_err(AgentError::IdentityStore)?;
     fs::rename(temporary, path).map_err(AgentError::IdentityStore)?;
     Ok(value)
+}
+
+pub fn administrative_state_file(identity_path: &Path) -> PathBuf {
+    identity_path.with_extension(ADMINISTRATIVE_STATE_FILE_EXTENSION)
+}
+
+fn administrative_state_from_i32(value: i32) -> Result<proto::AdministrativeState, AgentError> {
+    let state = proto::AdministrativeState::try_from(value)
+        .map_err(|_| AgentError::Protocol("administrative state is invalid".to_owned()))?;
+    if !valid_admin_state(state as i32) {
+        return Err(AgentError::Protocol(
+            "administrative state is invalid".to_owned(),
+        ));
+    }
+    Ok(state)
+}
+
+fn load_administrative_state(path: &Path) -> Result<proto::AdministrativeState, AgentError> {
+    match fs::read_to_string(path) {
+        Ok(value) => {
+            let value = value.trim();
+            let value = value.parse::<i32>().map_err(|_| {
+                AgentError::InvalidConfiguration("administrative state file is invalid")
+            })?;
+            administrative_state_from_i32(value)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(proto::AdministrativeState::Enabled)
+        }
+        Err(error) => Err(AgentError::IdentityStore(error)),
+    }
+}
+
+fn persist_administrative_state(
+    path: &Path,
+    state: proto::AdministrativeState,
+) -> Result<(), AgentError> {
+    if !valid_admin_state(state as i32) {
+        return Err(AgentError::InvalidConfiguration(
+            "administrative state is invalid",
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(AgentError::IdentityStore)?;
+    }
+    let temporary = path.with_extension("state.tmp");
+    fs::write(&temporary, format!("{}\n", state as i32)).map_err(AgentError::IdentityStore)?;
+    fs::rename(temporary, path).map_err(AgentError::IdentityStore)
+}
+
+fn validate_register_response(
+    response: &proto::RegisterResponse,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    if response.agent_id != agent_id || response.agent_epoch != agent_epoch {
+        return Err(AgentError::Protocol(
+            "registration identity mismatch".to_owned(),
+        ));
+    }
+    if response.selected_version.as_ref() != Some(&PROTOCOL_VERSION) {
+        return Err(AgentError::Protocol(
+            "registration version mismatch".to_owned(),
+        ));
+    }
+    administrative_state_from_i32(response.desired_state).map(|_| ())
 }
 
 #[cfg(test)]
@@ -1936,6 +2083,7 @@ mod tests {
                 agent_id: "node".to_owned(),
                 agent_epoch: "epoch-1".to_owned(),
                 sequence: 1,
+                state: proto::AdministrativeState::Enabled as i32,
                 ..Default::default()
             })
             .await?;
@@ -1958,6 +2106,7 @@ mod tests {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
             sequence: 1,
+            state: proto::AdministrativeState::Enabled as i32,
             ..Default::default()
         };
         registry.heartbeat(&heartbeat).await?;
@@ -1968,6 +2117,7 @@ mod tests {
                     agent_id: "node".to_owned(),
                     agent_epoch: "old".to_owned(),
                     sequence: 2,
+                    state: proto::AdministrativeState::Enabled as i32,
                     ..Default::default()
                 })
                 .await
@@ -1989,6 +2139,7 @@ mod tests {
                 agent_id: "node".to_owned(),
                 agent_epoch: "epoch".to_owned(),
                 sequence: 1,
+                state: proto::AdministrativeState::Enabled as i32,
                 ..Default::default()
             })
             .await?;
@@ -2288,6 +2439,44 @@ mod tests {
         assert_eq!(first, second);
         assert!(!format!("{first:?}").contains("private"));
         fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn administrative_state_defaults_and_round_trips_atomically()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = std::env::temp_dir().join(format!("o3k-agent-state-{}", Uuid::now_v7()));
+        let state_path = administrative_state_file(&identity);
+        assert_eq!(
+            load_administrative_state(&state_path)?,
+            proto::AdministrativeState::Enabled
+        );
+        persist_administrative_state(&state_path, proto::AdministrativeState::Draining)?;
+        assert_eq!(
+            load_administrative_state(&state_path)?,
+            proto::AdministrativeState::Draining
+        );
+        assert!(!state_path.with_extension("state.tmp").exists());
+        fs::remove_file(state_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn administrative_state_rejects_corrupt_and_unspecified_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = std::env::temp_dir().join(format!("o3k-agent-state-{}", Uuid::now_v7()));
+        let state_path = administrative_state_file(&identity);
+        fs::write(&state_path, "not-a-state\n")?;
+        assert!(matches!(
+            load_administrative_state(&state_path),
+            Err(AgentError::InvalidConfiguration(_))
+        ));
+        fs::write(
+            &state_path,
+            format!("{}\n", proto::AdministrativeState::Unspecified as i32),
+        )?;
+        assert!(load_administrative_state(&state_path).is_err());
+        fs::remove_file(state_path)?;
         Ok(())
     }
 

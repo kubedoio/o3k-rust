@@ -8,7 +8,7 @@ the real-libvirt acceptance evidence exists.
 |---:|---|---|---|
 | #36 | libvirt/KVM direction | merged | pending |
 | #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
-| #38 | secure registration/heartbeat | merged | control-plane startup failures clear readiness and identity-bearing stream messages are fenced to the authenticated registration; host deployment and process-level restart evidence pending |
+| #38 | secure registration/heartbeat | merged | durable validated agent administrative state, registration-before-heartbeat sequencing, and desired-state acknowledgements added; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs, rejects unsafe source inputs, and validates ownership metadata before managed-domain listing; host discovery pending |
 | #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
@@ -77,7 +77,8 @@ conflict rejection), ADR-0066 (CellHV provider selection), ADR-0067
 validation), ADR-0069 (Placement refresh usage reconciliation), ADR-0070
 (bounded config-drive network/vendor data), ADR-0071 (serialized console
 writers), ADR-0072 (managed-domain listing ownership validation), and ADR-0073
-(duplicate-name scheduler allocation rollback).
+(duplicate-name scheduler allocation rollback), and ADR-0074 (durable agent
+administrative state).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules

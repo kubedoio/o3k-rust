@@ -19,6 +19,24 @@ async fn mutual_tls_registration_and_heartbeat_are_black_box_observable()
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let registry = NodeRegistry::default();
+    registry
+        .register(&proto::RegisterRequest {
+            agent_id: "node-test".to_owned(),
+            agent_epoch: "seed-epoch".to_owned(),
+            software_version: "test".to_owned(),
+            host_label: "seed-host".to_owned(),
+            supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+            capabilities: Some(proto::Capabilities {
+                architecture: "x86_64".to_owned(),
+                agent_provider_name: "o3k-compute".to_owned(),
+                agent_provider_version: "test".to_owned(),
+                ..Default::default()
+            }),
+        })
+        .await?;
+    registry
+        .set_desired_state("node-test", proto::AdministrativeState::Draining)
+        .await?;
     let server = ControlPlaneServer {
         registry: registry.clone(),
         address,
@@ -92,10 +110,44 @@ async fn mutual_tls_registration_and_heartbeat_are_black_box_observable()
     }
     let node = registry.all().await.pop().ok_or("registered node")?;
     assert_eq!(node.host_label, "black-box-host");
+    assert_eq!(
+        node.last_heartbeat_state,
+        proto::AdministrativeState::Draining as i32
+    );
+    assert_eq!(
+        std::fs::read_to_string(o3k_compute_agent::administrative_state_file(&identity))?.trim(),
+        (proto::AdministrativeState::Draining as i32).to_string()
+    );
+    let transition = registry
+        .set_desired_state("node-test", proto::AdministrativeState::Disabled)
+        .await?;
+    for _ in 0..40 {
+        if let Some(node) = registry.snapshot("node-test").await {
+            if node.applied_state == proto::AdministrativeState::Disabled as i32
+                && node.transition_sequence == transition
+            {
+                break;
+            }
+        }
+        time::sleep(Duration::from_millis(25)).await;
+    }
+    let node = registry
+        .snapshot("node-test")
+        .await
+        .ok_or("registered node")?;
+    assert_eq!(
+        node.applied_state,
+        proto::AdministrativeState::Disabled as i32
+    );
+    assert_eq!(
+        std::fs::read_to_string(o3k_compute_agent::administrative_state_file(&identity))?.trim(),
+        (proto::AdministrativeState::Disabled as i32).to_string()
+    );
     agent_stop.send(()).map_err(|_| "agent already stopped")?;
     server_stop.send(()).map_err(|_| "server already stopped")?;
     let _ = agent_task.await?;
     let _ = server_task.await?;
+    let _ = std::fs::remove_file(o3k_compute_agent::administrative_state_file(&identity));
     let _ = std::fs::remove_file(identity);
     Ok(())
 }
