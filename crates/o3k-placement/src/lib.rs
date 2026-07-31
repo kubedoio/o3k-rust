@@ -142,6 +142,48 @@ impl PlacementLedger {
         Ok(result)
     }
 
+    /// Reconciles a provider snapshot while retaining allocations owned by
+    /// this ledger. Reported `used` values are not trusted: usage is derived
+    /// from the durable allocation map so a capability refresh cannot erase
+    /// reservations or make them available twice.
+    pub fn sync_provider(
+        &self,
+        node_id: &str,
+        mut inventories: BTreeMap<String, Inventory>,
+        state_value: ProviderState,
+    ) -> Result<ResourceProvider, PlacementError> {
+        if node_id.trim().is_empty() {
+            return Err(PlacementError::InvalidAllocation);
+        }
+        let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let provider = state
+            .entry(node_id.to_owned())
+            .or_insert_with(|| ResourceProvider {
+                id: node_id.to_owned(),
+                node_id: node_id.to_owned(),
+                state: state_value,
+                generation: 0,
+                inventories: BTreeMap::new(),
+                allocations: BTreeMap::new(),
+            });
+        for inventory in inventories.values_mut() {
+            inventory.used = 0;
+        }
+        for allocation in provider.allocations.values() {
+            for (class, amount) in &allocation.resources {
+                if let Some(inventory) = inventories.get_mut(class) {
+                    inventory.used = inventory.used.saturating_add(*amount);
+                }
+            }
+        }
+        provider.inventories = inventories;
+        provider.state = state_value;
+        provider.generation = provider.generation.saturating_add(1);
+        let result = provider.clone();
+        persist(&self.root, &state)?;
+        Ok(result)
+    }
+
     pub fn allocate(
         &self,
         provider_id: &str,
@@ -344,6 +386,41 @@ mod tests {
             ),
             Err(PlacementError::NotSchedulable)
         ));
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sync_preserves_allocations_across_capacity_refresh_and_unavailability()
+    -> Result<(), PlacementError> {
+        let root = std::env::temp_dir().join(format!("o3k-placement-sync-{}", std::process::id()));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.sync_provider("node-1", inventory(), ProviderState::Enabled)?;
+        ledger.allocate(
+            "node-1",
+            "allocation-1",
+            "server-1",
+            BTreeMap::from([(VCPU.to_owned(), 2)]),
+            provider.generation,
+        )?;
+        let refreshed = ledger.sync_provider(
+            "node-1",
+            BTreeMap::from([(
+                VCPU.to_owned(),
+                Inventory {
+                    total: 2,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 999,
+                },
+            )]),
+            ProviderState::Unavailable,
+        )?;
+        assert_eq!(refreshed.inventories[VCPU].used, 2);
+        assert_eq!(refreshed.allocations.len(), 1);
+        assert_eq!(refreshed.state, ProviderState::Unavailable);
+        let reopened = PlacementLedger::open(&root)?;
+        assert_eq!(reopened.provider("node-1")?.allocations.len(), 1);
         fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
         Ok(())
     }
