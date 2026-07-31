@@ -40,5 +40,5 @@ responsibilities.
 ## Verification
 
 `tests/human-review-package.sh` covers valid pending preparation, approved
-review, missing independent identity, missing finding disposition, and the
-required-approved failure path.
+review, missing independent identity, missing finding disposition, duplicate
+finding identifiers, and the required-approved failure path.

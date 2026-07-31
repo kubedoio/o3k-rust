@@ -63,6 +63,7 @@ else:
     if not isinstance(findings, list):
         errors.append("findings must be a list")
     else:
+        finding_ids = set()
         for index, finding in enumerate(findings):
             if not isinstance(finding, dict):
                 errors.append(f"findings[{index}] must be an object")
@@ -74,6 +75,11 @@ else:
                 errors.append(f"findings[{index}].severity is invalid")
             if finding.get("disposition") not in {"fixed", "accepted", "deferred", "not-applicable"}:
                 errors.append(f"findings[{index}].disposition is invalid")
+            finding_id = finding.get("id")
+            if isinstance(finding_id, str) and finding_id.strip():
+                if finding_id in finding_ids:
+                    errors.append(f"findings[{index}].id must be unique")
+                finding_ids.add(finding_id)
     approvals = value.get("approvals")
     if not isinstance(approvals, dict):
         errors.append("approvals must be an object")
