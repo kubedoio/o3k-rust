@@ -6,8 +6,9 @@ has passed.
 
 ## Bounded repository implementation
 
-The installer now rejects relative, root, symlink, and non-directory-compatible
-installation paths before creating any prefix or owned state directories. The
+The installer now rejects relative, root, symlink-component, and
+non-directory-compatible installation paths before creating any prefix or
+owned state directories. The
 libvirt profile validates its complete TLS input set and agent fingerprint
 before filesystem publication. Release-bundle and packaging safety tests
 verify that invalid inputs do not leave a partial installation.
@@ -19,4 +20,5 @@ verify that invalid inputs do not leave a partial installation.
 - no claim that `clean-ubuntu-install.json` exists or reports `passed`;
 - no broad installer transaction/rollback mechanism after input validation.
 
-Decision: [ADR-0096](../adr/ADR-0096-clean-install-input-validation.md).
+Decisions: [ADR-0096](../adr/ADR-0096-clean-install-input-validation.md) and
+[ADR-0112](../adr/ADR-0112-clean-install-path-component-fence.md).
