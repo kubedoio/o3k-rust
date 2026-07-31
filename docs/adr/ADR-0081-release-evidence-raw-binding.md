@@ -24,15 +24,17 @@ timestamp binding. Invalid, missing, or mismatched raw evidence blocks the
 gate with an explicit error. Existing non-benchmark artifact checks and CLI
 options remain unchanged.
 
-This change is limited to release-gate validation and its evidence contract;
-measurement harness production of the new binding is a separate follow-up.
+The measurement producer writes `raw.json` first, rereads it, computes the
+same canonical digest, and emits that value as `summary.json.raw_sha256`.
+Fake-profile output is explicitly marked `release_eligible: false` with a
+reason because it cannot provide libvirt guest evidence; it remains useful
+measurement evidence but is not release evidence.
 
 ## Consequences
 
 Release readiness now requires reviewers to retain both the evaluated summary
 and the exact raw benchmark document used to derive it. Raw benchmark files
-from the current harness need the producer-side binding follow-up before they
-can be used as release evidence. The gate remains portable because hashing is
+from the fake profile remain non-release evidence. The gate remains portable because hashing is
 implemented with Python's standard library and does not add a dependency.
 
 ## Non-goals
