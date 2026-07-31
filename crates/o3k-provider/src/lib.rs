@@ -19,11 +19,13 @@ pub struct Capabilities {
 pub struct CreateInstanceRequest {
     pub operation_id: Uuid,
     pub o3k_server_id: Uuid,
+    #[serde(default)]
     pub project_id: String,
     pub name: String,
     pub vcpus: u32,
     pub memory_mib: u64,
     pub image_id: Option<String>,
+    #[serde(default)]
     pub network_ids: Vec<String>,
     pub idempotency_key: String,
 }
