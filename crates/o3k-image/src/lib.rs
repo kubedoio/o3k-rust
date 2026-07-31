@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -30,6 +31,15 @@ pub struct ImageRecord {
     pub disk_format: String,
     pub size: Option<u64>,
     pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageArtifact {
+    pub id: Uuid,
+    pub checksum: String,
+    pub format: String,
+    pub size: u64,
+    pub content: Vec<u8>,
 }
 
 #[derive(Debug, Error)]
@@ -266,6 +276,60 @@ impl ImageService {
             .ok_or(ImageError::NotFound)
     }
 
+    pub fn resolve_artifact(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<ImageArtifact, ImageError> {
+        let (format, checksum, size, path) = {
+            let inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
+            let image = inner
+                .images
+                .iter()
+                .find(|image| image.id == id && image.project_id == project_id)
+                .ok_or(ImageError::NotFound)?;
+            if image.status != ImageStatus::Active {
+                return Err(ImageError::NotFound);
+            }
+            let checksum = image.checksum.clone().ok_or(ImageError::NotFound)?;
+            let size = image.size.ok_or(ImageError::NotFound)?;
+            if !matches!(image.disk_format.as_str(), "raw" | "qcow2") {
+                return Err(ImageError::UnsupportedFormat);
+            }
+            (
+                image.disk_format.clone(),
+                checksum,
+                size,
+                content_path(&inner.root, id),
+            )
+        };
+
+        if path.is_symlink() || !path.is_file() {
+            return Err(ImageError::NotFound);
+        }
+        let mut file = fs::File::open(&path).map_err(ImageError::Storage)?;
+        let actual_size = file.metadata().map_err(ImageError::Storage)?.len();
+        if actual_size > self.max_upload_bytes as u64 {
+            return Err(ImageError::TooLarge);
+        }
+        let mut content = Vec::with_capacity(actual_size as usize);
+        file.read_to_end(&mut content)
+            .map_err(ImageError::Storage)?;
+        if content.len() as u64 != size
+            || !is_checksum(&checksum)
+            || format!("{:x}", Sha256::digest(&content)) != checksum
+        {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        Ok(ImageArtifact {
+            id,
+            checksum,
+            format,
+            size,
+            content,
+        })
+    }
+
     pub fn upload(
         &self,
         project_id: &str,
@@ -370,6 +434,64 @@ mod tests {
         }));
         let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
         assert_eq!(reopened.get("project-a", image.id)?, uploaded);
+        let artifact = reopened.resolve_artifact("project-a", image.id)?;
+        assert_eq!(artifact.id, image.id);
+        assert_eq!(artifact.format, "qcow2");
+        assert_eq!(artifact.size, 11);
+        assert_eq!(artifact.content, b"image-bytes");
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_resolution_rechecks_content_and_scope() -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("artifact");
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
+        let image = service.create(
+            "project-a",
+            "test".to_owned(),
+            "private".to_owned(),
+            "bare".to_owned(),
+            "raw".to_owned(),
+        )?;
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id),
+            Err(ImageError::NotFound)
+        ));
+        service.upload("project-a", image.id, b"image-bytes")?;
+        assert!(matches!(
+            service.resolve_artifact("project-b", image.id),
+            Err(ImageError::NotFound)
+        ));
+        fs::write(path.join("content").join(image.id.to_string()), b"tampered")?;
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id),
+            Err(ImageError::ChecksumMismatch)
+        ));
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_resolution_bounds_tampered_content() -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("artifact-limit");
+        let service = ImageService::open(&path, 3)?;
+        let image = service.create(
+            "project-a",
+            "test".to_owned(),
+            "private".to_owned(),
+            "bare".to_owned(),
+            "raw".to_owned(),
+        )?;
+        service.upload("project-a", image.id, b"abc")?;
+        fs::write(
+            path.join("content").join(image.id.to_string()),
+            b"too-large",
+        )?;
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id),
+            Err(ImageError::TooLarge)
+        ));
         fs::remove_dir_all(path)?;
         Ok(())
     }
