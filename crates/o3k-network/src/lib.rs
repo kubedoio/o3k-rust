@@ -49,6 +49,14 @@ mod host_network_tests {
             }),
             Err(HostNetworkError::InvalidMac)
         ));
+        assert!(matches!(
+            manager.delete_tap(&TapSpec {
+                instance_id: "instance-1".to_owned(),
+                port_id: "port-1".to_owned(),
+                mac: "bad".to_owned(),
+            }),
+            Err(HostNetworkError::InvalidMac)
+        ));
         assert!(interface_output_is_owned(
             "2: o3ktap-abcd: <BROADCAST> mtu 1500 master o3k-br0 state UP\\n\\\tlink/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
             "02:00:00:00:00:01",
@@ -177,9 +185,15 @@ impl HostNetworkManager {
         }
         Ok(name)
     }
-    pub fn delete_tap(&self, port_id: &str) -> Result<(), HostNetworkError> {
-        let name = Self::tap_name(port_id)?;
+    /// Deletes a TAP only after proving its expected MAC and bridge ownership.
+    pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
+        validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
+        validate_mac(&spec.mac)?;
+        let name = Self::tap_name(&spec.port_id)?;
         if link_exists(&name) {
+            if !interface_is_owned(&name, &spec.mac, &self.config.bridge_name)? {
+                return Err(HostNetworkError::ForeignInterface);
+            }
             run_ip(["link", "del", "dev", &name])?;
         }
         Ok(())
