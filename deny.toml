@@ -22,7 +22,9 @@ allow = [
   "Unicode-DFS-2016",
   "Zlib",
 ]
-exceptions = []
+exceptions = [
+  { allow = ["LGPL-2.1"], name = "virt" },
+]
 
 [bans]
 multiple-versions = "warn"

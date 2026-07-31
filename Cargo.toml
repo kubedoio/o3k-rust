@@ -14,6 +14,7 @@ members = [
     "crates/o3k-compute",
     "crates/o3k-cellhv",
     "crates/o3k-compute-agent",
+    "crates/o3k-libvirt",
     "crates/o3k-store",
 ]
 resolver = "2"

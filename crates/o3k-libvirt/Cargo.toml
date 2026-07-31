@@ -1,0 +1,20 @@
+[package]
+name = "o3k-libvirt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+libvirt = ["dep:virt"]
+
+[lints]
+workspace = true
+
+[dependencies]
+o3k-provider-contract = { path = "../o3k-provider-contract" }
+thiserror.workspace = true
+tokio.workspace = true
+virt = { version = "0.4.3", optional = true }
