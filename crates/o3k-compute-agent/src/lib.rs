@@ -666,6 +666,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         || !(1..=1_048_576).contains(&disk_gib)
         || !valid_reference(&config_drive_artifact_id)
         || !valid_sha256(&config_drive_sha256)
+        || network_attachments.is_empty()
         || network_attachments
             .iter()
             .any(|attachment| !valid_network_attachment(attachment))
@@ -850,6 +851,7 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
                 fixed_ipv4: attachment.fixed_ipv4.clone(),
             })
         })
+        || resolved.network_attachments.is_empty()
         || has_duplicate_network_ports(
             &resolved
                 .network_attachments
@@ -1998,6 +2000,10 @@ mod tests {
             mac: "02:00:00:00:00:02".to_owned(),
             fixed_ipv4: "192.0.2.11".to_owned(),
         });
+        assert!(build_create_command(invalid).is_err());
+
+        let mut invalid = valid_create_spec();
+        invalid.network_attachments.clear();
         assert!(build_create_command(invalid).is_err());
     }
 
