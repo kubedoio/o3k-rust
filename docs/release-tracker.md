@@ -13,7 +13,7 @@ the real-libvirt acceptance evidence exists.
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs, rejects unsafe source inputs, and validates ownership metadata before managed-domain listing; host discovery pending |
 | #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication, bounded network/vendor payloads, and optional read-only libvirt attachment added; Nova wiring and guest cloud-init evidence pending |
-| #43 | Placement | merged | unique atomic state publication, allocation-preserving provider synchronization, and refresh usage reconciliation added; daemon capability publication and disk-capacity policy pending |
+| #43 | Placement | merged | unique atomic state publication, allocation-preserving provider synchronization, refresh and re-registration usage reconciliation added; daemon capability publication and disk-capacity policy pending |
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; duplicate-name conflicts now roll back newly reserved Placement allocations; production inventory wiring and integration dispatch pending |
 | #45 | bridge/TAP | merged | TAP reuse ownership fencing, existing bridge/uplink validation, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication, owned dnsmasq supervision, and gateway/binding conflict rejection added; TAP/dnsmasq/guest IP evidence pending |
@@ -78,7 +78,8 @@ validation), ADR-0069 (Placement refresh usage reconciliation), ADR-0070
 (bounded config-drive network/vendor data), ADR-0071 (serialized console
 writers), ADR-0072 (managed-domain listing ownership validation), and ADR-0073
 (duplicate-name scheduler allocation rollback), ADR-0074 (durable agent
-administrative state), and ADR-0075 (hardened CLI lifecycle evidence).
+administrative state), ADR-0075 (hardened CLI lifecycle evidence), and ADR-0076
+(Placement registration usage reconciliation).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules

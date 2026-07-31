@@ -101,7 +101,7 @@ impl PlacementLedger {
     pub fn register_provider(
         &self,
         node_id: &str,
-        inventories: BTreeMap<String, Inventory>,
+        mut inventories: BTreeMap<String, Inventory>,
     ) -> Result<ResourceProvider, PlacementError> {
         if node_id.trim().is_empty() {
             return Err(PlacementError::InvalidAllocation);
@@ -117,6 +117,7 @@ impl PlacementLedger {
                 inventories: BTreeMap::new(),
                 allocations: BTreeMap::new(),
             });
+        reconcile_inventory_usage(&mut inventories, &provider.allocations);
         provider.inventories = inventories;
         provider.generation = provider.generation.saturating_add(1);
         let result = provider.clone();
@@ -135,16 +136,7 @@ impl PlacementLedger {
         if generation != provider.generation {
             return Err(PlacementError::StaleGeneration);
         }
-        for inventory in inventories.values_mut() {
-            inventory.used = 0;
-        }
-        for allocation in provider.allocations.values() {
-            for (class, amount) in &allocation.resources {
-                if let Some(inventory) = inventories.get_mut(class) {
-                    inventory.used = inventory.used.saturating_add(*amount);
-                }
-            }
-        }
+        reconcile_inventory_usage(&mut inventories, &provider.allocations);
         provider.inventories = inventories;
         provider.generation = provider.generation.saturating_add(1);
         let result = provider.clone();
@@ -176,16 +168,7 @@ impl PlacementLedger {
                 inventories: BTreeMap::new(),
                 allocations: BTreeMap::new(),
             });
-        for inventory in inventories.values_mut() {
-            inventory.used = 0;
-        }
-        for allocation in provider.allocations.values() {
-            for (class, amount) in &allocation.resources {
-                if let Some(inventory) = inventories.get_mut(class) {
-                    inventory.used = inventory.used.saturating_add(*amount);
-                }
-            }
-        }
+        reconcile_inventory_usage(&mut inventories, &provider.allocations);
         provider.inventories = inventories;
         provider.state = state_value;
         provider.generation = provider.generation.saturating_add(1);
@@ -310,6 +293,22 @@ fn persist(root: &Path, state: &BTreeMap<String, ResourceProvider>) -> Result<()
     Ok(())
 }
 
+fn reconcile_inventory_usage(
+    inventories: &mut BTreeMap<String, Inventory>,
+    allocations: &BTreeMap<String, Allocation>,
+) {
+    for inventory in inventories.values_mut() {
+        inventory.used = 0;
+    }
+    for allocation in allocations.values() {
+        for (class, amount) in &allocation.resources {
+            if let Some(inventory) = inventories.get_mut(class) {
+                inventory.used = inventory.used.saturating_add(*amount);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +426,64 @@ mod tests {
         ));
         let reopened = PlacementLedger::open(&root)?;
         assert_eq!(reopened.provider("node-1")?.inventories[VCPU].used, 2);
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reregister_reconciles_usage_and_preserves_capacity_after_reopen()
+    -> Result<(), PlacementError> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-placement-reregister-{}", Uuid::now_v7()));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.register_provider("node-1", inventory())?;
+        ledger.allocate(
+            "node-1",
+            "allocation-1",
+            "server-1",
+            BTreeMap::from([(VCPU.to_owned(), 2), (MEMORY_MB.to_owned(), 1024)]),
+            provider.generation,
+        )?;
+
+        let mut reported = inventory();
+        reported
+            .get_mut(VCPU)
+            .ok_or(PlacementError::InvalidAllocation)?
+            .used = 999;
+        reported
+            .get_mut(MEMORY_MB)
+            .ok_or(PlacementError::InvalidAllocation)?
+            .used = 999;
+        reported.insert(
+            "CUSTOM_RESOURCE".to_owned(),
+            Inventory {
+                total: 8,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 999,
+            },
+        );
+
+        let reregistered = ledger.register_provider("node-1", reported)?;
+        assert_eq!(reregistered.inventories[VCPU].used, 2);
+        assert_eq!(reregistered.inventories[MEMORY_MB].used, 1024);
+        assert_eq!(reregistered.inventories["CUSTOM_RESOURCE"].used, 0);
+        assert!(matches!(
+            ledger.allocate(
+                "node-1",
+                "allocation-2",
+                "server-2",
+                BTreeMap::from([(VCPU.to_owned(), 3)]),
+                reregistered.generation
+            ),
+            Err(PlacementError::OverCapacity)
+        ));
+
+        let reopened = PlacementLedger::open(&root)?;
+        let persisted = reopened.provider("node-1")?;
+        assert_eq!(persisted.inventories[VCPU].used, 2);
+        assert_eq!(persisted.inventories[MEMORY_MB].used, 1024);
+        assert_eq!(persisted.allocations.len(), 1);
         fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
         Ok(())
     }
