@@ -46,6 +46,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .inspect(name.clone())
                     .await
                     .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 success(if inspection.active {
                     "domain is active"
                 } else {
@@ -53,6 +54,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 })
             }
             Some(proto::command::Action::Start(_)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 self.adapter
                     .start(name.clone())
                     .await
@@ -60,6 +67,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain started")
             }
             Some(proto::command::Action::Stop(_)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 self.adapter
                     .shutdown(name.clone())
                     .await
@@ -67,6 +80,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain stopped")
             }
             Some(proto::command::Action::Reboot(_)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 self.adapter
                     .reboot(name.clone())
                     .await
@@ -79,6 +98,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .inspect(name.clone())
                     .await
                     .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
                 if inspection.active {
                     self.adapter
                         .force_stop(name.clone())
@@ -126,6 +146,22 @@ impl CommandExecutor for LibvirtCommandExecutor {
             }
             None => Err(AgentError::Protocol("command action is missing".to_owned())),
         }
+    }
+}
+
+fn verify_owned_domain(
+    inspection: &o3k_libvirt::DomainInspection,
+    expected_server_id: &str,
+) -> Result<(), AgentError> {
+    match o3k_libvirt::discover_domain_xml(&inspection.name, &inspection.xml) {
+        o3k_libvirt::DiscoveryResult::Owned { metadata, .. }
+            if metadata.server_id == expected_server_id =>
+        {
+            Ok(())
+        }
+        _ => Err(AgentError::Protocol(
+            "libvirt domain ownership verification failed".to_owned(),
+        )),
     }
 }
 
@@ -261,4 +297,29 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
             ..Default::default()
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inspection(xml: &str) -> o3k_libvirt::DomainInspection {
+        o3k_libvirt::DomainInspection {
+            name: "o3k-domain".to_owned(),
+            active: false,
+            persistent: true,
+            state: "shutoff".to_owned(),
+            max_memory_kib: 128 * 1024,
+            vcpus: 1,
+            xml: xml.to_owned(),
+        }
+    }
+
+    #[test]
+    fn lifecycle_mutations_require_matching_owned_metadata() {
+        let xml = "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" server_id=\"server-1\" project_id=\"project\" generation=\"1\" operation_id=\"operation\" managed_by=\"o3k-compute\" /></metadata></domain>";
+        assert!(verify_owned_domain(&inspection(xml), "server-1").is_ok());
+        assert!(verify_owned_domain(&inspection(xml), "server-2").is_err());
+        assert!(verify_owned_domain(&inspection("<domain />"), "server-1").is_err());
+    }
 }
