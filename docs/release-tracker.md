@@ -11,7 +11,7 @@ the real-libvirt acceptance evidence exists.
 | #38 | secure registration/heartbeat | merged | host deployment pending |
 | #39 | local libvirt adapter | merged | host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | host discovery pending |
-| #41 | image cache/overlays | merged | atomic/idempotent overlay publication added; host qemu-img evidence pending |
+| #41 | image cache/overlays | merged | atomic/idempotent publication for base, upload, metadata, and overlays added; host qemu-img evidence pending |
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication added; integration allocation pending |
 | #44 | scheduler | merged | agent-targeted scheduling contract added; integration dispatch pending |
@@ -68,6 +68,7 @@ and ADR-0026 (TAP reuse ownership fencing), ADR-0027 (agent-targeted scheduling)
 and ADR-0028 (bounded console offset reads), ADR-0029 (CLI harness failure
 cleanup), ADR-0030 (dnsmasq supervision), ADR-0031 (typed resolved create
 inputs), ADR-0032 (measurement authentication input), ADR-0033 (CLI list and
-resource evidence), and ADR-0034 (Placement atomic publication).
+resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
+(image publication temporaries).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.

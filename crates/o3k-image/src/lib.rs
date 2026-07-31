@@ -108,8 +108,11 @@ impl ImageCache {
         }
         let temporary = self
             .root
-            .join(format!("base-{checksum}.tmp-{}", std::process::id()));
-        fs::write(&temporary, content).map_err(ImageError::Storage)?;
+            .join(format!("base-{checksum}.tmp-{}", Uuid::now_v7()));
+        if let Err(error) = fs::write(&temporary, content) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ImageError::Storage(error));
+        }
         fs::rename(&temporary, &path).map_err(|error| {
             let _ = fs::remove_file(&temporary);
             ImageError::Storage(error)
@@ -140,8 +143,7 @@ impl ImageCache {
         let temporary = self
             .root
             .join("overlays")
-            .join(format!(".{instance_id}.tmp-{}", std::process::id()));
-        let _ = fs::remove_file(&temporary);
+            .join(format!(".{instance_id}.tmp-{}", Uuid::now_v7()));
         let status = std::process::Command::new("qemu-img")
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
@@ -283,8 +285,11 @@ impl ImageService {
             return Err(ImageError::Conflict);
         }
         let content_path = content_path(&inner.root, id);
-        let temporary_path = content_path.with_extension(format!("upload-{}", std::process::id()));
-        fs::write(&temporary_path, content).map_err(ImageError::Storage)?;
+        let temporary_path = content_path.with_extension(format!("upload-{}", Uuid::now_v7()));
+        if let Err(error) = fs::write(&temporary_path, content) {
+            let _ = fs::remove_file(&temporary_path);
+            return Err(ImageError::Storage(error));
+        }
         if let Err(error) = fs::rename(&temporary_path, &content_path) {
             let _ = fs::remove_file(&temporary_path);
             return Err(ImageError::Storage(error));
@@ -325,9 +330,12 @@ fn persist(inner: &Inner) -> Result<(), ImageError> {
     let metadata_path = inner.root.join("metadata.json");
     let temporary_path = inner
         .root
-        .join(format!("metadata.json.tmp-{}", std::process::id()));
+        .join(format!("metadata.json.tmp-{}", Uuid::now_v7()));
     let encoded = serde_json::to_vec_pretty(&inner.images).map_err(ImageError::CorruptMetadata)?;
-    fs::write(&temporary_path, encoded).map_err(ImageError::Storage)?;
+    if let Err(error) = fs::write(&temporary_path, encoded) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(ImageError::Storage(error));
+    }
     if let Err(error) = fs::rename(&temporary_path, &metadata_path) {
         let _ = fs::remove_file(&temporary_path);
         return Err(ImageError::Storage(error));
@@ -356,6 +364,10 @@ mod tests {
         )?;
         let uploaded = service.upload("project-a", image.id, b"image-bytes")?;
         assert_eq!(uploaded.status, ImageStatus::Active);
+        assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
+            entry.file_name().to_string_lossy().contains(".tmp-")
+                || entry.file_name().to_string_lossy().contains("upload-")
+        }));
         let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
         assert_eq!(reopened.get("project-a", image.id)?, uploaded);
         fs::remove_dir_all(path)?;
