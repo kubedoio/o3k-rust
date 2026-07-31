@@ -1,6 +1,11 @@
 //! Durable bounded console output for O3K-managed instances.
 
-use std::{fs, io, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs, io,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -20,6 +25,7 @@ pub enum ConsoleError {
 pub struct ConsoleService {
     root: PathBuf,
     max_bytes: usize,
+    locks: Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +43,7 @@ impl ConsoleService {
         Ok(Self {
             root,
             max_bytes: MAX_CONSOLE_BYTES,
+            locks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -44,6 +51,12 @@ impl ConsoleService {
         if output.len() > self.max_bytes {
             return Err(ConsoleError::InvalidInput);
         }
+        let lock = self.instance_lock(instance_id)?;
+        let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
+        self.write_unlocked(instance_id, output)
+    }
+
+    fn write_unlocked(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
         let path = self.path(instance_id)?;
         let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7()));
         if let Err(error) = fs::write(&temporary, output) {
@@ -58,12 +71,18 @@ impl ConsoleService {
     }
 
     pub fn append(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
+        let lock = self.instance_lock(instance_id)?;
+        let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
+        self.append_unlocked(instance_id, output)
+    }
+
+    fn append_unlocked(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
         let mut current = self.read(instance_id).unwrap_or_default();
         current.extend_from_slice(output);
         if current.len() > self.max_bytes {
             current = current[current.len() - self.max_bytes..].to_vec();
         }
-        self.write(instance_id, &current)
+        self.write_unlocked(instance_id, &current)
     }
 
     /// Persists a sequential agent observation without allowing stale or
@@ -75,9 +94,11 @@ impl ConsoleService {
         output: &[u8],
     ) -> Result<(), ConsoleError> {
         let offset = usize::try_from(offset).map_err(|_| ConsoleError::InvalidInput)?;
+        let lock = self.instance_lock(instance_id)?;
+        let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
         let current = self.read(instance_id).unwrap_or_default();
         if offset == 0 {
-            return self.write(instance_id, output);
+            return self.write_unlocked(instance_id, output);
         }
         if offset > current.len() || output.len() > self.max_bytes.saturating_sub(offset) {
             return Err(ConsoleError::InvalidInput);
@@ -90,7 +111,7 @@ impl ConsoleService {
         if offset != current.len() {
             return Err(ConsoleError::InvalidInput);
         }
-        self.append(instance_id, output)
+        self.append_unlocked(instance_id, output)
     }
 
     pub fn read(&self, instance_id: Uuid) -> Result<Vec<u8>, ConsoleError> {
@@ -125,6 +146,8 @@ impl ConsoleService {
     }
 
     pub fn cleanup(&self, instance_id: Uuid) -> Result<(), ConsoleError> {
+        let lock = self.instance_lock(instance_id)?;
+        let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
         let path = self.path(instance_id)?;
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
@@ -138,6 +161,17 @@ impl ConsoleService {
             return Err(ConsoleError::InvalidInput);
         }
         Ok(self.root.join(format!("{instance_id}.log")))
+    }
+
+    fn instance_lock(&self, instance_id: Uuid) -> Result<Arc<Mutex<()>>, ConsoleError> {
+        if instance_id == Uuid::nil() {
+            return Err(ConsoleError::InvalidInput);
+        }
+        let mut locks = self.locks.lock().map_err(|_| ConsoleError::InvalidInput)?;
+        Ok(locks
+            .entry(instance_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone())
     }
 }
 
@@ -179,6 +213,21 @@ mod tests {
             Err(ConsoleError::InvalidInput)
         ));
         service.cleanup(id)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_appends_are_serialized() -> Result<(), ConsoleError> {
+        let service = service()?;
+        let id = Uuid::now_v7();
+        let left = service.clone();
+        let right = service.clone();
+        let first = std::thread::spawn(move || left.append(id, b"left"));
+        let second = std::thread::spawn(move || right.append(id, b"right"));
+        first.join().map_err(|_| ConsoleError::InvalidInput)??;
+        second.join().map_err(|_| ConsoleError::InvalidInput)??;
+        let output = service.read(id)?;
+        assert!(output == b"leftright" || output == b"rightleft");
         Ok(())
     }
 }
