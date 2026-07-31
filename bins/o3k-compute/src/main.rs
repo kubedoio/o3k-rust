@@ -2,6 +2,7 @@ use std::{env, net::SocketAddr, path::PathBuf, time::Duration};
 
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_compute_agent::{AgentClient, AgentConfig, TlsFiles};
+use o3k_libvirt::{LibvirtAdapter, LibvirtConfig};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -9,15 +10,29 @@ use tracing_subscriber::EnvFilter;
 #[derive(Clone)]
 struct HealthState {
     agent: AgentClient,
+    libvirt_ready: bool,
+    libvirt_error: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = config_from_env()?;
+    let mut config = config_from_env()?;
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+    let libvirt = LibvirtAdapter::new(LibvirtConfig::default())?;
+    let (libvirt_ready, libvirt_error) = match libvirt.capabilities().await {
+        Ok(capabilities) => {
+            config.capabilities = capabilities.to_protocol_capabilities();
+            (true, None)
+        }
+        Err(error) => {
+            let message = error.to_string();
+            tracing::warn!(error = %message, "local libvirt is unavailable");
+            (false, Some(message))
+        }
+    };
     let agent = AgentClient::new(config.clone())?;
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
@@ -25,6 +40,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<SocketAddr>()?;
     let state = HealthState {
         agent: agent.clone(),
+        libvirt_ready,
+        libvirt_error,
     };
     let health_server = axum::serve(TcpListener::bind(health_addr).await?, health_router(state));
     tokio::select! {
@@ -48,18 +65,25 @@ async fn liveness() -> impl IntoResponse {
 }
 
 async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
-    if state.agent.is_ready() {
-        (StatusCode::OK, "{\"status\":\"ready\"}\n")
+    if state.agent.is_ready() && state.libvirt_ready {
+        (StatusCode::OK, "{\"status\":\"ready\"}\n".to_owned())
     } else {
+        let error = state
+            .libvirt_error
+            .as_deref()
+            .unwrap_or("control plane is not connected");
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            "{\"status\":\"not_ready\"}\n",
+            format!(
+                "{{\"status\":\"not_ready\",\"reason\":{}}}\n",
+                serde_json::to_string(error).unwrap_or_else(|_| "\"unavailable\"".to_owned())
+            ),
         )
     }
 }
 
 async fn metrics(State(state): State<HealthState>) -> impl IntoResponse {
-    let ready = u8::from(state.agent.is_ready());
+    let ready = u8::from(state.agent.is_ready() && state.libvirt_ready);
     (StatusCode::OK, format!("o3k_compute_ready {ready}\n"))
 }
 

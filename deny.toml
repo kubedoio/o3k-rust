@@ -15,6 +15,7 @@ allow = [
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
+  "LGPL-2.1",
   "MIT",
   "MPL-2.0",
   "OpenSSL",
@@ -22,7 +23,9 @@ allow = [
   "Unicode-DFS-2016",
   "Zlib",
 ]
-exceptions = []
+exceptions = [
+  { allow = ["LGPL-2.1"], name = "virt" },
+]
 
 [bans]
 multiple-versions = "warn"

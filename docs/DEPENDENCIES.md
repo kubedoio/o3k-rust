@@ -14,13 +14,15 @@ licenses, advisories, bans, and sources in CI.
 | sqlx | O3K maintainers | SQLite persistence and migrations | crates.io; MIT/Apache-2.0 family |
 | thiserror, time, uuid | O3K maintainers | errors, timestamps, resource IDs | crates.io; MIT/Apache-2.0 family |
 | prost, tonic, tonic-build | O3K maintainers | provider protobuf/gRPC boundary | crates.io; MIT/Apache-2.0 family |
+| virt (optional) | O3K maintainers | local libvirt/KVM FFI adapter | crates.io; LGPL-2.1; enabled only for `o3k-compute --features libvirt` |
 | tracing, tracing-subscriber | O3K maintainers | structured diagnostics | crates.io; MIT/Apache-2.0 family |
 | url | O3K maintainers | SQLx URL/IDNA compatibility | crates.io; MIT/Apache-2.0 family; pinned to patched 2.5.4 |
 
 The policy also permits `CDLA-Permissive-2.0` for the transitive
 `webpki-roots` dependency. This is an intentional, reviewed exception to the
-common license set; BSL and LGPL alternatives remain disallowed unless a
-future dependency review explicitly changes `deny.toml`. Internal path
+common license set; the optional `virt` binding is the reviewed LGPL-2.1
+exception required for the local libvirt adapter. BSL alternatives remain
+disallowed unless a future dependency review explicitly changes `deny.toml`. Internal path
 dependencies are intentionally allowed; the source gate rejects unknown
 external registries and git sources.
 
