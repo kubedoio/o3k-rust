@@ -114,7 +114,14 @@ impl ImageCache {
         let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
         let path = self.root.join("base").join(format!("{checksum}.{format}"));
         if path.exists() {
-            return Ok(path);
+            let cached = fs::read(&path).map_err(ImageError::Storage)?;
+            if cached.len() as u64 <= self.max_bytes
+                && cached.len() == content.len()
+                && format!("{:x}", Sha256::digest(&cached)) == checksum
+            {
+                return Ok(path);
+            }
+            fs::remove_file(&path).map_err(ImageError::Storage)?;
         }
         let temporary = self
             .root
@@ -531,6 +538,10 @@ mod tests {
         let first = cache.cache_base(&checksum, "qcow2", content)?;
         let second = cache.cache_base(&checksum, "qcow2", content)?;
         assert_eq!(first, second);
+        fs::write(&first, b"corrupted-cache-entry")?;
+        let repaired = cache.cache_base(&checksum, "qcow2", content)?;
+        assert_eq!(repaired, first);
+        assert_eq!(fs::read(&repaired)?, content);
         assert!(matches!(
             cache.cache_base(&checksum, "vmdk", content),
             Err(ImageError::UnsupportedFormat)
