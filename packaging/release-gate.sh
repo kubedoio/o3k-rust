@@ -7,6 +7,7 @@ INSTALL_UBUNTU=
 INSTALL_DEBIAN=
 RECOVERY=
 BENCHMARK=
+BENCHMARK_RAW=
 while (($#)); do
   case "$1" in
     --e2e) E2E="${2:?missing E2E artifact}"; shift 2;;
@@ -14,13 +15,19 @@ while (($#)); do
     --install-debian) INSTALL_DEBIAN="${2:?missing Debian artifact}"; shift 2;;
     --recovery) RECOVERY="${2:?missing recovery artifact}"; shift 2;;
     --benchmark) BENCHMARK="${2:?missing benchmark artifact}"; shift 2;;
+    --benchmark-raw) BENCHMARK_RAW="${2:?missing raw benchmark artifact}"; shift 2;;
     --output) OUTPUT="${2:?missing output path}"; shift 2;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
-export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK OUTPUT
+export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW OUTPUT
 python3 <<'PY'
-import json, os, sys, time
+import hashlib
+import json
+import os
+import re
+import sys
+import time
 
 DEFAULT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 max_age_text = os.environ.get(
@@ -52,6 +59,7 @@ if max_age_error:
     errors.append(max_age_error)
 evidence = {}
 paths = {}
+benchmark_summary = None
 now = int(time.time())
 for name, (path, artifact_type) in required.items():
     if not path:
@@ -71,6 +79,8 @@ for name, (path, artifact_type) in required.items():
     if not isinstance(value, dict):
         errors.append(f"{name}: artifact root must be an object")
         continue
+    if name == "benchmark":
+        benchmark_summary = value
     status = value.get("status")
     evidence[name] = {
         "path": path,
@@ -128,6 +138,79 @@ for name, (path, artifact_type) in required.items():
         install = value.get("install")
         if not isinstance(install, dict) or install.get("status") != "passed":
             errors.append(f"{name}: install.status must be 'passed'")
+
+benchmark_raw = None
+benchmark_raw_path = os.environ["BENCHMARK_RAW"]
+if not benchmark_raw_path:
+    errors.append("benchmark_raw: artifact path was not supplied")
+else:
+    real_path = os.path.realpath(benchmark_raw_path)
+    if real_path in paths:
+        errors.append(
+            "benchmark_raw: artifact reuses "
+            f"{paths[real_path]}; each gate input must be distinct"
+        )
+    else:
+        paths[real_path] = "benchmark_raw"
+        try:
+            with open(benchmark_raw_path, encoding="utf-8") as stream:
+                benchmark_raw = json.load(stream)
+        except (OSError, json.JSONDecodeError) as error:
+            errors.append(f"benchmark_raw: cannot read JSON artifact ({error})")
+        if benchmark_raw is not None and not isinstance(benchmark_raw, dict):
+            errors.append("benchmark_raw: artifact root must be an object")
+            benchmark_raw = None
+
+if isinstance(benchmark_raw, dict):
+    if benchmark_raw.get("artifact_type") != "benchmark":
+        errors.append("benchmark_raw: artifact_type must be 'benchmark'")
+    if benchmark_raw.get("status") != "measured":
+        errors.append(
+            f"benchmark_raw: status must be measured, got {benchmark_raw.get('status')!r}"
+        )
+    if benchmark_raw.get("profile") != "libvirt":
+        errors.append("benchmark_raw: profile must be 'libvirt'")
+    if benchmark_raw.get("redacted") is not True:
+        errors.append("benchmark_raw: redacted must be true")
+    environment = benchmark_raw.get("environment")
+    if not isinstance(environment, dict):
+        errors.append("benchmark_raw: environment must be an object")
+    else:
+        for field in ("uname", "rustc"):
+            if not isinstance(environment.get(field), str) or not environment[field].strip():
+                errors.append(
+                    f"benchmark_raw: environment.{field} must be a non-empty string"
+                )
+    samples = benchmark_raw.get("samples")
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples <= 0:
+        errors.append("benchmark_raw: samples must be a positive integer")
+    for field in ("control_plane", "guest_and_libvirt", "targets"):
+        if not isinstance(benchmark_raw.get(field), dict):
+            errors.append(f"benchmark_raw: {field} must be an object")
+    guest = benchmark_raw.get("guest_and_libvirt")
+    if isinstance(guest, dict) and guest.get("status") != "measured":
+        errors.append("benchmark_raw: guest_and_libvirt.status must be measured")
+    targets = benchmark_raw.get("targets")
+    if isinstance(targets, dict):
+        for field in ("startup_readiness_ms", "idle_rss_mib", "token_p95_ms"):
+            if field not in targets:
+                errors.append(f"benchmark_raw: targets.{field} is required")
+
+if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
+    raw_sha256 = benchmark_summary.get("raw_sha256")
+    if not isinstance(raw_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", raw_sha256):
+        errors.append("benchmark: raw_sha256 must be a lowercase SHA-256 hex digest")
+    else:
+        canonical_raw = json.dumps(
+            benchmark_raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        expected_sha256 = hashlib.sha256(canonical_raw).hexdigest()
+        if raw_sha256 != expected_sha256:
+            errors.append("benchmark: raw_sha256 does not match benchmark_raw")
+    for field in ("samples", "control_plane", "guest_and_libvirt"):
+        if benchmark_summary.get(field) != benchmark_raw.get(field):
+            errors.append(f"benchmark: {field} must match benchmark_raw.{field}")
+
 report = {"release": "v0.2.0-alpha.1", "profile": "libvirt", "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
 with open(os.environ["OUTPUT"], "w", encoding="utf-8") as stream:
     json.dump(report, stream, indent=2, sort_keys=True); stream.write("\n")

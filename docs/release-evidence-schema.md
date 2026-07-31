@@ -22,7 +22,18 @@ The required artifact types are:
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | non-empty `failures` list |
-| `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured` and all evaluated targets true |
+| `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`, all evaluated targets true, and `raw_sha256` binding the summary to `--benchmark-raw` |
+| `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
+
+The benchmark summary and raw artifact are separate required inputs. Their
+`artifact_type`, `status`, `profile`, `samples`, `control_plane`, and
+`guest_and_libvirt` values must be identical. The summary's `raw_sha256` must
+be 64 lowercase hexadecimal characters and equal the SHA-256 digest of the
+raw artifact's canonical UTF-8 JSON: object keys sorted recursively, no
+whitespace (`separators=(',', ':')`), and non-ASCII characters escaped. This
+binds the measured summary to the exact raw document that was reviewed;
+changing raw data, even while preserving its valid JSON shape, blocks the
+gate. The gate does not use file metadata or paths as the binding.
 
 Paths must be distinct. Preflight, skipped, fake-profile, stale, or reused
 artifacts are rejected. Test scripts remove their prior result files before
