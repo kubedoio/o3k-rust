@@ -11,7 +11,7 @@ the real-libvirt acceptance evidence exists.
 | #38 | secure registration/heartbeat | merged | host deployment pending |
 | #39 | local libvirt adapter | merged | host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | host discovery pending |
-| #41 | image cache/overlays | merged | host qemu-img pending |
+| #41 | image cache/overlays | merged | atomic/idempotent overlay publication added; host qemu-img evidence pending |
 | #42 | config-drive | merged | guest cloud-init pending |
 | #43 | Placement | merged | integration allocation pending |
 | #44 | scheduler | merged | integration dispatch pending |
@@ -61,6 +61,7 @@ backends), ADR-0012 (console output), and ADR-0013 (lifecycle safety
 boundaries), ADR-0014 (Nova create idempotency), ADR-0015 (agent command dispatch),
 and ADR-0016 (durable lifecycle operations), ADR-0017 (agent command router),
 and ADR-0018 (scheduler and Placement intent), ADR-0019 (canonical create command),
-and ADR-0020 (durable agent-event reconciliation), and ADR-0021 (live agent-event consumer).
+and ADR-0020 (durable agent-event reconciliation), ADR-0021 (live agent-event consumer),
+and ADR-0022 (atomic image overlays).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
