@@ -13,7 +13,34 @@ LISTEN_ADDR="127.0.0.1:${PORT}"
 mkdir -p "$ARTIFACT_DIR"
 rm -f "$ARTIFACT_DIR/raw.json" "$ARTIFACT_DIR/summary.json" "$ARTIFACT_DIR/o3kd.log"
 O3KD_PID=
-trap 'set +e; [[ -n "${O3KD_PID}" ]] && kill -TERM "${O3KD_PID}" 2>/dev/null && wait "${O3KD_PID}" 2>/dev/null || true; rm -rf -- "${DATA_DIR}"' EXIT
+cleanup() {
+  local exit_code="$?"
+  local cleanup_status=passed
+  set +e
+  if [[ -n "${O3KD_PID}" ]]; then
+    if kill -TERM "${O3KD_PID}" 2>/dev/null; then
+      wait "${O3KD_PID}" 2>/dev/null || true
+    elif kill -0 "${O3KD_PID}" 2>/dev/null; then
+      cleanup_status=failed
+    fi
+  fi
+  rm -rf -- "$DATA_DIR" || cleanup_status=failed
+  if [[ -f "$ARTIFACT_DIR/summary.json" ]]; then
+    python3 - "$ARTIFACT_DIR/summary.json" "$cleanup_status" <<'PY'
+import json, sys
+path, cleanup_status = sys.argv[1:]
+with open(path, encoding="utf-8") as stream:
+    result = json.load(stream)
+if result.get("status") == "measured":
+    result["cleanup"] = {"status": cleanup_status}
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump(result, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+PY
+  fi
+  exit "$exit_code"
+}
+trap cleanup EXIT
 
 if [[ "$PROFILE" == libvirt ]] && { [[ ! -e /dev/kvm ]] || ! command -v virsh >/dev/null 2>&1; }; then
   python3 - "$ARTIFACT_DIR/summary.json" <<'PY'
@@ -89,7 +116,7 @@ raw = {
 with open(os.path.join(os.environ["ARTIFACT_DIR"], "raw.json"), "w", encoding="utf-8") as output:
     json.dump(raw, output, indent=2, sort_keys=True); output.write("\n")
 control = raw["control_plane"]
-summary = {"artifact_type": "benchmark", "status": "measured", "profile": raw["profile"], "samples": raw["samples"], "redacted": True, "finished_at": int(__import__("time").time()), "control_plane": control, "guest_and_libvirt": raw["guest_and_libvirt"], "cleanup": {"status": "not_measured"}, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
+summary = {"artifact_type": "benchmark", "status": "measured", "profile": raw["profile"], "samples": raw["samples"], "redacted": True, "finished_at": int(__import__("time").time()), "control_plane": control, "guest_and_libvirt": raw["guest_and_libvirt"], "cleanup": {"status": "pending"}, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
 with open(os.path.join(os.environ["ARTIFACT_DIR"], "summary.json"), "w", encoding="utf-8") as output:
     json.dump(summary, output, indent=2, sort_keys=True); output.write("\n")
 PY
