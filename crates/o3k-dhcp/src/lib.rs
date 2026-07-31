@@ -226,9 +226,16 @@ fn valid_mac(mac: &str) -> bool {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DhcpError> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, bytes).map_err(DhcpError::Storage)?;
-    fs::rename(temporary, path).map_err(DhcpError::Storage)
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::now_v7()));
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(DhcpError::Storage(error));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(DhcpError::Storage(error));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
