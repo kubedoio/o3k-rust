@@ -10,6 +10,21 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 [[ -x "$BINARY" ]] || { echo "packaging test binary is missing: $BINARY" >&2; exit 2; }
 
+# Disk-space evidence is a safety precondition, not an optional diagnostic.
+# A command that exits successfully without producing a parseable df row must
+# fail closed instead of allowing installation to continue.
+mkdir -p "$WORK_DIR/fake-preflight-bin"
+cat >"$WORK_DIR/fake-preflight-bin/df" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$WORK_DIR/fake-preflight-bin/df"
+if PATH="$WORK_DIR/fake-preflight-bin:/usr/bin:/bin" \
+  bash "$ROOT_DIR/packaging/preflight.sh" --profile fake; then
+  echo "preflight accepted missing disk-space evidence" >&2
+  exit 1
+fi
+
 # Invalid installation paths must be rejected before the installer creates a
 # partial prefix or state directory.
 (cd "$WORK_DIR" && if bash "$ROOT_DIR/packaging/install.sh" \

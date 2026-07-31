@@ -21,5 +21,15 @@ if ((${#missing[@]})); then
   printf 'preflight failed (%s): missing %s\n' "$PROFILE" "$(IFS=', '; echo "${missing[*]}")" >&2
   exit 1
 fi
-df -Pk /var/lib 2>/dev/null | awk 'NR==2 { if ($4 < 1048576) exit 1 }' || { echo "preflight failed: less than 1 GiB free on /var/lib" >&2; exit 1; }
+df -Pk /var/lib 2>/dev/null | awk '
+  NR == 2 {
+    found = 1
+    if ($4 !~ /^[0-9]+$/) invalid = 1
+    else if ($4 < 1048576) low = 1
+  }
+  END {
+    if (!found || invalid) exit 2
+    if (low) exit 1
+  }
+' || { echo "preflight failed: unable to verify at least 1 GiB free on /var/lib" >&2; exit 1; }
 printf 'preflight passed: profile=%s\n' "$PROFILE"
