@@ -564,7 +564,7 @@ where
             match self.provider.get_instance(&provider_id).await {
                 Ok(instance) => match instance.state {
                     o3k_provider::InstanceState::Running => "ACTIVE",
-                    o3k_provider::InstanceState::Stopped => "STOPPED",
+                    o3k_provider::InstanceState::Stopped => "SHUTOFF",
                     o3k_provider::InstanceState::Creating => "BUILD",
                     o3k_provider::InstanceState::Deleting => "DELETING",
                     o3k_provider::InstanceState::Deleted => "DELETED",
@@ -1059,7 +1059,7 @@ mod tests {
         );
         assert_eq!(
             store.get_resource(resource.id).await?.observed_state,
-            "STOPPED"
+            "SHUTOFF"
         );
         Ok(())
     }

@@ -12,6 +12,10 @@ reference. Creation journals the request in SQLite before invoking the fake
 compute provider. The reconciler projects provider success to `ACTIVE` and
 retains provider references for delete and action operations.
 
+Observed powered-off instances are exposed with Nova's `SHUTOFF` status. The
+provider's internal `Stopped` state is not exposed as the non-Nova `STOPPED`
+string.
+
 Supported actions are start, stop, and reboot. Delete is idempotent after the
 server has reached the deleted projection. Keypairs, metadata, resize,
 rebuild, rescue, pagination, quotas, full microversion coverage, and provider

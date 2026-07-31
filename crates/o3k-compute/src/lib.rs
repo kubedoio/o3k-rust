@@ -479,9 +479,9 @@ impl ComputeService {
             return Err(ComputeError::Conflict);
         }
         let target = match (action, resource.observed_state.as_str()) {
-            (InstanceAction::Start, "stopped" | "STOPPED") => "ACTIVE",
-            (InstanceAction::Stop, "active" | "ACTIVE") => "STOPPED",
-            (InstanceAction::Reboot, "active" | "ACTIVE" | "stopped" | "STOPPED") => "ACTIVE",
+            (InstanceAction::Start, "stopped" | "SHUTOFF") => "ACTIVE",
+            (InstanceAction::Stop, "active" | "ACTIVE") => "SHUTOFF",
+            (InstanceAction::Reboot, "active" | "ACTIVE" | "stopped" | "SHUTOFF") => "ACTIVE",
             _ => return Err(ComputeError::Conflict),
         };
         let lifecycle_action = match action {
@@ -603,7 +603,7 @@ mod tests {
                 .action("project-a", server.id, InstanceAction::Stop)
                 .await?
                 .status,
-            "STOPPED"
+            "SHUTOFF"
         );
         assert_eq!(
             service
