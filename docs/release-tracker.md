@@ -17,7 +17,7 @@ the real-libvirt acceptance evidence exists.
 | #44 | scheduler | merged | agent-targeted scheduling and registry eligibility gate added; duplicate-name conflicts now roll back newly reserved Placement allocations; production inventory wiring and integration dispatch pending |
 | #45 | bridge/TAP | merged | TAP reuse ownership fencing, existing bridge/uplink validation, ownership-checked deletion, unique network metadata publication, and validated libvirt TAP attachment added; host execution/guest network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication, owned dnsmasq supervision, and gateway/binding conflict rejection added; TAP/dnsmasq/guest IP evidence pending |
-| #47 | libvirt lifecycle backend | merged | distinct CellHV provider selection, durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, non-empty network validation, and lifecycle ownership fencing added; agent-backed artifact realization/create and host evidence pending |
+| #47 | libvirt lifecycle backend | merged | distinct CellHV provider selection, durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, typed resolved create inputs, lifecycle ownership fencing, and fail-closed libvirt-provider validation for unsupported network inputs added; full network/TAP, artifact, config-drive, agent-backed create realization, and host evidence remain coupled follow-ups |
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, serialized per-instance writes, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
 | #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, validated show/list identity, verified deletion, and redacted evidence with discarded raw CLI errors; stronger script evidence does not replace a trusted real CLI/libvirt run |
@@ -79,7 +79,8 @@ validation), ADR-0069 (Placement refresh usage reconciliation), ADR-0070
 writers), ADR-0072 (managed-domain listing ownership validation), and ADR-0073
 (duplicate-name scheduler allocation rollback), ADR-0074 (durable agent
 administrative state), ADR-0075 (hardened CLI lifecycle evidence), and ADR-0076
-(Placement registration usage reconciliation).
+(Placement registration usage reconciliation), and ADR-0077 (fail-closed libvirt
+create inputs).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
