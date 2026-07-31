@@ -6,12 +6,18 @@ ARTIFACT_DIR="${O3K_TESTLAB_ARTIFACT_DIR:-${ROOT_DIR}/target/testlab-artifacts}"
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-cli.XXXXXX")"
 mkdir -p "${ARTIFACT_DIR}"
 rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
-    "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/console.log"
+    "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
+    "${ARTIFACT_DIR}/console.log"
 IMAGE_ID=
 NETWORK_ID=
 SUBNET_ID=
 FLAVOR_ID=
 SERVER_ID=
+CREATED_IMAGE_ID=
+CREATED_NETWORK_ID=
+CREATED_SUBNET_ID=
+CREATED_FLAVOR_ID=
+CREATED_SERVER_ID=
 
 cleanup_resources() {
     local cleanup_ok=1
@@ -40,9 +46,11 @@ cleanup_resources() {
 
 write_result() {
     local status="$1" reason="$2" cleanup_status="${3:-not_run}"
-    python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${status}" "${reason}" "${cleanup_status}" <<'PY'
+    python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${status}" "${reason}" "${cleanup_status}" \
+        "${CREATED_IMAGE_ID}" "${CREATED_NETWORK_ID}" "${CREATED_SUBNET_ID}" \
+        "${CREATED_FLAVOR_ID}" "${CREATED_SERVER_ID}" <<'PY'
 import json, sys, time
-path, status, reason, cleanup_status = sys.argv[1:]
+path, status, reason, cleanup_status, image_id, network_id, subnet_id, flavor_id, server_id = sys.argv[1:]
 result = {
     "artifact_type": "openstack-cli-e2e",
     "status": status,
@@ -53,6 +61,17 @@ result = {
     "cleanup": {"status": cleanup_status},
     "finished_at": int(time.time()),
 }
+resources = {
+    name: value for name, value in {
+        "image_id": image_id,
+        "network_id": network_id,
+        "subnet_id": subnet_id,
+        "flavor_id": flavor_id,
+        "server_id": server_id,
+    }.items() if value
+}
+if resources:
+    result["resources"] = resources
 if status == "passed":
     result["lifecycle"] = {
         "create": True, "show": True, "list": True, "stop": True,
@@ -116,15 +135,21 @@ if ! openstack token issue >/dev/null 2>"${ARTIFACT_DIR}/openstack-cli-error.log
     exit 0
 fi
 
-# The remainder deliberately uses only OpenStack CLI calls. Resource IDs and
-# operation IDs are captured in the artifact; credentials and response bodies
-# are not uploaded.
+# The remainder deliberately uses only OpenStack CLI calls. Resource IDs are
+# captured in the redacted artifact; credentials and response bodies are not
+# uploaded. The public CLI does not expose operation IDs here.
 IMAGE_ID="$(openstack image create o3k-testlab-image --disk-format raw --container-format bare -f value -c id)"
+CREATED_IMAGE_ID="${IMAGE_ID}"
 NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"
+CREATED_NETWORK_ID="${NETWORK_ID}"
 SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 o3k-testlab-subnet -f value -c id)"
+CREATED_SUBNET_ID="${SUBNET_ID}"
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
+CREATED_FLAVOR_ID="${FLAVOR_ID}"
 SERVER_ID="$(openstack server create --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" o3k-testlab-server -f value -c id)"
+CREATED_SERVER_ID="${SERVER_ID}"
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
+openstack server list --name o3k-testlab-server -f json >"${ARTIFACT_DIR}/server-list.json"
 openstack console log show "${SERVER_ID}" -f value | tail -c 65536 >"${ARTIFACT_DIR}/console.log"
 openstack server stop "${SERVER_ID}"
 openstack server start "${SERVER_ID}"

@@ -19,7 +19,12 @@ case "$*" in
   subnet\ create*) echo subnet-id;;
   flavor\ create*) echo flavor-id;;
   server\ create*) echo server-id;;
-  server\ show*) exit 1;;
+  server\ show*)
+    if [[ "${O3K_MOCK_FAIL_SHOW:-1}" == 1 ]]; then exit 1; fi
+    echo '{}'
+    ;;
+  server\ list*) echo '[]';;
+  console\ log\ show*) echo 'boot output';;
   *) exit 0;;
 esac
 SH
@@ -43,10 +48,27 @@ import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == "passed"
+assert result["resources"] == {
+    "image_id": "image-id",
+    "network_id": "network-id",
+    "subnet_id": "subnet-id",
+    "flavor_id": "flavor-id",
+    "server_id": "server-id",
+}
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
                 "subnet delete subnet-id" "network delete network-id" "image delete image-id"; do
   grep -Fq "${resource}" "${O3K_MOCK_LOG}"
 done
+
+O3K_MOCK_FAIL_SHOW=0 bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"
+python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status"] == "passed"
+assert result["lifecycle"]["list"] is True
+assert result["resources"]["server_id"] == "server-id"
+PY
+grep -Fq "server list --name o3k-testlab-server -f json" "${O3K_MOCK_LOG}"
 
 echo "OpenStack CLI cleanup test passed"
