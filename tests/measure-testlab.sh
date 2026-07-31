@@ -198,12 +198,14 @@ BINARY_BYTES="$(stat -c %s "$BINARY")"
 export ARTIFACT_DIR PROFILE SAMPLES READY_MS RSS_KIB BINARY_BYTES TOKEN_TIMES
 python3 <<'PY'
 import hashlib
-import json, math, os, platform, subprocess
+import json, math, os, platform, subprocess, time
 times = [float(value) for value in os.environ["TOKEN_TIMES"].split()]
 ordered = sorted(times)
 p95 = ordered[min(len(ordered) - 1, max(0, math.ceil(len(ordered) * 0.95) - 1))]
+finished_at = int(time.time())
 raw = {
     "artifact_type": "benchmark", "status": "measured", "profile": os.environ["PROFILE"], "samples": int(os.environ["SAMPLES"]), "redacted": True,
+    "finished_at": finished_at,
     "environment": {"uname": platform.platform(), "rustc": subprocess.run(["rustc", "--version"], capture_output=True, text=True).stdout.strip()},
     "control_plane": {"startup_readiness_ms": int(os.environ["READY_MS"]), "token_seconds": times, "token_p95_seconds": p95, "idle_rss_kib": None if os.environ["RSS_KIB"] == "null" else int(os.environ["RSS_KIB"]), "o3kd_binary_bytes": int(os.environ["BINARY_BYTES"])},
     "guest_and_libvirt": {"status": "not_measured", "reason": "control-plane harness does not claim real guest coverage"},
@@ -225,7 +227,7 @@ canonical_raw = json.dumps(
 ).encode("utf-8")
 raw_sha256 = hashlib.sha256(canonical_raw).hexdigest()
 control = raw["control_plane"]
-summary = {"artifact_type": "benchmark", "status": "measured", "profile": raw["profile"], "samples": raw["samples"], "redacted": True, "finished_at": int(__import__("time").time()), "control_plane": control, "guest_and_libvirt": raw["guest_and_libvirt"], "cleanup": {"status": "pending"}, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "raw_sha256": raw_sha256, "release_eligible": raw["release_eligible"], "release_exclusion_reason": raw["release_exclusion_reason"], "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
+summary = {"artifact_type": "benchmark", "status": "measured", "profile": raw["profile"], "samples": raw["samples"], "redacted": True, "finished_at": finished_at, "control_plane": control, "guest_and_libvirt": raw["guest_and_libvirt"], "cleanup": {"status": "pending"}, "targets_evaluated": {"startup": control["startup_readiness_ms"] <= 2000, "rss": control["idle_rss_kib"] is not None and control["idle_rss_kib"] <= 150 * 1024, "token_p95": p95 <= 0.1}, "raw_sha256": raw_sha256, "release_eligible": raw["release_eligible"], "release_exclusion_reason": raw["release_exclusion_reason"], "note": "Thresholds are evaluations, not production guarantees; no OpenStack comparison is made."}
 with open(os.path.join(os.environ["ARTIFACT_DIR"], "summary.json"), "w", encoding="utf-8") as output:
     json.dump(summary, output, indent=2, sort_keys=True); output.write("\n")
 PY

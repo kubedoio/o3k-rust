@@ -23,11 +23,12 @@ The required artifact types are:
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | non-empty `failures` list |
 | `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`, all evaluated targets true, and `raw_sha256` binding the summary to `--benchmark-raw` |
-| `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
+| `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
 
 The benchmark summary and raw artifact are separate required inputs. Their
-`artifact_type`, `status`, `profile`, `samples`, `control_plane`, and
-`guest_and_libvirt` values must be identical. The summary's `raw_sha256` must
+`artifact_type`, `status`, `profile`, `samples`, `finished_at`, `control_plane`,
+and `guest_and_libvirt` values must be identical. Both artifacts' `finished_at`
+values are checked against the same gate timestamp and age policy. The summary's `raw_sha256` must
 be 64 lowercase hexadecimal characters and equal the SHA-256 digest of the
 raw artifact's canonical UTF-8 JSON: object keys sorted recursively, no
 whitespace (`separators=(',', ':')`), and non-ASCII characters escaped. This
