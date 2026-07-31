@@ -103,13 +103,24 @@ pub fn generate(
     if let Some(vendor) = &input.vendor_data {
         write(&temporary.join("openstack/latest/vendor_data.json"), vendor)?;
     }
-    if directory.exists() {
-        fs::remove_dir_all(&directory).map_err(ConfigDriveError::Storage)?;
+    let backup = root.join(format!(".{}-old-{}", input.instance_id, Uuid::now_v7()));
+    let had_previous = directory.exists();
+    if had_previous {
+        fs::rename(&directory, &backup).map_err(|error| {
+            let _ = fs::remove_dir_all(&temporary);
+            ConfigDriveError::Storage(error)
+        })?;
     }
-    fs::rename(&temporary, &directory).map_err(|error| {
+    if let Err(error) = fs::rename(&temporary, &directory) {
         let _ = fs::remove_dir_all(&temporary);
-        ConfigDriveError::Storage(error)
-    })?;
+        if had_previous {
+            let _ = fs::rename(&backup, &directory);
+        }
+        return Err(ConfigDriveError::Storage(error));
+    }
+    if had_previous {
+        fs::remove_dir_all(&backup).map_err(ConfigDriveError::Storage)?;
+    }
     Ok(ConfigDriveResult {
         directory,
         fingerprint_sha256,
