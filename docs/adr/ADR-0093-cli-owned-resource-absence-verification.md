@@ -7,7 +7,7 @@ Accepted
 ## Context
 
 The OpenStack CLI acceptance harness tracked the image, network, subnet,
-flavor, and server IDs it created. It verified that the server disappeared,
+flavor, server, and keypair IDs it created. It verified that the server disappeared,
 but treated a successful delete exit status for the dependent resources as
 proof of cleanup. A provider or CLI no-op could therefore leave a managed
 resource behind while the redacted artifact reported `cleanup: passed`.
@@ -24,7 +24,7 @@ to retry the owned cleanup and report failure honestly.
 
 ## Consequences
 
-- Image, network, subnet, flavor, and server cleanup now has observable
+- Image, keypair, network, subnet, flavor, and server cleanup now has observable
   absence evidence.
 - Successful delete commands that do nothing fail the workflow.
 - The check remains public-API-only and does not claim a real OpenStack or

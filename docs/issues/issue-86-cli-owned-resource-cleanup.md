@@ -6,8 +6,9 @@ claimed by this repository change.
 
 ## Bounded repository implementation
 
-The public CLI harness now verifies absence after deleting every resource it
-created: server, flavor, subnet, network, and image. A successful delete
+The public CLI harness now creates a public-only keypair, passes it to the
+server, and verifies absence after deleting every resource it created:
+server, keypair, flavor, subnet, network, and image. A successful delete
 command is insufficient. A delete error is observed before being classified,
 because the result may be unknown after an interrupted request. Unproven IDs
 remain tracked for best-effort retry by the failure handler and the artifact

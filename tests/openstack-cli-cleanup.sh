@@ -18,11 +18,14 @@ mode="${O3K_MOCK_MODE:-normal}"
 case "$*" in
   token\ issue*) exit 0;;
   image\ create*) : >"${state_dir}/image-image-id"; echo image-id;;
+  keypair\ create*) : >"${state_dir}/keypair-keypair-id"; echo keypair-id;;
   network\ create*) : >"${state_dir}/network-network-id"; echo network-id;;
   subnet\ create*) : >"${state_dir}/subnet-subnet-id"; echo subnet-id;;
   flavor\ create*) : >"${state_dir}/flavor-flavor-id"; echo flavor-id;;
   image\ show*)
     if [[ -e "${state_dir}/image-image-id" ]]; then echo '{}'; else echo 'No image with a name or ID was found' >&2; exit 1; fi;;
+  keypair\ show*)
+    if [[ -e "${state_dir}/keypair-keypair-id" ]]; then echo '{}'; else echo 'No keypair with a name or ID was found' >&2; exit 1; fi;;
   network\ show*)
     if [[ -e "${state_dir}/network-network-id" ]]; then echo '{}'; else echo 'No network with a name or ID was found' >&2; exit 1; fi;;
   subnet\ show*)
@@ -58,6 +61,7 @@ case "$*" in
     fi
     ;;
   image\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/image-image-id";;
+  keypair\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/keypair-keypair-id";;
   network\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/network-network-id";;
   subnet\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/subnet-subnet-id";;
   flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
@@ -96,6 +100,7 @@ result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == sys.argv[2]
 assert result["resources"]["server_id"] == "server-id"
+assert result["resources"]["keypair_id"] == "keypair-id"
 PY
 }
 
@@ -109,7 +114,8 @@ import sys
 assert not (pathlib.Path(sys.argv[2]) / "console-error.log").exists()
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
-                "subnet delete subnet-id" "network delete network-id" "image delete image-id"; do
+                "keypair delete keypair-id" "subnet delete subnet-id" \
+                "network delete network-id" "image delete image-id"; do
   grep -Fq "${resource}" "${O3K_MOCK_LOG}"
 done
 
@@ -120,12 +126,14 @@ result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
 assert result["resources"]["server_id"] == "server-id"
-assert set(result["cleanup"]["resources"]) == {"image", "network", "subnet", "flavor", "server"}
+assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "flavor", "server"}
 assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
 PY
 grep -Fq "server list --name o3k-testlab-server -f json" "${O3K_MOCK_LOG}"
 grep -Fq "image create o3k-testlab-image --file" "${O3K_MOCK_LOG}"
 grep -Fq "server create --wait" "${O3K_MOCK_LOG}"
+grep -Fq "keypair create --public-key" "${O3K_MOCK_LOG}"
+grep -Fq -- "--key-name keypair-id" "${O3K_MOCK_LOG}"
 grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
