@@ -34,6 +34,8 @@ jobs:
         run: bash tests/release-gate.sh
       - name: Test human review evidence package
         run: bash tests/human-review-package.sh
+      - name: Test program tracker contract
+        run: bash tests/program-tracker.sh
       - name: Test OpenStack CLI failure cleanup
         run: bash tests/openstack-cli-cleanup.sh
       - name: Test packaging safety

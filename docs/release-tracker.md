@@ -1,8 +1,17 @@
 # v0.2.0-alpha.1 release tracker
 
+<!-- tracker-contract
+owner_issue: 94
+release_issue: 93
+program_status: blocked
+closure_decision: pending
+-->
+
 This file is the source-controlled status record for issue #54. A merged PR
 means the scoped implementation and repository gates passed; it does not mean
-the real-libvirt acceptance evidence exists.
+the real-libvirt acceptance evidence exists. The tracker contract is checked
+by `packaging/validate-program-tracker.sh`; it must remain blocked and pending
+until the independent evidence and decisions listed below exist.
 
 | Issue | Scope | Repository state | Real-host evidence |
 |---:|---|---|---|
@@ -25,6 +34,7 @@ the real-libvirt acceptance evidence exists.
 | #52 | measurements / release-evidence integrity | merged | fake control-plane measurement now preflights the selected port, verifies launched-PID ownership through readiness/token/RSS checkpoints, emits redacted diagnostics for port/child failures, and binds summary to canonical raw JSON; fake artifacts are explicitly non-release evidence; guest metrics pending |
 | #53 | release gate | merged | benchmark and cleanup evidence are required; positive, non-future, seven-day freshness checks now reject stale artifacts; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
+| #94 | program closure and provenance tracker | repository contract guarded; ADR-0100 | blocked until every required real-host artifact and independent human decision is recorded; no program closure is claimed |
 | #77 | protected real-host validation | repository implementation complete; ADR-0084 and portable guard tests added | host-gated: protected environment, exact labeled runner, configured TestLab/libvirt host, credentials, image, and a passing manual run remain required |
 | #76 | protected runner capability probe | repository implementation complete; ADR-0085, redacted capability artifact, workflow preflight, and portable fake-command tests added | host-gated: dedicated non-root labeled runner must produce `status: passed`; repository work does not claim host acceptance |
 | #78 | fail-closed real-libvirt profile safety guard | repository implementation complete; ADR-0086, direct `LibvirtProvider` construction removed from `o3kd`, and deterministic config rejection test added | blocked until a separately scoped agent-backed provider path and real-host evidence exist; no host evidence claimed |
@@ -41,7 +51,7 @@ the real-libvirt acceptance evidence exists.
 | #90 | clean Debian installation and full TestLab lifecycle | repository uninstall precondition ordering complete; ADR-0097 and portable packaging coverage ensure rejected purges do not mutate systemd state | host-gated: clean Debian install, dependency/bootstrap validation, real CirrOS lifecycle, reset/reinstall/uninstall/purge, foreign-state preservation, and trusted leak-free `clean-debian-install.json` remain outstanding; no host acceptance claimed |
 | #91 | real libvirt footprint and lifecycle measurements | repository benchmark freshness boundary complete; ADR-0098 and regression coverage require the raw benchmark's timestamp to be fresh and identical to the reviewed summary | host-gated: real CirrOS/libvirt measurements, raw samples, host/kernel/libvirt/QEMU/Rust metadata, and `real-libvirt-benchmark.json` with `status: measured` remain outstanding; no host measurement claimed |
 | #92 | independent architecture and security review | repository review package complete; ADR-0099, threat-model checklist, versioned evidence schema, and fail-closed validator added | human-gated: an identified non-LLM reviewer must inspect the exact release commit, record findings/dispositions, approve release-blocking and destructive-cleanup protections, and publish `human-review.json`; no human review or approval claimed |
-| #93 | release gate and v0.2.0-alpha.1 publication | repository gate now requires an approved human-review artifact bound to an explicit source commit; ADR-0101 and regression coverage added | blocked: real host evidence, clean-install artifacts, measured benchmark, human approval, signed tag, reproducible published artifacts, and operator verification remain outstanding |
+| #93 | release gate and v0.2.0-alpha.1 publication | repository gate now requires an approved human-review artifact bound to an explicit source commit; ADR-0101 and regression coverage added | blocked: real host evidence, clean-install artifacts, measured benchmark, human approval, signed tag, reproducible published artifacts, and operator verification remain outstanding; no release-ready claim |
 
 ## Current release gate
 
@@ -148,3 +158,6 @@ fail-closed validator for issue #92; it does not identify a reviewer or
 substitute automated evidence for independent human approval. ADR-0101 records
 the issue #93 release-gate binding to that approved artifact and exact source
 commit; it does not provide approval or host evidence.
+ADR-0100 records the fail-closed source-controlled tracker contract for issue
+#94; it does not validate host artifacts, human identity, signatures, or
+release publication.
