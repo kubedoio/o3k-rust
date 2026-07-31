@@ -83,6 +83,19 @@ mod host_network_tests {
             "o3k-br0"
         ));
     }
+
+    #[test]
+    fn existing_link_must_be_a_bridge_before_it_is_reused() {
+        assert!(interface_output_is_bridge(
+            "3: o3k-br0: <BROADCAST,UP> mtu 1500 state UP\n\tbridge forward_delay 1500 hello_time 200 max_age 2000"
+        ));
+        assert!(!interface_output_is_bridge(
+            "3: o3k-br0: <BROADCAST,UP> mtu 1500 state UP\n\tlink/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff"
+        ));
+        assert!(!interface_output_is_bridge(
+            "3: o3k-br0: <BROADCAST,UP> mtu 1500 state UP\n\tbridge-helper foreign-name"
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,6 +164,15 @@ impl HostNetworkManager {
     }
     pub fn ensure_bridge(&self) -> Result<(), HostNetworkError> {
         if link_exists(&self.config.bridge_name) {
+            let output = Command::new("ip")
+                .args(["-d", "link", "show", "dev", &self.config.bridge_name])
+                .output()
+                .map_err(|_| HostNetworkError::CommandFailed)?;
+            if !output.status.success()
+                || !interface_output_is_bridge(&String::from_utf8_lossy(&output.stdout))
+            {
+                return Err(HostNetworkError::ForeignInterface);
+            }
             run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
             if let Some(uplink) = &self.config.uplink {
                 let output = Command::new("ip")
@@ -302,6 +324,12 @@ fn interface_is_attached_to(output: &str, bridge_name: &str) -> bool {
     output
         .lines()
         .any(|line| line.contains("state UP") && line.contains(&format!("master {bridge_name}")))
+}
+
+fn interface_output_is_bridge(output: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.trim_start().starts_with("bridge "))
 }
 
 fn run_ip<'a, I>(args: I) -> Result<(), HostNetworkError>
