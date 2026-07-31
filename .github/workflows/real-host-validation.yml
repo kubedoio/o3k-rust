@@ -1,0 +1,80 @@
+name: Real-host validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_path:
+        description: Absolute path to a prepared local CirrOS image on the runner
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-real-host-validation
+  cancel-in-progress: false
+
+jobs:
+  real-host:
+    name: Protected TestLab real-host validation
+    # Configure this environment to require maintainer approval.
+    environment: o3k-real-host-validation
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Check out the canonical repository
+        uses: actions/checkout@v4
+
+      - name: Pre-run host and trust guard
+        id: guard
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+        run: bash scripts/real-host-pre-run-guard.sh
+
+      - name: Run public real-host lifecycle
+        id: lifecycle
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+          O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+        run: bash tests/testlab-libvirt.sh
+
+      - name: Post-run result guard
+        if: always()
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
+          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
+          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
+          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
+        run: bash scripts/real-host-post-run-guard.sh
+
+      - name: Upload redacted real-host artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-host-workflow-artifacts
+          path: target/real-host-workflow-artifacts/
+          if-no-files-found: error

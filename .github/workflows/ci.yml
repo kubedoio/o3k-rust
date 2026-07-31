@@ -26,6 +26,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Validate packaging scripts
         run: for file in packaging/*.sh tests/*.sh; do bash -n "$file"; done
+      - name: Test protected real-host workflow guards
+        run: bash tests/real-host-workflow-guards.sh
       - name: Test release evidence gate
         run: bash tests/release-gate.sh
       - name: Test OpenStack CLI failure cleanup
