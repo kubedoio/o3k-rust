@@ -46,11 +46,16 @@ export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=kubedoio/o3k-rust
 export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF=
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
+export O3K_REAL_HOST_WORKFLOW_RUN_ID=guard-run-1 O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT=1
+export GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
 mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
 json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
-           "status": "passed", "redacted": True},
+           "status": "passed", "redacted": True,
+           "workflow_run_id": "guard-run-1", "workflow_run_attempt": "1",
+           "source_commit": "0123456789abcdef0123456789abcdef01234567",
+           "finished_at": 1},
           open(sys.argv[1], "w", encoding="utf-8"))
 PY
 
@@ -79,7 +84,10 @@ unset O3K_FAKE_IP_UNSTABLE O3K_FAKE_IP_COUNTER
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
 json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
-           "status": "failed", "reason": "runner_labels_mismatch", "redacted": True},
+           "status": "failed", "reason": "runner_labels_mismatch", "redacted": True,
+           "workflow_run_id": "guard-run-1", "workflow_run_attempt": "1",
+           "source_commit": "0123456789abcdef0123456789abcdef01234567",
+           "finished_at": 1},
           open(sys.argv[1], "w", encoding="utf-8"))
 PY
 : >"${GITHUB_OUTPUT}"
@@ -102,7 +110,10 @@ PY
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
 json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
-           "status": "passed", "redacted": True},
+           "status": "passed", "redacted": True,
+           "workflow_run_id": "guard-run-1", "workflow_run_attempt": "1",
+           "source_commit": "0123456789abcdef0123456789abcdef01234567",
+           "finished_at": 1},
           open(sys.argv[1], "w", encoding="utf-8"))
 PY
 
@@ -172,6 +183,34 @@ assert value["status"] == "failed"
 assert value["foreign_state_changed"] is True
 PY
 unset O3K_FAKE_VIRSH_DIRTY O3K_FAKE_OPENSTACK_LEAK O3K_FAKE_IP_DIRTY
+
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
+import json, sys
+value = {"artifact_type": "runner-capabilities", "schema_version": 1,
+         "status": "passed", "redacted": True, "finished_at": 1,
+         "workflow_run_id": "old-run", "workflow_run_attempt": "1",
+         "source_commit": "0123456789abcdef0123456789abcdef01234567"}
+json.dump(value, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "stale capability artifact was accepted" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked"
+assert value["reason"] == "capability_probe_unavailable"
+PY
+
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
+           "status": "passed", "redacted": True, "finished_at": 1,
+           "workflow_run_id": "guard-run-1", "workflow_run_attempt": "1",
+           "source_commit": "0123456789abcdef0123456789abcdef01234567"},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
 
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/libvirt-result.json" <<'PY'
 import json, sys

@@ -9,6 +9,9 @@ EXPECTED_REPOSITORY="kubedoio/o3k-rust"
 KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
 INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
 CAPABILITY_PATH="${O3K_REAL_HOST_CAPABILITY_OUTPUT:-${ARTIFACT_DIR}/runner-capabilities.json}"
+EXPECTED_RUN_ID="${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}"
+EXPECTED_RUN_ATTEMPT="${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}"
+EXPECTED_SOURCE_COMMIT="${GITHUB_SHA:-}"
 mkdir -p "${ARTIFACT_DIR}"
 rm -f -- "${RESULT_PATH}" "${INVENTORY_PATH}" \
     "${ARTIFACT_DIR}/real-host-owned-inventory-after.json" \
@@ -39,14 +42,30 @@ fi
 
 capability_status=unavailable
 if [[ -r "${CAPABILITY_PATH}" ]]; then
-    capability_status="$(python3 - "${CAPABILITY_PATH}" <<'PY'
+    capability_status="$(python3 - "${CAPABILITY_PATH}" "${EXPECTED_RUN_ID}" \
+        "${EXPECTED_RUN_ATTEMPT}" "${EXPECTED_SOURCE_COMMIT}" <<'PY'
 import json, sys
+path, expected_run_id, expected_attempt, expected_source_commit = sys.argv[1:]
 try:
-    value = json.load(open(sys.argv[1], encoding="utf-8"))
+    with open(path, encoding="utf-8") as stream:
+        value = json.load(stream)
 except (OSError, json.JSONDecodeError):
     print("unavailable")
 else:
-    print(value.get("status", "unavailable") if value.get("redacted") is True else "unavailable")
+    valid = (
+        value.get("artifact_type") == "runner-capabilities"
+        and value.get("schema_version") == 1
+        and value.get("redacted") is True
+        and isinstance(value.get("finished_at"), int)
+        and not isinstance(value.get("finished_at"), bool)
+    )
+    if expected_run_id and value.get("workflow_run_id") != expected_run_id:
+        valid = False
+    if expected_attempt and value.get("workflow_run_attempt") != expected_attempt:
+        valid = False
+    if expected_source_commit and value.get("source_commit") != expected_source_commit:
+        valid = False
+    print(value.get("status", "unavailable") if valid else "unavailable")
 PY
 )"
 fi
