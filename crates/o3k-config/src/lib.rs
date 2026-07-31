@@ -55,6 +55,11 @@ pub struct Config {
     pub log_format: LogFormat,
     pub log_filter: String,
     pub provider: Provider,
+    pub cellhv_endpoint: Option<String>,
+    pub cellhv_expected_version: Option<String>,
+    pub cellhv_ca_certificate: Option<PathBuf>,
+    pub cellhv_client_certificate: Option<PathBuf>,
+    pub cellhv_client_key: Option<PathBuf>,
     pub compute_control_addr: SocketAddr,
     pub compute_server_certificate: Option<PathBuf>,
     pub compute_server_private_key: Option<PathBuf>,
@@ -75,6 +80,11 @@ impl fmt::Debug for Config {
             .field("log_format", &self.log_format)
             .field("log_filter", &self.log_filter)
             .field("provider", &self.provider)
+            .field("cellhv_endpoint", &self.cellhv_endpoint)
+            .field("cellhv_expected_version", &self.cellhv_expected_version)
+            .field("cellhv_ca_certificate", &self.cellhv_ca_certificate)
+            .field("cellhv_client_certificate", &self.cellhv_client_certificate)
+            .field("cellhv_client_key", &"<redacted>")
             .field("compute_control_addr", &self.compute_control_addr)
             .field(
                 "compute_server_certificate",
@@ -172,6 +182,8 @@ pub enum ConfigError {
     InvalidLogFormat,
     #[error("provider must be `fake`, `cellhv`, or `libvirt`")]
     InvalidProvider,
+    #[error("CellHV provider requires endpoint and expected version")]
+    MissingCellHvConfiguration,
     #[error("bootstrap secret must not contain a newline")]
     InvalidSecret,
     #[error("bootstrap password must not contain a newline")]
@@ -188,6 +200,11 @@ struct PartialConfig {
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
+    cellhv_endpoint: Option<String>,
+    cellhv_expected_version: Option<String>,
+    cellhv_ca_certificate: Option<String>,
+    cellhv_client_certificate: Option<String>,
+    cellhv_client_key: Option<String>,
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
     token_signing_key: Option<String>,
@@ -206,6 +223,11 @@ struct FileConfig {
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
+    cellhv_endpoint: Option<String>,
+    cellhv_expected_version: Option<String>,
+    cellhv_ca_certificate: Option<String>,
+    cellhv_client_certificate: Option<String>,
+    cellhv_client_key: Option<String>,
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
     token_signing_key: Option<String>,
@@ -224,6 +246,11 @@ impl From<FileConfig> for PartialConfig {
             log_format: file.log_format,
             log_filter: file.log_filter,
             provider: file.provider,
+            cellhv_endpoint: file.cellhv_endpoint,
+            cellhv_expected_version: file.cellhv_expected_version,
+            cellhv_ca_certificate: file.cellhv_ca_certificate,
+            cellhv_client_certificate: file.cellhv_client_certificate,
+            cellhv_client_key: file.cellhv_client_key,
             bootstrap_secret: file.bootstrap_secret,
             bootstrap_password: file.bootstrap_password,
             token_signing_key: file.token_signing_key,
@@ -256,6 +283,21 @@ impl PartialConfig {
         }
         if other.provider.is_some() {
             self.provider = other.provider;
+        }
+        if other.cellhv_endpoint.is_some() {
+            self.cellhv_endpoint = other.cellhv_endpoint;
+        }
+        if other.cellhv_expected_version.is_some() {
+            self.cellhv_expected_version = other.cellhv_expected_version;
+        }
+        if other.cellhv_ca_certificate.is_some() {
+            self.cellhv_ca_certificate = other.cellhv_ca_certificate;
+        }
+        if other.cellhv_client_certificate.is_some() {
+            self.cellhv_client_certificate = other.cellhv_client_certificate;
+        }
+        if other.cellhv_client_key.is_some() {
+            self.cellhv_client_key = other.cellhv_client_key;
         }
         if other.bootstrap_secret.is_some() {
             self.bootstrap_secret = other.bootstrap_secret;
@@ -290,6 +332,11 @@ impl PartialConfig {
             log_format: value_from_env(environment, "O3K_LOG_FORMAT"),
             log_filter: value_from_env(environment, "O3K_LOG_FILTER"),
             provider: value_from_env(environment, "O3K_PROVIDER"),
+            cellhv_endpoint: value_from_env(environment, "O3K_CELLHV_ENDPOINT"),
+            cellhv_expected_version: value_from_env(environment, "O3K_CELLHV_EXPECTED_VERSION"),
+            cellhv_ca_certificate: value_from_env(environment, "O3K_CELLHV_CA_CERTIFICATE"),
+            cellhv_client_certificate: value_from_env(environment, "O3K_CELLHV_CLIENT_CERTIFICATE"),
+            cellhv_client_key: value_from_env(environment, "O3K_CELLHV_CLIENT_KEY"),
             bootstrap_secret: value_from_env(environment, "O3K_BOOTSTRAP_SECRET"),
             bootstrap_password: value_from_env(environment, "O3K_BOOTSTRAP_PASSWORD"),
             token_signing_key: value_from_env(environment, "O3K_TOKEN_SIGNING_KEY"),
@@ -330,6 +377,19 @@ impl PartialConfig {
                 "--log-format" => result.log_format = Some(value("--log-format")?),
                 "--log-filter" => result.log_filter = Some(value("--log-filter")?),
                 "--provider" => result.provider = Some(value("--provider")?),
+                "--cellhv-endpoint" => result.cellhv_endpoint = Some(value("--cellhv-endpoint")?),
+                "--cellhv-expected-version" => {
+                    result.cellhv_expected_version = Some(value("--cellhv-expected-version")?)
+                }
+                "--cellhv-ca-certificate" => {
+                    result.cellhv_ca_certificate = Some(value("--cellhv-ca-certificate")?)
+                }
+                "--cellhv-client-certificate" => {
+                    result.cellhv_client_certificate = Some(value("--cellhv-client-certificate")?)
+                }
+                "--cellhv-client-key" => {
+                    result.cellhv_client_key = Some(value("--cellhv-client-key")?)
+                }
                 "--bootstrap-secret" => {
                     result.bootstrap_secret = Some(value("--bootstrap-secret")?)
                 }
@@ -410,6 +470,18 @@ impl PartialConfig {
             "libvirt" => Provider::Libvirt,
             _ => return Err(ConfigError::InvalidProvider),
         };
+        if provider == Provider::CellHv
+            && (self
+                .cellhv_endpoint
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+                || self
+                    .cellhv_expected_version
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty()))
+        {
+            return Err(ConfigError::MissingCellHvConfiguration);
+        }
         if self
             .bootstrap_secret
             .as_deref()
@@ -466,6 +538,11 @@ impl PartialConfig {
             log_format,
             log_filter,
             provider,
+            cellhv_endpoint: self.cellhv_endpoint,
+            cellhv_expected_version: self.cellhv_expected_version,
+            cellhv_ca_certificate: self.cellhv_ca_certificate.map(PathBuf::from),
+            cellhv_client_certificate: self.cellhv_client_certificate.map(PathBuf::from),
+            cellhv_client_key: self.cellhv_client_key.map(PathBuf::from),
             compute_control_addr,
             compute_server_certificate: self.compute_server_certificate.map(PathBuf::from),
             compute_server_private_key: self.compute_server_private_key.map(PathBuf::from),
@@ -506,7 +583,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            "listen_addr = '127.0.0.1:9000'\ndata_dir = '/var/lib/o3k'\nprovider = 'cellhv'\n",
+            "listen_addr = '127.0.0.1:9000'\ndata_dir = '/var/lib/o3k'\nprovider = 'cellhv'\ncellhv_endpoint = 'http://127.0.0.1:50052'\ncellhv_expected_version = 'v1'\n",
         )?;
         let args = vec![
             "o3kd".to_owned(),
@@ -522,9 +599,25 @@ mod tests {
         assert_eq!(config.listen_addr.to_string(), "127.0.0.1:9100");
         assert_eq!(config.data_dir, PathBuf::from("/tmp/o3k"));
         assert_eq!(config.provider, Provider::CellHv);
+        assert_eq!(
+            config.cellhv_endpoint.as_deref(),
+            Some("http://127.0.0.1:50052")
+        );
         assert_eq!(config.log_format, LogFormat::Json);
         fs::remove_file(path)?;
         Ok(())
+    }
+
+    #[test]
+    fn cellhv_requires_endpoint_and_version() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned(), "--provider=cellhv".to_owned()],
+            Vec::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::MissingCellHvConfiguration)
+        ));
     }
 
     #[test]

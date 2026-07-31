@@ -1210,6 +1210,7 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "axum",
  "o3k-api",
+ "o3k-cellhv",
  "o3k-compute",
  "o3k-compute-agent",
  "o3k-config",
