@@ -8,7 +8,7 @@ the real-libvirt acceptance evidence exists.
 |---:|---|---|---|
 | #36 | libvirt/KVM direction | merged | pending |
 | #37 | compute-agent protocol | merged | accepted contract; protocol tests passed; runtime and host security evidence remain pending |
-| #38 | secure registration/heartbeat | merged | control-plane startup failures now clear readiness; host deployment and process-level restart evidence pending |
+| #38 | secure registration/heartbeat | merged | control-plane startup failures clear readiness and identity-bearing stream messages are fenced to the authenticated registration; host deployment and process-level restart evidence pending |
 | #39 | local libvirt adapter | merged | provider-backed readiness and vCPU/KVM capability projection added; host libvirt pending |
 | #40 | domain XML/ownership/discovery | merged | deterministic ownership discovery now quarantines all duplicate IDs and rejects unsafe source inputs; host discovery pending |
 | #41 | image cache/overlays | merged | atomic publication, cache-hit checksum revalidation, and verified project-scoped artifact resolution added; host qemu-img evidence pending |
@@ -72,7 +72,8 @@ resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
 (image publication temporaries), ADR-0036 (network metadata publication),
 ADR-0062 (image-cache hit revalidation), ADR-0063 (reset service cleanup), and
 ADR-0064 (required benchmark release gate), and ADR-0065 (DHCP gateway-binding
-conflict rejection), and ADR-0066 (CellHV provider selection).
+conflict rejection), ADR-0066 (CellHV provider selection), and ADR-0067
+(authenticated stream identity binding).
 ADR-0037 through ADR-0061 record the
 subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
