@@ -4,6 +4,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
+LEAK_RESULT_PATH="${ARTIFACT_DIR}/resource-leak-result.json"
 LIFECYCLE_RESULT="${ARTIFACT_DIR}/libvirt-result.json"
 STEP_STATUS="${O3K_REAL_HOST_WORKFLOW_STEP_STATUS:-skipped}"
 CURRENT_INVENTORY="${ARTIFACT_DIR}/real-host-owned-inventory-after.json"
@@ -25,9 +26,25 @@ then
     fi
 fi
 
-python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" <<'PY'
-import json, sys, time
-result_path, lifecycle_path, step_status, current_inventory_path, inventory_status = sys.argv[1:]
+python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
+import json, os, sys, tempfile, time
+result_path, lifecycle_path, step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
+
+def write_atomic(path, document):
+    directory = os.path.dirname(path) or "."
+    descriptor, temporary = tempfile.mkstemp(prefix=".resource-result.", dir=directory, text=True)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(document, output, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
 try:
     with open(result_path, encoding="utf-8") as stream:
         preflight = json.load(stream)
@@ -44,13 +61,15 @@ except (OSError, json.JSONDecodeError):
 baseline = preflight.get("inventory_baseline", {})
 after = None
 result_leaks = None
+foreign_state_changed = None
 if status == "ready" and inventory_status == "available":
     try:
         with open(current_inventory_path, encoding="utf-8") as stream:
             after = json.load(stream)
     except (OSError, json.JSONDecodeError):
         after = {"status": "unavailable", "redacted": True}
-    if baseline.get("status") == "available" and after.get("status") == "available":
+    if (baseline.get("schema_version") == 2 and after.get("schema_version") == 2
+            and baseline.get("status") == "available" and after.get("status") == "available"):
         baseline_resources = baseline.get("openstack", {}).get("resources", {})
         after_resources = after.get("openstack", {}).get("resources", {})
         result_leaks = {
@@ -63,6 +82,7 @@ if status == "ready" and inventory_status == "available":
         result_leaks["openstack"] = {
             name: values for name, values in result_leaks["openstack"].items() if values
         }
+        foreign_state_changed = baseline.get("foreign_state") != after.get("foreign_state")
 
 if status == "blocked":
     final_status = "blocked"
@@ -75,6 +95,9 @@ elif inventory_status != "available" or after is None or after.get("status") != 
 elif result_leaks["domains"] or result_leaks["openstack"]:
     final_status = "failed"
     reason = "resource_leak_detected"
+elif foreign_state_changed:
+    final_status = "failed"
+    reason = "foreign_state_changed"
 elif step_status != "success":
     final_status = "failed" if step_status == "failure" else "skipped"
     reason = "workflow_step_failed" if step_status == "failure" else "workflow_step_skipped"
@@ -90,13 +113,21 @@ result = {"artifact_type": "real-host-workflow-result", "status": final_status,
           "preflight_status": status, "lifecycle_status": lifecycle_status}
 if result_leaks is not None:
     result["leaks"] = result_leaks
+if foreign_state_changed is not None:
+    result["foreign_state_changed"] = foreign_state_changed
 if after is not None:
     result["inventory_after"] = after
 if isinstance(preflight.get("environment"), dict):
     result["environment"] = preflight["environment"]
-with open(result_path, "w", encoding="utf-8") as output:
-    json.dump(result, output, indent=2)
-    output.write("\n")
+write_atomic(result_path, result)
+leak_result = {"artifact_type": "resource-leak-result", "schema_version": 1,
+               "status": final_status, "redacted": True,
+               "finished_at": result["finished_at"], "reason": reason}
+if result_leaks is not None:
+    leak_result["leaks"] = result_leaks
+if foreign_state_changed is not None:
+    leak_result["foreign_state_changed"] = foreign_state_changed
+write_atomic(leak_result_path, leak_result)
 if final_status != "passed":
     raise SystemExit(f"real-host workflow did not pass: {final_status} ({reason})")
 PY

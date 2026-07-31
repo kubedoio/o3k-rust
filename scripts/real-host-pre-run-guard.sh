@@ -10,6 +10,9 @@ KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
 INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
 CAPABILITY_PATH="${O3K_REAL_HOST_CAPABILITY_OUTPUT:-${ARTIFACT_DIR}/runner-capabilities.json}"
 mkdir -p "${ARTIFACT_DIR}"
+rm -f -- "${RESULT_PATH}" "${INVENTORY_PATH}" \
+    "${ARTIFACT_DIR}/real-host-owned-inventory-after.json" \
+    "${ARTIFACT_DIR}/resource-leak-result.json"
 
 blocked_reason=
 if [[ "${GITHUB_REPOSITORY:-}" != "${EXPECTED_REPOSITORY}" ]]; then

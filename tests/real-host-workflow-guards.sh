@@ -18,6 +18,21 @@ if [[ "$*" == "-c qemu:///system list --all --name" && "${O3K_FAKE_VIRSH_DIRTY:-
 fi
 SH
 chmod +x "${FAKE_BIN}/virsh"
+cat >"${FAKE_BIN}/ip" <<'SH'
+#!/usr/bin/env bash
+if [[ "${O3K_FAKE_IP_DIRTY:-false}" == true ]]; then
+    echo '2: foreign0: <BROADCAST> mtu 1500 state UP'
+fi
+if [[ "${O3K_FAKE_IP_UNSTABLE:-false}" == true ]]; then
+    counter_file="${O3K_FAKE_IP_COUNTER:?}"
+    count=0
+    [[ -f "${counter_file}" ]] && count="$(<"${counter_file}")"
+    count=$((count + 1))
+    printf '%s\n' "${count}" >"${counter_file}"
+    echo "${count}: unstable0: <BROADCAST> mtu 1500 state UP"
+fi
+SH
+chmod +x "${FAKE_BIN}/ip"
 cat >"${FAKE_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
 if [[ "$*" == *" list "* && "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
@@ -48,6 +63,18 @@ assert value["status"] == "ready" and value["redacted"] is True
 assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 PY
+
+export O3K_FAKE_IP_UNSTABLE=true O3K_FAKE_IP_COUNTER="${WORK_DIR}/ip-counter"
+if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/unstable.json"; then
+    echo "unstable inventory was accepted" >&2
+    exit 1
+fi
+python3 - "${WORK_DIR}/unstable.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "unavailable" and value["reason"] == "inventory_not_stable"
+PY
+unset O3K_FAKE_IP_UNSTABLE O3K_FAKE_IP_COUNTER
 
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
@@ -114,10 +141,16 @@ python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
 import json, sys
 assert json.load(open(sys.argv[1], encoding="utf-8"))["status"] == "passed"
 PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/resource-leak-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["artifact_type"] == "resource-leak-result"
+assert value["status"] == "passed"
+PY
 
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
-export O3K_FAKE_VIRSH_DIRTY=true O3K_FAKE_OPENSTACK_LEAK=true
+export O3K_FAKE_VIRSH_DIRTY=true O3K_FAKE_OPENSTACK_LEAK=true O3K_FAKE_IP_DIRTY=true
 if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
     echo "owned resource leak was accepted" >&2
     exit 1
@@ -128,9 +161,17 @@ value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "failed" and value["reason"] == "resource_leak_detected"
 assert "o3k-preexisting-domain" in value["leaks"]["domains"]
 assert "leaked-openstack-resource" in value["leaks"]["openstack"]["image"]
+assert value["foreign_state_changed"] is True
+assert "foreign0" not in json.dumps(value)
 assert "do-not-upload-this-value" not in json.dumps(value)
 PY
-unset O3K_FAKE_VIRSH_DIRTY O3K_FAKE_OPENSTACK_LEAK
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/resource-leak-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "failed"
+assert value["foreign_state_changed"] is True
+PY
+unset O3K_FAKE_VIRSH_DIRTY O3K_FAKE_OPENSTACK_LEAK O3K_FAKE_IP_DIRTY
 
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/libvirt-result.json" <<'PY'
 import json, sys
