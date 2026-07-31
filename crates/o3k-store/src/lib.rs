@@ -66,6 +66,7 @@ pub struct ResourceRecord {
 pub struct OperationRecord {
     pub id: Uuid,
     pub resource_id: Uuid,
+    pub kind: String,
     pub state: OperationState,
     pub provider_operation_id: Option<String>,
     pub error_category: Option<String>,
@@ -299,9 +300,10 @@ impl DurableStore for SqliteStore {
     }
 
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO operations (id, resource_id, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?)")
+        sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .bind(operation.id.to_string())
             .bind(operation.resource_id.to_string())
+            .bind(&operation.kind)
             .bind(operation.state.as_str())
             .bind(&operation.provider_operation_id)
             .bind(&operation.error_category)
@@ -313,7 +315,7 @@ impl DurableStore for SqliteStore {
     }
 
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
-        let row = sqlx::query("SELECT id, resource_id, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?")
+        let row = sqlx::query("SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?")
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
@@ -440,6 +442,7 @@ fn operation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<OperationRecord, 
     Ok(OperationRecord {
         id: parse_uuid(row.get("id"))?,
         resource_id: parse_uuid(row.get("resource_id"))?,
+        kind: row.get("kind"),
         state: OperationState::parse(row.get("state"))?,
         provider_operation_id: row.get("provider_operation_id"),
         error_category: row.get("error_category"),
@@ -479,6 +482,7 @@ pub async fn run_conformance<S: DurableStore>(store: &S) -> Result<(), StoreErro
     let operation = OperationRecord {
         id: Uuid::now_v7(),
         resource_id: resource.id,
+        kind: "test".to_owned(),
         state: OperationState::UnknownOutcome,
         provider_operation_id: Some("provider-op-1".to_owned()),
         error_category: Some("unknown_outcome".to_owned()),
@@ -536,6 +540,7 @@ mod tests {
         let operation = OperationRecord {
             id: Uuid::now_v7(),
             resource_id: Uuid::now_v7(),
+            kind: "test".to_owned(),
             state: OperationState::Pending,
             provider_operation_id: None,
             error_category: None,

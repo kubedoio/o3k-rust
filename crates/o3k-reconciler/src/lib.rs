@@ -22,6 +22,35 @@ pub enum JournalEventKind {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleAction {
+    Start,
+    Stop,
+    Reboot,
+    Delete,
+}
+
+impl LifecycleAction {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Start => "lifecycle:start",
+            Self::Stop => "lifecycle:stop",
+            Self::Reboot => "lifecycle:reboot",
+            Self::Delete => "lifecycle:delete",
+        }
+    }
+
+    fn parse(kind: &str) -> Option<Self> {
+        match kind {
+            "lifecycle:start" => Some(Self::Start),
+            "lifecycle:stop" => Some(Self::Stop),
+            "lifecycle:reboot" => Some(Self::Reboot),
+            "lifecycle:delete" => Some(Self::Delete),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEvent {
     pub operation_id: Uuid,
@@ -102,6 +131,7 @@ where
         let operation = OperationRecord {
             id: request.operation_id,
             resource_id: request.o3k_server_id,
+            kind: "create".to_owned(),
             state: OperationState::Pending,
             provider_operation_id: None,
             error_category: None,
@@ -116,6 +146,315 @@ where
             JournalEventKind::IntentPersisted,
         );
         Ok(operation.id)
+    }
+
+    pub async fn begin_lifecycle(
+        &self,
+        resource_id: Uuid,
+        operation_id: Uuid,
+        action: LifecycleAction,
+    ) -> Result<Uuid, ReconcileError> {
+        self.store
+            .insert_operation(&OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: action.kind().to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        self.event(operation_id, resource_id, JournalEventKind::IntentPersisted);
+        Ok(operation_id)
+    }
+
+    pub async fn reconcile_lifecycle_once(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<OperationState, ReconcileError> {
+        let operation = self.store.get_operation(operation_id).await?;
+        if matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::Failed
+        ) {
+            return Ok(operation.state);
+        }
+        let action =
+            LifecycleAction::parse(&operation.kind).ok_or(ReconcileError::InvalidIntent)?;
+        let resource = self.store.get_resource(operation.resource_id).await?;
+        if operation.state == OperationState::UnknownOutcome {
+            return self.observe_lifecycle(operation, resource, action).await;
+        }
+        let provider_id = resource
+            .provider_id
+            .clone()
+            .ok_or(ReconcileError::InvalidIntent)?;
+        self.store
+            .update_operation(
+                operation_id,
+                OperationState::Running,
+                operation.provider_operation_id.as_deref(),
+                None,
+                None,
+            )
+            .await?;
+        self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
+        let result = match action {
+            LifecycleAction::Delete => {
+                self.provider
+                    .delete_instance(o3k_provider::DeleteInstanceRequest {
+                        operation_id,
+                        provider_instance_id: provider_id.clone(),
+                        idempotency_key: format!("o3k-operation-{operation_id}"),
+                    })
+                    .await
+            }
+            LifecycleAction::Start | LifecycleAction::Stop | LifecycleAction::Reboot => {
+                self.provider
+                    .action_instance(
+                        &provider_id,
+                        match action {
+                            LifecycleAction::Start => o3k_provider::InstanceAction::Start,
+                            LifecycleAction::Stop => o3k_provider::InstanceAction::Stop,
+                            LifecycleAction::Reboot => o3k_provider::InstanceAction::Reboot,
+                            LifecycleAction::Delete => unreachable!(),
+                        },
+                        operation_id,
+                        &format!("o3k-operation-{operation_id}"),
+                    )
+                    .await
+            }
+        };
+        self.handle_lifecycle_result(operation, resource, action, provider_id, result)
+            .await
+    }
+
+    async fn observe_lifecycle(
+        &self,
+        operation: OperationRecord,
+        resource: ResourceRecord,
+        action: LifecycleAction,
+    ) -> Result<OperationState, ReconcileError> {
+        let Some(provider_operation_id) = operation.provider_operation_id.as_deref() else {
+            return Err(ReconcileError::InvalidIntent);
+        };
+        let provider_id = resource
+            .provider_id
+            .clone()
+            .ok_or(ReconcileError::InvalidIntent)?;
+        if action == LifecycleAction::Delete
+            && matches!(
+                self.provider.get_instance(&provider_id).await,
+                Err(ProviderError::NotFound)
+            )
+        {
+            return self
+                .finish_lifecycle(
+                    operation.id,
+                    resource,
+                    action,
+                    provider_operation_id.to_owned(),
+                    provider_id,
+                )
+                .await;
+        }
+        let provider_operation = self
+            .provider
+            .get_operation(
+                Uuid::parse_str(provider_operation_id)
+                    .map_err(|_| ReconcileError::InvalidIntent)?,
+            )
+            .await?;
+        match provider_operation.state {
+            ProviderOperationState::Succeeded => {
+                self.finish_lifecycle(
+                    operation.id,
+                    resource,
+                    action,
+                    provider_operation_id.to_owned(),
+                    provider_id,
+                )
+                .await
+            }
+            ProviderOperationState::UnknownOutcome => {
+                self.event(operation.id, resource.id, JournalEventKind::UnknownObserved);
+                Ok(OperationState::UnknownOutcome)
+            }
+            ProviderOperationState::Retryable => {
+                self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
+                    .await
+            }
+            ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                Ok(OperationState::Running)
+            }
+            ProviderOperationState::Failed => {
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::Failed,
+                        Some(provider_operation_id),
+                        Some("terminal"),
+                        Some("provider operation failed"),
+                    )
+                    .await?;
+                self.event(operation.id, resource.id, JournalEventKind::Failed);
+                Ok(OperationState::Failed)
+            }
+        }
+    }
+
+    async fn handle_lifecycle_result(
+        &self,
+        operation: OperationRecord,
+        resource: ResourceRecord,
+        action: LifecycleAction,
+        provider_id: String,
+        result: Result<o3k_provider::Operation, ProviderError>,
+    ) -> Result<OperationState, ReconcileError> {
+        match result {
+            Ok(provider_operation) => match provider_operation.state {
+                ProviderOperationState::Succeeded => {
+                    self.finish_lifecycle(
+                        operation.id,
+                        resource,
+                        action,
+                        provider_operation.provider_operation_id.to_string(),
+                        provider_id,
+                    )
+                    .await
+                }
+                ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                    self.store
+                        .update_operation(
+                            operation.id,
+                            OperationState::Running,
+                            Some(&provider_operation.provider_operation_id.to_string()),
+                            None,
+                            None,
+                        )
+                        .await?;
+                    Ok(OperationState::Running)
+                }
+                ProviderOperationState::UnknownOutcome => Ok(OperationState::UnknownOutcome),
+                ProviderOperationState::Retryable => {
+                    self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
+                        .await
+                }
+                ProviderOperationState::Failed => {
+                    self.store
+                        .update_operation(
+                            operation.id,
+                            OperationState::Failed,
+                            Some(&provider_operation.provider_operation_id.to_string()),
+                            Some("terminal"),
+                            Some("provider operation failed"),
+                        )
+                        .await?;
+                    self.event(operation.id, resource.id, JournalEventKind::Failed);
+                    Ok(OperationState::Failed)
+                }
+            },
+            Err(ProviderError::UnknownOutcome { operation_id }) => {
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::UnknownOutcome,
+                        Some(&operation_id.to_string()),
+                        Some("unknown_outcome"),
+                        None,
+                    )
+                    .await?;
+                self.event(operation.id, resource.id, JournalEventKind::RetryScheduled);
+                Ok(OperationState::UnknownOutcome)
+            }
+            Err(error @ ProviderError::Retryable) | Err(error @ ProviderError::StaleState) => {
+                self.retry_or_fail(operation.id, resource.id, error).await
+            }
+            Err(ProviderError::NotFound) if action == LifecycleAction::Delete => {
+                self.finish_lifecycle(
+                    operation.id,
+                    resource,
+                    action,
+                    operation
+                        .provider_operation_id
+                        .unwrap_or_else(|| operation.id.to_string()),
+                    provider_id,
+                )
+                .await
+            }
+            Err(error) => {
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::Failed,
+                        None,
+                        Some(match error.category() {
+                            o3k_provider::ErrorCategory::InvalidRequest => "invalid_request",
+                            o3k_provider::ErrorCategory::NotFound => "not_found",
+                            o3k_provider::ErrorCategory::Conflict => "conflict",
+                            o3k_provider::ErrorCategory::Capacity => "capacity",
+                            o3k_provider::ErrorCategory::Retryable => "retryable",
+                            o3k_provider::ErrorCategory::UnknownOutcome => "unknown_outcome",
+                            o3k_provider::ErrorCategory::Terminal => "terminal",
+                        }),
+                        Some(&error.to_string()),
+                    )
+                    .await?;
+                self.event(operation.id, resource.id, JournalEventKind::Failed);
+                Ok(OperationState::Failed)
+            }
+        }
+    }
+
+    async fn finish_lifecycle(
+        &self,
+        operation_id: Uuid,
+        resource: ResourceRecord,
+        action: LifecycleAction,
+        provider_operation_id: String,
+        provider_id: String,
+    ) -> Result<OperationState, ReconcileError> {
+        let observed_state = if action == LifecycleAction::Delete {
+            "DELETED".to_owned()
+        } else {
+            match self.provider.get_instance(&provider_id).await {
+                Ok(instance) => match instance.state {
+                    o3k_provider::InstanceState::Running => "ACTIVE",
+                    o3k_provider::InstanceState::Stopped => "STOPPED",
+                    o3k_provider::InstanceState::Creating => "BUILD",
+                    o3k_provider::InstanceState::Deleting => "DELETING",
+                    o3k_provider::InstanceState::Deleted => "DELETED",
+                    o3k_provider::InstanceState::Error => "ERROR",
+                }
+                .to_owned(),
+                Err(ProviderError::NotFound) if action == LifecycleAction::Delete => {
+                    "DELETED".to_owned()
+                }
+                Err(error) => return Err(ReconcileError::Provider(error)),
+            }
+        };
+        self.store
+            .update_operation(
+                operation_id,
+                OperationState::Succeeded,
+                Some(&provider_operation_id),
+                None,
+                None,
+            )
+            .await?;
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                &observed_state,
+                resource.generation,
+                Some(&provider_id),
+            )
+            .await?;
+        self.event(operation_id, resource.id, JournalEventKind::Succeeded);
+        Ok(OperationState::Succeeded)
     }
 
     pub async fn reconcile_once(
@@ -427,6 +766,37 @@ mod tests {
         assert_eq!(
             store.get_operation(operation_id).await?.state,
             OperationState::Failed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_delete_is_observed_without_repeating_mutation() -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("delete-unknown", 2).await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        provider.set_failure(FailureInjection::Timeout)?;
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "DELETED"
         );
         Ok(())
     }
