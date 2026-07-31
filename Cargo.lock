@@ -988,8 +988,10 @@ name = "o3k-compute"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "o3k-placement",
  "o3k-provider",
  "o3k-reconciler",
+ "o3k-scheduler",
  "o3k-store",
  "serde",
  "serde_json",

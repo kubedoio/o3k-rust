@@ -27,6 +27,10 @@ pub struct CreateInstanceRequest {
     pub image_id: Option<String>,
     #[serde(default)]
     pub network_ids: Vec<String>,
+    #[serde(default)]
+    pub placement_provider_id: Option<String>,
+    #[serde(default)]
+    pub placement_allocation_id: Option<String>,
     pub idempotency_key: String,
 }
 
@@ -243,14 +247,16 @@ impl FakeComputeProvider {
 
     fn create_fingerprint(request: &CreateInstanceRequest) -> String {
         format!(
-            "{}:{}:{}:{}:{}:{:?}:{:?}",
+            "{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
             request.o3k_server_id,
             request.project_id,
             request.name,
             request.vcpus,
             request.memory_mib,
             request.image_id,
-            request.network_ids
+            request.network_ids,
+            request.placement_provider_id,
+            request.placement_allocation_id
         )
     }
 
@@ -482,6 +488,8 @@ pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(
         memory_mib: 128,
         image_id: None,
         network_ids: Vec::new(),
+        placement_provider_id: None,
+        placement_allocation_id: None,
         idempotency_key: format!("conformance-{}", Uuid::now_v7()),
     };
     let operation = provider.create_instance(request.clone()).await?;
@@ -512,6 +520,8 @@ mod tests {
             memory_mib: 128,
             image_id: None,
             network_ids: Vec::new(),
+            placement_provider_id: None,
+            placement_allocation_id: None,
             idempotency_key: key.to_owned(),
         }
     }
