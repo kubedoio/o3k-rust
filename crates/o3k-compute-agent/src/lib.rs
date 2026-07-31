@@ -17,6 +17,7 @@ use std::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hyper_util::rt::TokioIo;
 use o3k_provider_contract::compute_proto as proto;
+use prost::Message;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     pki_types::{
@@ -554,6 +555,83 @@ fn validate_command(command: &proto::Command) -> Result<(), AgentError> {
         ));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCommandSpec {
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub operation_id: String,
+    pub resource_id: String,
+    pub idempotency_key: String,
+    pub deadline_unix_ms: i64,
+    pub image_id: String,
+    pub flavor_id: String,
+    pub network_port_ids: Vec<String>,
+}
+
+pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, AgentError> {
+    let CreateCommandSpec {
+        agent_id,
+        agent_epoch,
+        operation_id,
+        resource_id,
+        idempotency_key,
+        deadline_unix_ms,
+        image_id,
+        flavor_id,
+        network_port_ids,
+    } = spec;
+    if agent_id.trim().is_empty()
+        || agent_epoch.trim().is_empty()
+        || operation_id.trim().is_empty()
+        || resource_id.trim().is_empty()
+        || idempotency_key.trim().is_empty()
+        || image_id.trim().is_empty()
+        || flavor_id.trim().is_empty()
+        || network_port_ids.iter().any(|id| id.trim().is_empty())
+        || deadline_unix_ms <= unix_ms()
+    {
+        return Err(AgentError::Protocol(
+            "create command identity, resources, and deadline are invalid".to_owned(),
+        ));
+    }
+    let create = proto::CreateCommand {
+        image_id,
+        flavor_id,
+        network_port_ids,
+    };
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: operation_id.clone(),
+        resource_id: resource_id.clone(),
+        action: Some(proto::canonical_command_payload::Action::Create(
+            create.clone(),
+        )),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let mut payload_fingerprint_sha256 = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
+            .expect("writing to an in-memory string cannot fail");
+    }
+    let command_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:command:{agent_id}:{operation_id}").as_bytes(),
+    )
+    .to_string();
+    Ok(proto::Command {
+        command_id,
+        operation_id,
+        idempotency_key,
+        agent_id,
+        agent_epoch,
+        resource_id,
+        deadline_unix_ms,
+        protocol_version: Some(PROTOCOL_VERSION),
+        payload_fingerprint_sha256,
+        action: Some(proto::command::Action::Create(create)),
+    })
 }
 
 fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
@@ -1376,6 +1454,51 @@ mod tests {
         let mut fenced = command;
         fenced.agent_epoch = "old-epoch".to_owned();
         assert!(registry.dispatch_command(fenced).await.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn create_command_identity_and_fingerprint_are_deterministic() -> Result<(), AgentError> {
+        let deadline = unix_ms().saturating_add(10_000);
+        let first = build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            idempotency_key: "request-1".to_owned(),
+            deadline_unix_ms: deadline,
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            network_port_ids: vec!["port-1".to_owned()],
+        })?;
+        let second = build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            idempotency_key: "request-1".to_owned(),
+            deadline_unix_ms: deadline,
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            network_port_ids: vec!["port-1".to_owned()],
+        })?;
+        assert_eq!(first, second);
+        let changed = build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            idempotency_key: "request-1".to_owned(),
+            deadline_unix_ms: deadline,
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            network_port_ids: vec!["port-2".to_owned()],
+        })?;
+        assert_eq!(first.command_id, changed.command_id);
+        assert_ne!(
+            first.payload_fingerprint_sha256,
+            changed.payload_fingerprint_sha256
+        );
         Ok(())
     }
 
