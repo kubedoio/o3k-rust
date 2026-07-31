@@ -22,6 +22,14 @@ pub struct ConsoleService {
     max_bytes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsoleChunk {
+    pub bytes: Vec<u8>,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub truncated: bool,
+}
+
 impl ConsoleService {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConsoleError> {
         let root = root.into();
@@ -37,9 +45,16 @@ impl ConsoleService {
             return Err(ConsoleError::InvalidInput);
         }
         let path = self.path(instance_id)?;
-        let temporary = path.with_extension("tmp");
-        fs::write(&temporary, output).map_err(ConsoleError::Storage)?;
-        fs::rename(temporary, path).map_err(ConsoleError::Storage)
+        let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7()));
+        if let Err(error) = fs::write(&temporary, output) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ConsoleError::Storage(error));
+        }
+        if let Err(error) = fs::rename(&temporary, &path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ConsoleError::Storage(error));
+        }
+        Ok(())
     }
 
     pub fn append(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
@@ -58,6 +73,27 @@ impl ConsoleService {
             } else {
                 ConsoleError::Storage(error)
             }
+        })
+    }
+
+    pub fn read_from(
+        &self,
+        instance_id: Uuid,
+        offset: u64,
+        max_bytes: usize,
+    ) -> Result<ConsoleChunk, ConsoleError> {
+        let bytes = self.read(instance_id)?;
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let end = start
+            .saturating_add(max_bytes.min(self.max_bytes))
+            .min(bytes.len());
+        Ok(ConsoleChunk {
+            bytes: bytes[start..end].to_vec(),
+            offset: start as u64,
+            next_offset: end as u64,
+            truncated: end < bytes.len(),
         })
     }
 
@@ -91,6 +127,10 @@ mod tests {
         service.append(id, b"boot\n")?;
         service.append(id, &vec![b'x'; MAX_CONSOLE_BYTES + 10])?;
         assert_eq!(service.read(id)?.len(), MAX_CONSOLE_BYTES);
+        let chunk = service.read_from(id, 10, 20)?;
+        assert_eq!(chunk.offset, 10);
+        assert_eq!(chunk.next_offset, 30);
+        assert!(chunk.truncated);
         let restarted = ConsoleService::open(service.root.clone())?;
         assert_eq!(restarted.read(id)?.len(), MAX_CONSOLE_BYTES);
         restarted.cleanup(id)?;
