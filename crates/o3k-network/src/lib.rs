@@ -49,6 +49,16 @@ mod host_network_tests {
             }),
             Err(HostNetworkError::InvalidMac)
         ));
+        assert!(interface_output_is_owned(
+            "2: o3ktap-abcd: <BROADCAST> mtu 1500 master o3k-br0 state UP\\n\\\tlink/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
+            "2: o3ktap-abcd: <BROADCAST> mtu 1500 master o3k-br0 state UP\\n\\\tlink/ether 02:00:00:00:00:02 brd ff:ff:ff:ff:ff:ff",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
         Ok(())
     }
 }
@@ -70,6 +80,8 @@ pub enum HostNetworkError {
     InvalidName,
     #[error("host network MAC address is invalid")]
     InvalidMac,
+    #[error("existing TAP interface is not owned by the requested O3K network")]
+    ForeignInterface,
 }
 
 impl HostNetworkConfig {
@@ -145,19 +157,24 @@ impl HostNetworkManager {
         validate_mac(&spec.mac)?;
         self.ensure_bridge()?;
         let name = Self::tap_name(&spec.port_id)?;
-        if !link_exists(&name) {
+        if link_exists(&name) {
+            if !interface_is_owned(&name, &spec.mac, &self.config.bridge_name)? {
+                return Err(HostNetworkError::ForeignInterface);
+            }
+        } else {
             run_ip(["tuntap", "add", "dev", &name, "mode", "tap"])?;
+            run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
+            run_ip([
+                "link",
+                "set",
+                "dev",
+                &name,
+                "master",
+                &self.config.bridge_name,
+            ])?;
+            run_ip(["link", "set", "dev", &name, "up"])?;
+            return Ok(name);
         }
-        run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
-        run_ip([
-            "link",
-            "set",
-            "dev",
-            &name,
-            "master",
-            &self.config.bridge_name,
-        ])?;
-        run_ip(["link", "set", "dev", &name, "up"])?;
         Ok(name)
     }
     pub fn delete_tap(&self, port_id: &str) -> Result<(), HostNetworkError> {
@@ -214,6 +231,27 @@ fn link_exists(name: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn interface_is_owned(
+    name: &str,
+    expected_mac: &str,
+    bridge_name: &str,
+) -> Result<bool, HostNetworkError> {
+    let output = Command::new("ip")
+        .args(["-o", "link", "show", "dev", name])
+        .output()
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+    if !output.status.success() {
+        return Err(HostNetworkError::CommandFailed);
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(interface_output_is_owned(&text, expected_mac, bridge_name))
+}
+
+fn interface_output_is_owned(output: &str, expected_mac: &str, bridge_name: &str) -> bool {
+    output.contains(&format!("link/ether {expected_mac}"))
+        && output.contains(&format!("master {bridge_name}"))
 }
 fn run_ip<'a, I>(args: I) -> Result<(), HostNetworkError>
 where
