@@ -1078,6 +1078,7 @@ name = "o3k-libvirt"
 version = "0.1.0-alpha.0"
 dependencies = [
  "o3k-provider-contract",
+ "sha2",
  "thiserror",
  "tokio",
  "virt",

@@ -8,12 +8,215 @@
 use std::{fmt, sync::Arc};
 
 use o3k_provider_contract::compute_proto as proto;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(feature = "libvirt")]
 use virt::{connect::Connect, domain::Domain};
 
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
+pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainMetadata {
+    pub server_id: String,
+    pub project_id: String,
+    pub generation: u64,
+    pub operation_id: String,
+    pub managed_by: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DomainSpec {
+    pub metadata: DomainMetadata,
+    pub vcpus: u32,
+    pub memory_mib: u64,
+    pub image_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltDomainXml {
+    pub name: String,
+    pub xml: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiscoveryResult {
+    Owned {
+        name: String,
+        metadata: DomainMetadata,
+    },
+    Foreign {
+        name: String,
+    },
+    Quarantined {
+        name: String,
+        reason: String,
+    },
+}
+
+pub fn stable_domain_name(server_id: &str) -> String {
+    let digest = Sha256::digest(server_id.as_bytes());
+    let mut suffix = String::with_capacity(20);
+    for byte in digest.iter().take(10) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut suffix, "{byte:02x}");
+    }
+    format!("o3k-{suffix}")
+}
+
+pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtError> {
+    validate_metadata(&spec.metadata)?;
+    if spec.vcpus == 0
+        || spec.vcpus > 512
+        || spec.memory_mib == 0
+        || spec.image_id.trim().is_empty()
+    {
+        return Err(LibvirtError::new(
+            ErrorCategory::InvalidRequest,
+            "domain resource values are invalid",
+        ));
+    }
+    let name = stable_domain_name(&spec.metadata.server_id);
+    let m = &spec.metadata;
+    let xml = format!(
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk></devices></domain>",
+        xml_escape(&name),
+        spec.memory_mib,
+        spec.memory_mib,
+        spec.vcpus,
+        O3K_METADATA_NAMESPACE,
+        xml_escape(&m.server_id),
+        xml_escape(&m.project_id),
+        m.generation,
+        xml_escape(&m.operation_id),
+        xml_escape(&m.managed_by),
+        xml_escape(&spec.image_id)
+    );
+    Ok(BuiltDomainXml { name, xml })
+}
+
+pub fn discover_domain_xml(name: &str, xml: &str) -> DiscoveryResult {
+    let Some(metadata) = parse_metadata(xml) else {
+        return DiscoveryResult::Foreign {
+            name: name.to_owned(),
+        };
+    };
+    match metadata {
+        Ok(metadata) => DiscoveryResult::Owned {
+            name: name.to_owned(),
+            metadata,
+        },
+        Err(reason) => DiscoveryResult::Quarantined {
+            name: name.to_owned(),
+            reason,
+        },
+    }
+}
+
+pub fn discover_domain_xmls(domains: &[(String, String)]) -> Vec<DiscoveryResult> {
+    let mut results = domains
+        .iter()
+        .map(|(name, xml)| discover_domain_xml(name, xml))
+        .collect::<Vec<_>>();
+    let mut seen = std::collections::HashSet::new();
+    for result in &mut results {
+        if let DiscoveryResult::Owned { metadata, .. } = result {
+            if !seen.insert(metadata.server_id.clone()) {
+                let name = match result {
+                    DiscoveryResult::Owned { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                *result = DiscoveryResult::Quarantined {
+                    name,
+                    reason: "duplicate O3K server ID".to_owned(),
+                };
+            }
+        }
+    }
+    results
+}
+
+fn validate_metadata(metadata: &DomainMetadata) -> Result<(), LibvirtError> {
+    for value in [
+        &metadata.server_id,
+        &metadata.project_id,
+        &metadata.operation_id,
+        &metadata.managed_by,
+    ] {
+        if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(LibvirtError::new(
+                ErrorCategory::InvalidRequest,
+                "domain metadata is invalid",
+            ));
+        }
+    }
+    if metadata.managed_by != "o3k-compute" {
+        return Err(LibvirtError::new(
+            ErrorCategory::InvalidRequest,
+            "domain managed-by value is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_metadata(xml: &str) -> Option<Result<DomainMetadata, String>> {
+    let marker = "<o3k:domain";
+    let start = xml.find(marker)?;
+    let end = xml[start..].find('>')? + start;
+    let tag = &xml[start..end];
+    let namespace = attr(tag, "xmlns:o3k")?;
+    if namespace != O3K_METADATA_NAMESPACE {
+        return Some(Err("metadata namespace is invalid".to_owned()));
+    }
+    let generation = match attr(tag, "generation").and_then(|value| value.parse().ok()) {
+        Some(value) => value,
+        None => return Some(Err("generation is invalid".to_owned())),
+    };
+    let (Some(server_id), Some(project_id), Some(operation_id), Some(managed_by)) = (
+        attr(tag, "server_id"),
+        attr(tag, "project_id"),
+        attr(tag, "operation_id"),
+        attr(tag, "managed_by"),
+    ) else {
+        return Some(Err("metadata fields are incomplete".to_owned()));
+    };
+    let metadata = DomainMetadata {
+        server_id,
+        project_id,
+        generation,
+        operation_id,
+        managed_by,
+    };
+    if validate_metadata(&metadata).is_err() {
+        Some(Err("metadata fields are invalid".to_owned()))
+    } else {
+        Some(Ok(metadata))
+    }
+}
+
+fn attr(tag: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}=\"");
+    let start = tag.find(&marker)? + marker.len();
+    Some(
+        tag[start..]
+            .split_once('"')?
+            .0
+            .replace("&quot;", "\"")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">"),
+    )
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -413,6 +616,50 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn domain_xml_is_deterministic_escaped_and_recoverable() -> Result<(), LibvirtError> {
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "server-1".to_owned(),
+                project_id: "project&1".to_owned(),
+                generation: 7,
+                operation_id: "op-1".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 2,
+            memory_mib: 512,
+            image_id: "/var/lib/o3k/disk&1.qcow2".to_owned(),
+        };
+        let first = build_domain_xml(&spec)?;
+        let second = build_domain_xml(&spec)?;
+        assert_eq!(first, second);
+        assert!(first.xml.contains("project&amp;1"));
+        assert_eq!(
+            discover_domain_xml(&first.name, &first.xml),
+            DiscoveryResult::Owned {
+                name: first.name,
+                metadata: spec.metadata
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_or_duplicate_metadata_is_quarantined() {
+        let malformed = "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" generation=\"x\" /></metadata></domain>";
+        assert!(matches!(
+            discover_domain_xml("o3k-bad", malformed),
+            DiscoveryResult::Quarantined { .. }
+        ));
+        let foreign = "<domain><name>foreign</name></domain>";
+        assert_eq!(
+            discover_domain_xml("foreign", foreign),
+            DiscoveryResult::Foreign {
+                name: "foreign".to_owned()
+            }
         );
     }
 }
