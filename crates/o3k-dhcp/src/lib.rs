@@ -6,7 +6,7 @@ use std::{
     fs, io,
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command},
 };
 use thiserror::Error;
 
@@ -38,6 +38,107 @@ pub enum DhcpError {
     CorruptState(#[source] serde_json::Error),
     #[error("dnsmasq command failed")]
     CommandFailed,
+}
+
+/// Owns one managed dnsmasq process and provides restart/cleanup semantics.
+///
+/// The supervisor intentionally owns the child handle rather than relying on a
+/// pid file alone. A pid file is an artifact produced by dnsmasq, not proof
+/// that the process is still the one started by this service.
+pub struct DnsmasqSupervisor {
+    binary: PathBuf,
+    config: PathBuf,
+    pid_file: PathBuf,
+    child: Child,
+}
+
+impl DnsmasqSupervisor {
+    fn spawn(root: &Path, binary: &Path) -> Result<Self, DhcpError> {
+        let config = root.join("dnsmasq.conf");
+        let pid_file = root.join(format!("dnsmasq-{}.pid", uuid::Uuid::now_v7()));
+        let mut child = Command::new(binary)
+            .args([
+                "--conf-file",
+                config.to_str().ok_or(DhcpError::CommandFailed)?,
+                "--pid-file",
+                pid_file.to_str().ok_or(DhcpError::CommandFailed)?,
+                "--keep-in-foreground",
+            ])
+            .spawn()
+            .map_err(|_| DhcpError::CommandFailed)?;
+        if child
+            .try_wait()
+            .map_err(|_| DhcpError::CommandFailed)?
+            .is_some()
+        {
+            let _ = fs::remove_file(&pid_file);
+            return Err(DhcpError::CommandFailed);
+        }
+        Ok(Self {
+            binary: binary.to_path_buf(),
+            config,
+            pid_file,
+            child,
+        })
+    }
+
+    /// Returns whether the owned process is still running.
+    pub fn is_running(&mut self) -> Result<bool, DhcpError> {
+        Ok(self
+            .child
+            .try_wait()
+            .map_err(|_| DhcpError::CommandFailed)?
+            .is_none())
+    }
+
+    /// Restart the owned process after the caller has published new config.
+    pub fn restart(&mut self) -> Result<(), DhcpError> {
+        self.stop()?;
+        let mut child = Command::new(&self.binary)
+            .args([
+                "--conf-file",
+                self.config.to_str().ok_or(DhcpError::CommandFailed)?,
+                "--pid-file",
+                self.pid_file.to_str().ok_or(DhcpError::CommandFailed)?,
+                "--keep-in-foreground",
+            ])
+            .spawn()
+            .map_err(|_| DhcpError::CommandFailed)?;
+        if child
+            .try_wait()
+            .map_err(|_| DhcpError::CommandFailed)?
+            .is_some()
+        {
+            let _ = fs::remove_file(&self.pid_file);
+            return Err(DhcpError::CommandFailed);
+        }
+        self.child = child;
+        Ok(())
+    }
+
+    /// Stop the owned process and remove only its managed pid file.
+    pub fn stop(&mut self) -> Result<(), DhcpError> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|_| DhcpError::CommandFailed)?
+            .is_none()
+        {
+            self.child.kill().map_err(|_| DhcpError::CommandFailed)?;
+        }
+        self.child.wait().map_err(|_| DhcpError::CommandFailed)?;
+        match fs::remove_file(&self.pid_file) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(DhcpError::CommandFailed),
+        }
+    }
+}
+
+impl Drop for DnsmasqSupervisor {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -144,25 +245,15 @@ impl DhcpService {
         Ok(path)
     }
 
-    pub fn start(&self, binary: &Path) -> Result<(), DhcpError> {
-        let config = self.write_config()?;
-        let status = Command::new(binary)
-            .args([
-                "--conf-file",
-                config.to_str().ok_or(DhcpError::CommandFailed)?,
-                "--pid-file",
-                self.root
-                    .join("dnsmasq.pid")
-                    .to_str()
-                    .ok_or(DhcpError::CommandFailed)?,
-            ])
-            .status()
-            .map_err(|_| DhcpError::CommandFailed)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(DhcpError::CommandFailed)
-        }
+    pub fn start(&self, binary: &Path) -> Result<DnsmasqSupervisor, DhcpError> {
+        self.write_config()?;
+        DnsmasqSupervisor::spawn(&self.root, binary)
+    }
+
+    /// Publish the current state and restart the owned process.
+    pub fn reload(&self, supervisor: &mut DnsmasqSupervisor) -> Result<(), DhcpError> {
+        self.write_config()?;
+        supervisor.restart()
     }
 
     pub fn managed_config_path(&self) -> PathBuf {
@@ -282,6 +373,48 @@ mod tests {
                 .managed_config_path()
                 .ends_with("o3k-dhcp-tests/dnsmasq.conf")
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_is_nonblocking_restartable_and_owned() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("o3k-dhcp-supervisor-{}", std::process::id()));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        let binary = root.join("fake-dnsmasq.sh");
+        fs::write(&binary, "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nsleep 30\n")
+            .map_err(DhcpError::Storage)?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(DhcpError::Storage)?;
+
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        let mut supervisor = service.start(&binary)?;
+        assert!(supervisor.is_running()?);
+        service.upsert_binding(Binding {
+            port_id: "p1".into(),
+            mac: "02:00:00:00:00:01".into(),
+            address: "192.0.2.10".parse().map_err(|_| DhcpError::InvalidConfig)?,
+        })?;
+        service.reload(&mut supervisor)?;
+        assert!(supervisor.is_running()?);
+        assert!(
+            fs::read_to_string(service.managed_config_path())
+                .map_err(DhcpError::Storage)?
+                .contains("192.0.2.10")
+        );
+        supervisor.stop()?;
+        assert!(!supervisor.is_running()?);
+
+        let failing_binary = root.join("missing-dnsmasq");
+        assert!(matches!(
+            service.start(&failing_binary),
+            Err(DhcpError::CommandFailed)
+        ));
+
+        let _ = fs::remove_dir_all(root);
         Ok(())
     }
 }
