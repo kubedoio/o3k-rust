@@ -27,11 +27,11 @@ required = {
     "clean_debian_install": (os.environ["INSTALL_DEBIAN"], "clean-install"),
     "failure_recovery": (os.environ["RECOVERY"], "failure-recovery"),
 }
-optional = {"benchmark": (os.environ["BENCHMARK"], "benchmark")}
+required["benchmark"] = (os.environ["BENCHMARK"], "benchmark")
 errors = []
 evidence = {}
 paths = {}
-for name, (path, artifact_type) in {**required, **optional}.items():
+for name, (path, artifact_type) in required.items():
     if not path:
         errors.append(f"{name}: artifact path was not supplied")
         continue
