@@ -167,7 +167,7 @@ mod host_network_tests {
         ]);
         let manager = test_manager(command.clone(), None);
         let spec = TapSpec {
-            instance_id: "instance-1".to_owned(),
+            instance_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
             port_id: "port-1".to_owned(),
             mac: "02:00:00:00:00:01".to_owned(),
         };
@@ -227,6 +227,41 @@ mod host_network_tests {
                 .iter()
                 .any(|args| args == &["link", "del", "dev", "o3ktap-abcd"])
         );
+    }
+
+    #[test]
+    fn discovery_only_returns_taps_attached_to_the_configured_bridge() {
+        let command = FakeNetworkCommand::new([Response::output(
+            true,
+            "2: o3ktap-owned: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP\n\
+             3: o3ktap-detached: <BROADCAST,UP> mtu 1500 state UP\n\
+             4: o3ktap-foreign: <BROADCAST,UP> mtu 1500 master other-br0 state UP",
+        )]);
+        let manager = test_manager(command, None);
+
+        assert_eq!(
+            manager.discover_managed().expect("discovery succeeds"),
+            vec!["o3ktap-owned"]
+        );
+    }
+
+    #[test]
+    fn ownership_tokens_are_matched_without_prefix_collisions() {
+        assert!(interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP link/ether 02:00:00:00:00:01",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br01 state UP link/ether 02:00:00:00:00:01",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP link/ether 02:00:00:00:00:010",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
     }
 
     #[derive(Clone)]
@@ -435,7 +470,7 @@ impl HostNetworkManager {
     }
 
     pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
-        validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
+        validate_reference(&spec.instance_id)?;
         validate_mac(&spec.mac)?;
         let bridge_created = self.ensure_bridge_with_ownership()?;
         let name = Self::tap_name(&spec.port_id)?;
@@ -477,7 +512,7 @@ impl HostNetworkManager {
     }
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
-        validate_ifname(&spec.instance_id).map_err(|_| HostNetworkError::InvalidName)?;
+        validate_reference(&spec.instance_id)?;
         validate_mac(&spec.mac)?;
         let name = Self::tap_name(&spec.port_id)?;
         if self.link_exists(&name) {
@@ -498,10 +533,12 @@ impl HostNetworkManager {
             .stdout
             .lines()
             .filter_map(|line| {
-                line.split_once(": ")
-                    .map(|(_, rest)| rest.split(':').next().unwrap_or_default().to_owned())
+                let (_, rest) = line.split_once(": ")?;
+                let name = rest.split(':').next()?.to_owned();
+                (name.starts_with("o3ktap-")
+                    && interface_is_attached_to(line, &self.config.bridge_name))
+                .then_some(name)
             })
-            .filter(|name| name.starts_with("o3ktap-"))
             .collect())
     }
 
@@ -571,6 +608,19 @@ fn validate_ifname(name: &str) -> Result<(), HostNetworkError> {
     }
     Ok(())
 }
+
+fn validate_reference(value: &str) -> Result<(), HostNetworkError> {
+    if value.is_empty()
+        || value.len() > 128
+        || value.chars().any(|character| {
+            character.is_whitespace() || character.is_control() || matches!(character, '/' | '\\')
+        })
+    {
+        return Err(HostNetworkError::InvalidName);
+    }
+    Ok(())
+}
+
 fn validate_mac(mac: &str) -> Result<(), HostNetworkError> {
     if mac.len() != 17
         || mac.split(':').count() != 6
@@ -602,14 +652,22 @@ fn interface_is_owned_with(
 }
 
 fn interface_output_is_owned(output: &str, expected_mac: &str, bridge_name: &str) -> bool {
-    output.contains(&format!("link/ether {expected_mac}"))
-        && output.contains(&format!("master {bridge_name}"))
+    has_link_token(output, "link/ether", expected_mac)
+        && has_link_token(output, "master", bridge_name)
 }
 
 fn interface_is_attached_to(output: &str, bridge_name: &str) -> bool {
+    output.lines().any(|line| {
+        has_link_token(line, "state", "UP") && has_link_token(line, "master", bridge_name)
+    })
+}
+
+fn has_link_token(output: &str, key: &str, expected: &str) -> bool {
     output
-        .lines()
-        .any(|line| line.contains("state UP") && line.contains(&format!("master {bridge_name}")))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .any(|pair| pair[0] == key && pair[1].eq_ignore_ascii_case(expected))
 }
 
 fn interface_output_is_bridge(output: &str) -> bool {
@@ -644,6 +702,8 @@ pub struct PortRecord {
     pub network_id: Uuid,
     pub project_id: String,
     pub name: String,
+    #[serde(default)]
+    pub mac_address: String,
     pub fixed_ip: Ipv4Addr,
     pub status: String,
 }
@@ -686,14 +746,25 @@ impl NetworkService {
         let root = root.into();
         fs::create_dir_all(&root).map_err(NetworkError::Storage)?;
         let path = root.join("metadata.json");
-        let data = if path.exists() {
+        let mut data = if path.exists() {
             serde_json::from_slice(&fs::read(path).map_err(NetworkError::Storage)?)
                 .map_err(NetworkError::CorruptMetadata)?
         } else {
             Persisted::default()
         };
+        let mut migrated = false;
+        for port in &mut data.ports {
+            if port.mac_address.is_empty() {
+                port.mac_address = deterministic_port_mac(port.id);
+                migrated = true;
+            }
+        }
+        let inner = Inner { root, data };
+        if migrated {
+            persist(&inner)?;
+        }
         Ok(Self {
-            inner: Arc::new(Mutex::new(Inner { root, data })),
+            inner: Arc::new(Mutex::new(inner)),
         })
     }
 
@@ -906,11 +977,13 @@ impl NetworkService {
         while candidate <= end {
             let address = Ipv4Addr::from(candidate);
             if address != gateway && !used.contains(&address) {
+                let id = Uuid::now_v7();
                 let port = PortRecord {
-                    id: Uuid::now_v7(),
+                    id,
                     network_id,
                     project_id: project_id.to_owned(),
                     name,
+                    mac_address: deterministic_port_mac(id),
                     fixed_ip: address,
                     status: "ACTIVE".to_owned(),
                 };
@@ -1023,6 +1096,15 @@ fn persist(inner: &Inner) -> Result<(), NetworkError> {
     Ok(())
 }
 
+fn deterministic_port_mac(port_id: Uuid) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(port_id.as_bytes());
+    format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        digest[0], digest[1], digest[2], digest[3], digest[4]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,6 +1132,8 @@ mod tests {
         let first = service.create_port("project-a", network.id, "one".to_owned())?;
         let second = service.create_port("project-a", network.id, "two".to_owned())?;
         assert_ne!(first.fixed_ip, second.fixed_ip);
+        assert_ne!(first.mac_address, second.mac_address);
+        assert_eq!(first.mac_address, deterministic_port_mac(first.id));
         assert_eq!(first.fixed_ip, subnet.allocation_start);
         let reopened = NetworkService::open(&path)?;
         assert_eq!(reopened.get_port("project-a", first.id)?, first);
@@ -1060,6 +1144,41 @@ mod tests {
                 .contains("metadata.tmp-")
         }));
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn opening_legacy_ports_migrates_the_deterministic_mac() -> Result<(), NetworkError> {
+        let path = root("port-mac-migration");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).map_err(NetworkError::Storage)?;
+        let port_id = Uuid::now_v7();
+        let network_id = Uuid::now_v7();
+        let legacy = serde_json::json!({
+            "networks": [],
+            "subnets": [],
+            "ports": [{
+                "id": port_id,
+                "network_id": network_id,
+                "project_id": "project-a",
+                "name": "legacy",
+                "fixed_ip": "192.0.2.2",
+                "status": "ACTIVE"
+            }]
+        });
+        fs::write(
+            path.join("metadata.json"),
+            serde_json::to_vec(&legacy).map_err(|_| NetworkError::Conflict)?,
+        )
+        .map_err(NetworkError::Storage)?;
+
+        let service = NetworkService::open(&path)?;
+        let port = service.get_port("project-a", port_id)?;
+        assert_eq!(port.mac_address, deterministic_port_mac(port_id));
+        let persisted =
+            fs::read_to_string(path.join("metadata.json")).map_err(NetworkError::Storage)?;
+        assert!(persisted.contains(&port.mac_address));
+        let _ = fs::remove_dir_all(path);
         Ok(())
     }
 

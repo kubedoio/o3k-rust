@@ -628,6 +628,7 @@ struct PortResponse {
     network_id: String,
     project_id: String,
     name: String,
+    mac_address: String,
     fixed_ips: Vec<FixedIpResponse>,
     status: String,
 }
@@ -643,6 +644,7 @@ fn port_response(value: PortRecord, subnet_id: Option<uuid::Uuid>) -> PortRespon
         network_id: value.network_id.to_string(),
         project_id: value.project_id,
         name: value.name,
+        mac_address: value.mac_address,
         fixed_ips: subnet_id
             .into_iter()
             .map(|id| FixedIpResponse {
