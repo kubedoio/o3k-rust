@@ -25,11 +25,22 @@ jobs:
       - name: Check out the canonical repository
         uses: actions/checkout@v4
 
+      - name: Probe runner capabilities
+        id: capabilities
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
+          O3K_REAL_HOST_SERVICE_ACCOUNT: ${{ vars.O3K_REAL_HOST_SERVICE_ACCOUNT || 'o3k-testlab' }}
+          O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
+        run: bash scripts/real-host-capability-probe.sh
+
       - name: Pre-run host and trust guard
         id: guard
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_HEAD_REF: ${{ github.head_ref }}
@@ -48,6 +59,7 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
+          O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}

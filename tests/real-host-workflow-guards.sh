@@ -31,6 +31,13 @@ export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=kubedoio/o3k-rust
 export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF=
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
+mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
+           "status": "passed", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
 
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
 grep -qx 'ready=true' "${GITHUB_OUTPUT}"
@@ -115,6 +122,7 @@ text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
+               "Probe runner capabilities", "runner-capabilities.json",
                "contents: read",
                "if: always()", "actions/upload-artifact@v4"):
     assert needle in text, needle
