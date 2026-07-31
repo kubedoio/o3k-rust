@@ -47,6 +47,30 @@ impl Scheduler {
         server_id: &str,
         flavor: Flavor,
     ) -> Result<ScheduleDecision, SchedulerError> {
+        self.schedule_internal(server_id, flavor, None)
+    }
+
+    /// Schedules only on the explicitly named provider/agent identity.
+    /// Placement provider IDs must be bound to the same identity by the
+    /// control-plane integration layer before a command is dispatched.
+    pub fn schedule_for_agent(
+        &self,
+        agent_id: &str,
+        server_id: &str,
+        flavor: Flavor,
+    ) -> Result<ScheduleDecision, SchedulerError> {
+        if agent_id.trim().is_empty() {
+            return Err(SchedulerError::InvalidFlavor);
+        }
+        self.schedule_internal(server_id, flavor, Some(agent_id))
+    }
+
+    fn schedule_internal(
+        &self,
+        server_id: &str,
+        flavor: Flavor,
+        selected_provider: Option<&str>,
+    ) -> Result<ScheduleDecision, SchedulerError> {
         if server_id.is_empty() || flavor.vcpus == 0 || flavor.memory_mb == 0 {
             return Err(SchedulerError::InvalidFlavor);
         }
@@ -55,7 +79,8 @@ impl Scheduler {
             .providers()?
             .into_iter()
             .filter(|provider| {
-                provider.state == ProviderState::Enabled
+                selected_provider.is_none_or(|selected| provider.id == selected)
+                    && provider.state == ProviderState::Enabled
                     && provider
                         .inventories
                         .get(VCPU)
@@ -192,6 +217,42 @@ mod tests {
                     vcpus: 2,
                     memory_mb: 512,
                     disk_gb: 1
+                }
+            ),
+            Err(SchedulerError::NoValidHost)
+        ));
+        std::fs::remove_dir_all(root)
+            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[test]
+    fn agent_targeted_schedule_never_falls_back_to_another_provider() -> Result<(), SchedulerError>
+    {
+        let root = std::env::temp_dir().join(format!("o3k-scheduler-agent-{}", std::process::id()));
+        let placement = PlacementLedger::open(&root)?;
+        placement.register_provider("agent-a", inv(4))?;
+        placement.register_provider("agent-b", inv(4))?;
+        let scheduler = Scheduler::new(placement.clone());
+        let decision = scheduler.schedule_for_agent(
+            "agent-b",
+            "server-1",
+            Flavor {
+                vcpus: 1,
+                memory_mb: 512,
+                disk_gb: 1,
+            },
+        )?;
+        assert_eq!(decision.provider_id, "agent-b");
+        scheduler.release_terminal(&decision)?;
+        assert!(matches!(
+            scheduler.schedule_for_agent(
+                "missing-agent",
+                "server-2",
+                Flavor {
+                    vcpus: 1,
+                    memory_mb: 512,
+                    disk_gb: 1,
                 }
             ),
             Err(SchedulerError::NoValidHost)
