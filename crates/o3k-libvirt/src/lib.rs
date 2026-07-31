@@ -32,6 +32,8 @@ pub struct DomainSpec {
     pub vcpus: u32,
     pub memory_mib: u64,
     pub image_id: String,
+    /// Host path to an O3K-owned, materialized config-drive image.
+    pub config_drive_image_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,10 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         || spec.vcpus > 512
         || spec.memory_mib == 0
         || validate_image_source(&spec.image_id).is_err()
+        || spec
+            .config_drive_image_path
+            .as_deref()
+            .is_some_and(|path| validate_image_source(path).is_err())
     {
         return Err(LibvirtError::new(
             ErrorCategory::InvalidRequest,
@@ -79,8 +85,18 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
     }
     let name = stable_domain_name(&spec.metadata.server_id);
     let m = &spec.metadata;
+    let config_drive = spec
+        .config_drive_image_path
+        .as_deref()
+        .map(|path| {
+            format!(
+                "<disk type=\"file\" device=\"cdrom\"><driver name=\"qemu\" type=\"raw\" /><source file=\"{}\" /><target dev=\"sda\" bus=\"sata\" /><readonly /></disk>",
+                xml_escape(path)
+            )
+        })
+        .unwrap_or_default();
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk></devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}</devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -91,7 +107,8 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         m.generation,
         xml_escape(&m.operation_id),
         xml_escape(&m.managed_by),
-        xml_escape(&spec.image_id)
+        xml_escape(&spec.image_id),
+        config_drive
     );
     Ok(BuiltDomainXml { name, xml })
 }
@@ -776,6 +793,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
             image_id,
+            config_drive_image_path: None,
         })
         .map_err(provider_error)?;
         self.adapter
@@ -937,6 +955,7 @@ mod tests {
             vcpus: 2,
             memory_mib: 512,
             image_id: "/var/lib/o3k/disk&1.qcow2".to_owned(),
+            config_drive_image_path: None,
         };
         let first = build_domain_xml(&spec)?;
         let second = build_domain_xml(&spec)?;
@@ -953,6 +972,30 @@ mod tests {
                 metadata: spec.metadata
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn domain_xml_attaches_config_drive_read_only() -> Result<(), LibvirtError> {
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "server-config-drive".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image_path: Some(
+                "/var/lib/o3k/config-drive/server-config-drive.iso".to_owned(),
+            ),
+        };
+        let xml = build_domain_xml(&spec)?.xml;
+        assert!(xml.contains("device=\"cdrom\""));
+        assert!(xml.contains("source file=\"/var/lib/o3k/config-drive/server-config-drive.iso\""));
+        assert!(xml.contains("<target dev=\"sda\" bus=\"sata\" /><readonly />"));
         Ok(())
     }
 
@@ -982,6 +1025,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image_path: None,
         };
         let xml = build_domain_xml(&spec)?.xml;
         let discovered = discover_domain_xmls(&[
@@ -1012,6 +1056,23 @@ mod tests {
                     vcpus: 1,
                     memory_mib: 128,
                     image_id: image_id.to_owned(),
+                    config_drive_image_path: None,
+                })
+                .is_err()
+            );
+        }
+        for config_drive_image_path in [
+            "../outside.iso",
+            "file:///tmp/config-drive.iso",
+            "config\n-drive.iso",
+        ] {
+            assert!(
+                build_domain_xml(&DomainSpec {
+                    metadata: metadata.clone(),
+                    vcpus: 1,
+                    memory_mib: 128,
+                    image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+                    config_drive_image_path: Some(config_drive_image_path.to_owned()),
                 })
                 .is_err()
             );
@@ -1045,6 +1106,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image_path: None,
         };
         let built = build_domain_xml(&spec)?;
         let owned = DomainInspection {
