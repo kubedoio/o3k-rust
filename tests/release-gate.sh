@@ -110,7 +110,8 @@ grep -q 'finished_at must be positive' "${ARTIFACT_DIR}/zero-release.json"
 
 set_e2e_finished_at "$(python3 - <<'PY'
 import time
-print(int(time.time()) + 1)
+# Keep the future timestamp comfortably beyond the gate's validation boundary.
+print(int(time.time()) + 3600)
 PY
 )"
 if O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS=3600 bash "${ROOT_DIR}/packaging/release-gate.sh" \

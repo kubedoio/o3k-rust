@@ -21,7 +21,7 @@ the real-libvirt acceptance evidence exists.
 | #48 | console log | merged | bounded API reads, fenced agent routing, durable observations, serialized per-instance writes, atomic writes, serial-console XML, and libvirt stream reads added; guest boot evidence pending |
 | #49 | real-libvirt harness | merged | prerequisite validation invokes the public OpenStack lifecycle workflow with artifact validation; isolated guest/failure scenarios and trusted-host evidence remain pending |
 | #50 | OpenStack CLI workflow | merged | local guest-image upload, waited lifecycle transitions, bounded console polling, failure cleanup, validated show/list identity, verified deletion, and redacted evidence with discarded raw CLI errors; stronger script evidence does not replace a trusted real CLI/libvirt run |
-| #51 | clean-host packaging | merged | release bundles now install their bundled `bin/o3kd`/`bin/o3k-compute` binaries without Cargo; uninstall removes the complete O3K helper set while retaining state by default, libvirt profile selects libvirt, and reset stops both control-plane and compute services; Ubuntu/Debian clean installs pending |
+| #51 | clean-host packaging | merged | release bundles now install their bundled `bin/o3kd`/`bin/o3k-compute` binaries without Cargo; uninstall removes the complete O3K helper set while retaining state by default and restricts systemd cleanup to the exact default layout, libvirt profile selects libvirt, and reset stops both control-plane and compute services; Ubuntu/Debian clean installs pending |
 | #52 | measurements / release-evidence integrity | merged | fake control-plane measurement now preflights the selected port, verifies launched-PID ownership through readiness/token/RSS checkpoints, emits redacted diagnostics for port/child failures, and binds summary to canonical raw JSON; fake artifacts are explicitly non-release evidence; guest metrics pending |
 | #53 | release gate | merged | benchmark and cleanup evidence are required; positive, non-future, seven-day freshness checks now reject stale artifacts; gate remains blocked by real-host rows above |
 | #54 | program tracker | this change | tracked here |
@@ -88,3 +88,4 @@ subsequent provider, console, lifecycle, network, placement, CLI, and
 measurement decisions. Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
 ADR-0082 records complete, foreign-path-safe uninstall helper cleanup.
+ADR-0083 records custom-prefix uninstall systemd cleanup safety.
