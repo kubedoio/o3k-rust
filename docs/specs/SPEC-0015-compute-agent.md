@@ -172,16 +172,20 @@ An accepted operation never moves backwards. A timeout after acceptance is
 The control plane persists desired state and its operation record before
 dispatch. The agent durably records `(agent_id, operation_id)` and the
 idempotency-key fingerprint before acknowledging acceptance. The fingerprint
-is lowercase hexadecimal SHA-256 of a deterministic protobuf serialization of
-the semantic command tuple `(operation_id, resource_id, action)`, with fields
-encoded in ascending field-number order, unknown fields omitted, and repeated
-fields kept in their specified order. `command_id`, `idempotency_key`,
-`agent_epoch`, `deadline_unix_ms`, `protocol_version`, and the fingerprint
-itself are excluded from the digest. The control plane computes and sends the
-same digest; the agent rejects a mismatch. Repeating the same operation and
-equivalent payload returns the original operation/result without creating a
-second VM. Reusing an idempotency key with a different operation, resource, or
-payload returns `IDEMPOTENCY_CONFLICT` and performs no action.
+is lowercase hexadecimal SHA-256 of the deterministic protobuf wire
+serialization of the committed `CanonicalCommandPayload` message. Its fields
+are exactly `operation_id` (field 1), `resource_id` (field 2), and the action
+oneof discriminator/payload in fields 3–9 (`create`, `inspect`, `start`,
+`stop`, `reboot`, `delete`, `console_log`). Deterministic serialization uses
+ascending field numbers, omits unknown fields, encodes absent proto3 scalar
+values as their default, and preserves repeated `network_port_ids` order.
+`command_id`, `idempotency_key`, `agent_epoch`, `deadline_unix_ms`,
+`protocol_version`, and the fingerprint itself are excluded from the digest.
+The control plane computes and sends the same digest; the agent rejects a
+mismatch. Repeating the same operation and equivalent payload returns the
+original operation/result without creating a second VM. Reusing an idempotency
+key with a different operation, resource, or payload returns
+`IDEMPOTENCY_CONFLICT` and performs no action.
 
 The control plane and agent retain records for at least the configured retry
 window and must not expire a record while the operation is non-terminal. After

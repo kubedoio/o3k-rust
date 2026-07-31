@@ -31,6 +31,12 @@ jobs:
           protoc --proto_path=proto \
             --descriptor_set_out=/tmp/o3k-compute-agent-v1.pb \
             proto/compute/v1/compute_agent.proto
+      - name: Install buf
+        uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.50.0
+      - name: Check protobuf compatibility
+        run: buf breaking --against '.git#branch=main,subdir=proto'
       - name: TestLab fake-provider workflow
         run: bash tests/testlab.sh
       - name: Generate candidate SBOM

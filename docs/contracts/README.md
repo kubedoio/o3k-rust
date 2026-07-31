@@ -31,10 +31,10 @@ committed files under `proto/provider/` during every clean build. Generated
 code is build output and is not hand-edited or committed. The Rust-native
 `o3k-provider` types remain independent; `mapping` is the explicit transport
 boundary. CI must run `cargo fmt --all -- --check`, protobuf generation through
-`cargo test --workspace`, and the repository's protobuf syntax/descriptor
-validation. A breaking-change checker such as `buf breaking` is required once
-the versioned baseline is published; this draft is the initial baseline and
-does not yet have a prior compute-agent descriptor to compare against.
+`cargo test --workspace`, descriptor validation, and `buf breaking` against the
+default branch. The initial compute-agent package is additive relative to the
+existing provider package, so the first comparison establishes the baseline;
+future incompatible changes require a new package version.
 
 Contract versioning is package-based (`o3k.provider.v1` and
 `o3k.compute.v1`). Additive fields are compatible; removed fields must be

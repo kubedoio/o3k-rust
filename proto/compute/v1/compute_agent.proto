@@ -188,6 +188,21 @@ message ConsoleLogCommand {
   uint32 max_bytes = 2;
 }
 
+// Canonical semantic payload used for Command.payload_fingerprint_sha256.
+message CanonicalCommandPayload {
+  string operation_id = 1;
+  string resource_id = 2;
+  oneof action {
+    CreateCommand create = 3;
+    InspectCommand inspect = 4;
+    StartCommand start = 5;
+    StopCommand stop = 6;
+    RebootCommand reboot = 7;
+    DeleteCommand delete = 8;
+    ConsoleLogCommand console_log = 9;
+  }
+}
+
 message CommandAccepted {
   string command_id = 1;
   string operation_id = 2;
