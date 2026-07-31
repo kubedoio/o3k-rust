@@ -37,6 +37,8 @@ jobs:
         uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.50.0
+      - name: Fetch protobuf compatibility baseline
+        run: git fetch origin main:refs/heads/main
       - name: Check protobuf compatibility
         run: buf breaking --against '.git#branch=main,subdir=proto'
       - name: TestLab fake-provider workflow
