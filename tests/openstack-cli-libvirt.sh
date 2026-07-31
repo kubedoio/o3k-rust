@@ -80,6 +80,26 @@ server_is_absent() {
     validate_server_absent_list "${list_output}" "${server_id}"
 }
 
+resource_is_absent() {
+    local resource="$1" resource_id="$2"
+    local show_output="${DATA_DIR}/${resource}-delete-show.json"
+    local show_error="${DATA_DIR}/${resource}-delete-show.error"
+
+    if openstack "${resource}" show "${resource_id}" -f json \
+        >"${show_output}" 2>"${show_error}"; then
+        return 1
+    fi
+    grep -Eiq 'not[ -]?found|could not find|no .*found|404' "${show_error}"
+}
+
+delete_resource_and_verify_absent() {
+    local resource="$1" resource_id="$2"
+    # A failed delete has an unknown outcome. Always observe before deciding
+    # that cleanup failed; a timeout may have removed the resource already.
+    openstack "${resource}" delete "${resource_id}" >/dev/null 2>&1 || true
+    resource_is_absent "${resource}" "${resource_id}"
+}
+
 cleanup_resources() {
     local cleanup_ok=1
     if [[ -n "${SERVER_ID}" ]]; then
@@ -91,20 +111,32 @@ cleanup_resources() {
         fi
     fi
     if [[ -n "${FLAVOR_ID}" ]]; then
-        openstack flavor delete "${FLAVOR_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        FLAVOR_ID=
+        if delete_resource_and_verify_absent flavor "${FLAVOR_ID}"; then
+            FLAVOR_ID=
+        else
+            cleanup_ok=0
+        fi
     fi
     if [[ -n "${SUBNET_ID}" ]]; then
-        openstack subnet delete "${SUBNET_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        SUBNET_ID=
+        if delete_resource_and_verify_absent subnet "${SUBNET_ID}"; then
+            SUBNET_ID=
+        else
+            cleanup_ok=0
+        fi
     fi
     if [[ -n "${NETWORK_ID}" ]]; then
-        openstack network delete "${NETWORK_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        NETWORK_ID=
+        if delete_resource_and_verify_absent network "${NETWORK_ID}"; then
+            NETWORK_ID=
+        else
+            cleanup_ok=0
+        fi
     fi
     if [[ -n "${IMAGE_ID}" ]]; then
-        openstack image delete "${IMAGE_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        IMAGE_ID=
+        if delete_resource_and_verify_absent image "${IMAGE_ID}"; then
+            IMAGE_ID=
+        else
+            cleanup_ok=0
+        fi
     fi
     return "$((1 - cleanup_ok))"
 }
@@ -242,12 +274,12 @@ if ! server_is_absent "${SERVER_ID}"; then
     exit 1
 fi
 SERVER_ID=
-openstack flavor delete "${FLAVOR_ID}"
+delete_resource_and_verify_absent flavor "${FLAVOR_ID}"
 FLAVOR_ID=
-openstack subnet delete "${SUBNET_ID}"
+delete_resource_and_verify_absent subnet "${SUBNET_ID}"
 SUBNET_ID=
-openstack network delete "${NETWORK_ID}"
+delete_resource_and_verify_absent network "${NETWORK_ID}"
 NETWORK_ID=
-openstack image delete "${IMAGE_ID}"
+delete_resource_and_verify_absent image "${IMAGE_ID}"
 IMAGE_ID=
 write_result passed "CLI lifecycle completed" passed
