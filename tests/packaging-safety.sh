@@ -10,6 +10,27 @@ if [[ ! -x "$BINARY" ]]; then
 fi
 [[ -x "$BINARY" ]] || { echo "packaging test binary is missing: $BINARY" >&2; exit 2; }
 
+# Invalid installation paths must be rejected before the installer creates a
+# partial prefix or state directory.
+(cd "$WORK_DIR" && if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" \
+    --prefix relative-prefix --data-dir "$WORK_DIR/data" \
+    --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"; then
+  echo "installer accepted a relative prefix" >&2
+  exit 1
+fi)
+[[ ! -e "$WORK_DIR/relative-prefix" ]]
+mkdir -p "$WORK_DIR/symlink-target"
+ln -s "$WORK_DIR/symlink-target" "$WORK_DIR/symlink-data"
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" \
+    --prefix "$WORK_DIR/symlink-prefix" --data-dir "$WORK_DIR/symlink-data" \
+    --config-dir "$WORK_DIR/symlink-config" --log-dir "$WORK_DIR/symlink-log"; then
+  echo "installer accepted a symlink data directory" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/symlink-prefix" && ! -e "$WORK_DIR/symlink-config" ]]
+
 mkdir -p "$WORK_DIR/preexisting"
 printf 'keep me\n' >"$WORK_DIR/preexisting/user-data"
 if bash "$ROOT_DIR/packaging/install.sh" \

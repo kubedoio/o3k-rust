@@ -45,6 +45,20 @@ cat >"$BUNDLE_DIR/packaging/preflight.sh" <<'EOF'
 set -Eeuo pipefail
 EOF
 chmod 0755 "$BUNDLE_DIR/packaging/preflight.sh"
+
+# A libvirt bundle must validate certificate inputs before creating any
+# installation state. This keeps a failed clean install repair-free.
+if bash "$BUNDLE_DIR/packaging/install.sh" \
+    --profile libvirt --noninteractive \
+    --prefix "$WORK_DIR/invalid-libvirt-prefix" \
+    --data-dir "$WORK_DIR/invalid-libvirt-data" \
+    --config-dir "$WORK_DIR/invalid-libvirt-config" \
+    --log-dir "$WORK_DIR/invalid-libvirt-log"; then
+  echo "libvirt installer accepted missing TLS inputs" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/invalid-libvirt-prefix" && ! -e "$WORK_DIR/invalid-libvirt-data" ]]
+
 TLS_DIR="$WORK_DIR/libvirt-config/tls"
 mkdir -p "$TLS_DIR"
 printf 'o3k-owned-v1 path=%s\n' "$WORK_DIR/libvirt-config" >"$WORK_DIR/libvirt-config/.o3k-owned"
