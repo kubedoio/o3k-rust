@@ -13,13 +13,22 @@ cat >"${MOCK_BIN}/openstack" <<'SH'
 set -Eeuo pipefail
 printf '%s\n' "$*" >>"${O3K_MOCK_LOG}"
 state_file="${O3K_MOCK_STATE:?}"
+state_dir="${O3K_MOCK_STATE_DIR:?}"
 mode="${O3K_MOCK_MODE:-normal}"
 case "$*" in
   token\ issue*) exit 0;;
-  image\ create*) echo image-id;;
-  network\ create*) echo network-id;;
-  subnet\ create*) echo subnet-id;;
-  flavor\ create*) echo flavor-id;;
+  image\ create*) : >"${state_dir}/image-image-id"; echo image-id;;
+  network\ create*) : >"${state_dir}/network-network-id"; echo network-id;;
+  subnet\ create*) : >"${state_dir}/subnet-subnet-id"; echo subnet-id;;
+  flavor\ create*) : >"${state_dir}/flavor-flavor-id"; echo flavor-id;;
+  image\ show*)
+    if [[ -e "${state_dir}/image-image-id" ]]; then echo '{}'; else echo 'No image with a name or ID was found' >&2; exit 1; fi;;
+  network\ show*)
+    if [[ -e "${state_dir}/network-network-id" ]]; then echo '{}'; else echo 'No network with a name or ID was found' >&2; exit 1; fi;;
+  subnet\ show*)
+    if [[ -e "${state_dir}/subnet-subnet-id" ]]; then echo '{}'; else echo 'No subnet with a name or ID was found' >&2; exit 1; fi;;
+  flavor\ show*)
+    if [[ -e "${state_dir}/flavor-flavor-id" ]]; then echo '{}'; else echo 'No flavor with a name or ID was found' >&2; exit 1; fi;;
   server\ create*) : >"${state_file}"; echo server-id;;
   server\ show*)
     if [[ ! -e "${state_file}" ]]; then
@@ -48,6 +57,10 @@ case "$*" in
       rm -f -- "${state_file}"
     fi
     ;;
+  image\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/image-image-id";;
+  network\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/network-network-id";;
+  subnet\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/subnet-subnet-id";;
+  flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
   console\ log\ show*) echo 'boot output';;
   *) exit 0;;
 esac
@@ -61,6 +74,8 @@ chmod +x "${MOCK_BIN}/openstack" "${MOCK_BIN}/curl"
 export PATH="${MOCK_BIN}:${PATH}"
 export O3K_MOCK_LOG="${WORK_DIR}/commands.log"
 export O3K_MOCK_STATE="${WORK_DIR}/server-present"
+export O3K_MOCK_STATE_DIR="${WORK_DIR}/resource-state"
+mkdir -p "${O3K_MOCK_STATE_DIR}"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
 export O3K_TESTLAB_PROFILE=libvirt OS_PASSWORD=test-password
 IMAGE_PATH="${WORK_DIR}/cirros.img"
@@ -115,6 +130,17 @@ grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
 
 if O3K_MOCK_MODE=noop-delete bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
   echo "CLI harness accepted a no-op server delete" >&2
+  exit 1
+fi
+python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status"] == "failed"
+assert result["cleanup"]["status"] == "failed"
+PY
+
+if O3K_MOCK_MODE=noop-dependent-delete bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
+  echo "CLI harness accepted a no-op dependent-resource delete" >&2
   exit 1
 fi
 python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'

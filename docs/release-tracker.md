@@ -34,6 +34,7 @@ the real-libvirt acceptance evidence exists.
 | #82 | Placement scheduling and allocations | repository publication rollback boundary complete; ADR-0090 and regression coverage restore in-memory state after failed ledger publication | blocked until agent-backed provider inventory/create/delete wiring, real guest allocation evidence, restart recovery, and trusted real-host scheduling artifact exist; no host acceptance claimed |
 | #83 | libvirt lifecycle and observed Nova state | repository observed-state projection boundary complete; ADR-0091 and regression coverage fail closed for paused, crashed, blocked, suspended, unknown, and inconsistent libvirt observations | blocked until agent-backed lifecycle dispatch, real Nova/guest lifecycle evidence, restart/failure recovery, and trusted real-host artifact exist; no host acceptance claimed |
 | #84 | libvirt serial console and Nova console-log | repository console ownership fence complete; ADR-0092 and regression coverage require matching O3K domain metadata before opening a libvirt stream | blocked until actual CirrOS output, bounded restart persistence, cross-project CLI isolation, deletion evidence, and trusted real-host console artifact exist; no host acceptance claimed |
+| #86 | complete real CirrOS OpenStack CLI acceptance | repository-owned cleanup now verifies absence for every created resource after public CLI deletion; ADR-0093 and stateful no-op regression coverage added | blocked until a protected runner uploads `real-libvirt-e2e.json` with `status: passed`, including real CirrOS ACTIVE/config-drive/console/restart and leak evidence; no host acceptance claimed |
 
 ## Current release gate
 
@@ -115,3 +116,6 @@ projection of libvirt lifecycle observations for issue #83; it does not
 substitute for real libvirt, guest, Nova, or host evidence.
 ADR-0092 records the ownership fence before libvirt console streams are opened
 for issue #84; it does not substitute for actual guest output or host evidence.
+ADR-0093 records public-CLI absence verification for every resource owned by
+the issue #86 harness; it does not substitute for a real CirrOS or protected
+host run.
