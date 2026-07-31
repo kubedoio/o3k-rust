@@ -197,9 +197,47 @@ for name, (path, artifact_type) in required.items():
         if value.get("public_api_only") is not True:
             errors.append(f"{name}: public_api_only must be true")
     if name == "failure_recovery":
-        failures = value.get("failures")
-        if not isinstance(failures, list) or not failures:
-            errors.append(f"{name}: failures must list exercised recovery scenarios")
+        required_scenarios = {
+            "control-plane-crash-before-dispatch",
+            "control-plane-crash-after-dispatch",
+            "compute-agent-crash-before-mutation",
+            "compute-agent-crash-after-domain-definition-or-start",
+            "libvirt-daemon-restart",
+            "agent-control-plane-network-interruption",
+            "timeout-after-accepted-mutation",
+            "duplicate-create-delivery",
+            "duplicate-action-delivery",
+            "duplicate-delete-delivery",
+            "corrupted-truncated-image",
+            "image-checksum-mismatch",
+            "qemu-img-failure",
+            "config-drive-failure",
+            "tap-failure",
+            "dnsmasq-failure",
+            "disk-full",
+            "repeated-delete",
+            "partial-cleanup",
+        }
+        scenarios = value.get("scenarios")
+        if not isinstance(scenarios, dict):
+            errors.append(f"{name}: scenarios must be an object keyed by required scenario")
+        else:
+            missing = required_scenarios - scenarios.keys()
+            unexpected = scenarios.keys() - required_scenarios
+            if missing:
+                errors.append(
+                    f"{name}: scenarios missing required keys: {', '.join(sorted(missing))}"
+                )
+            if unexpected:
+                errors.append(
+                    f"{name}: scenarios contain unknown keys: {', '.join(sorted(unexpected))}"
+                )
+            for scenario in sorted(required_scenarios & scenarios.keys()):
+                result = scenarios[scenario]
+                if not isinstance(result, dict) or result.get("status") != "passed":
+                    errors.append(
+                        f"{name}: scenarios.{scenario}.status must be 'passed'"
+                    )
     if name in {"clean_ubuntu_install", "clean_debian_install"}:
         expected_distro = "ubuntu" if name.endswith("ubuntu_install") else "debian"
         if value.get("distro") != expected_distro:

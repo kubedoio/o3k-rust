@@ -23,7 +23,7 @@ The required artifact types are:
 | `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; redacted `resources` IDs may be included |
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
-| `--recovery` | `failure-recovery` | non-empty `failures` list |
+| `--recovery` | `failure-recovery` | `scenarios` object contains every required scenario key, each with `status: passed` |
 | `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`, all evaluated targets true, and `raw_sha256` binding the summary to `--benchmark-raw` |
 | `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
 
@@ -63,3 +63,29 @@ age boundary is accepted; timestamps older than that boundary, non-positive
 timestamps, and future-dated timestamps are rejected. The age override is
 intended for controlled local or CI runs and must not be used to conceal stale
 release evidence.
+
+The failure-recovery artifact must contain these scenario keys under
+`scenarios`. Each value is a machine-readable result object whose `status` is
+`passed`; missing, unknown, or non-passed scenarios block the gate:
+
+```text
+control-plane-crash-before-dispatch
+control-plane-crash-after-dispatch
+compute-agent-crash-before-mutation
+compute-agent-crash-after-domain-definition-or-start
+libvirt-daemon-restart
+agent-control-plane-network-interruption
+timeout-after-accepted-mutation
+duplicate-create-delivery
+duplicate-action-delivery
+duplicate-delete-delivery
+corrupted-truncated-image
+image-checksum-mismatch
+qemu-img-failure
+config-drive-failure
+tap-failure
+dnsmasq-failure
+disk-full
+repeated-delete
+partial-cleanup
+```

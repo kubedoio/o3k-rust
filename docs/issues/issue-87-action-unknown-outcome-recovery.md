@@ -17,6 +17,12 @@ otherwise it remains unknown and does not repeat an unproven mutation.
 Regression tests cover timeout-after-stop, duplicate action delivery, durable
 unknown state, and observation-based completion.
 
+The release gate now also rejects an incomplete or failed aggregate recovery
+artifact: all required crash, restart, interruption, timeout, duplicate,
+image, host-tool, and cleanup scenario keys must be present with a passed
+machine-readable result. This validates evidence shape only and does not claim
+that any real-host scenario has run.
+
 ## Explicit non-goals
 
 - no real libvirt, agent, daemon, network, disk, or process failure injection;
