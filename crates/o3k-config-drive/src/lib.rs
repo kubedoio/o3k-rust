@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 pub const MAX_USER_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
+pub const MAX_NETWORK_DATA_BYTES: usize = 64 * 1024;
+pub const MAX_VENDOR_DATA_BYTES: usize = 64 * 1024;
 const MANIFEST_NAME: &str = "o3k-ownership.json";
 const MANAGED_BY: &str = "o3k-config-drive";
 
@@ -23,6 +25,10 @@ pub enum ConfigDriveError {
     UserDataTooLarge,
     #[error("config-drive metadata is too large")]
     MetadataTooLarge,
+    #[error("config-drive network data is too large")]
+    NetworkDataTooLarge,
+    #[error("config-drive vendor data is too large")]
+    VendorDataTooLarge,
     #[error("config-drive storage failed")]
     Storage(#[source] io::Error),
     #[error("config-drive serialization failed")]
@@ -250,6 +256,18 @@ fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
     if encoded.len() > MAX_METADATA_BYTES {
         return Err(ConfigDriveError::MetadataTooLarge);
     }
+    let network_data =
+        serde_json::to_vec(&input.network_data).map_err(ConfigDriveError::Serialization)?;
+    if network_data.len() > MAX_NETWORK_DATA_BYTES {
+        return Err(ConfigDriveError::NetworkDataTooLarge);
+    }
+    if input
+        .vendor_data
+        .as_ref()
+        .is_some_and(|data| data.len() > MAX_VENDOR_DATA_BYTES)
+    {
+        return Err(ConfigDriveError::VendorDataTooLarge);
+    }
     Ok(())
 }
 
@@ -303,6 +321,19 @@ mod tests {
         assert!(matches!(
             generate(std::env::temp_dir(), &value),
             Err(ConfigDriveError::UserDataTooLarge)
+        ));
+        let mut value = input();
+        value.network_data =
+            BTreeMap::from([("payload".to_owned(), "x".repeat(MAX_NETWORK_DATA_BYTES))]);
+        assert!(matches!(
+            generate(std::env::temp_dir(), &value),
+            Err(ConfigDriveError::NetworkDataTooLarge)
+        ));
+        let mut value = input();
+        value.vendor_data = Some(vec![b'x'; MAX_VENDOR_DATA_BYTES + 1]);
+        assert!(matches!(
+            generate(std::env::temp_dir(), &value),
+            Err(ConfigDriveError::VendorDataTooLarge)
         ));
     }
 
