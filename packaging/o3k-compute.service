@@ -1,0 +1,21 @@
+[Unit]
+Description=O3K libvirt compute agent
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=o3k
+Group=o3k
+SupplementaryGroups=libvirt kvm
+EnvironmentFile=-/etc/o3k/o3k-compute.env
+ExecStart=/usr/local/bin/o3k-compute
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/o3k /var/log/o3k
+
+[Install]
+WantedBy=multi-user.target
