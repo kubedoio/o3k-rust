@@ -53,5 +53,6 @@ is blocked.
 
 The implementation decisions are recorded in ADR-0007 (agent security),
 ADR-0008 (libvirt adapter), ADR-0010 (DHCP isolation), ADR-0011 (provider
-backends), and ADR-0012 (console output). Release policy and evidence rules
+backends), ADR-0012 (console output), and ADR-0013 (lifecycle safety
+boundaries). Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.

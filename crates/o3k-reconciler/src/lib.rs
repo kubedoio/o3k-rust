@@ -333,10 +333,12 @@ mod tests {
         CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
             o3k_server_id: Uuid::now_v7(),
+            project_id: "project".to_owned(),
             name: "journal-test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
             image_id: None,
+            network_ids: Vec::new(),
             idempotency_key: "journal-test-key".to_owned(),
         }
     }

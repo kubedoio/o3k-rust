@@ -38,10 +38,12 @@ pub mod mapping {
         Ok(CreateInstanceRequest {
             operation_id,
             o3k_server_id,
+            project_id: request.project_id,
             name: request.name,
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
             image_id: (!request.image_id.is_empty()).then_some(request.image_id),
+            network_ids: request.network_ids,
             idempotency_key: request.idempotency_key,
         })
     }
@@ -58,10 +60,12 @@ mod tests {
         let request = proto::CreateInstanceRequest {
             operation_id: Uuid::nil().to_string(),
             o3k_server_id: Uuid::from_u128(7).to_string(),
+            project_id: "project".to_owned(),
             name: "test".to_owned(),
             vcpus: 2,
             memory_mib: 512,
             image_id: "image".to_owned(),
+            network_ids: vec!["network".to_owned()],
             idempotency_key: "key".to_owned(),
         };
         let encoded = request.encode_to_vec();
@@ -75,6 +79,8 @@ mod tests {
         };
         assert_eq!(internal.vcpus, 2);
         assert_eq!(internal.image_id.as_deref(), Some("image"));
+        assert_eq!(internal.project_id, "project");
+        assert_eq!(internal.network_ids, vec!["network"]);
     }
 
     #[test]

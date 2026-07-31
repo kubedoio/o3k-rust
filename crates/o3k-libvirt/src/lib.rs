@@ -643,6 +643,22 @@ fn provider_error(error: LibvirtError) -> o3k_provider::ProviderError {
     }
 }
 
+fn owned_metadata(
+    inspection: &DomainInspection,
+    expected_server_id: Option<&str>,
+) -> Result<DomainMetadata, o3k_provider::ProviderError> {
+    let DiscoveryResult::Owned { metadata, .. } =
+        discover_domain_xml(&inspection.name, &inspection.xml)
+    else {
+        // Foreign or malformed domains are never eligible for provider mutations.
+        return Err(o3k_provider::ProviderError::NotFound);
+    };
+    if expected_server_id.is_some_and(|id| metadata.server_id != id) {
+        return Err(o3k_provider::ProviderError::NotFound);
+    }
+    Ok(metadata)
+}
+
 #[async_trait::async_trait]
 impl o3k_provider::ComputeProvider for LibvirtProvider {
     async fn capabilities(
@@ -667,7 +683,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
         let definition = build_domain_xml(&DomainSpec {
             metadata: DomainMetadata {
                 server_id: request.o3k_server_id.to_string(),
-                project_id: "unknown".into(),
+                project_id: request.project_id,
                 generation: 1,
                 operation_id: request.operation_id.to_string(),
                 managed_by: "o3k-compute".into(),
@@ -700,9 +716,11 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             .inspect(provider_instance_id.to_owned())
             .await
             .map_err(provider_error)?;
+        let metadata = owned_metadata(&inspection, None)?;
         Ok(o3k_provider::Instance {
             provider_instance_id: inspection.name,
-            o3k_server_id: uuid::Uuid::nil(),
+            o3k_server_id: uuid::Uuid::parse_str(&metadata.server_id)
+                .map_err(|_| o3k_provider::ProviderError::Terminal)?,
             state: if inspection.active {
                 o3k_provider::InstanceState::Running
             } else {
@@ -719,6 +737,7 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
         let name = request.provider_instance_id;
         match self.adapter.inspect(name.clone()).await {
             Ok(inspection) => {
+                owned_metadata(&inspection, None)?;
                 if inspection.active {
                     self.adapter
                         .force_stop(name.clone())
@@ -741,6 +760,12 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
         _idempotency_key: &str,
     ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
         let name = provider_instance_id.to_owned();
+        let inspection = self
+            .adapter
+            .inspect(name.clone())
+            .await
+            .map_err(provider_error)?;
+        owned_metadata(&inspection, None)?;
         match action {
             o3k_provider::InstanceAction::Start => self.adapter.start(name).await,
             o3k_provider::InstanceAction::Stop => self.adapter.shutdown(name).await,
@@ -831,5 +856,50 @@ mod tests {
                 name: "foreign".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn provider_ownership_guard_rejects_foreign_or_malformed_domains() -> Result<(), LibvirtError> {
+        let foreign = DomainInspection {
+            name: "o3k-same-prefix".to_owned(),
+            active: true,
+            persistent: true,
+            state: "running".to_owned(),
+            max_memory_kib: 512,
+            vcpus: 1,
+            xml: "<domain><name>o3k-same-prefix</name></domain>".to_owned(),
+        };
+        assert_eq!(
+            owned_metadata(&foreign, None),
+            Err(o3k_provider::ProviderError::NotFound)
+        );
+
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "server-guard".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+        };
+        let built = build_domain_xml(&spec)?;
+        let owned = DomainInspection {
+            name: built.name,
+            active: false,
+            persistent: true,
+            state: "shutoff".to_owned(),
+            max_memory_kib: 128,
+            vcpus: 1,
+            xml: built.xml,
+        };
+        assert_eq!(
+            owned_metadata(&owned, Some("different-server")),
+            Err(o3k_provider::ProviderError::NotFound)
+        );
+        Ok(())
     }
 }

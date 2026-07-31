@@ -216,10 +216,12 @@ impl ComputeProvider for CellHvProvider {
             .create_instance(Request::new(proto::CreateInstanceRequest {
                 operation_id: request.operation_id.to_string(),
                 o3k_server_id: request.o3k_server_id.to_string(),
+                project_id: request.project_id,
                 name: request.name,
                 vcpus: request.vcpus,
                 memory_mib: request.memory_mib,
                 image_id: request.image_id.unwrap_or_default(),
+                network_ids: request.network_ids,
                 idempotency_key: request.idempotency_key,
             }))
             .await
