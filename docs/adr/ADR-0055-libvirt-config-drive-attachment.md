@@ -12,11 +12,12 @@ could therefore never consume the generated metadata through libvirt.
 
 ## Decision
 
-`DomainSpec` accepts an optional host-side path to a materialized config-drive
-image. When present, the builder validates it with the same fail-closed source
-rules as the boot image and emits a raw, read-only SATA CD-ROM attachment. The
-path is XML-escaped and is not accepted as a URI, control-character value, or
-parent-directory path.
+`DomainSpec` accepts an optional host-side path and SHA-256 digest for a
+materialized config-drive image. When present, the builder validates that the
+path is an absolute regular file and that its bytes match the supplied digest,
+then emits a raw, read-only SATA CD-ROM attachment. The path is XML-escaped
+and is not accepted as a URI, control-character value, or parent-directory
+path.
 
 This change only wires a materialized artifact into domain XML. It does not
 turn the generated directory into an image, verify O3K ownership at this
@@ -26,7 +27,7 @@ host evidence work.
 
 ## Consequences
 
-Generated domains can expose a materialized config-drive without permitting the
-guest to write it. Invalid or ambiguous host sources fail before definition,
-and the existing deterministic XML behavior remains unchanged when no
-config-drive is requested.
+Generated domains can expose a materialized, digest-bound config-drive without
+permitting the guest to write it. Invalid, altered, symlinked, or ambiguous
+host sources fail before definition, and the existing deterministic XML
+behavior remains unchanged when no config-drive is requested.
