@@ -89,6 +89,13 @@ done
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/config/o3kd.env" && -f "$WORK_DIR/log/.o3k-owned" ]]
 [[ ! -s "$WORK_DIR/systemctl.log" ]]
 
+# Keep the destructive precondition ahead of any default-layout service
+# mutation. This source-order assertion is portable and does not require
+# creating foreign directories under /var/lib or /etc on the test host.
+ownership_line="$(grep -n 'refusing purge of unowned path' "$ROOT_DIR/packaging/uninstall.sh" | head -n1 | cut -d: -f1)"
+systemd_line="$(grep -n 'systemctl disable --now o3kd.service' "$ROOT_DIR/packaging/uninstall.sh" | head -n1 | cut -d: -f1)"
+[[ -n "$ownership_line" && -n "$systemd_line" && "$ownership_line" -lt "$systemd_line" ]]
+
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"

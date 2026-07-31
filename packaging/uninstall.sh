@@ -11,11 +11,6 @@ while (($#)); do case "$1" in --prefix) PREFIX="$2"; shift 2;; --data-dir) DATA_
 owned_marker() { [[ -f "$1/.o3k-owned" && ! -L "$1/.o3k-owned" ]] && grep -Fqx "o3k-owned-v1 path=$1" "$1/.o3k-owned"; }
 SYSTEM_INSTALL=0
 if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" == /etc/o3k && "$LOG_DIR" == /var/log/o3k ]]; then SYSTEM_INSTALL=1; fi
-if [[ $SYSTEM_INSTALL -eq 1 ]]; then
-  command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
-  command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
-  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
-fi
 if [[ $PURGE -eq 1 ]]; then
   for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do
     [[ -n "$path" && "$path" == /* && "$path" != / ]] || { echo "refusing unsafe purge path" >&2; exit 2; }
@@ -24,6 +19,13 @@ if [[ $PURGE -eq 1 ]]; then
       exit 2
     fi
   done
+fi
+if [[ $SYSTEM_INSTALL -eq 1 ]]; then
+  command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
+  command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+fi
+if [[ $PURGE -eq 1 ]]; then
   for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do [[ -e "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; [[ -f "$path/.o3k-owned" ]] && rm -f -- "$path/.o3k-owned"; rmdir "$path" 2>/dev/null || true; done
 fi
 
