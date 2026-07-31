@@ -69,6 +69,20 @@ mod host_network_tests {
         ));
         Ok(())
     }
+
+    #[test]
+    fn existing_uplink_must_be_up_and_attached_to_the_managed_bridge() {
+        let output = "3: eth0: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP";
+        assert!(interface_is_attached_to(output, "o3k-br0"));
+        assert!(!interface_is_attached_to(
+            "3: eth0: <BROADCAST,UP> mtu 1500 state UP",
+            "o3k-br0"
+        ));
+        assert!(!interface_is_attached_to(
+            "3: eth0: <BROADCAST> mtu 1500 master o3k-br0 state DOWN",
+            "o3k-br0"
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +151,22 @@ impl HostNetworkManager {
     }
     pub fn ensure_bridge(&self) -> Result<(), HostNetworkError> {
         if link_exists(&self.config.bridge_name) {
+            run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
+            if let Some(uplink) = &self.config.uplink {
+                let output = Command::new("ip")
+                    .args(["-o", "link", "show", "dev", uplink])
+                    .output()
+                    .map_err(|_| HostNetworkError::CommandFailed)?;
+                if !output.status.success() {
+                    return Err(HostNetworkError::CommandFailed);
+                }
+                if !interface_is_attached_to(
+                    &String::from_utf8_lossy(&output.stdout),
+                    &self.config.bridge_name,
+                ) {
+                    return Err(HostNetworkError::ForeignInterface);
+                }
+            }
             return Ok(());
         }
         run_ip([
@@ -267,6 +297,13 @@ fn interface_output_is_owned(output: &str, expected_mac: &str, bridge_name: &str
     output.contains(&format!("link/ether {expected_mac}"))
         && output.contains(&format!("master {bridge_name}"))
 }
+
+fn interface_is_attached_to(output: &str, bridge_name: &str) -> bool {
+    output
+        .lines()
+        .any(|line| line.contains("state UP") && line.contains(&format!("master {bridge_name}")))
+}
+
 fn run_ip<'a, I>(args: I) -> Result<(), HostNetworkError>
 where
     I: IntoIterator<Item = &'a str>,
