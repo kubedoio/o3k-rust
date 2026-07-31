@@ -1371,10 +1371,42 @@ async fn server_action(
             if let Err(error) = service.show_server(&token.project_id, id).await {
                 return compute_error(error);
             }
-            return match console.read(id) {
-                Ok(output) => (
+            let options = body
+                .get("os-getConsoleOutput")
+                .and_then(serde_json::Value::as_object);
+            let offset = match options.and_then(|value| value.get("offset")) {
+                None => Ok(0),
+                Some(value) => value.as_u64().ok_or(()),
+            };
+            let Ok(offset) = offset else {
+                return keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "console output offset is invalid",
+                );
+            };
+            let length = match options.and_then(|value| value.get("length")) {
+                None => Ok(o3k_console::MAX_CONSOLE_BYTES as u64),
+                Some(value) => value.as_u64().ok_or(()),
+            };
+            let Ok(length) = length else {
+                return keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "console output length is invalid",
+                );
+            };
+            let Ok(length) = usize::try_from(length) else {
+                return keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "console output length is invalid",
+                );
+            };
+            return match console.read_from(id, offset, length) {
+                Ok(chunk) => (
                     StatusCode::OK,
-                    Json(serde_json::json!({"output": String::from_utf8_lossy(&output)})),
+                    Json(serde_json::json!({"output": String::from_utf8_lossy(&chunk.bytes)})),
                 )
                     .into_response(),
                 Err(ConsoleError::NotFound) => {

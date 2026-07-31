@@ -312,9 +312,12 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     )?;
     let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
     let compute = ComputeService::new(store, std::sync::Arc::new(FakeComputeProvider::new()));
+    let console =
+        o3k_console::ConsoleService::open(format!("/tmp/o3k-api-console-{}", std::process::id()))?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
-        .with_compute(compute);
+        .with_compute(compute)
+        .with_console(console.clone());
     let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let response = o3k_api::router_with_state(state.clone())
         .oneshot(
@@ -364,6 +367,26 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let server_id = server_json["server"]["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("server missing"))?;
+    let server_uuid = server_id.parse::<uuid::Uuid>()?;
+    console.write(server_uuid, b"0123456789abcdef")?;
+    let console_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                ))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"os-getConsoleOutput":{"offset":4,"length":6}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(console_response.status(), StatusCode::OK);
+    let console_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(console_response.into_body(), 4096).await?)?;
+    assert_eq!(console_json["output"], "456789");
     let stopped = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -387,6 +410,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    console.cleanup(server_uuid)?;
     std::fs::remove_file(path)?;
     Ok(())
 }
