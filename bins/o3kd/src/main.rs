@@ -1,3 +1,4 @@
+use o3k_provider::ComputeProvider;
 use std::{sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -35,6 +36,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 store,
                 Arc::new(o3k_provider::FakeComputeProvider::new()),
             )
+        }
+    };
+    let compute_ready = match tokio::time::timeout(
+        Duration::from_secs(5),
+        compute_service.provider().capabilities(),
+    )
+    .await
+    {
+        Ok(Ok(capabilities)) => {
+            info!(provider = %capabilities.provider_name, "compute provider is ready");
+            true
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "compute provider is not ready");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("compute provider readiness probe timed out");
+            false
         }
     };
     let event_task = compute_service.spawn_agent_event_consumer(registry.clone());
@@ -102,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_console(console_service)
             .with_compute(compute_service)
     };
-    state.set_ready(true);
+    state.set_ready(compute_ready);
     let shutdown_state = state.clone();
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
