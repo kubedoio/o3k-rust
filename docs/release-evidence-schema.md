@@ -11,6 +11,8 @@ be a JSON object with:
   controlled gate invocation; leaving it unset retains the safe seven-day
   default;
 - `cleanup.status: "passed"`;
+- for the CLI workflow, `cleanup.resources` records each created resource's
+  disposition as `verified_absent`, `not_verified`, or `pending`;
 - the status required by the gate (`passed` for workflows, `measured` for the
   benchmark).
 
@@ -49,6 +51,11 @@ starting so an interrupted run cannot leave a previous pass available to the
 gate. The CLI harness also writes a redacted `failed` artifact after a
 non-skipped lifecycle error and records the cleanup result; this is diagnostic
 evidence only and remains ineligible for the release gate.
+
+For `openstack-cli-e2e` artifacts, every created resource must be
+`verified_absent` when `cleanup.status` is `passed`. A failed cleanup retains
+the owned resource's `not_verified` or `pending` disposition instead of
+implying that an unsuccessful delete command established absence.
 
 The gate captures one current epoch timestamp for the invocation and applies
 the same timestamp policy to every artifact. A timestamp equal to the maximum

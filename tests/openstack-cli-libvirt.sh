@@ -18,6 +18,11 @@ CREATED_NETWORK_ID=
 CREATED_SUBNET_ID=
 CREATED_FLAVOR_ID=
 CREATED_SERVER_ID=
+CLEANUP_IMAGE_STATUS=
+CLEANUP_NETWORK_STATUS=
+CLEANUP_SUBNET_STATUS=
+CLEANUP_FLAVOR_STATUS=
+CLEANUP_SERVER_STATUS=
 SERVER_NAME=o3k-testlab-server
 
 validate_server_json() {
@@ -97,7 +102,22 @@ delete_resource_and_verify_absent() {
     # A failed delete has an unknown outcome. Always observe before deciding
     # that cleanup failed; a timeout may have removed the resource already.
     openstack "${resource}" delete "${resource_id}" >/dev/null 2>&1 || true
-    resource_is_absent "${resource}" "${resource_id}"
+    if resource_is_absent "${resource}" "${resource_id}"; then
+        case "${resource}" in
+            image) CLEANUP_IMAGE_STATUS=verified_absent ;;
+            network) CLEANUP_NETWORK_STATUS=verified_absent ;;
+            subnet) CLEANUP_SUBNET_STATUS=verified_absent ;;
+            flavor) CLEANUP_FLAVOR_STATUS=verified_absent ;;
+        esac
+        return 0
+    fi
+    case "${resource}" in
+        image) CLEANUP_IMAGE_STATUS=not_verified ;;
+        network) CLEANUP_NETWORK_STATUS=not_verified ;;
+        subnet) CLEANUP_SUBNET_STATUS=not_verified ;;
+        flavor) CLEANUP_FLAVOR_STATUS=not_verified ;;
+    esac
+    return 1
 }
 
 cleanup_resources() {
@@ -105,8 +125,10 @@ cleanup_resources() {
     if [[ -n "${SERVER_ID}" ]]; then
         openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || cleanup_ok=0
         if ! server_is_absent "${SERVER_ID}"; then
+            CLEANUP_SERVER_STATUS=not_verified
             cleanup_ok=0
         else
+            CLEANUP_SERVER_STATUS=verified_absent
             SERVER_ID=
         fi
     fi
@@ -145,9 +167,16 @@ write_result() {
     local status="$1" reason="$2" cleanup_status="${3:-not_run}"
     python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${status}" "${reason}" "${cleanup_status}" \
         "${CREATED_IMAGE_ID}" "${CREATED_NETWORK_ID}" "${CREATED_SUBNET_ID}" \
-        "${CREATED_FLAVOR_ID}" "${CREATED_SERVER_ID}" <<'PY'
+        "${CREATED_FLAVOR_ID}" "${CREATED_SERVER_ID}" \
+        "${CLEANUP_IMAGE_STATUS}" "${CLEANUP_NETWORK_STATUS}" \
+        "${CLEANUP_SUBNET_STATUS}" "${CLEANUP_FLAVOR_STATUS}" \
+        "${CLEANUP_SERVER_STATUS}" <<'PY'
 import json, sys, time
-path, status, reason, cleanup_status, image_id, network_id, subnet_id, flavor_id, server_id = sys.argv[1:]
+(
+    path, status, reason, cleanup_status, image_id, network_id, subnet_id,
+    flavor_id, server_id, image_status, network_status, subnet_status,
+    flavor_status, server_status,
+) = sys.argv[1:]
 result = {
     "artifact_type": "openstack-cli-e2e",
     "status": status,
@@ -158,6 +187,17 @@ result = {
     "cleanup": {"status": cleanup_status},
     "finished_at": int(time.time()),
 }
+cleanup_resources = {
+    name: value for name, value in {
+        "image": image_status,
+        "network": network_status,
+        "subnet": subnet_status,
+        "flavor": flavor_status,
+        "server": server_status,
+    }.items() if value
+}
+if cleanup_resources:
+    result["cleanup"]["resources"] = cleanup_resources
 resources = {
     name: value for name, value in {
         "image_id": image_id,
@@ -243,14 +283,19 @@ fi
 # uploaded. The public CLI does not expose operation IDs here.
 IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --disk-format raw --container-format bare -f value -c id)"
 CREATED_IMAGE_ID="${IMAGE_ID}"
+CLEANUP_IMAGE_STATUS=pending
 NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"
 CREATED_NETWORK_ID="${NETWORK_ID}"
+CLEANUP_NETWORK_STATUS=pending
 SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 o3k-testlab-subnet -f value -c id)"
 CREATED_SUBNET_ID="${SUBNET_ID}"
+CLEANUP_SUBNET_STATUS=pending
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
+CLEANUP_FLAVOR_STATUS=pending
 SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --network "${NETWORK_ID}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
+CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
@@ -273,13 +318,18 @@ if ! server_is_absent "${SERVER_ID}"; then
     echo "server deletion was not verified" >&2
     exit 1
 fi
+CLEANUP_SERVER_STATUS=verified_absent
 SERVER_ID=
 delete_resource_and_verify_absent flavor "${FLAVOR_ID}"
+CLEANUP_FLAVOR_STATUS=verified_absent
 FLAVOR_ID=
 delete_resource_and_verify_absent subnet "${SUBNET_ID}"
+CLEANUP_SUBNET_STATUS=verified_absent
 SUBNET_ID=
 delete_resource_and_verify_absent network "${NETWORK_ID}"
+CLEANUP_NETWORK_STATUS=verified_absent
 NETWORK_ID=
 delete_resource_and_verify_absent image "${IMAGE_ID}"
+CLEANUP_IMAGE_STATUS=verified_absent
 IMAGE_ID=
 write_result passed "CLI lifecycle completed" passed
