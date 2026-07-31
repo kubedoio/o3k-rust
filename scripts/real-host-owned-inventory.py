@@ -85,9 +85,14 @@ def snapshot() -> dict[str, object] | None:
         else:
             foreign_domains.append(value)
 
+    openstack_requested = os.environ.get("O3K_REAL_HOST_OPENSTACK_INVENTORY", "false") == "true"
     openstack_status = "not_checked"
     resources: dict[str, list[str]] = {}
-    if os.environ.get("O3K_REAL_HOST_OPENSTACK_INVENTORY", "false") == "true" and os.environ.get("OS_PASSWORD"):
+    if openstack_requested and not os.environ.get("OS_PASSWORD"):
+        # A protected run that requests provider inventory must not silently
+        # turn missing credentials into an empty, apparently clean snapshot.
+        return None
+    if openstack_requested:
         openstack_status = "available"
         for resource in RESOURCES:
             output = command(("openstack", *RESOURCE_COMMANDS[resource]), scrub_provider_config=True)

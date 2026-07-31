@@ -69,6 +69,19 @@ assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 PY
 
+unset OS_PASSWORD
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "requested OpenStack inventory without credentials was accepted" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked"
+assert value["reason"] == "owned_inventory_unavailable"
+PY
+export OS_PASSWORD=fake-password
+
 export O3K_FAKE_IP_UNSTABLE=true O3K_FAKE_IP_COUNTER="${WORK_DIR}/ip-counter"
 if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/unstable.json"; then
     echo "unstable inventory was accepted" >&2

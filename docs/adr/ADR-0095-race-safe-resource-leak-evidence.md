@@ -16,7 +16,9 @@ artifact or detect changes to unrelated host networking state.
 
 The owned-resource inventory is collected twice and is accepted only when two
 consecutive canonical snapshots match. Collection failures and an unstable
-host fail closed. JSON publication uses a same-directory temporary file and
+host fail closed; when OpenStack inventory is requested, missing credentials
+are also a collection failure rather than an unchecked empty inventory. JSON
+publication uses a same-directory temporary file and
 `os.replace`, so an interrupted writer cannot leave a result that looks like a
 complete snapshot.
 
