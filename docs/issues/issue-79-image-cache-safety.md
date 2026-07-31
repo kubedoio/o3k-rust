@@ -19,6 +19,9 @@ This bounded repository change hardens the existing image-cache boundary:
   files;
 - regression coverage proves symlinked bases, symlinked overlays, and an
   outside target are rejected.
+- verified `ImageService` artifacts now have an explicit local
+  `ImageCache::cache_artifact` bridge with size revalidation and idempotent
+  publication coverage.
 
 See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
 [ADR-0104](../adr/ADR-0104-image-overlay-backing-verification.md).
@@ -26,5 +29,6 @@ See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
 ## Explicit boundary
 
 This does not claim completion of the full issue. Glance-backed image
-resolution, compute-agent dispatch, libvirt image realization, and trusted
-real-host evidence remain separate follow-ups.
+resolution, authenticated transfer to a selected compute host,
+compute-agent dispatch, durable image/overlay ownership, libvirt image
+realization, and trusted real-host evidence remain separate follow-ups.

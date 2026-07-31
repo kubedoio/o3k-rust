@@ -42,6 +42,19 @@ pub struct ImageArtifact {
     pub content: Vec<u8>,
 }
 
+/// A verified image artifact published into this process's managed cache.
+///
+/// The path is intentionally local to the image-cache boundary. It must not
+/// be sent through the public API or compute-agent protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedImageArtifact {
+    pub id: Uuid,
+    pub checksum: String,
+    pub format: String,
+    pub size: u64,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Error)]
 pub enum ImageError {
     #[error("image not found")]
@@ -152,6 +165,30 @@ impl ImageCache {
             ImageError::Storage(error)
         })?;
         Ok(path)
+    }
+
+    /// Publishes a previously verified image-service artifact into the local
+    /// content-addressed cache.
+    ///
+    /// The cache still validates the digest, format, and byte limit through
+    /// [`Self::cache_base`]. The explicit size check prevents a forged or
+    /// stale in-memory artifact from crossing the service/cache boundary with
+    /// inconsistent metadata.
+    pub fn cache_artifact(
+        &self,
+        artifact: &ImageArtifact,
+    ) -> Result<CachedImageArtifact, ImageError> {
+        if artifact.size != artifact.content.len() as u64 {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        let path = self.cache_base(&artifact.checksum, &artifact.format, &artifact.content)?;
+        Ok(CachedImageArtifact {
+            id: artifact.id,
+            checksum: artifact.checksum.clone(),
+            format: artifact.format.clone(),
+            size: artifact.size,
+            path,
+        })
     }
 
     pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
@@ -588,6 +625,42 @@ mod tests {
             Err(ImageError::TooLarge)
         ));
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn verified_service_artifact_publishes_to_cache_idempotently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let service_path = root("artifact-cache-service");
+        let cache_path = root("artifact-cache-cache");
+        let service = ImageService::open(&service_path, DEFAULT_MAX_UPLOAD_BYTES)?;
+        let image = service.create(
+            "project-a",
+            "test".to_owned(),
+            "private".to_owned(),
+            "bare".to_owned(),
+            "qcow2".to_owned(),
+        )?;
+        service.upload("project-a", image.id, b"image-bytes")?;
+        let artifact = service.resolve_artifact("project-a", image.id)?;
+        let cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
+
+        let first = cache.cache_artifact(&artifact)?;
+        let second = cache.cache_artifact(&artifact)?;
+        assert_eq!(first, second);
+        assert_eq!(first.id, image.id);
+        assert_eq!(first.size, artifact.content.len() as u64);
+        assert_eq!(fs::read(&first.path)?, artifact.content);
+
+        let mut inconsistent = artifact;
+        inconsistent.size += 1;
+        assert!(matches!(
+            cache.cache_artifact(&inconsistent),
+            Err(ImageError::ChecksumMismatch)
+        ));
+
+        fs::remove_dir_all(service_path)?;
+        fs::remove_dir_all(cache_path)?;
         Ok(())
     }
 
