@@ -8,6 +8,7 @@ use o3k_provider::{
     InstanceAction, Operation, ProviderError,
 };
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
+use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{DurableStore, SqliteStore, StoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -46,6 +47,8 @@ pub enum ComputeError {
     Reconcile(#[from] ReconcileError),
     #[error("compute provider error")]
     Provider(#[from] ProviderError),
+    #[error("compute scheduler error")]
+    Scheduler(#[from] SchedulerError),
 }
 
 #[derive(Clone)]
@@ -53,6 +56,7 @@ pub struct ComputeService {
     store: Arc<SqliteStore>,
     provider: Arc<ProviderBackend>,
     journal: OperationJournal<SqliteStore, ProviderBackend>,
+    scheduler: Option<Scheduler>,
 }
 
 #[derive(Clone)]
@@ -110,7 +114,14 @@ impl ComputeService {
             store,
             provider,
             journal,
+            scheduler: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
+        self.scheduler = Some(scheduler);
+        self
     }
 
     #[must_use]
@@ -180,7 +191,32 @@ impl ComputeService {
             memory_mib: flavor.ram_mib,
             image_id: Some(image_id.clone()),
             network_ids: network_ids.clone(),
+            placement_provider_id: None,
+            placement_allocation_id: None,
             idempotency_key: idempotency_key.clone(),
+        };
+        let placement = self
+            .scheduler
+            .as_ref()
+            .map(|scheduler| {
+                scheduler.schedule(
+                    &server_id.to_string(),
+                    SchedulerFlavor {
+                        vcpus: flavor.vcpus as u64,
+                        memory_mb: flavor.ram_mib,
+                        disk_gb: flavor.disk_gib,
+                    },
+                )
+            })
+            .transpose()?;
+        let request = CreateInstanceRequest {
+            placement_provider_id: placement
+                .as_ref()
+                .map(|decision| decision.provider_id.clone()),
+            placement_allocation_id: placement
+                .as_ref()
+                .map(|decision| decision.allocation_id.clone()),
+            ..request
         };
         match self.store.get_resource(server_id).await {
             Ok(existing) => {
@@ -222,7 +258,25 @@ impl ComputeService {
             }
             Err(error) => return Err(ComputeError::Reconcile(error)),
         }
-        let _ = self.journal.reconcile_once(request.operation_id).await?;
+        let reconcile_state = self.journal.reconcile_once(request.operation_id).await?;
+        if reconcile_state == o3k_store::OperationState::Failed {
+            if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
+                self.scheduler.as_ref(),
+                request.placement_provider_id.as_deref(),
+                request.placement_allocation_id.as_deref(),
+            ) {
+                scheduler.release_terminal(&o3k_scheduler::ScheduleDecision {
+                    provider_id: provider_id.to_owned(),
+                    allocation_id: allocation_id.to_owned(),
+                    allocation: o3k_placement::Allocation {
+                        provider_id: provider_id.to_owned(),
+                        consumer_id: id.to_string(),
+                        resources: std::collections::BTreeMap::new(),
+                    },
+                })?;
+            }
+            return Err(ComputeError::Conflict);
+        }
         self.show_server(project_id, id).await
     }
 
@@ -293,6 +347,23 @@ impl ComputeService {
             != o3k_store::OperationState::Succeeded
         {
             return Err(ComputeError::Conflict);
+        }
+        let intent: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
+            self.scheduler.as_ref(),
+            intent.placement_provider_id.as_deref(),
+            intent.placement_allocation_id.as_deref(),
+        ) {
+            scheduler.release_terminal(&o3k_scheduler::ScheduleDecision {
+                provider_id: provider_id.to_owned(),
+                allocation_id: allocation_id.to_owned(),
+                allocation: o3k_placement::Allocation {
+                    provider_id: provider_id.to_owned(),
+                    consumer_id: id.to_string(),
+                    resources: std::collections::BTreeMap::new(),
+                },
+            })?;
         }
         Ok(())
     }
@@ -459,6 +530,101 @@ mod tests {
             service.show_server("project-a", server.id).await,
             Err(ComputeError::NotFound)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduler_binding_is_persisted_idempotently_and_released_on_delete()
+    -> Result<(), ComputeError> {
+        let placement_root =
+            PathBuf::from(format!("/tmp/o3k-placement-compute-{}", Uuid::now_v7()));
+        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 8,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 8192,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let service = service("scheduler")
+            .await?
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let flavor = service.flavors()[0].id;
+        let server = service
+            .create_server(
+                "project-a",
+                "scheduled".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "request-scheduled".to_owned(),
+            )
+            .await?;
+        let resource = service.store.get_resource(server.id).await?;
+        let intent: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        assert_eq!(intent.placement_provider_id.as_deref(), Some("node-a"));
+        assert_eq!(
+            intent.placement_allocation_id.as_deref(),
+            Some(format!("allocation-{}", server.id).as_str())
+        );
+        assert_eq!(
+            placement
+                .provider("node-a")
+                .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+                .allocations
+                .len(),
+            1
+        );
+        let retry = service
+            .create_server(
+                "project-a",
+                "scheduled".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "request-scheduled".to_owned(),
+            )
+            .await?;
+        assert_eq!(retry.id, server.id);
+        service.delete_server("project-a", server.id).await?;
+        assert_eq!(
+            placement
+                .provider("node-a")
+                .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+                .allocations
+                .len(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(placement_root);
         Ok(())
     }
 }

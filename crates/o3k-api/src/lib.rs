@@ -1103,6 +1103,11 @@ fn compute_error(error: ComputeError) -> axum::response::Response {
             "Conflict",
             "compute operation conflicts with current state",
         ),
+        ComputeError::Scheduler(_) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "compute host could not satisfy placement requirements",
+        ),
         ComputeError::InvalidRequest => keystone_error(
             StatusCode::BAD_REQUEST,
             "Bad Request",
