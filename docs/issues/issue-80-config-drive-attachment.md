@@ -9,9 +9,12 @@ config-drive publisher:
   unpublished `.instance-*-tmp-*` directory;
 - rejected replacement of an unowned instance directory leaves that directory
   untouched;
+- published ownership validation recomputes the manifest fingerprint and
+  rejects symlinked, missing, or unexpected content before cleanup or replace;
 - regression coverage proves no temporary artifact remains after the failure.
 
-See [ADR-0088](../adr/ADR-0088-config-drive-failed-generation-cleanup.md).
+See [ADR-0088](../adr/ADR-0088-config-drive-failed-generation-cleanup.md) and
+[ADR-0105](../adr/ADR-0105-config-drive-manifest-integrity.md).
 
 ## Explicit boundary
 

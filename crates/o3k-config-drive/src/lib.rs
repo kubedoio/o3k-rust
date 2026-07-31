@@ -123,19 +123,12 @@ fn generate_at(
         serde_json::to_vec_pretty(&metadata).map_err(ConfigDriveError::Serialization)?;
     let network_data =
         serde_json::to_vec_pretty(&input.network_data).map_err(ConfigDriveError::Serialization)?;
-    let mut fingerprint = Sha256::new();
-    fingerprint.update(&meta_data);
-    fingerprint.update(&input.user_data);
-    fingerprint.update(&network_data);
-    if let Some(vendor) = &input.vendor_data {
-        fingerprint.update(vendor);
-    }
-    let digest = fingerprint.finalize();
-    let mut fingerprint_sha256 = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(&mut fingerprint_sha256, "{byte:02x}");
-    }
+    let fingerprint_sha256 = fingerprint(
+        &meta_data,
+        &input.user_data,
+        &network_data,
+        input.vendor_data.as_deref(),
+    );
     let directory = root.join(&input.instance_id);
     let temporary = root.join(format!(".{}-tmp-{}", input.instance_id, Uuid::now_v7()));
     fs::create_dir_all(&temporary).map_err(ConfigDriveError::Storage)?;
@@ -213,25 +206,100 @@ pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
 }
 
 fn validate_owned_directory(path: &Path, instance_id: &str) -> Result<(), ConfigDriveError> {
-    if path.is_symlink() {
-        return Err(ConfigDriveError::UnownedPath);
-    }
-    let manifest: OwnershipManifest = serde_json::from_slice(
-        &fs::read(path.join(MANIFEST_NAME)).map_err(|_| ConfigDriveError::UnownedPath)?,
-    )
-    .map_err(|_| ConfigDriveError::UnownedPath)?;
-    if manifest.schema_version != 1
-        || manifest.managed_by != MANAGED_BY
-        || manifest.instance_id != instance_id
-        || manifest.fingerprint_sha256.len() != 64
-        || !manifest
-            .fingerprint_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
+    if path.is_symlink()
+        || !fs::symlink_metadata(path)
+            .map_err(|_| ConfigDriveError::UnownedPath)?
+            .is_dir()
     {
         return Err(ConfigDriveError::UnownedPath);
     }
+    let manifest_path = path.join(MANIFEST_NAME);
+    let manifest: OwnershipManifest = serde_json::from_slice(&read_owned_file(&manifest_path)?)
+        .map_err(|_| ConfigDriveError::UnownedPath)?;
+    if manifest.schema_version != 1
+        || manifest.managed_by != MANAGED_BY
+        || manifest.instance_id != instance_id
+    {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    require_owned_directory(&path.join("openstack"))?;
+    let latest = path.join("openstack/latest");
+    require_owned_directory(&latest)?;
+    let meta_data = read_owned_file(&latest.join("meta_data.json"))?;
+    let network_data = read_owned_file(&latest.join("network_data.json"))?;
+    let user_data = read_owned_file(&latest.join("user_data"))?;
+    let vendor_path = latest.join("vendor_data.json");
+    let vendor_data = if vendor_path.exists() {
+        Some(read_owned_file(&vendor_path)?)
+    } else {
+        None
+    };
+    let actual_fingerprint = fingerprint(
+        &meta_data,
+        &user_data,
+        &network_data,
+        vendor_data.as_deref(),
+    );
+    if manifest.fingerprint_sha256 != actual_fingerprint {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    reject_unexpected_entries(path, &[MANIFEST_NAME, "openstack"])?;
+    reject_unexpected_entries(&path.join("openstack"), &["latest"])?;
+    let mut expected = vec!["meta_data.json", "network_data.json", "user_data"];
+    if vendor_data.is_some() {
+        expected.push("vendor_data.json");
+    }
+    reject_unexpected_entries(&latest, &expected)?;
     Ok(())
+}
+
+fn read_owned_file(path: &Path) -> Result<Vec<u8>, ConfigDriveError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ConfigDriveError::UnownedPath)?;
+    if !metadata.is_file() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    fs::read(path).map_err(|_| ConfigDriveError::UnownedPath)
+}
+
+fn require_owned_directory(path: &Path) -> Result<(), ConfigDriveError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ConfigDriveError::UnownedPath)?;
+    if !metadata.is_dir() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    Ok(())
+}
+
+fn reject_unexpected_entries(path: &Path, expected: &[&str]) -> Result<(), ConfigDriveError> {
+    for entry in fs::read_dir(path).map_err(|_| ConfigDriveError::UnownedPath)? {
+        let entry = entry.map_err(|_| ConfigDriveError::UnownedPath)?;
+        let name = entry.file_name();
+        if !expected.iter().any(|value| name == *value) {
+            return Err(ConfigDriveError::UnownedPath);
+        }
+    }
+    Ok(())
+}
+
+fn fingerprint(
+    meta_data: &[u8],
+    user_data: &[u8],
+    network_data: &[u8],
+    vendor_data: Option<&[u8]>,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut digest = Sha256::new();
+    digest.update(meta_data);
+    digest.update(user_data);
+    digest.update(network_data);
+    if let Some(vendor) = vendor_data {
+        digest.update(vendor);
+    }
+    let mut result = String::with_capacity(64);
+    for byte in digest.finalize() {
+        let _ = write!(&mut result, "{byte:02x}");
+    }
+    result
 }
 
 fn valid_instance_id(value: &str) -> bool {
@@ -394,6 +462,39 @@ mod tests {
         assert_eq!(temporary_count, 0);
         assert!(unowned.join("keep").exists());
 
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn altered_or_extra_published_content_is_not_owned() -> Result<(), ConfigDriveError> {
+        let root = std::env::temp_dir().join(format!("o3k-drive-integrity-{}", Uuid::now_v7()));
+        let store = ConfigDriveStore::open(&root)?;
+        let result = store.generate(&input())?;
+        fs::write(
+            result.directory.join("openstack/latest/user_data"),
+            b"tampered",
+        )
+        .map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(result.directory.exists());
+        fs::remove_file(result.directory.join("openstack/latest/user_data"))
+            .map_err(ConfigDriveError::Storage)?;
+        fs::write(
+            result.directory.join("openstack/latest/user_data"),
+            b"#cloud-config\nhostname: vm-1\n",
+        )
+        .map_err(ConfigDriveError::Storage)?;
+        fs::write(result.directory.join("unexpected"), b"foreign")
+            .map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(result.directory.exists());
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }
