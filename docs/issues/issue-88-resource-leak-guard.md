@@ -9,6 +9,8 @@ The protected workflow inventory now:
 
 - takes two consecutive canonical snapshots and fails closed if the host is
   changing while it is being observed;
+- treats requested OpenStack inventory without credentials as unavailable
+  instead of accepting an empty resource set;
 - publishes inventory JSON atomically, preventing a partial write from being
   consumed as evidence;
 - records O3K-owned domain/provider identities while representing foreign
