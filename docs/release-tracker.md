@@ -15,7 +15,7 @@ the real-libvirt acceptance evidence exists.
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |
 | #43 | Placement | merged | unique atomic state publication added; integration allocation pending |
 | #44 | scheduler | merged | agent-targeted scheduling contract added; integration dispatch pending |
-| #45 | bridge/TAP | merged | TAP reuse ownership fencing added; privileged host network evidence pending |
+| #45 | bridge/TAP | merged | TAP reuse ownership fencing and unique network metadata publication added; privileged host network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic publication and owned dnsmasq supervision added; TAP/dnsmasq/guest IP evidence pending |
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, fake command realization, and typed resolved create inputs added; real artifact realization/create and host evidence pending |
 | #48 | console log | merged | atomic writes and bounded offset reads added; guest boot output evidence pending |
@@ -69,6 +69,6 @@ and ADR-0028 (bounded console offset reads), ADR-0029 (CLI harness failure
 cleanup), ADR-0030 (dnsmasq supervision), ADR-0031 (typed resolved create
 inputs), ADR-0032 (measurement authentication input), ADR-0033 (CLI list and
 resource evidence), ADR-0034 (Placement atomic publication), and ADR-0035
-(image publication temporaries).
+(image publication temporaries), and ADR-0036 (network metadata publication).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
