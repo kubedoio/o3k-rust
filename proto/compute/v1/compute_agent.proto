@@ -1,0 +1,296 @@
+syntax = "proto3";
+
+package o3k.compute.v1;
+
+// Draft contract for issue #37. Field numbers are permanent once released.
+service ComputeEnrollment {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc RotateCertificate(RotateCertificateRequest) returns (RotateCertificateResponse);
+}
+
+service ComputeAgent {
+  // The first client envelope must be Register. Subsequent agent-to-control
+  // envelopes carry heartbeats, acknowledgements, operations, and observations;
+  // commands and desired-state updates travel in ControlResponse.
+  rpc Control(stream ControlRequest) returns (stream ControlResponse);
+}
+
+message ProtocolVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 wire_revision = 3;
+}
+
+message EnrollRequest {
+  string bootstrap_token = 1;
+  bytes certificate_signing_request_pem = 2;
+  string requested_host_label = 3;
+  repeated ProtocolVersion supported_versions = 4;
+}
+
+message EnrollResponse {
+  string agent_id = 1;
+  bytes client_certificate_chain_pem = 2;
+  bytes ca_certificate_pem = 3;
+  string ca_fingerprint_sha256 = 4;
+  ProtocolVersion selected_version = 5;
+  int64 certificate_expires_at_unix_ms = 6;
+  int64 rotation_deadline_unix_ms = 7;
+}
+
+message RotateCertificateRequest {
+  string agent_id = 1;
+  bytes certificate_signing_request_pem = 2;
+  repeated ProtocolVersion supported_versions = 3;
+}
+
+message RotateCertificateResponse {
+  string agent_id = 1;
+  bytes client_certificate_chain_pem = 2;
+  bytes ca_certificate_pem = 3;
+  string ca_fingerprint_sha256 = 4;
+  ProtocolVersion selected_version = 5;
+  int64 certificate_expires_at_unix_ms = 6;
+  int64 next_rotation_deadline_unix_ms = 7;
+}
+
+message ControlRequest {
+  oneof body {
+    RegisterRequest register = 1;
+    Heartbeat heartbeat = 2;
+    OperationUpdate operation = 3;
+    Observation observation = 4;
+    AgentStateAck agent_state_ack = 5;
+    CommandAccepted command_accepted = 6;
+    ResyncSnapshot resync_snapshot = 7;
+    ProtocolError error = 8;
+  }
+}
+
+message ControlResponse {
+  oneof body {
+    RegisterResponse register = 1;
+    HeartbeatAck heartbeat = 2;
+    Command command = 3;
+    DesiredAgentState desired_state = 4;
+    ObservationAck observation_ack = 5;
+    ResyncRequest resync = 6;
+    ProtocolError error = 7;
+  }
+}
+
+message RegisterRequest {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  string software_version = 3;
+  string host_label = 4;
+  repeated ProtocolVersion supported_versions = 5;
+  Capabilities capabilities = 6;
+}
+
+message RegisterResponse {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  ProtocolVersion selected_version = 3;
+  uint32 heartbeat_interval_seconds = 4;
+  uint32 max_clock_skew_seconds = 5;
+  AdministrativeState desired_state = 6;
+  uint64 highest_observation_sequence = 7;
+}
+
+enum AdministrativeState {
+  ADMINISTRATIVE_STATE_UNSPECIFIED = 0;
+  ADMINISTRATIVE_STATE_ENABLED = 1;
+  ADMINISTRATIVE_STATE_DRAINING = 2;
+  ADMINISTRATIVE_STATE_DISABLED = 3;
+}
+
+message Heartbeat {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  uint64 sequence = 3;
+  int64 sent_at_unix_ms = 4;
+  AdministrativeState state = 5;
+  uint32 active_operation_count = 6;
+  uint64 highest_observation_sequence = 7;
+}
+
+message HeartbeatAck {
+  int64 received_at_unix_ms = 1;
+  AdministrativeState desired_state = 2;
+  uint64 acknowledged_heartbeat_sequence = 3;
+  uint64 highest_observation_sequence = 4;
+}
+
+message Capabilities {
+  string architecture = 1;
+  string agent_provider_name = 2;
+  string agent_provider_version = 3;
+  uint32 max_vcpus = 4;
+  uint64 max_memory_mib = 5;
+  repeated string disk_formats = 6;
+  repeated string lifecycle_actions = 7;
+  bool console_log = 8;
+  uint64 max_console_log_bytes = 9;
+  repeated CapabilityFlag flags = 10;
+}
+
+message CapabilityFlag {
+  string name = 1;
+  bool supported = 2;
+  string bounded_value = 3;
+}
+
+message Command {
+  string command_id = 1;
+  string operation_id = 2;
+  string idempotency_key = 3;
+  string agent_id = 4;
+  string agent_epoch = 5;
+  string resource_id = 6;
+  int64 deadline_unix_ms = 7;
+  ProtocolVersion protocol_version = 8;
+  string payload_fingerprint_sha256 = 9;
+  oneof action {
+    CreateCommand create = 10;
+    InspectCommand inspect = 11;
+    StartCommand start = 12;
+    StopCommand stop = 13;
+    RebootCommand reboot = 14;
+    DeleteCommand delete = 15;
+    ConsoleLogCommand console_log = 16;
+  }
+}
+
+message CreateCommand {
+  string image_id = 1;
+  string flavor_id = 2;
+  repeated string network_port_ids = 3;
+}
+
+message InspectCommand {}
+message StartCommand {}
+message StopCommand {}
+
+message RebootCommand {
+  enum RebootType {
+    REBOOT_TYPE_UNSPECIFIED = 0;
+    REBOOT_TYPE_SOFT = 1;
+    REBOOT_TYPE_HARD = 2;
+  }
+  RebootType type = 1;
+}
+
+message DeleteCommand {}
+
+message ConsoleLogCommand {
+  uint64 offset = 1;
+  uint32 max_bytes = 2;
+}
+
+message CommandAccepted {
+  string command_id = 1;
+  string operation_id = 2;
+  OperationState state = 3;
+  uint64 operation_sequence = 4;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_ACCEPTED = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCEEDED = 3;
+  OPERATION_STATE_FAILED = 4;
+  OPERATION_STATE_UNKNOWN_OUTCOME = 5;
+}
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  ERROR_CATEGORY_INVALID_REQUEST = 1;
+  ERROR_CATEGORY_UNAUTHENTICATED = 2;
+  ERROR_CATEGORY_UNAUTHORIZED = 3;
+  ERROR_CATEGORY_CONFLICT = 4;
+  ERROR_CATEGORY_CAPACITY = 5;
+  ERROR_CATEGORY_NOT_FOUND = 6;
+  ERROR_CATEGORY_RETRYABLE = 7;
+  ERROR_CATEGORY_UNKNOWN_OUTCOME = 8;
+  ERROR_CATEGORY_TERMINAL = 9;
+}
+
+message OperationUpdate {
+  string operation_id = 1;
+  string resource_id = 2;
+  OperationState state = 3;
+  ErrorCategory error_category = 4;
+  string redacted_message = 5;
+  uint64 operation_sequence = 6;
+  string provider_resource_id = 7;
+}
+
+message Observation {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  string resource_id = 3;
+  string provider_resource_id = 4;
+  ResourceState state = 5;
+  string operation_id = 6;
+  OperationState operation_state = 7;
+  uint64 observation_sequence = 8;
+  int64 observed_at_unix_ms = 9;
+  string redacted_message = 10;
+  reserved 11;
+  reserved "stale";
+  bytes console_log_bytes = 12;
+  uint64 console_log_offset = 13;
+  bool console_log_complete = 14;
+  bool console_log_truncated = 15;
+}
+
+enum ResourceState {
+  RESOURCE_STATE_UNSPECIFIED = 0;
+  RESOURCE_STATE_CREATING = 1;
+  RESOURCE_STATE_RUNNING = 2;
+  RESOURCE_STATE_STOPPED = 3;
+  RESOURCE_STATE_DELETING = 4;
+  RESOURCE_STATE_DELETED = 5;
+  RESOURCE_STATE_ERROR = 6;
+}
+
+message ObservationAck {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  uint64 highest_contiguous_sequence = 3;
+}
+
+message AgentStateAck {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  AdministrativeState applied_state = 3;
+  uint64 transition_sequence = 4;
+  uint32 active_operation_count = 5;
+}
+
+message DesiredAgentState {
+  AdministrativeState state = 1;
+  string reason = 2;
+  uint64 transition_sequence = 3;
+}
+
+message ResyncRequest {
+  uint64 after_observation_sequence = 1;
+  uint64 after_operation_sequence = 2;
+}
+
+message ResyncSnapshot {
+  repeated OperationUpdate operations = 1;
+  repeated Observation observations = 2;
+}
+
+message ProtocolError {
+  ErrorCategory category = 1;
+  string code = 2;
+  string redacted_message = 3;
+  string operation_id = 4;
+  bool retryable = 5;
+  string command_id = 6;
+}

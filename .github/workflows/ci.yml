@@ -26,6 +26,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Validate compute-agent protobuf draft
+        run: |
+          protoc --proto_path=proto \
+            --descriptor_set_out=/tmp/o3k-compute-agent-v1.pb \
+            proto/compute/v1/compute_agent.proto
       - name: TestLab fake-provider workflow
         run: bash tests/testlab.sh
       - name: Generate candidate SBOM
