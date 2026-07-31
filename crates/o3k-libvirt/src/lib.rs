@@ -796,14 +796,16 @@ mod tests {
     async fn default_build_reports_missing_libvirt_without_blocking() -> Result<(), LibvirtError> {
         let _adapter = LibvirtAdapter::new(LibvirtConfig::default())?;
         #[cfg(not(feature = "libvirt"))]
-        let result = _adapter.capabilities().await;
-        assert!(matches!(
-            result,
-            Err(LibvirtError {
-                category: ErrorCategory::Unavailable,
-                ..
-            })
-        ));
+        {
+            let result = _adapter.capabilities().await;
+            assert!(matches!(
+                result,
+                Err(LibvirtError {
+                    category: ErrorCategory::Unavailable,
+                    ..
+                })
+            ));
+        }
         Ok(())
     }
 
