@@ -23,6 +23,25 @@ while (($#)); do
 done
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
 [[ -n "$PREFIX" && -n "$DATA_DIR" && -n "$CONFIG_DIR" && -n "$LOG_DIR" ]] || { echo "installation paths must not be empty" >&2; exit 2; }
+validate_install_path() {
+  local name="$1" path="$2"
+  [[ "$path" == /* && "$path" != / ]] || {
+    echo "$name must be an absolute non-root path: $path" >&2
+    exit 2
+  }
+  if [[ -L "$path" ]]; then
+    echo "refusing symlink installation path for $name: $path" >&2
+    exit 2
+  fi
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    echo "installation path for $name is not a directory: $path" >&2
+    exit 2
+  fi
+}
+validate_install_path prefix "$PREFIX"
+validate_install_path data-dir "$DATA_DIR"
+validate_install_path config-dir "$CONFIG_DIR"
+validate_install_path log-dir "$LOG_DIR"
 SYSTEM_INSTALL=0
 if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" == /etc/o3k && "$LOG_DIR" == /var/log/o3k ]]; then SYSTEM_INSTALL=1; fi
 if [[ $EUID -ne 0 && ( "$PREFIX" == /usr/* || "$DATA_DIR" == /var/* || "$CONFIG_DIR" == /etc/* ) ]]; then echo "system paths require root; use sudo or explicit user paths" >&2; exit 2; fi
@@ -46,6 +65,18 @@ if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
   fi
 fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
+TLS_DIR="$CONFIG_DIR/tls"
+if [[ "$PROFILE" == libvirt ]]; then
+  [[ -d "$TLS_DIR" && ! -L "$TLS_DIR" ]] || { echo "libvirt TLS directory is missing or unsafe: $TLS_DIR" >&2; exit 2; }
+  for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
+    [[ -f "$TLS_DIR/$file" && ! -L "$TLS_DIR/$file" && -s "$TLS_DIR/$file" ]] || {
+      echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2
+      exit 2
+    }
+  done
+  FINGERPRINT="$(<"$TLS_DIR/agent-fingerprint")"
+  [[ "$FINGERPRINT" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "agent fingerprint is invalid" >&2; exit 2; }
+fi
 if [[ $EUID -eq 0 ]]; then
   getent group o3k >/dev/null || groupadd --system o3k
   id o3k >/dev/null 2>&1 || useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
@@ -92,7 +123,6 @@ if [[ ! -e "$ENV_FILE" ]]; then
   chmod 0600 "$ENV_FILE"
 fi
 if [[ "$PROFILE" == libvirt ]]; then
-  TLS_DIR="$CONFIG_DIR/tls"
   for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
     [[ -s "$TLS_DIR/$file" ]] || { echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2; exit 2; }
   done
@@ -101,8 +131,6 @@ if [[ "$PROFILE" == libvirt ]]; then
     chmod 0750 "$TLS_DIR"
     chmod 0640 "$TLS_DIR"/*
   fi
-  FINGERPRINT="$(<"$TLS_DIR/agent-fingerprint")"
-  [[ "$FINGERPRINT" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "agent fingerprint is invalid" >&2; exit 2; }
   if [[ ! -e "$CONFIG_DIR/o3k-compute.env" ]]; then
     umask 077
     printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"

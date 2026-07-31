@@ -37,6 +37,7 @@ the real-libvirt acceptance evidence exists.
 | #86 | complete real CirrOS OpenStack CLI acceptance | repository-owned cleanup now verifies absence for every created resource after public CLI deletion; ADR-0093 and stateful no-op regression coverage added | blocked until a protected runner uploads `real-libvirt-e2e.json` with `status: passed`, including real CirrOS ACTIVE/config-drive/console/restart and leak evidence; no host acceptance claimed |
 | #87 | real-host failure injection and unknown-outcome recovery | repository action-recovery boundary complete; ADR-0094, deterministic action timeout injection, fingerprinted duplicate replay, and observation-based lifecycle convergence tests added | host-gated: all required crash, timeout, duplicate, partial-completion, corruption, disk-full, cleanup, and aggregate `failure-recovery.json` scenarios still require the protected self-hosted runner; no host acceptance claimed |
 | #88 | real-host resource leak and foreign-state guard | repository race-safe inventory boundary complete; ADR-0095, stable two-read snapshots, atomic redacted inventory publication, foreign-state digests, and `resource-leak-result.json` output added | host-gated: full independent inventory around normal and failure-injection suites, including TAP/DHCP/filesystem/ports/Placement/operations/processes, and a trusted clean-host run remain outstanding; no host acceptance claimed |
+| #89 | clean Ubuntu installation and TestLab lifecycle | repository clean-install input validation complete; ADR-0096 and packaging regression coverage reject unsafe paths and incomplete libvirt TLS before filesystem publication | host-gated: clean Ubuntu install, dependency/bootstrap validation, real CirrOS lifecycle, reset/reinstall/uninstall/purge, and trusted leak-free `clean-ubuntu-install.json` remain outstanding; no host acceptance claimed |
 
 ## Current release gate
 
@@ -125,4 +126,6 @@ actions; it does not substitute for issue #87's real-host failure-injection
 matrix or aggregate recovery artifact. ADR-0095 records the stable,
 redacted inventory and foreign-state digest boundary for issue #88; it does
 not substitute for the complete independent host inventory or a trusted
-normal/failure-injection run.
+normal/failure-injection run. ADR-0096 records pre-mutation clean-install
+path and libvirt TLS validation for issue #89; it does not substitute for a
+clean Ubuntu installation, lifecycle run, or release evidence artifact.
