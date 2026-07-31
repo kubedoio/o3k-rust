@@ -15,7 +15,7 @@ the real-libvirt acceptance evidence exists.
 | #42 | config-drive | merged | atomic replacement publication added; guest cloud-init evidence pending |
 | #43 | Placement | merged | integration allocation pending |
 | #44 | scheduler | merged | integration dispatch pending |
-| #45 | bridge/TAP | merged | privileged host network pending |
+| #45 | bridge/TAP | merged | TAP reuse ownership fencing added; privileged host network evidence pending |
 | #46 | DHCP/fixed IP | merged | atomic DHCP state/config publication added; dnsmasq/guest IP evidence pending |
 | #47 | libvirt lifecycle backend | merged | durable journal, command router, scheduler binding, canonical create builder, durable agent-event reconciliation, live control-plane event consumer, and fake command realization added; real artifact protocol/create and host evidence pending |
 | #48 | console log | merged | guest boot output pending |
@@ -63,6 +63,7 @@ and ADR-0016 (durable lifecycle operations), ADR-0017 (agent command router),
 and ADR-0018 (scheduler and Placement intent), ADR-0019 (canonical create command),
 and ADR-0020 (durable agent-event reconciliation), ADR-0021 (live agent-event consumer),
 and ADR-0022 (atomic image overlays), ADR-0023 (fake command realization),
-and ADR-0024 (atomic config-drive publication), and ADR-0025 (atomic DHCP publication).
+and ADR-0024 (atomic config-drive publication), ADR-0025 (atomic DHCP publication),
+and ADR-0026 (TAP reuse ownership fencing).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
