@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT=release-evidence.json
 E2E=
 INSTALL_UBUNTU=
@@ -8,6 +9,8 @@ INSTALL_DEBIAN=
 RECOVERY=
 BENCHMARK=
 BENCHMARK_RAW=
+HUMAN_REVIEW=
+SOURCE_COMMIT=
 while (($#)); do
   case "$1" in
     --e2e) E2E="${2:?missing E2E artifact}"; shift 2;;
@@ -16,11 +19,25 @@ while (($#)); do
     --recovery) RECOVERY="${2:?missing recovery artifact}"; shift 2;;
     --benchmark) BENCHMARK="${2:?missing benchmark artifact}"; shift 2;;
     --benchmark-raw) BENCHMARK_RAW="${2:?missing raw benchmark artifact}"; shift 2;;
+    --human-review) HUMAN_REVIEW="${2:?missing human-review artifact}"; shift 2;;
+    --source-commit) SOURCE_COMMIT="${2:?missing source commit}"; shift 2;;
     --output) OUTPUT="${2:?missing output path}"; shift 2;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
 done
-export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW OUTPUT
+HUMAN_REVIEW_VALIDATION_ERROR=
+if [[ -z "$HUMAN_REVIEW" ]]; then
+  HUMAN_REVIEW_VALIDATION_ERROR="human_review: artifact path was not supplied"
+else
+  set +e
+  HUMAN_REVIEW_VALIDATION_OUTPUT="$(bash "$SCRIPT_DIR/validate-human-review.sh" --input "$HUMAN_REVIEW" --require-approved 2>&1)"
+  HUMAN_REVIEW_VALIDATION_STATUS=$?
+  set -e
+  if (( HUMAN_REVIEW_VALIDATION_STATUS != 0 )); then
+    HUMAN_REVIEW_VALIDATION_ERROR="human_review: validator rejected artifact: ${HUMAN_REVIEW_VALIDATION_OUTPUT//$'\n'/; }"
+  fi
+fi
+export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW HUMAN_REVIEW OUTPUT SOURCE_COMMIT HUMAN_REVIEW_VALIDATION_ERROR
 python3 <<'PY'
 import hashlib
 import json
@@ -59,6 +76,43 @@ if max_age_error:
     errors.append(max_age_error)
 evidence = {}
 paths = {}
+human_review_path = os.environ["HUMAN_REVIEW"]
+source_commit = os.environ["SOURCE_COMMIT"]
+human_review_validation_error = os.environ["HUMAN_REVIEW_VALIDATION_ERROR"]
+if human_review_validation_error:
+    errors.append(human_review_validation_error)
+if not source_commit:
+    errors.append("source_commit: value was not supplied")
+elif not re.fullmatch(r"[0-9a-f]{40}", source_commit):
+    errors.append("source_commit: must be a 40-character lowercase commit SHA")
+human_review = None
+if human_review_path:
+    human_review_real_path = os.path.realpath(human_review_path)
+    if human_review_real_path in paths:
+        errors.append(
+            "human_review: artifact reuses "
+            f"{paths[human_review_real_path]}; each gate input must be distinct"
+        )
+    else:
+        paths[human_review_real_path] = "human_review"
+    try:
+        with open(human_review_path, encoding="utf-8") as stream:
+            human_review = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"human_review: cannot read JSON artifact ({error})")
+    if isinstance(human_review, dict):
+        if source_commit and human_review.get("reviewed_commit") != source_commit:
+            errors.append("human_review: reviewed_commit must match source_commit")
+        evidence["human_review"] = {
+            "path": human_review_path,
+            "artifact_type": human_review.get("artifact_type"),
+            "status": human_review.get("status"),
+            "reviewed_commit": human_review.get("reviewed_commit"),
+        }
+    else:
+        evidence["human_review"] = {"path": human_review_path}
+else:
+    evidence["human_review"] = {}
 benchmark_summary = None
 now = int(time.time())
 for name, (path, artifact_type) in required.items():
@@ -223,7 +277,7 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
         if benchmark_summary.get(field) != benchmark_raw.get(field):
             errors.append(f"benchmark: {field} must match benchmark_raw.{field}")
 
-report = {"release": "v0.2.0-alpha.1", "profile": "libvirt", "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
+report = {"release": "v0.2.0-alpha.1", "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
 with open(os.environ["OUTPUT"], "w", encoding="utf-8") as stream:
     json.dump(report, stream, indent=2, sort_keys=True); stream.write("\n")
 if errors:
