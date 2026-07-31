@@ -116,12 +116,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_image(image_service)
             .with_network(network_service)
             .with_console(console_service.clone())
+            .with_agent_registry(registry.clone())
             .with_compute(compute_service)
     } else {
         o3k_api::AppState::new()
             .with_image(image_service)
             .with_network(network_service)
             .with_console(console_service)
+            .with_agent_registry(registry.clone())
             .with_compute(compute_service)
     };
     state.set_ready(compute_ready);
