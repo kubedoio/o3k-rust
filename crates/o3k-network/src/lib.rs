@@ -660,11 +660,12 @@ impl Ipv4Net {
 
 fn persist(inner: &Inner) -> Result<(), NetworkError> {
     let path = inner.root.join("metadata.json");
-    let temporary = inner
-        .root
-        .join(format!("metadata.tmp-{}", std::process::id()));
+    let temporary = inner.root.join(format!("metadata.tmp-{}", Uuid::now_v7()));
     let bytes = serde_json::to_vec_pretty(&inner.data).map_err(|_| NetworkError::Conflict)?;
-    fs::write(&temporary, bytes).map_err(NetworkError::Storage)?;
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(NetworkError::Storage(error));
+    }
     if let Err(error) = fs::rename(&temporary, &path) {
         let _ = fs::remove_file(temporary);
         return Err(NetworkError::Storage(error));
@@ -702,6 +703,12 @@ mod tests {
         assert_eq!(first.fixed_ip, subnet.allocation_start);
         let reopened = NetworkService::open(&path)?;
         assert_eq!(reopened.get_port("project-a", first.id)?, first);
+        assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .contains("metadata.tmp-")
+        }));
         fs::remove_dir_all(path)?;
         Ok(())
     }
