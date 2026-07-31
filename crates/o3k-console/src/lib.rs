@@ -66,6 +66,33 @@ impl ConsoleService {
         self.write(instance_id, &current)
     }
 
+    /// Persists a sequential agent observation without allowing stale or
+    /// out-of-order chunks to corrupt the durable console buffer.
+    pub fn write_chunk(
+        &self,
+        instance_id: Uuid,
+        offset: u64,
+        output: &[u8],
+    ) -> Result<(), ConsoleError> {
+        let offset = usize::try_from(offset).map_err(|_| ConsoleError::InvalidInput)?;
+        let current = self.read(instance_id).unwrap_or_default();
+        if offset == 0 {
+            return self.write(instance_id, output);
+        }
+        if offset > current.len() || output.len() > self.max_bytes.saturating_sub(offset) {
+            return Err(ConsoleError::InvalidInput);
+        }
+        if current.len() >= offset.saturating_add(output.len())
+            && current[offset..offset + output.len()] == *output
+        {
+            return Ok(());
+        }
+        if offset != current.len() {
+            return Err(ConsoleError::InvalidInput);
+        }
+        self.append(instance_id, output)
+    }
+
     pub fn read(&self, instance_id: Uuid) -> Result<Vec<u8>, ConsoleError> {
         fs::read(self.path(instance_id)?).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -136,6 +163,22 @@ mod tests {
         restarted.cleanup(id)?;
         restarted.cleanup(id)?;
         assert!(matches!(restarted.read(id), Err(ConsoleError::NotFound)));
+        Ok(())
+    }
+
+    #[test]
+    fn observation_chunks_are_sequential_and_replay_safe() -> Result<(), ConsoleError> {
+        let service = service()?;
+        let id = Uuid::now_v7();
+        service.write_chunk(id, 0, b"boot ")?;
+        service.write_chunk(id, 5, b"output\n")?;
+        service.write_chunk(id, 5, b"output\n")?;
+        assert_eq!(service.read(id)?, b"boot output\n");
+        assert!(matches!(
+            service.write_chunk(id, 2, b"stale"),
+            Err(ConsoleError::InvalidInput)
+        ));
+        service.cleanup(id)?;
         Ok(())
     }
 }
