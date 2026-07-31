@@ -46,6 +46,17 @@ if bash "$ROOT_DIR/packaging/install.sh" \
 fi
 [[ ! -e "$WORK_DIR/symlink-prefix" && ! -e "$WORK_DIR/symlink-config" ]]
 
+mkdir -p "$WORK_DIR/symlink-parent-target"
+ln -s "$WORK_DIR/symlink-parent-target" "$WORK_DIR/symlink-parent"
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" \
+    --prefix "$WORK_DIR/symlink-parent/prefix" --data-dir "$WORK_DIR/symlink-parent/data" \
+    --config-dir "$WORK_DIR/symlink-parent/config" --log-dir "$WORK_DIR/symlink-parent/log"; then
+  echo "installer accepted a symlink installation path component" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/symlink-parent-target/prefix" && ! -e "$WORK_DIR/symlink-parent-target/data" ]]
+
 mkdir -p "$WORK_DIR/preexisting"
 printf 'keep me\n' >"$WORK_DIR/preexisting/user-data"
 if bash "$ROOT_DIR/packaging/install.sh" \

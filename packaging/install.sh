@@ -29,10 +29,15 @@ validate_install_path() {
     echo "$name must be an absolute non-root path: $path" >&2
     exit 2
   }
-  if [[ -L "$path" ]]; then
-    echo "refusing symlink installation path for $name: $path" >&2
-    exit 2
-  fi
+  local current=/ component
+  while IFS= read -r component; do
+    [[ -n "$component" ]] || continue
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      echo "refusing symlink installation path for $name: $path" >&2
+      exit 2
+    fi
+  done < <(tr '/' '\n' <<< "${path#/}")
   if [[ -e "$path" && ! -d "$path" ]]; then
     echo "installation path for $name is not a directory: $path" >&2
     exit 2
