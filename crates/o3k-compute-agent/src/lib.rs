@@ -354,6 +354,45 @@ impl NodeRegistry {
             .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))
     }
 
+    /// Dispatches a fenced command and waits for its matching observation.
+    /// The subscription is installed before dispatch so a fast agent response
+    /// cannot be missed.
+    pub async fn dispatch_command_and_wait(
+        &self,
+        command: proto::Command,
+        timeout: Duration,
+    ) -> Result<proto::Observation, AgentError> {
+        let mut events = self.subscribe_events();
+        let resource_id = command.resource_id.clone();
+        let operation_id = command.operation_id.clone();
+        self.dispatch_command(command).await?;
+        time::timeout(timeout, async move {
+            loop {
+                match events.recv().await {
+                    Ok(AgentEvent::Observation(observation))
+                        if observation.resource_id == resource_id
+                            && observation.operation_id == operation_id =>
+                    {
+                        return Ok(observation);
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(count)) => {
+                        return Err(AgentError::Protocol(format!(
+                            "agent observation stream lagged by {count} events"
+                        )));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Protocol(
+                            "agent observation stream closed".to_owned(),
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| AgentError::Protocol("agent observation timed out".to_owned()))?
+    }
+
     fn publish_event(&self, event: AgentEvent) {
         let _ = self.events.send(event);
     }
@@ -690,6 +729,67 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         payload_fingerprint_sha256,
         action: Some(proto::command::Action::Create(create)),
     })
+}
+
+/// Builds a bounded, fenced console-log query using the existing protocol.
+pub fn build_console_log_command(
+    agent_id: &str,
+    agent_epoch: &str,
+    operation_id: &str,
+    resource_id: &str,
+    offset: u64,
+    max_bytes: u32,
+) -> Result<proto::Command, AgentError> {
+    if !valid_reference(agent_id)
+        || !valid_reference(agent_epoch)
+        || !valid_reference(operation_id)
+        || !valid_reference(resource_id)
+        || max_bytes == 0
+        || max_bytes as usize > o3k_console_limit()
+    {
+        return Err(AgentError::Protocol(
+            "console command identity and bounds are invalid".to_owned(),
+        ));
+    }
+    let action = proto::canonical_command_payload::Action::ConsoleLog(proto::ConsoleLogCommand {
+        offset,
+        max_bytes,
+    });
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: operation_id.to_owned(),
+        resource_id: resource_id.to_owned(),
+        action: Some(action),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let mut payload_fingerprint_sha256 = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
+            .expect("writing to an in-memory string cannot fail");
+    }
+    let idempotency_key = format!("console:{resource_id}:{offset}:{max_bytes}");
+    Ok(proto::Command {
+        command_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:console-command:{agent_id}:{operation_id}").as_bytes(),
+        )
+        .to_string(),
+        operation_id: operation_id.to_owned(),
+        idempotency_key,
+        agent_id: agent_id.to_owned(),
+        agent_epoch: agent_epoch.to_owned(),
+        resource_id: resource_id.to_owned(),
+        deadline_unix_ms: unix_ms().saturating_add(10_000),
+        protocol_version: Some(PROTOCOL_VERSION),
+        payload_fingerprint_sha256,
+        action: Some(proto::command::Action::ConsoleLog(
+            proto::ConsoleLogCommand { offset, max_bytes },
+        )),
+    })
+}
+
+const fn o3k_console_limit() -> usize {
+    64 * 1024
 }
 
 fn valid_reference(value: &str) -> bool {
@@ -2051,6 +2151,29 @@ mod tests {
         assert_ne!(
             first.payload_fingerprint_sha256,
             changed.payload_fingerprint_sha256
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn console_query_command_is_bounded_and_fenced() -> Result<(), AgentError> {
+        let command =
+            build_console_log_command("agent-1", "epoch-1", "operation-1", "resource-1", 12, 128)?;
+        assert_eq!(command.agent_id, "agent-1");
+        assert_eq!(command.agent_epoch, "epoch-1");
+        assert!(command.deadline_unix_ms > unix_ms());
+        assert!(matches!(
+            command.action,
+            Some(proto::command::Action::ConsoleLog(
+                proto::ConsoleLogCommand {
+                    offset: 12,
+                    max_bytes: 128,
+                }
+            ))
+        ));
+        assert!(
+            build_console_log_command("agent-1", "epoch-1", "operation-1", "resource-1", 0, 0,)
+                .is_err()
         );
         Ok(())
     }

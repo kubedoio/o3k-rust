@@ -3,7 +3,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use axum::{
@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
 };
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
+use o3k_compute_agent::NodeRegistry;
 use o3k_console::{ConsoleError, ConsoleService};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
@@ -42,6 +43,7 @@ pub struct AppState {
     network: Option<Arc<NetworkService>>,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
+    agent_registry: Option<NodeRegistry>,
 }
 
 impl AppState {
@@ -81,6 +83,12 @@ impl AppState {
     #[must_use]
     pub fn with_console(mut self, service: ConsoleService) -> Self {
         self.console = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
+    pub fn with_agent_registry(mut self, registry: NodeRegistry) -> Self {
+        self.agent_registry = Some(registry);
         self
     }
 
@@ -1403,6 +1411,70 @@ async fn server_action(
                     "console output length is invalid",
                 );
             };
+            if length == 0 {
+                return (StatusCode::OK, Json(serde_json::json!({"output": ""}))).into_response();
+            }
+            if let Some(registry) = state.agent_registry.as_ref() {
+                match service.placement_provider_id(&token.project_id, id).await {
+                    Ok(Some(agent_id)) => {
+                        let Some(node) = registry.snapshot(&agent_id).await else {
+                            return keystone_error(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "Service Unavailable",
+                                "compute agent is not registered",
+                            );
+                        };
+                        let operation_id = uuid::Uuid::now_v7().to_string();
+                        let command = match o3k_compute_agent::build_console_log_command(
+                            &agent_id,
+                            &node.agent_epoch,
+                            &operation_id,
+                            &id.to_string(),
+                            offset,
+                            length.min(o3k_console::MAX_CONSOLE_BYTES) as u32,
+                        ) {
+                            Ok(command) => command,
+                            Err(_) => {
+                                return keystone_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "Bad Request",
+                                    "console output bounds are invalid",
+                                );
+                            }
+                        };
+                        let observation = match registry
+                            .dispatch_command_and_wait(command, Duration::from_secs(5))
+                            .await
+                        {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                tracing::warn!(%error, server_id = %id, "agent console query failed");
+                                return keystone_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "Service Unavailable",
+                                    "compute agent console output is unavailable",
+                                );
+                            }
+                        };
+                        if let Err(error) = console.write_chunk(
+                            id,
+                            observation.console_log_offset,
+                            &observation.console_log_bytes,
+                        ) {
+                            tracing::warn!(%error, server_id = %id, "agent console observation persistence failed");
+                        }
+                        return (
+                            StatusCode::OK,
+                            Json(serde_json::json!({
+                                "output": String::from_utf8_lossy(&observation.console_log_bytes)
+                            })),
+                        )
+                            .into_response();
+                    }
+                    Ok(None) => {}
+                    Err(error) => return compute_error(error),
+                }
+            }
             return match console.read_from(id, offset, length) {
                 Ok(chunk) => (
                     StatusCode::OK,

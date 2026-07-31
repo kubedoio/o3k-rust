@@ -14,11 +14,13 @@ axum.workspace = true
 o3k-console = { path = "../o3k-console" }
 o3k-identity = { path = "../o3k-identity" }
 o3k-compute = { path = "../o3k-compute" }
+o3k-compute-agent = { path = "../o3k-compute-agent" }
 o3k-image = { path = "../o3k-image" }
 o3k-network = { path = "../o3k-network" }
 o3k-provider = { path = "../o3k-provider" }
 serde.workspace = true
 serde_json.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

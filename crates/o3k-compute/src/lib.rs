@@ -384,6 +384,21 @@ impl ComputeService {
         Ok(server)
     }
 
+    /// Returns the placement agent bound to a project-owned server.
+    pub async fn placement_provider_id(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<Option<String>, ComputeError> {
+        let resource = self.store.get_resource(id).await?;
+        if resource.kind != "compute_instance" || resource.project_id != project_id {
+            return Err(ComputeError::NotFound);
+        }
+        let request: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        Ok(request.placement_provider_id)
+    }
+
     pub async fn delete_server(&self, project_id: &str, id: Uuid) -> Result<(), ComputeError> {
         let resource = self
             .store
