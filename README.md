@@ -123,8 +123,13 @@ The bootstrap workspace provides a health endpoint and domain-state examples onl
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo test --workspace
 ```
+
+The optional native libvirt feature requires a host with libvirt development
+libraries; the default workspace test intentionally remains portable. The
+project status stays bootstrap/pre-alpha until the real-libvirt release gate
+has passed.
 
 ## Licensing
 
