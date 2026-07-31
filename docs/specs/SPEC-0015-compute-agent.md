@@ -7,8 +7,9 @@ Version: `o3k.compute.v1` / wire revision 1
 
 This specification defines the identity, enrollment, transport, lifecycle
 command, operation, observation, liveness, and recovery contract between
-`o3kd` and one `o3k-compute` process. It is a draft contract, not an agent
-implementation.
+`o3kd` and one `o3k-compute` process. The contract is accepted; runtime
+implementation and real-host evidence are tracked separately by issue #38 and
+the later release issues.
 
 The execution path is:
 
