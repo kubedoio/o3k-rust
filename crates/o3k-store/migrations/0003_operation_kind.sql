@@ -1,0 +1,1 @@
+ALTER TABLE operations ADD COLUMN kind TEXT NOT NULL DEFAULT 'create';

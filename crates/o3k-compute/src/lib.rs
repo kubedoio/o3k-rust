@@ -7,7 +7,7 @@ use o3k_provider::{
     Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
     InstanceAction, Operation, ProviderError,
 };
-use o3k_reconciler::{OperationJournal, ReconcileError};
+use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_store::{DurableStore, SqliteStore, StoreError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -274,33 +274,26 @@ impl ComputeService {
         if resource.observed_state == "DELETED" {
             return Ok(());
         }
-        let provider_id = resource
-            .provider_id
-            .as_deref()
-            .ok_or(ComputeError::Conflict)?;
-        let delete_result = self
-            .provider
-            .delete_instance(DeleteInstanceRequest {
-                operation_id: Uuid::now_v7(),
-                provider_instance_id: provider_id.to_owned(),
-                idempotency_key: format!("delete-{id}"),
-            })
-            .await;
-        if let Err(error) = delete_result {
-            if !matches!(error, ProviderError::NotFound) {
-                return Err(ComputeError::Provider(error));
-            }
+        if resource.provider_id.is_none() {
+            return Err(ComputeError::Conflict);
         }
-        self.store
-            .update_resource(
-                id,
-                resource.generation,
-                &resource.desired_state,
-                "DELETED",
-                resource.observed_generation,
-                Some(provider_id),
-            )
-            .await?;
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:delete:{project_id}:{id}:{}", resource.generation).as_bytes(),
+        );
+        match self
+            .journal
+            .begin_lifecycle(id, operation_id, LifecycleAction::Delete)
+            .await
+        {
+            Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
+            Err(error) => return Err(ComputeError::Reconcile(error)),
+        }
+        if self.journal.reconcile_lifecycle_once(operation_id).await?
+            != o3k_store::OperationState::Succeeded
+        {
+            return Err(ComputeError::Conflict);
+        }
         Ok(())
     }
 
@@ -321,43 +314,41 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        let provider_id = resource
-            .provider_id
-            .as_deref()
-            .ok_or(ComputeError::Conflict)?;
+        if resource.provider_id.is_none() {
+            return Err(ComputeError::Conflict);
+        }
         let target = match (action, resource.observed_state.as_str()) {
             (InstanceAction::Start, "stopped" | "STOPPED") => "ACTIVE",
             (InstanceAction::Stop, "active" | "ACTIVE") => "STOPPED",
             (InstanceAction::Reboot, "active" | "ACTIVE" | "stopped" | "STOPPED") => "ACTIVE",
             _ => return Err(ComputeError::Conflict),
         };
-        self.provider
-            .action_instance(
-                provider_id,
-                action,
-                Uuid::now_v7(),
-                &format!("action-{id}-{target}"),
-            )
-            .await?;
-        let observed = self.provider.get_instance(provider_id).await?;
-        let observed_state = match observed.state {
-            o3k_provider::InstanceState::Running => "ACTIVE",
-            o3k_provider::InstanceState::Stopped => "STOPPED",
-            o3k_provider::InstanceState::Creating => "BUILD",
-            o3k_provider::InstanceState::Deleting => "DELETING",
-            o3k_provider::InstanceState::Deleted => "DELETED",
-            o3k_provider::InstanceState::Error => "ERROR",
+        let lifecycle_action = match action {
+            InstanceAction::Start => LifecycleAction::Start,
+            InstanceAction::Stop => LifecycleAction::Stop,
+            InstanceAction::Reboot => LifecycleAction::Reboot,
         };
-        self.store
-            .update_resource(
-                id,
-                resource.generation,
-                &resource.desired_state,
-                observed_state,
-                resource.observed_generation,
-                Some(provider_id),
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:action:{project_id}:{id}:{target}:{}",
+                resource.generation
             )
-            .await?;
+            .as_bytes(),
+        );
+        match self
+            .journal
+            .begin_lifecycle(id, operation_id, lifecycle_action)
+            .await
+        {
+            Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
+            Err(error) => return Err(ComputeError::Reconcile(error)),
+        }
+        if self.journal.reconcile_lifecycle_once(operation_id).await?
+            != o3k_store::OperationState::Succeeded
+        {
+            return Err(ComputeError::Conflict);
+        }
         self.show_server(project_id, id).await
     }
 }

@@ -17,7 +17,7 @@ the real-libvirt acceptance evidence exists.
 | #44 | scheduler | merged | integration dispatch pending |
 | #45 | bridge/TAP | merged | privileged host network pending |
 | #46 | DHCP/fixed IP | merged | dnsmasq/guest IP pending |
-| #47 | libvirt lifecycle backend | merged | command dispatch and real domain lifecycle evidence still pending |
+| #47 | libvirt lifecycle backend | merged | durable lifecycle journal added; command bridge and real domain evidence pending |
 | #48 | console log | merged | guest boot output pending |
 | #49 | real-libvirt harness | merged | preflight is skipped here |
 | #50 | OpenStack CLI workflow | merged | CLI/libvirt endpoint pending |
@@ -58,6 +58,7 @@ evidence.
 The implementation decisions are recorded in ADR-0007 (agent security),
 ADR-0008 (libvirt adapter), ADR-0010 (DHCP isolation), ADR-0011 (provider
 backends), ADR-0012 (console output), and ADR-0013 (lifecycle safety
-boundaries), ADR-0014 (Nova create idempotency), and ADR-0015 (agent command dispatch).
+boundaries), ADR-0014 (Nova create idempotency), ADR-0015 (agent command dispatch),
+and ADR-0016 (durable lifecycle operations).
 Release policy and evidence rules
 are in `docs/RELEASE.md`, `docs/compatibility.md`, and the #53 release gate.
