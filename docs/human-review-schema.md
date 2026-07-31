@@ -14,7 +14,7 @@ The artifact is a JSON object with `schema_version: 1` and
 | `reviewed_commit` | exact 40-character lowercase commit SHA |
 | `review_record_url` | durable `https://` link to the human review record |
 | `scope` | non-empty list of reviewed surfaces |
-| `findings` | list of objects with non-empty `id`, severity, and disposition; severity is `critical`, `high`, `medium`, `low`, or `informational`; disposition is `fixed`, `accepted`, `deferred`, or `not-applicable` |
+| `findings` | list of objects with unique, non-empty `id`, severity, and disposition; severity is `critical`, `high`, `medium`, `low`, or `informational`; disposition is `fixed`, `accepted`, `deferred`, or `not-applicable` |
 | `approvals` | `release_blocking_findings: true` and `destructive_cleanup: true` only when explicitly approved by the reviewer |
 | `unresolved_risks` | list of strings, including an empty list when none remain |
 
