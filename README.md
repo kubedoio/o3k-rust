@@ -76,8 +76,10 @@ OpenStack CLI / Terraform / SDKs
    compute       network      storage
      |              |            |
   libvirt/KVM   flat/local   local/S3
-       |             |
-  CellHV (optional provider for later profiles)
+       |
+     QEMU/KVM
+
+  CellHV (optional provider behind the same boundary for later profiles)
 ```
 
 O3K owns OpenStack-facing identity, catalog, image, network, compute, volume, placement, quota, policy, operation, and reconciliation semantics. Providers expose capabilities and execute bounded operations.

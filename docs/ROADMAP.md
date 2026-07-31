@@ -43,6 +43,8 @@ evidence.
 
 ## Phase 3 — Optional CellHV provider and reproducible follow-on profiles
 
+- volume contract and volume-backed boot work, after the alpha release gate and
+  before any later CellHV expansion (not part of `v0.2.0-alpha.1`);
 - CellHV capability discovery and provider conformance;
 - CellHV compute/network/storage providers;
 - independently releasable CellHV integration profiles;

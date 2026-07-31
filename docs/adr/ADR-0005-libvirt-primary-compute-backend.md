@@ -101,4 +101,3 @@ separately and is not substituted for missing libvirt evidence.
 - libvirt URI documentation: <https://libvirt.org/uri.html>
 - libvirt architecture documentation: <https://libvirt.org/architecture.html>
 - O3K provider boundary: `docs/specs/SPEC-0003-provider-contract.md`
-
