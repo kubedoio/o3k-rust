@@ -284,6 +284,7 @@ pub struct LibvirtCapabilities {
     pub architecture: Option<String>,
     pub cpu_model: Option<String>,
     pub total_memory_kib: Option<u64>,
+    pub total_vcpus: Option<u32>,
     pub machine_types: Vec<String>,
     pub kvm_available: bool,
     pub supported_operations: Vec<String>,
@@ -303,11 +304,16 @@ impl LibvirtCapabilities {
             architecture: self.architecture.clone().unwrap_or_default(),
             agent_provider_name: "o3k-libvirt".to_owned(),
             agent_provider_version: self.libvirt_version.clone().unwrap_or_default(),
-            max_vcpus: 0,
+            max_vcpus: self.total_vcpus.unwrap_or_default(),
             max_memory_mib: self.total_memory_kib.unwrap_or_default() / 1024,
             lifecycle_actions: self.supported_operations.clone(),
             console_log: true,
             max_console_log_bytes: 64 * 1024,
+            flags: vec![proto::CapabilityFlag {
+                name: "kvm".to_owned(),
+                supported: self.kvm_available,
+                bounded_value: String::new(),
+            }],
             ..Default::default()
         }
     }
@@ -503,6 +509,7 @@ fn backend_capabilities(uri: &str) -> Result<LibvirtCapabilities, LibvirtError> 
         architecture: xml_attribute(&capabilities_xml, "<arch", "name"),
         cpu_model: Some(node.model),
         total_memory_kib: Some(node.memory),
+        total_vcpus: Some(node.cpus),
         machine_types: xml_values(&capabilities_xml, "<machine", "name"),
         kvm_available: connection
             .get_type()
@@ -875,6 +882,25 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn capability_projection_reports_capacity_and_kvm_support() {
+        let capabilities = LibvirtCapabilities {
+            total_vcpus: Some(8),
+            total_memory_kib: Some(16 * 1024 * 1024),
+            kvm_available: true,
+            ..Default::default()
+        }
+        .to_protocol_capabilities();
+        assert_eq!(capabilities.max_vcpus, 8);
+        assert_eq!(capabilities.max_memory_mib, 16 * 1024);
+        assert!(
+            capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "kvm" && flag.supported)
         );
     }
 
