@@ -5,7 +5,11 @@ it does not accept a generic `{"status":"passed"}` file. Every artifact must
 be a JSON object with:
 
 - `artifact_type`, `profile: "libvirt"`, `redacted: true`;
-- an integer `finished_at` epoch timestamp;
+- a positive `finished_at` epoch timestamp that is not in the future and is no
+  older than seven days (604800 seconds) when the gate runs. Operators may
+  set `O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS` to another positive integer for a
+  controlled gate invocation; leaving it unset retains the safe seven-day
+  default;
 - `cleanup.status: "passed"`;
 - the status required by the gate (`passed` for workflows, `measured` for the
   benchmark).
@@ -26,3 +30,10 @@ starting so an interrupted run cannot leave a previous pass available to the
 gate. The CLI harness also writes a redacted `failed` artifact after a
 non-skipped lifecycle error and records the cleanup result; this is diagnostic
 evidence only and remains ineligible for the release gate.
+
+The gate captures one current epoch timestamp for the invocation and applies
+the same timestamp policy to every artifact. A timestamp equal to the maximum
+age boundary is accepted; timestamps older than that boundary, non-positive
+timestamps, and future-dated timestamps are rejected. The age override is
+intended for controlled local or CI runs and must not be used to conceal stale
+release evidence.
