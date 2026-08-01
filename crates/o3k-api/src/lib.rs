@@ -121,6 +121,7 @@ pub fn router_with_state(state: AppState) -> Router {
             "/v2.1/{project_id}/servers",
             get(list_servers).post(create_server),
         )
+        .route("/v2.1/{project_id}/servers/detail", get(list_servers))
         .route(
             "/v2.1/{project_id}/servers/{id}",
             get(show_server).delete(delete_server),
