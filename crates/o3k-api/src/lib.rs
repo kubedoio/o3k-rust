@@ -116,6 +116,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
         .route("/v2.1/{project_id}/flavors", get(list_flavors))
+        .route("/v2.1/{project_id}/flavors/detail", get(list_flavors))
         .route("/v2.1/{project_id}/flavors/{id}", get(show_flavor))
         .route(
             "/v2.1/{project_id}/servers",
