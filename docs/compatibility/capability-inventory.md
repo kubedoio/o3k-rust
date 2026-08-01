@@ -4,7 +4,7 @@ This file is generated from `capability-inventory-source.json`; edit the source 
 
 - Profile: `testlab-alpha`
 - Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
-- Rust reference: `1f053f2fc76b092c9eae3b4a6fe48b31cf39317d`
+- Rust reference: `5ca770f3156741a7a283603b3e42b5cd9d5920a4`
 - Operations: `41`
 
 Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.
@@ -12,9 +12,9 @@ Evidence states are independent: route implementation does not imply contract, C
 | Service | Operation | Method | Canonical path | Implementation | Contract | CLI | Protected runner | Relevance |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | compute | flavor_list | GET | /v2.1/{project_id}/flavors | implemented | verified | pending | failed | required |
-| compute | flavor_create | POST | /v2.1/{project_id}/flavors | missing | pending | pending | pending | required |
+| compute | flavor_create | POST | /v2.1/{project_id}/flavors | implemented | verified | pending | pending | required |
 | compute | flavor_list_detail | GET | /v2.1/{project_id}/flavors/detail | implemented | verified | pending | pending | required |
-| compute | flavor_delete | DELETE | /v2.1/{project_id}/flavors/{id} | missing | pending | pending | pending | required |
+| compute | flavor_delete | DELETE | /v2.1/{project_id}/flavors/{id} | implemented | verified | pending | pending | required |
 | compute | flavor_show | GET | /v2.1/{project_id}/flavors/{id} | implemented | verified | pending | pending | required |
 | compute | keypair_list | GET | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
 | compute | keypair_import | POST | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
@@ -56,8 +56,8 @@ Evidence states are independent: route implementation does not imply contract, C
 ## Known gaps
 
 - `compute.flavor_collection_list`: Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200.
-- `compute.flavor_collection_create`: The current fixed flavor catalog has no administrative create route.
-- `compute.flavor_member_delete`: Flavor deletion and immutable resource ownership are planned in #293.
+- `compute.flavor_collection_create`: Protected deployment verification remains a release-gate task.
+- `compute.flavor_member_delete`: Protected deployment verification remains a release-gate task.
 - `compute.keypair_collection_list`: Private-key generation is intentionally unsupported.
 - `compute.keypair_collection_import`: The private key never crosses the API boundary.
 - `compute.keypair_member_delete`: Deletion is rejected while an owned server still references the keypair.

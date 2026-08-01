@@ -1659,6 +1659,47 @@ async fn create_server(
             "network is required",
         );
     }
+    if let Some(image_service) = state.image.as_ref() {
+        let image_id = match image.parse::<uuid::Uuid>() {
+            Ok(value) => value,
+            Err(_) => {
+                return keystone_error(
+                    StatusCode::BAD_REQUEST,
+                    "Bad Request",
+                    "image must be a UUID when image validation is enabled",
+                );
+            }
+        };
+        match image_service.get(&token.project_id, image_id) {
+            Ok(record) if record.status == o3k_image::ImageStatus::Active => {}
+            Ok(_) => {
+                return keystone_error(StatusCode::CONFLICT, "Conflict", "image is not active");
+            }
+            Err(error) => return image_error(error),
+        }
+    }
+    let network_ids = networks
+        .iter()
+        .filter_map(|network| network.uuid.as_deref())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if let Some(network_service) = state.network.as_ref() {
+        for network_id in &network_ids {
+            let port_id = match network_id.parse::<uuid::Uuid>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return keystone_error(
+                        StatusCode::BAD_REQUEST,
+                        "Bad Request",
+                        "network references must be durable port UUIDs when network validation is enabled",
+                    );
+                }
+            };
+            if let Err(error) = network_service.get_port(&token.project_id, port_id) {
+                return network_error(error);
+            }
+        }
+    }
     let idempotency = headers
         .get("x-openstack-request-id")
         .and_then(|value| value.to_str().ok())
@@ -1671,10 +1712,7 @@ async fn create_server(
             name: body.server.name,
             image_id: image,
             flavor_id: flavor,
-            network_ids: networks
-                .into_iter()
-                .filter_map(|network| network.uuid)
-                .collect(),
+            network_ids,
             key_name: body.server.key_name,
             idempotency_key: idempotency,
         })
