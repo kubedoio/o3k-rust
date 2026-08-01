@@ -12,14 +12,14 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: 1.85.0
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config
       - name: Refresh cached libvirt bindings
@@ -30,6 +30,23 @@ jobs:
         run: |
           for file in packaging/*.sh tests/*.sh scripts/*.sh; do bash -n "$file"; done
           python3 -m compileall -q scripts
+      - name: Install pinned actionlint
+        run: |
+          install_dir="${RUNNER_TEMP}/actionlint/bin"
+          archive="${RUNNER_TEMP}/actionlint.tar.gz"
+          mkdir -p "${install_dir}"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz"
+          printf '%s  %s\n' \
+            '023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757' \
+            "${archive}" | sha256sum --check --status
+          tar --extract --gzip --file "${archive}" --directory "${install_dir}"
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+      - name: Validate GitHub Actions workflows
+        run: bash scripts/validate-workflows.sh actionlint
+      - name: Test workflow validation and duplicate-key regression
+        run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
       - name: Test CI workflow contracts
@@ -62,7 +79,7 @@ jobs:
             --descriptor_set_out=/tmp/o3k-compute-agent-v1.pb \
             proto/compute/v1/compute_agent.proto
       - name: Install buf
-        uses: bufbuild/buf-setup-action@v1
+        uses: bufbuild/buf-setup-action@a47c93e0b1648d5651a065437926377d060baa99 # v1
         with:
           version: 1.50.0
           github_token: ${{ github.token }}
@@ -80,18 +97,26 @@ jobs:
         run: bash packaging/make-sbom.sh target/testlab-artifacts/sbom.spdx.json
       - name: Upload TestLab artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: testlab-artifacts
           path: target/testlab-artifacts/
   supply-chain:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
       - name: Audit Rust dependencies for vulnerabilities
         run: |
+          advisory_db="${RUNNER_TEMP}/rustsec-advisory-db"
+          advisory_commit="84dd82689f285460d9b815c8e3271b33780f411e"
+          git init "${advisory_db}"
+          git -C "${advisory_db}" remote add origin https://github.com/RustSec/advisory-db.git
+          git -C "${advisory_db}" fetch --depth=1 origin "${advisory_commit}"
+          git -C "${advisory_db}" checkout --detach "${advisory_commit}"
+          test "$(git -C "${advisory_db}" rev-parse HEAD)" = "${advisory_commit}"
+          echo "RustSec advisory database: ${advisory_commit}"
           cargo install cargo-audit --version 0.22.1 --locked
-          cargo audit --ignore RUSTSEC-2023-0071
+          cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071
