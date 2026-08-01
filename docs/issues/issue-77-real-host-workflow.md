@@ -5,6 +5,9 @@
 Implemented on the repository branch:
 
 - manually dispatched workflow with the exact six self-hosted labels;
+- pinned CirrOS 0.6.3 x86_64 image download with SHA-256 verification on the
+  protected runner, so dispatch does not depend on an operator-provided local
+  image path;
 - protected environment `o3k-real-host-validation` (maintainer approval must
   be configured in GitHub settings);
 - canonical-repository and untrusted-fork guard before lifecycle execution;
@@ -19,8 +22,8 @@ Implemented on the repository branch:
 
 This change does not claim that the host gate passed. A maintainer must
 configure the protected environment and a runner with the exact labels,
-QEMU/KVM, libvirt `qemu:///system`, required tools, an installed TestLab
-profile, credentials, and a local CirrOS image. A manual run must produce
+  QEMU/KVM, libvirt `qemu:///system`, required tools, an installed TestLab
+  profile, credentials, and access to the pinned CirrOS download. A manual run must produce
 `status: passed` for the lifecycle and redacted result before real-host
 evidence is accepted by the release gate. The baseline must be clean and the
 post-run inventory must contain no added O3K-owned resources; the guards do not
