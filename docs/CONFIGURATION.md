@@ -40,6 +40,11 @@ problem without printing secret values.
 | Compute client CA | `compute_client_ca` | `O3K_COMPUTE_CLIENT_CA` | `--compute-client-ca` | unset |
 | Authorized compute agents | `compute_authorized_agents` | `O3K_COMPUTE_AUTHORIZED_AGENTS` | `--compute-authorized-agents` | unset |
 
+The host-local `o3k-compute` agent accepts `O3K_COMPUTE_MAX_DISK_GB` as an
+explicit, operator-declared Placement disk-capacity bound. Its default is
+`0`, which intentionally keeps the agent unschedulable until the operator
+provides a trusted value; disk format support is not capacity evidence.
+
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
 Although `libvirt` remains a reserved profile value for packaging and release
 tracking, `o3kd` rejects it before startup because no agent-backed provider

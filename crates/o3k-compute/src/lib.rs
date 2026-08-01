@@ -12,7 +12,10 @@ use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{DurableStore, SqliteStore, StoreError};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -64,6 +67,97 @@ pub struct ComputeService {
 
 #[derive(Clone)]
 pub struct ProviderBackend(Arc<dyn ComputeProvider>);
+
+/// Projects one authenticated agent capability snapshot into the inventory
+/// shape required by the scheduler. Missing capacity is represented as zero
+/// and makes the provider unschedulable; capability flags and disk formats are
+/// never treated as capacity.
+pub fn agent_inventory(
+    capabilities: &o3k_provider_contract::compute_proto::Capabilities,
+) -> BTreeMap<String, o3k_placement::Inventory> {
+    BTreeMap::from([
+        (
+            o3k_placement::VCPU.to_owned(),
+            o3k_placement::Inventory {
+                total: u64::from(capabilities.max_vcpus),
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+        (
+            o3k_placement::MEMORY_MB.to_owned(),
+            o3k_placement::Inventory {
+                total: capabilities.max_memory_mib,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+        (
+            o3k_placement::DISK_GB.to_owned(),
+            o3k_placement::Inventory {
+                total: capabilities.max_disk_gb,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+    ])
+}
+
+fn agent_provider_state(
+    snapshot: &o3k_compute_agent::NodeSnapshot,
+) -> o3k_placement::ProviderState {
+    use o3k_compute_agent::Availability;
+    use o3k_provider_contract::compute_proto::AdministrativeState;
+
+    if snapshot.availability != Availability::Available
+        || snapshot.desired_state == AdministrativeState::Disabled as i32
+        || snapshot.capabilities.max_vcpus == 0
+        || snapshot.capabilities.max_memory_mib == 0
+        || snapshot.capabilities.max_disk_gb == 0
+    {
+        o3k_placement::ProviderState::Unavailable
+    } else if snapshot.desired_state == AdministrativeState::Draining as i32 {
+        o3k_placement::ProviderState::Draining
+    } else {
+        o3k_placement::ProviderState::Enabled
+    }
+}
+
+/// Synchronizes the current authenticated agent snapshots into Placement.
+/// The stable agent ID is the Placement provider ID, so reconnects update the
+/// same provider and preserve durable allocations.
+pub async fn sync_agent_inventory(
+    registry: &NodeRegistry,
+    placement: &o3k_placement::PlacementLedger,
+) -> Result<(), SchedulerError> {
+    for snapshot in registry.all().await {
+        placement.sync_provider(
+            &snapshot.agent_id,
+            agent_inventory(&snapshot.capabilities),
+            agent_provider_state(&snapshot),
+        )?;
+    }
+    Ok(())
+}
+
+/// Starts the bounded periodic inventory publisher used by `o3kd`.
+pub fn spawn_agent_inventory_publisher(
+    registry: NodeRegistry,
+    placement: o3k_placement::PlacementLedger,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Err(error) = sync_agent_inventory(&registry, &placement).await {
+                tracing::warn!(%error, "agent inventory publication failed");
+            }
+        }
+    })
+}
 
 impl<P: ComputeProvider + 'static> From<Arc<P>> for ProviderBackend {
     fn from(provider: Arc<P>) -> Self {
@@ -639,6 +733,76 @@ mod tests {
             Arc::new(SqliteStore::connect_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
+    }
+
+    #[test]
+    fn agent_inventory_requires_explicit_disk_capacity() {
+        let capabilities = proto::Capabilities {
+            max_vcpus: 4,
+            max_memory_mib: 4096,
+            disk_formats: vec!["qcow2".to_owned()],
+            ..Default::default()
+        };
+        let inventory = agent_inventory(&capabilities);
+        assert_eq!(inventory[o3k_placement::VCPU].total, 4);
+        assert_eq!(inventory[o3k_placement::MEMORY_MB].total, 4096);
+        assert_eq!(inventory[o3k_placement::DISK_GB].total, 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_agent_inventory_is_published_and_state_fenced()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = PathBuf::from(format!(
+            "/tmp/o3k-placement-agent-inventory-{}",
+            Uuid::now_v7()
+        ));
+        let placement = o3k_placement::PlacementLedger::open(&root)?;
+        let registry = NodeRegistry::default();
+        registry
+            .register(&proto::RegisterRequest {
+                agent_id: "agent-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                software_version: "test".to_owned(),
+                host_label: "host-a".to_owned(),
+                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+                capabilities: Some(proto::Capabilities {
+                    max_vcpus: 4,
+                    max_memory_mib: 4096,
+                    max_disk_gb: 20,
+                    ..Default::default()
+                }),
+            })
+            .await?;
+
+        sync_agent_inventory(&registry, &placement).await?;
+        let provider = placement.provider("agent-a")?;
+        assert_eq!(provider.state, o3k_placement::ProviderState::Enabled);
+        assert_eq!(provider.inventories[o3k_placement::VCPU].total, 4);
+        assert_eq!(provider.inventories[o3k_placement::MEMORY_MB].total, 4096);
+        assert_eq!(provider.inventories[o3k_placement::DISK_GB].total, 20);
+
+        placement.allocate(
+            "agent-a",
+            "allocation-1",
+            "server-1",
+            BTreeMap::from([
+                (o3k_placement::VCPU.to_owned(), 1),
+                (o3k_placement::MEMORY_MB.to_owned(), 512),
+                (o3k_placement::DISK_GB.to_owned(), 1),
+            ]),
+            provider.generation,
+        )?;
+        registry
+            .set_desired_state("agent-a", proto::AdministrativeState::Draining)
+            .await?;
+        sync_agent_inventory(&registry, &placement).await?;
+        let refreshed = placement.provider("agent-a")?;
+        assert_eq!(refreshed.state, o3k_placement::ProviderState::Draining);
+        assert_eq!(refreshed.allocations.len(), 1);
+        assert_eq!(refreshed.inventories[o3k_placement::VCPU].used, 1);
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[tokio::test]

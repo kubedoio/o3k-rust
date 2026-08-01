@@ -131,11 +131,15 @@ sequence.
 ## 6. Capabilities
 
 Capabilities are typed and bounded: host architecture, libvirt/QEMU feature
-flags, vCPU and memory capacity, supported disk/image formats, lifecycle
+flags, vCPU, memory, and explicitly declared disk capacity, supported disk/image formats, lifecycle
 actions, console-log support, and maximum console-log size. Capacity is an
 observation, not an allocation; placement and allocation remain control-plane
 concerns in later issues. Provider-native objects and CellHV models must not be
 added as extensions to this common contract.
+
+`max_disk_gb` is the agent operator's bounded capacity declaration. Zero means
+that disk capacity is unknown; the control plane must publish the provider as
+unschedulable rather than infer capacity from `disk_formats` or a host path.
 
 ## 7. Commands and operations
 
