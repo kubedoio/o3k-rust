@@ -391,7 +391,7 @@ impl DurableStore for SqliteStore {
         operation: &OperationRecord,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
-        sqlx::query("INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        let insert_resource = sqlx::query("INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(resource.id.to_string())
             .bind(&resource.kind)
             .bind(&resource.project_id)
@@ -401,8 +401,14 @@ impl DurableStore for SqliteStore {
             .bind(&resource.observed_state)
             .bind(&resource.provider_id)
             .execute(&mut *transaction)
-            .await
-            .map_err(StoreError::Database)?;
+            .await;
+        match insert_resource {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                return Err(StoreError::ResourceAlreadyExists);
+            }
+            Err(error) => return Err(StoreError::Database(error)),
+        }
         sqlx::query("INSERT INTO operations (id, resource_id, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(operation.id.to_string())
             .bind(operation.resource_id.to_string())
