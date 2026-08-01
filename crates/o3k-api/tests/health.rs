@@ -589,6 +589,19 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     let subnet: Value =
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
     assert_eq!(subnet["subnet"]["gateway_ip"], "192.0.2.1");
+    let unsupported_pools = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/subnets")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(format!(
+                    r#"{{"subnet":{{"name":"many-pools","network_id":"{network_id}","cidr":"198.51.100.0/29","allocation_pools":[{{"start":"198.51.100.2","end":"198.51.100.3"}},{{"start":"198.51.100.5","end":"198.51.100.6"}}]}}}}"#
+                )))?,
+        )
+        .await?;
+    assert_eq!(unsupported_pools.status(), StatusCode::BAD_REQUEST);
     let body = serde_json::json!({"port":{"name":"port-1","network_id":network_id}});
     let response = o3k_api::router_with_state(state.clone())
         .oneshot(
@@ -605,6 +618,52 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
     assert!(port["port"]["mac_address"].as_str().is_some());
     assert_eq!(port["port"]["fixed_ips"][0]["ip_address"], "192.0.2.2");
+    let conflict = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let delete_port = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!(
+                    "/v2.0/ports/{}",
+                    port["port"]["id"].as_str().unwrap_or_default()
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(delete_port.status(), StatusCode::NO_CONTENT);
+    let delete_subnet = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!(
+                    "/v2.0/subnets/{}",
+                    subnet["subnet"]["id"].as_str().unwrap_or_default()
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(delete_subnet.status(), StatusCode::NO_CONTENT);
+    let delete_network = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/networks/{network_id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(delete_network.status(), StatusCode::NO_CONTENT);
     std::fs::remove_dir_all(root)?;
     Ok(())
 }

@@ -742,19 +742,19 @@ struct FixedIpResponse {
     ip_address: Ipv4Addr,
 }
 
-fn port_response(value: PortRecord, subnet_id: Option<uuid::Uuid>) -> PortResponse {
+fn port_response(value: PortRecord) -> PortResponse {
     PortResponse {
         id: value.id.to_string(),
         network_id: value.network_id.to_string(),
         project_id: value.project_id,
         name: value.name,
         mac_address: value.mac_address,
-        fixed_ips: subnet_id
-            .into_iter()
-            .map(|id| FixedIpResponse {
-                subnet_id: id.to_string(),
+        fixed_ips: (!value.subnet_id.is_nil())
+            .then_some(FixedIpResponse {
+                subnet_id: value.subnet_id.to_string(),
                 ip_address: value.fixed_ip,
             })
+            .into_iter()
             .collect(),
         status: value.status,
     }
@@ -909,6 +909,18 @@ async fn create_subnet(
             "invalid subnet request",
         );
     };
+    if body
+        .subnet
+        .allocation_pools
+        .as_ref()
+        .is_some_and(|values| values.len() > 1)
+    {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "multiple allocation pools are not supported by this profile",
+        );
+    }
     let pool = body
         .subnet
         .allocation_pools
@@ -1017,24 +1029,13 @@ async fn create_port(
         );
     };
     match service.create_port(&token.project_id, body.port.network_id, body.port.name) {
-        Ok(value) => {
-            let subnet = service
-                .list_subnets(&token.project_id)
-                .ok()
-                .and_then(|values| {
-                    values
-                        .into_iter()
-                        .find(|v| v.network_id == value.network_id)
-                        .map(|v| v.id)
-                });
-            (
-                StatusCode::CREATED,
-                Json(PortEnvelope {
-                    port: port_response(value, subnet),
-                }),
-            )
-                .into_response()
-        }
+        Ok(value) => (
+            StatusCode::CREATED,
+            Json(PortEnvelope {
+                port: port_response(value),
+            }),
+        )
+            .into_response(),
         Err(error) => network_error(error),
     }
 }
@@ -1053,17 +1054,7 @@ async fn list_ports(
     };
     match service.list_ports(&token.project_id) {
         Ok(values) => Json(PortList {
-            ports: values
-                .into_iter()
-                .map(|v| {
-                    let subnet = service.list_subnets(&token.project_id).ok().and_then(|ss| {
-                        ss.into_iter()
-                            .find(|s| s.network_id == v.network_id)
-                            .map(|s| s.id)
-                    });
-                    port_response(v, subnet)
-                })
-                .collect(),
+            ports: values.into_iter().map(port_response).collect(),
         })
         .into_response(),
         Err(error) => network_error(error),
@@ -1084,17 +1075,10 @@ async fn show_port(
         Err(response) => return response,
     };
     match service.get_port(&token.project_id, id) {
-        Ok(value) => {
-            let subnet = service.list_subnets(&token.project_id).ok().and_then(|ss| {
-                ss.into_iter()
-                    .find(|s| s.network_id == value.network_id)
-                    .map(|s| s.id)
-            });
-            Json(PortEnvelope {
-                port: port_response(value, subnet),
-            })
-            .into_response()
-        }
+        Ok(value) => Json(PortEnvelope {
+            port: port_response(value),
+        })
+        .into_response(),
         Err(error) => network_error(error),
     }
 }

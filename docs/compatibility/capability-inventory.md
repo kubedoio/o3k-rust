@@ -4,7 +4,7 @@ This file is generated from `capability-inventory-source.json`; edit the source 
 
 - Profile: `testlab-alpha`
 - Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
-- Rust reference: `ff0bb9a993555767e7fc3de2225d70fc9099f090`
+- Rust reference: `1f053f2fc76b092c9eae3b4a6fe48b31cf39317d`
 - Operations: `41`
 
 Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.
@@ -78,7 +78,7 @@ Evidence states are independent: route implementation does not imply contract, C
 - `network.port_collection_create`: One deterministic fixed IPv4 allocation is targeted initially.
 - `network.port_member_delete`: Host TAP/bridge attachment is a later real-network slice.
 - `network.subnet_collection_create`: One flat subnet/allocation profile is targeted initially.
-- `network.subnet_member_delete`: Delete conflicts with dependent ports and networks must be tested against the public API.
+- `network.subnet_member_delete`: Advanced Neutron resources remain outside the TestLab profile.
 - `placement.allocation_candidates_list`: Allocation candidates and generation-aware scheduling are tracked by #82.
 - `placement.allocation_member_set`: Durable local allocation state is not a public Placement allocation API.
 - `placement.provider_collection_list`: Rust currently has a local durable ledger, not an HTTP Placement service.

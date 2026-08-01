@@ -744,6 +744,8 @@ pub struct SubnetRecord {
 pub struct PortRecord {
     pub id: Uuid,
     pub network_id: Uuid,
+    #[serde(default)]
+    pub subnet_id: Uuid,
     pub project_id: String,
     pub name: String,
     #[serde(default)]
@@ -801,6 +803,14 @@ impl NetworkService {
             if port.mac_address.is_empty() {
                 port.mac_address = deterministic_port_mac(port.id);
                 migrated = true;
+            }
+            if port.subnet_id.is_nil() {
+                if let Some(subnet) = data.subnets.iter().find(|subnet| {
+                    subnet.network_id == port.network_id && subnet.project_id == port.project_id
+                }) {
+                    port.subnet_id = subnet.id;
+                    migrated = true;
+                }
             }
         }
         let mut macs = HashSet::new();
@@ -912,8 +922,7 @@ impl NetworkService {
         if !net.contains(start)
             || !net.contains(end)
             || start > end
-            || start == gateway
-            || end == gateway
+            || (u32::from(start)..=u32::from(end)).contains(&u32::from(gateway))
         {
             return Err(NetworkError::InvalidRequest);
         }
@@ -1042,6 +1051,7 @@ impl NetworkService {
                 let port = PortRecord {
                     id,
                     network_id,
+                    subnet_id: subnet.id,
                     project_id: project_id.to_owned(),
                     name,
                     mac_address,
@@ -1198,6 +1208,9 @@ mod tests {
         assert_eq!(first.fixed_ip, subnet.allocation_start);
         let reopened = NetworkService::open(&path)?;
         assert_eq!(reopened.get_port("project-a", first.id)?, first);
+        service.delete_port("project-a", first.id)?;
+        let replacement = service.create_port("project-a", network.id, "replacement".to_owned())?;
+        assert_eq!(replacement.fixed_ip, first.fixed_ip);
         assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
             entry
                 .file_name()
@@ -1275,6 +1288,18 @@ mod tests {
         assert!(matches!(
             service.create_port("project-a", network.id, "two".to_owned()),
             Err(NetworkError::PoolExhausted)
+        ));
+        assert!(matches!(
+            service.create_subnet(
+                "project-a",
+                network.id,
+                "gateway-overlap".to_owned(),
+                "198.51.100.0/29".to_owned(),
+                Some(Ipv4Addr::new(198, 51, 100, 3)),
+                Some(Ipv4Addr::new(198, 51, 100, 2)),
+                Some(Ipv4Addr::new(198, 51, 100, 4)),
+            ),
+            Err(NetworkError::InvalidRequest)
         ));
         assert!(matches!(
             service.get_network("project-b", network.id),

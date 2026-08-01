@@ -253,6 +253,12 @@ class SelfTestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(300, {"versions": {"values": [{"id": "v3"}]}})
         elif self.path == "/v3":
             self.send_json(200, {"version": {"id": "v3"}})
+        elif self.path == "/v2.0/networks":
+            self.send_json(200, {"networks": []})
+        elif self.path == "/v2.0/subnets":
+            self.send_json(200, {"subnets": []})
+        elif self.path == "/v2.0/ports":
+            self.send_json(200, {"ports": []})
         elif self.path.endswith("/flavors") or self.path.endswith("/flavors/detail"):
             self.send_json(200, {"flavors": [{"id": "self-test-flavor"}]})
         elif self.path.endswith("/os-keypairs"):

@@ -931,7 +931,7 @@
       "id": "network.subnet_member_delete",
       "implementation_state": "implemented",
       "known_gaps": [
-        "Delete conflicts with dependent ports and networks must be tested against the public API."
+        "Advanced Neutron resources remain outside the TestLab profile."
       ],
       "method": "DELETE",
       "official_sources": [
@@ -1116,7 +1116,7 @@
     "placement"
   ],
   "rust_reference": {
-    "commit": "ff0bb9a993555767e7fc3de2225d70fc9099f090",
+    "commit": "1f053f2fc76b092c9eae3b4a6fe48b31cf39317d",
     "repository": "https://github.com/kubedoio/o3k-rust"
   },
   "schema_version": 1
