@@ -18,6 +18,7 @@ concurrency:
 jobs:
   real-host:
     name: Protected TestLab real-host validation
+    if: github.ref == 'refs/heads/main'
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
@@ -25,7 +26,10 @@ jobs:
       O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}
     steps:
       - name: Check out the canonical repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
 
       - name: Probe runner capabilities
         id: capabilities
@@ -92,9 +96,16 @@ jobs:
 
       - name: Upload redacted real-host artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: real-host-workflow-artifacts
-          path: target/real-host-workflow-artifacts/
+          path: |
+            target/real-host-workflow-artifacts/runner-capabilities.json
+            target/real-host-workflow-artifacts/real-host-owned-inventory-baseline.json
+            target/real-host-workflow-artifacts/real-host-owned-inventory-after.json
+            target/real-host-workflow-artifacts/real-host-workflow-result.json
+            target/real-host-workflow-artifacts/resource-leak-result.json
+            target/real-host-workflow-artifacts/libvirt-result.json
+            target/real-host-workflow-artifacts/openstack-cli-result.json
           if-no-files-found: error
           retention-days: 14

@@ -46,7 +46,7 @@ chmod +x "${FAKE_BIN}/openstack"
 
 export PATH="${FAKE_BIN}:${PATH}" O3K_REAL_HOST_ARTIFACT_DIR="${WORK_DIR}/artifacts"
 export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=kubedoio/o3k-rust
-export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF=
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF= GITHUB_REF=refs/heads/main
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
 export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
@@ -159,6 +159,18 @@ assert value["status"] == "blocked" and value["reason"] == "non_canonical_reposi
 PY
 
 export GITHUB_REPOSITORY=kubedoio/o3k-rust
+export GITHUB_REF=refs/heads/feature-untrusted
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "non-main source ref was accepted" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked" and value["reason"] == "untrusted_source_ref"
+PY
+export GITHUB_REF=refs/heads/main
+
 export O3K_FAKE_VIRSH_DIRTY=true
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
     echo "pre-existing owned resource was accepted" >&2
@@ -271,9 +283,14 @@ for needle in ("workflow_dispatch:",
                "Probe runner capabilities", "runner-capabilities.json",
                "contents: read",
                "O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}",
-               "if: always()", "actions/upload-artifact@v4",
+               "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14"):
     assert needle in text, needle
+assert "if: github.ref == 'refs/heads/main'" in text
+assert "ref: refs/heads/main" in text
+assert "persist-credentials: false" in text
+assert "target/real-host-workflow-artifacts/console.log" not in text
+assert "target/real-host-workflow-artifacts/server-show.json" not in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 PY
 echo "real-host workflow guard tests passed"
