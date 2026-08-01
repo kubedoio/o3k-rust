@@ -26,35 +26,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
         .map_err(|error| format!("open Placement ledger: {error}"))?;
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
-    let mut compute_service = match config.provider {
-        o3k_config::Provider::Libvirt => {
-            return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
-        }
-        o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
-            store,
-            Arc::new(o3k_provider::FakeComputeProvider::new()),
-        ),
-        o3k_config::Provider::CellHv => {
-            let provider = o3k_cellhv::CellHvProvider::connect(&o3k_cellhv::CellHvConfig {
-                endpoint: config
-                    .cellhv_endpoint
-                    .clone()
-                    .ok_or("missing CellHV endpoint")?,
-                expected_version: config
-                    .cellhv_expected_version
-                    .clone()
-                    .ok_or("missing CellHV expected version")?,
-                ca_certificate: config.cellhv_ca_certificate.clone(),
-                client_certificate: config.cellhv_client_certificate.clone(),
-                client_key: config.cellhv_client_key.clone(),
-            })
-            .await?;
-            o3k_compute::ComputeService::new(store, Arc::new(provider))
-        }
-    };
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
+    let mut compute_service = if agent_control_enabled {
+        o3k_compute::ComputeService::new(
+            store,
+            Arc::new(o3k_compute::AgentComputeProvider::new(
+                registry.clone(),
+                Arc::new(o3k_compute::UnconfiguredResolvedCreateResolver),
+            )),
+        )
+    } else {
+        match config.provider {
+            o3k_config::Provider::Libvirt => {
+                return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
+            }
+            o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
+                store,
+                Arc::new(o3k_provider::FakeComputeProvider::new()),
+            ),
+            o3k_config::Provider::CellHv => {
+                let provider = o3k_cellhv::CellHvProvider::connect(&o3k_cellhv::CellHvConfig {
+                    endpoint: config
+                        .cellhv_endpoint
+                        .clone()
+                        .ok_or("missing CellHV endpoint")?,
+                    expected_version: config
+                        .cellhv_expected_version
+                        .clone()
+                        .ok_or("missing CellHV expected version")?,
+                    ca_certificate: config.cellhv_ca_certificate.clone(),
+                    client_certificate: config.cellhv_client_certificate.clone(),
+                    client_key: config.cellhv_client_key.clone(),
+                })
+                .await?;
+                o3k_compute::ComputeService::new(store, Arc::new(provider))
+            }
+        }
+    };
     if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
