@@ -31,12 +31,26 @@ cat >"${MOCK_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 state_file="${O3K_MOCK_STATE:?}"
+resource_state="${O3K_MOCK_RESOURCE_STATE:?}"
 case "$*" in
   token\ issue*) exit 0;;
-  image\ create*) echo image-id;;
-  network\ create*) echo network-id;;
-  subnet\ create*) echo subnet-id;;
-  flavor\ create*) echo flavor-id;;
+  image\ create*) echo image-id; : >"${resource_state}/image-id";;
+  keypair\ create*) echo keypair-id; : >"${resource_state}/keypair-id";;
+  network\ create*) echo network-id; : >"${resource_state}/network-id";;
+  subnet\ create*) echo subnet-id; : >"${resource_state}/subnet-id";;
+  flavor\ create*) echo flavor-id; : >"${resource_state}/flavor-id";;
+  image\ show*|keypair\ show*|network\ show*|subnet\ show*|flavor\ show*)
+    resource="${1}"; id="${3}"
+    if [[ -e "${resource_state}/${id}" ]]; then
+      printf '{"id":"%s"}\n' "${id}"
+    else
+      printf 'No %s with ID was found\n' "${resource}" >&2
+      exit 1
+    fi
+    ;;
+  image\ delete*|keypair\ delete*|network\ delete*|subnet\ delete*|flavor\ delete*)
+    rm -f -- "${resource_state}/${3}"
+    ;;
   server\ create*) : >"${state_file}"; echo server-id;;
   server\ show*)
     if [[ -e "${state_file}" ]]; then
@@ -62,6 +76,8 @@ chmod +x "${MOCK_BIN}"/*
 
 export PATH="${MOCK_BIN}:${PATH}"
 export O3K_MOCK_STATE="${WORK_DIR}/server-present"
+export O3K_MOCK_RESOURCE_STATE="${WORK_DIR}/resources"
+mkdir -p "${O3K_MOCK_RESOURCE_STATE}"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
 export O3K_TESTLAB_PROFILE=libvirt
 export OS_PASSWORD=test-password
