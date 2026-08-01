@@ -208,6 +208,11 @@ impl TokenService {
         self
     }
 
+    #[must_use]
+    pub fn catalog_endpoint(&self) -> &str {
+        &self.catalog_endpoint
+    }
+
     pub fn issue(
         &self,
         request: &TokenRequest,

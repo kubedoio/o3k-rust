@@ -249,7 +249,11 @@ def compare_targets(
 
 class SelfTestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path.endswith("/flavors") or self.path.endswith("/flavors/detail"):
+        if self.path == "/":
+            self.send_json(300, {"versions": {"values": [{"id": "v3"}]}})
+        elif self.path == "/v3":
+            self.send_json(200, {"version": {"id": "v3"}})
+        elif self.path.endswith("/flavors") or self.path.endswith("/flavors/detail"):
             self.send_json(200, {"flavors": [{"id": "self-test-flavor"}]})
         elif self.path.endswith("/os-keypairs"):
             self.send_json(200, {"keypairs": []})
