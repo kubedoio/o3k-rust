@@ -272,6 +272,8 @@ install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
 sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/data/agent-id"
+AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
+  || fail "cannot read generated agent fingerprint"
 
 PASSWORD="$(openssl rand -hex 32)"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
@@ -295,7 +297,7 @@ O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_CERTIFICATE=$(printf '%q' "$STATE_ROOT/tls/server.pem")
 O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
 O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
-O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(<"$STATE_ROOT/tls/agent-fingerprint")
+O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(printf '%q' "$AUTHORIZED_FINGERPRINT")
 EOF
 cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
