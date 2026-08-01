@@ -31,9 +31,11 @@ RESOURCE_COMMANDS = {
     "flavor": ("flavor", "list", "--name", "o3k-testlab-flavor", "-f", "value", "-c", "ID"),
     "keypair": ("keypair", "list", "--name", "o3k-testlab-keypair", "-f", "value", "-c", "ID"),
 }
+LAST_FAILURE_REASON = "inventory_collection_failed"
 
 
 def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> str | None:
+    global LAST_FAILURE_REASON
     environment = os.environ.copy()
     if scrub_provider_config:
         environment.pop("OS_CLOUD", None)
@@ -50,6 +52,7 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
             text=True,
         )
     except (OSError, UnicodeError, subprocess.SubprocessError):
+        LAST_FAILURE_REASON = f"command_unavailable:{args[0]}"
         return None
     return result.stdout
 
@@ -61,6 +64,7 @@ def digest(values: list[str]) -> str:
 
 def protected_paths_digest() -> str | None:
     """Hash an explicit, redacted allowlist of host paths and their contents."""
+    global LAST_FAILURE_REASON
     raw_allowlist = os.environ.get("O3K_REAL_HOST_PROTECTED_PATHS")
     if raw_allowlist is None:
         return None
@@ -72,6 +76,7 @@ def protected_paths_digest() -> str | None:
         path = Path(value)
         if (not path.is_absolute() or "\x00" in value
                 or ".." in path.parts):
+            LAST_FAILURE_REASON = "protected_path_allowlist_invalid"
             return None
         paths.append(Path(os.path.abspath(path)))
 
@@ -84,6 +89,7 @@ def protected_paths_digest() -> str | None:
                 for candidate in root.rglob("*"):
                     candidates.append(candidate)
                     if len(candidates) > MAX_PROTECTED_ENTRIES:
+                        LAST_FAILURE_REASON = "protected_path_too_many_entries"
                         return None
             for candidate in candidates:
                 stat = candidate.lstat()
@@ -93,9 +99,11 @@ def protected_paths_digest() -> str | None:
                 content = ""
                 if kind == "file":
                     if stat.st_size > MAX_PROTECTED_FILE_BYTES:
+                        LAST_FAILURE_REASON = "protected_path_file_too_large"
                         return None
                     total_bytes += stat.st_size
                     if total_bytes > MAX_PROTECTED_TOTAL_BYTES:
+                        LAST_FAILURE_REASON = "protected_path_total_too_large"
                         return None
                     hasher = hashlib.sha256()
                     with candidate.open("rb") as stream:
@@ -115,6 +123,7 @@ def protected_paths_digest() -> str | None:
                     "content_sha256": content,
                 }, sort_keys=True, separators=(",", ":")))
         except (OSError, UnicodeError, ValueError):
+            LAST_FAILURE_REASON = "protected_path_unreadable"
             return None
     return digest(records)
 
@@ -229,7 +238,7 @@ def main() -> int:
     for _attempt in range(3):
         current = snapshot()
         if current is None:
-            write_atomic(output, {"status": "unavailable", "reason": "inventory_collection_failed", "redacted": True})
+            write_atomic(output, {"status": "unavailable", "reason": LAST_FAILURE_REASON, "redacted": True})
             return 1
         canonical = json.dumps(current, sort_keys=True, separators=(",", ":"))
         if previous == canonical:
