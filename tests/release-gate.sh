@@ -364,6 +364,26 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
 fi
 grep -q 'benchmark: samples must match benchmark_raw.samples' "${ARTIFACT_DIR}/inconsistent-release.json"
 
+python3 - "${ARTIFACT_DIR}/benchmark-raw.json" "${ARTIFACT_DIR}/benchmark.json" <<'PY'
+import hashlib, json, sys
+raw_path, summary_path = sys.argv[1:]
+raw = json.loads(open(raw_path, encoding="utf-8").read())
+summary = json.loads(open(summary_path, encoding="utf-8").read())
+raw["control_plane"]["startup_readiness_ms"] = 3000
+summary["control_plane"] = raw["control_plane"]
+summary["raw_sha256"] = hashlib.sha256(
+    json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+).hexdigest()
+open(raw_path, "w", encoding="utf-8").write(json.dumps(raw))
+open(summary_path, "w", encoding="utf-8").write(json.dumps(summary))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --output "${ARTIFACT_DIR}/forged-target-evaluation.json"; then
+    echo "release gate accepted forged benchmark target evaluation" >&2
+    exit 1
+fi
+grep -q 'benchmark: targets_evaluated does not match raw measurements' "${ARTIFACT_DIR}/forged-target-evaluation.json"
+
 python3 - "${ARTIFACT_DIR}/benchmark-raw.json" <<'PY'
 import json, sys
 path = sys.argv[1]

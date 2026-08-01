@@ -340,6 +340,34 @@ if isinstance(benchmark_summary, dict) and isinstance(benchmark_raw, dict):
     ):
         if benchmark_summary.get(field) != benchmark_raw.get(field):
             errors.append(f"benchmark: {field} must match benchmark_raw.{field}")
+    control_plane = benchmark_raw.get("control_plane")
+    targets = benchmark_raw.get("targets")
+    evaluated = benchmark_summary.get("targets_evaluated")
+    if isinstance(control_plane, dict) and isinstance(targets, dict) and isinstance(evaluated, dict):
+        measurements = {
+            "startup": (control_plane.get("startup_readiness_ms"), targets.get("startup_readiness_ms")),
+            "rss": (control_plane.get("idle_rss_kib"), targets.get("idle_rss_mib")),
+            "token_p95": (control_plane.get("token_p95_seconds"), targets.get("token_p95_ms")),
+        }
+        expected = {}
+        valid = True
+        for name, (measurement, target) in measurements.items():
+            if isinstance(measurement, bool) or not isinstance(measurement, (int, float)):
+                valid = False
+                continue
+            if isinstance(target, bool) or not isinstance(target, (int, float)):
+                valid = False
+                continue
+            if name == "rss":
+                expected[name] = measurement <= target * 1024
+            elif name == "token_p95":
+                expected[name] = measurement * 1000 <= target
+            else:
+                expected[name] = measurement <= target
+        if not valid:
+            errors.append("benchmark_raw: control_plane measurements and targets must be numeric")
+        elif evaluated != expected or not all(expected.values()):
+            errors.append("benchmark: targets_evaluated does not match raw measurements")
 
 report = {"release": "v0.2.0-alpha.1", "profile": "libvirt", "source_commit": source_commit, "status": "ready" if not errors else "blocked", "evidence": evidence, "errors": errors, "tag_created": False}
 with open(os.environ["OUTPUT"], "w", encoding="utf-8") as stream:

@@ -6,7 +6,9 @@ The release gate previously freshness-checked only the benchmark summary. This
 slice adds a timestamp to the raw benchmark artifact, validates raw freshness,
 requires the raw and summary timestamps to be identical, and requires both
 artifacts to explicitly declare release eligibility. The raw digest still
-binds the summary to the exact measured document.
+binds the summary to the exact measured document, and the release gate
+recomputes target results from those raw measurements instead of trusting a
+truthy summary map.
 
 ## Evidence and non-claims
 
@@ -21,6 +23,8 @@ evidence.
 - stale raw evidence is rejected even when its summary hash is refreshed;
 - mismatched raw/summary timestamps are rejected;
 - ineligible raw/summary benchmark evidence is rejected;
+- a summary with forged target results is rejected even when its raw digest is
+  valid;
 - real-host measurements remain pending until the protected CirrOS workflow
   produces the required raw samples and environment metadata.
 
