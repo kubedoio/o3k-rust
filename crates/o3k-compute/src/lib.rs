@@ -725,7 +725,7 @@ mod tests {
                 .get_resource(request.o3k_server_id)
                 .await?
                 .observed_state,
-            "active"
+            "requested"
         );
         Ok(())
     }
