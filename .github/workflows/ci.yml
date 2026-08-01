@@ -21,7 +21,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install protobuf compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config
+      - name: Refresh cached libvirt bindings
+        run: cargo clean -p virt-sys
       - name: Format
         run: cargo fmt --all -- --check
       - name: Validate packaging scripts
@@ -53,7 +55,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --all-features
       - name: Validate compute-agent protobuf draft
         run: |
           protoc --proto_path=proto \
