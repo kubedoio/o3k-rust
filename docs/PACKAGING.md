@@ -22,6 +22,10 @@ ships `o3k-compute`, preflight/diagnostics, certificate bootstrap, and the
 release gate. Release artifacts are not claims of CellHV support; the CellHV
 profile remains separately environment-gated.
 
+The version must use the numeric release format with an optional alphanumeric
+prerelease suffix (for example, `0.2.0-alpha.1`). Unsafe path or control
+characters are rejected before build or output cleanup.
+
 Reset is explicit and preserves credentials:
 
 ```text

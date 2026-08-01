@@ -4,7 +4,8 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-bundle.XXXXXX")"
 DIRTY_MARKER="$ROOT_DIR/.o3k-release-dirty-test"
-cleanup() { rm -f -- "$DIRTY_MARKER"; rm -rf -- "$WORK_DIR"; }
+ESCAPE_SENTINEL="$ROOT_DIR/o3k-release-escape-sentinel"
+cleanup() { rm -f -- "$DIRTY_MARKER" "$ESCAPE_SENTINEL"; rm -rf -- "$WORK_DIR"; }
 trap cleanup EXIT
 
 BUNDLE_DIR="$WORK_DIR/bundle"
@@ -38,6 +39,18 @@ if CARGO_MARKER="$WORK_DIR/dirty-cargo-invoked" PATH="$CARGO_DIR:$PATH" \
 fi
 [[ ! -e "$WORK_DIR/dirty-cargo-invoked" ]]
 rm -f -- "$DIRTY_MARKER"
+
+printf 'must survive invalid version input\n' >"$ESCAPE_SENTINEL"
+for invalid_version in '../../../o3k-release-escape' '1.2.3/escape' '1.2.3 bad' '1.2.3"quote'; do
+  if CARGO_MARKER="$WORK_DIR/invalid-version-cargo" PATH="$CARGO_DIR:$PATH" \
+      bash "$ROOT_DIR/packaging/make-release.sh" "$invalid_version" fake; then
+    echo "release builder accepted unsafe version: $invalid_version" >&2
+    exit 1
+  fi
+  [[ ! -e "$WORK_DIR/invalid-version-cargo" ]]
+  grep -qx 'must survive invalid version input' "$ESCAPE_SENTINEL"
+done
+rm -f -- "$ESCAPE_SENTINEL"
 
 PREFIX="$WORK_DIR/prefix"
 CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
