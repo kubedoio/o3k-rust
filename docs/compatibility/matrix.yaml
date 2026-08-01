@@ -157,6 +157,7 @@ entries:
     known_deviations:
       - Public-key import is supported; private-key generation and private-key responses are intentionally unsupported.
       - Keypairs are scoped to the authenticated user and project.
+      - The alpha response uses a durable epoch-seconds creation timestamp and UUID identity rather than Nova's legacy integer/timestamp presentation.
     executable_tests:
       - crates/o3k-store/src/lib.rs::tests::keypairs_are_scoped_unique_and_survive_restart
       - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes

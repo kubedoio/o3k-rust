@@ -574,6 +574,18 @@ impl ComputeService {
                 if existing_request != request {
                     return Err(ComputeError::Conflict);
                 }
+                let attached = self.store.get_server_keypair_name(id).await?;
+                if attached != request.key_name {
+                    if attached.is_none() {
+                        if let Some(keypair) = keypair.as_ref() {
+                            self.store.attach_server_keypair(id, keypair.id).await?;
+                        } else {
+                            return Err(ComputeError::Conflict);
+                        }
+                    } else {
+                        return Err(ComputeError::Conflict);
+                    }
+                }
                 return self.show_server(&project_id, id).await;
             }
             Err(error) => return Err(ComputeError::Reconcile(error)),
