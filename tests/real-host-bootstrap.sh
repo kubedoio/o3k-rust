@@ -44,8 +44,22 @@ bash "$ROOT_DIR/scripts/real-host-bootstrap.sh" >"$WORK_DIR/stdout" 2>"$WORK_DIR
 grep -Fqx 'O3K_REAL_HOST_SERVICE_ACCOUNT=o3k-testlab' "$GITHUB_ENV"
 grep -Fqx 'OS_PASSWORD=generated-test-password' "$GITHUB_ENV"
 grep -Fqx "O3K_REAL_HOST_PROTECTED_PATHS=$WORK_DIR/protected-state" "$GITHUB_ENV"
+grep -Fqx 'O3K_TESTLAB_PASSWORD_SOURCE=environment' "$GITHUB_ENV"
 grep -Fqx "$WORK_DIR/venv/bin" "$GITHUB_PATH"
 [[ "$(<"$WORK_DIR/protected-state")" == 'o3k-real-host-protected-state-v1' ]]
 ! grep -Fq 'generated-test-password' "$WORK_DIR/stdout" "$WORK_DIR/stderr"
+
+printf 'keystone_admin_password: "kolla# shared\\x41-password" # comment\n' >"$WORK_DIR/passwords.yml"
+GITHUB_ENV="$WORK_DIR/github-kolla.env"
+GITHUB_PATH="$WORK_DIR/github-kolla.path"
+O3K_KOLLA_PASSWORD_FILE="$WORK_DIR/passwords.yml"
+O3K_REAL_HOST_PROTECTED_STATE="$WORK_DIR/kolla-protected-state"
+unset OS_PASSWORD
+export GITHUB_ENV GITHUB_PATH O3K_KOLLA_PASSWORD_FILE O3K_REAL_HOST_PROTECTED_STATE
+bash "$ROOT_DIR/scripts/real-host-bootstrap.sh" >"$WORK_DIR/kolla-stdout" 2>"$WORK_DIR/kolla-stderr"
+grep -Fqx 'OS_PASSWORD=kolla# sharedA-password' "$GITHUB_ENV"
+grep -Fqx 'O3K_TESTLAB_PASSWORD_SOURCE=kolla-passwords-yml' "$GITHUB_ENV"
+grep -Fqx '::add-mask::kolla# sharedA-password' "$WORK_DIR/kolla-stdout"
+! grep -Fq 'kolla# sharedA-password' "$WORK_DIR/kolla-stderr"
 
 echo "real-host bootstrap tests passed"

@@ -27,7 +27,10 @@ This change does not claim that the host gate passed. A maintainer must
 configure the protected environment and a runner with the exact labels,
   QEMU/KVM, libvirt `qemu:///system`, required tools, an installed TestLab
   profile, credentials, and access to the pinned CirrOS download. The workflow
-  provisions only disposable CLI/config-drive dependencies; it does not guess
+  provisions only disposable CLI/config-drive dependencies. Credential
+  discovery preserves `OS_PASSWORD`, the O3K environment file, and the
+  standard Kolla-Ansible `/etc/kolla/passwords.yml`
+  (`keystone_admin_password`) or `admin-openrc.sh` sources; it does not guess
   or rotate the daemon credential. A manual run must produce
 `status: passed` for the lifecycle and redacted result before real-host
 evidence is accepted by the release gate. The baseline must be clean and the
