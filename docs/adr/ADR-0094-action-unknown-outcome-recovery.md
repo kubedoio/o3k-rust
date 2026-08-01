@@ -30,6 +30,10 @@ durable journal record. A provider-operation UUID alone is not sufficient
 evidence: a mismatched or stale operation is rejected as invalid intent and
 cannot complete the resource transition.
 
+The release-gate aggregate must also carry a non-empty evidence artifact
+identifier and checks list for every required failure-recovery scenario. A
+passed status without those references is not sufficient evidence shape.
+
 ## Consequences
 
 - Repository tests cover timeout-after-action, duplicate delivery,

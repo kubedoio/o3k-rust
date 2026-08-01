@@ -241,6 +241,20 @@ for name, (path, artifact_type) in required.items():
                     errors.append(
                         f"{name}: scenarios.{scenario}.status must be 'passed'"
                     )
+                elif (
+                    not isinstance(result.get("evidence"), dict)
+                    or not isinstance(result["evidence"].get("artifact"), str)
+                    or not result["evidence"]["artifact"].strip()
+                    or not isinstance(result["evidence"].get("checks"), list)
+                    or not result["evidence"]["checks"]
+                    or not all(
+                        isinstance(check, str) and check.strip()
+                        for check in result["evidence"]["checks"]
+                    )
+                ):
+                    errors.append(
+                        f"{name}: scenarios.{scenario}.evidence must identify an artifact and checks"
+                    )
     if name in {"clean_ubuntu_install", "clean_debian_install"}:
         expected_distro = "ubuntu" if name.endswith("ubuntu_install") else "debian"
         if value.get("distro") != expected_distro:

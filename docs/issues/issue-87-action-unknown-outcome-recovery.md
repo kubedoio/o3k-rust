@@ -29,9 +29,11 @@ image, host-tool, and cleanup scenario keys must be present with a passed
 machine-readable result. This validates evidence shape only and does not claim
 that any real-host scenario has run.
 
-The gate currently validates the required scenario key set and each result's
-`status`; richer host evidence remains the responsibility of the failure
-injection harness and is not inferred from those fields.
+The gate validates the required scenario key set, each result's `status`, and
+the presence of an artifact identifier plus non-empty checks for every
+scenario. It does not inspect those referenced artifacts; richer host evidence
+remains the responsibility of the failure-injection harness and is not
+inferred from these fields.
 
 ## Explicit non-goals
 

@@ -33,7 +33,13 @@ artifacts = {
         "artifact_type": "failure-recovery",
         "status": "passed",
         "scenarios": {
-            scenario: {"status": "passed"}
+            scenario: {
+                "status": "passed",
+                "evidence": {
+                    "artifact": f"failure-recovery/{scenario}.json",
+                    "checks": ["observed transition", "verified cleanup"],
+                },
+            }
             for scenario in (
                 "control-plane-crash-before-dispatch",
                 "control-plane-crash-after-dispatch",
@@ -53,7 +59,7 @@ artifacts = {
                 "dnsmasq-failure",
                 "disk-full",
                 "repeated-delete",
-                "partial-cleanup",
+        "partial-cleanup",
             )
         },
     },
@@ -138,6 +144,30 @@ GATE_ARGS=(
     --human-review "${HUMAN_REVIEW}"
     --source-commit "${SOURCE_COMMIT}"
 )
+
+cp "${ARTIFACT_DIR}/recovery.json" "${ARTIFACT_DIR}/recovery-missing-evidence.json"
+python3 - "${ARTIFACT_DIR}/recovery-missing-evidence.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["scenarios"]["partial-cleanup"]["evidence"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    --e2e "${ARTIFACT_DIR}/e2e.json" \
+    --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
+    --install-debian "${ARTIFACT_DIR}/debian.json" \
+    --recovery "${ARTIFACT_DIR}/recovery-missing-evidence.json" \
+    --benchmark "${ARTIFACT_DIR}/benchmark.json" \
+    --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+    --human-review "${HUMAN_REVIEW}" \
+    --source-commit "${SOURCE_COMMIT}" \
+    --output "${ARTIFACT_DIR}/missing-recovery-evidence.json"; then
+    echo "release gate accepted a scenario without evidence" >&2
+    exit 1
+fi
+grep -q 'failure_recovery: scenarios.partial-cleanup.evidence must identify an artifact and checks' \
+    "${ARTIFACT_DIR}/missing-recovery-evidence.json"
 
 python3 - "${HUMAN_REVIEW}" <<'PY'
 import json, sys
