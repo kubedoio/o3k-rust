@@ -36,6 +36,7 @@ jobs:
         run: bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Download and verify CirrOS image
+        id: image
         if: steps.bootstrap.outcome == 'success'
         continue-on-error: true
         env:
@@ -55,7 +56,7 @@ jobs:
 
       - name: Probe runner capabilities
         id: capabilities
-        if: steps.bootstrap.outcome == 'success'
+        if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts

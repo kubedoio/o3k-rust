@@ -117,27 +117,12 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is unavailable"
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
-
-need_packages=false
-command -v genisoimage >/dev/null 2>&1 || need_packages=true
-python3 -m venv --help >/dev/null 2>&1 || need_packages=true
-command -v pkg-config >/dev/null 2>&1 || need_packages=true
-if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
-  command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
-  sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
-  sudo -n flock -x "$APT_LOCK" bash -c '
-    set -euo pipefail
-    env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      genisoimage python3-venv pkg-config libvirt-dev
-  ' || fail "cannot install required host packages"
-fi
 
 for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
   ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
@@ -186,7 +171,22 @@ if [[ -e "$STATE_ROOT" ]]; then
 fi
 
 if [[ "$REUSE" == false ]]; then
-mkdir -p "${STATE_ROOT%/*}"
+umask 077
+need_packages=false
+command -v genisoimage >/dev/null 2>&1 || need_packages=true
+python3 -m venv --help >/dev/null 2>&1 || need_packages=true
+command -v pkg-config >/dev/null 2>&1 || need_packages=true
+if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
+  command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
+  sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
+  sudo -n flock -x "$APT_LOCK" bash -c '
+    set -euo pipefail
+    timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
+      apt-get install -y --no-install-recommends genisoimage python3-venv pkg-config libvirt-dev
+  ' || fail "cannot install required host packages within the bounded package-manager timeout"
+fi
+install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}"
 account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
   set -euo pipefail
   group_created=false
@@ -205,7 +205,6 @@ account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
 read -r ACCOUNT_CREATED GROUP_CREATED <<<"$account_state"
 [[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
 
-mkdir -p "${PID_ROOT%/*}"
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
 [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state already exists"
@@ -241,9 +240,13 @@ PASSWORD="$(openssl rand -hex 32)"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
 echo "::add-mask::${PASSWORD}"
 SIGNING_KEY="$(openssl rand -hex 48)"
-printf '%s\n' "$PASSWORD" >"$STATE_ROOT/.password"
-chmod 0600 "$STATE_ROOT/.password"
-cat >"$STATE_ROOT/o3kd.env" <<EOF
+password_tmp="$STATE_ROOT/.password.tmp.$$"
+printf '%s\n' "$PASSWORD" >"$password_tmp"
+chmod 0600 "$password_tmp"
+mv -f -- "$password_tmp" "$STATE_ROOT/.password"
+o3kd_env_tmp="$STATE_ROOT/o3kd.env.tmp.$$"
+compute_env_tmp="$STATE_ROOT/o3k-compute.env.tmp.$$"
+cat >"$o3kd_env_tmp" <<EOF
 O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
 O3K_PROVIDER=fake
@@ -257,7 +260,7 @@ O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
 O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
 O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(<"$STATE_ROOT/tls/agent-fingerprint")
 EOF
-cat >"$STATE_ROOT/o3k-compute.env" <<EOF
+cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_NAME=o3k-control-plane
@@ -266,19 +269,37 @@ O3K_COMPUTE_TLS_DIR=$(printf '%q' "$STATE_ROOT/tls")
 O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
 O3K_COMPUTE_MAX_DISK_GB=10
 EOF
-chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/o3k-compute.env"
+chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
+mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
+mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
 sudo -n chown -R "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT"
 sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
   || fail "o3k service account cannot traverse the run state root"
 
 start_service() {
   local name="$1" env_file="$2" binary="$3" log_file="$4" pid_file="$5"
+  local supervisor child candidate
   sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
     "$env_file" "$binary" "$log_file" &
-  local pid=$!
-  printf '%s\n' "$pid" >"$pid_file"
-  kill -0 "$pid" 2>/dev/null || fail "$name did not start"
-  if [[ "$name" == o3kd ]]; then O3KD_PID="$pid"; else COMPUTE_PID="$pid"; fi
+  supervisor=$!
+  child=
+  for _ in $(seq 1 50); do
+    while read -r candidate; do
+      if process_matches "$candidate" "$(basename "$binary")"; then
+        child="$candidate"
+        break
+      fi
+    done < <(sudo -n pgrep -P "$supervisor" -u "$SERVICE_ACCOUNT" 2>/dev/null || true)
+    [[ -n "$child" ]] && break
+    sudo -n kill -0 "$supervisor" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [[ -z "$child" ]]; then
+    sudo -n kill "$supervisor" 2>/dev/null || true
+    fail "$name did not start as the packaged service account"
+  fi
+  printf '%s\n' "$child" >"$pid_file"
+  if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
 }
   start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
 for _ in $(seq 1 60); do
