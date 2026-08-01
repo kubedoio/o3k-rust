@@ -103,6 +103,7 @@ pub fn router_with_state(state: AppState) -> Router {
     Router::new()
         .route("/", get(keystone_root))
         .route("/v3", get(keystone_v3))
+        .route("/placement", get(placement_discovery))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v3/auth/tokens", post(issue_token))
@@ -155,22 +156,40 @@ async fn health() -> impl IntoResponse {
     Json(HealthResponse { status: "ok" })
 }
 
-fn keystone_version() -> serde_json::Value {
+fn keystone_version(endpoint: &str) -> serde_json::Value {
     serde_json::json!({
         "id": "v3",
         "status": "stable",
         "updated": "2024-01-01T00:00:00Z",
-        "links": [{"rel": "self", "href": "/v3"}],
+        "links": [{"rel": "self", "href": format!("{endpoint}/v3")}],
         "media-types": [{"base": "application/json", "type": "application/vnd.openstack.identity-v3+json"}]
     })
 }
 
-async fn keystone_root() -> impl IntoResponse {
-    Json(serde_json::json!({"versions": {"values": [keystone_version()]}}))
+fn identity_endpoint(state: &AppState) -> String {
+    state.identity.as_ref().map_or_else(
+        || "http://127.0.0.1:8080".to_owned(),
+        |service| service.catalog_endpoint().to_owned(),
+    )
 }
 
-async fn keystone_v3() -> impl IntoResponse {
-    Json(serde_json::json!({"version": keystone_version()}))
+async fn keystone_root(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::MULTIPLE_CHOICES,
+        Json(
+            serde_json::json!({"versions": {"values": [keystone_version(&identity_endpoint(&state))]}}),
+        ),
+    )
+}
+
+async fn keystone_v3(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({"version": keystone_version(&identity_endpoint(&state))}))
+}
+
+async fn placement_discovery() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "versions": [{"id": "1.0", "status": "stable", "links": [{"rel": "self", "href": "/placement"}]}]
+    }))
 }
 
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {

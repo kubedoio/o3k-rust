@@ -11,6 +11,26 @@
   },
   "fixtures": [
     {
+      "id": "identity.version_root",
+      "name": "identity-discovery-root",
+      "service": "identity",
+      "method": "GET",
+      "path": "/",
+      "expected_status": [300],
+      "required_json_keys": ["versions"],
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#version-discovery"]
+    },
+    {
+      "id": "identity.version_v3",
+      "name": "identity-discovery-v3",
+      "service": "identity",
+      "method": "GET",
+      "path": "/v3",
+      "expected_status": [200],
+      "required_json_keys": ["version"],
+      "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#version-discovery"]
+    },
+    {
       "id": "compute.flavor_collection_list",
       "name": "flavor-list",
       "service": "compute",

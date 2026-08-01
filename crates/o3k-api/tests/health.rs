@@ -232,7 +232,15 @@ async fn keystone_discovery_exposes_v3_without_fallback_warning()
                     .body(Body::empty())?,
             )
             .await?;
-        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        assert_eq!(
+            response.status(),
+            if uri == "/" {
+                StatusCode::MULTIPLE_CHOICES
+            } else {
+                StatusCode::OK
+            },
+            "{uri}"
+        );
         let body: Value =
             serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 8192).await?)?;
         if uri == "/" {
@@ -245,6 +253,10 @@ async fn keystone_discovery_exposes_v3_without_fallback_warning()
             assert_eq!(body["version"]["id"], "v3");
             assert_eq!(body["version"]["status"], "stable");
             assert_eq!(body["version"]["links"][0]["rel"], "self");
+            assert_eq!(
+                body["version"]["links"][0]["href"],
+                "http://127.0.0.1:8080/v3"
+            );
         }
     }
     Ok(())
