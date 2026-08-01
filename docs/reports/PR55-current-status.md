@@ -2,7 +2,7 @@
 
 **Report date:** 2026-08-01  
 **Repository:** `kubedoio/o3k-rust`  
-**Current main analyzed:** [`37a7219`](https://github.com/kubedoio/o3k-rust/commit/37a7219037c84c08d676649a669b5d0c927e0cfe)
+**Current main analyzed:** [`08e586e`](https://github.com/kubedoio/o3k-rust/commit/08e586e3abc0b342ad030cff7379c71483f76f60)
 **Release target:** `v0.2.0-alpha.1` libvirt TestLab  
 
 ## Executive summary
@@ -11,36 +11,38 @@ The repository contains a large amount of repository-side implementation, safety
 
 ## Latest protected-run evidence
 
-Run [`30715574164`](https://github.com/kubedoio/o3k-rust/actions/runs/30715574164)
-executed from `main` at source commit `37a7219` on runner `runner-2404`.
+Run [`30717871057`](https://github.com/kubedoio/o3k-rust/actions/runs/30717871057)
+executed from `main` at source commit `08e586e` on runner `runner-2404`.
 Bootstrap authenticated with the generated ephemeral credential; the runner
 capabilities artifact reported `passed`, the pre-run inventory guard was ready,
-cleanup passed, and all redacted artifacts uploaded successfully. The first
-lifecycle failure was the public CLI keypair-create request:
+cleanup passed, and all redacted artifacts uploaded successfully. The keypair
+import/list/show/delete portion completed and the lifecycle advanced to flavor
+discovery. The next failure was:
 
 ```text
-POST /v2.1/bootstrap-project/os-keypairs -> HTTP 404
+GET /v2.1/bootstrap-project/flavors -> HTTP 405 Method Not Allowed
 ```
 
 The redacted `openstack-cli-result.json` and `libvirt-result.json` reported
 `status: failed`; `real-host-workflow-result.json` and
 `resource-leak-result.json` reported failed lifecycle evidence with no foreign
-state change and no remaining managed resources. This is the authoritative
-blocker; run `30713011899` is superseded and must not be used for diagnosis.
+state change and no remaining managed resources. This is the authoritative next
+blocker; run `30715574164` is superseded for keypair diagnosis.
 
-Issue #280 tracks the focused Nova keypair compatibility slice. Issue #86
-remains open because its required real-host artifact is not `passed`.
+Issues #280 and #282 delivered the focused Nova keypair compatibility slice.
+Issue #86 remains open because its required full real-host artifact is not
+`passed`.
 
-The immediate blocker is no longer missing application code. The first blocker is an invalid GitHub Actions workflow:
+The immediate blocker is now Nova flavor collection. The runner, KVM, libvirt,
+bootstrap, authentication, keypair lifecycle, and cleanup paths have all been
+exercised; no release or full CirrOS acceptance claim is made.
 
 ```text
-Invalid workflow file: .github/workflows/real-host-validation.yml
 (Line: 78, Col: 11): 'OS_PASSWORD' is already defined
 ```
 
-In the `Run public real-host lifecycle` step, `OS_PASSWORD` appears twice in the same `env` mapping. GitHub rejects the workflow before scheduling any job. The self-hosted runner, KVM, libvirt, scripts, credentials, and application code are therefore never reached.
+The prior workflow parse failure is superseded by protected execution.
 
-This must be fixed before continuing any downstream issue. Until the workflow parses and a protected real-host run uploads a successful artifact, issues #76 and #77 remain unverified and issues #78–#93 remain dependency-blocked for real-host acceptance.
 
 ## Current repository state
 
