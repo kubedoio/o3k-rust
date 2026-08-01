@@ -2,12 +2,17 @@
 
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    fs::OpenOptions,
+    io::{self, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 use thiserror::Error;
 use uuid::Uuid;
+
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 pub const MAX_CONSOLE_BYTES: usize = 64 * 1024;
 
@@ -39,7 +44,17 @@ pub struct ConsoleChunk {
 impl ConsoleService {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConsoleError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(ConsoleError::Storage)?;
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Err(ConsoleError::InvalidInput),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&root).map_err(ConsoleError::Storage)?;
+            }
+            Err(error) => return Err(ConsoleError::Storage(error)),
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .map_err(ConsoleError::Storage)?;
         Ok(Self {
             root,
             max_bytes: MAX_CONSOLE_BYTES,
@@ -58,8 +73,25 @@ impl ConsoleService {
 
     fn write_unlocked(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
         let path = self.path(instance_id)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(ConsoleError::InvalidInput),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ConsoleError::Storage(error)),
+        }
         let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7()));
-        if let Err(error) = fs::write(&temporary, output) {
+        let write_result = (|| -> io::Result<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary)?;
+            file.write_all(output)?;
+            #[cfg(unix)]
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            Ok(())
+        })();
+        if let Err(error) = write_result {
             let _ = fs::remove_file(&temporary);
             return Err(ConsoleError::Storage(error));
         }
@@ -77,7 +109,11 @@ impl ConsoleService {
     }
 
     fn append_unlocked(&self, instance_id: Uuid, output: &[u8]) -> Result<(), ConsoleError> {
-        let mut current = self.read(instance_id).unwrap_or_default();
+        let mut current = match self.read(instance_id) {
+            Ok(current) => current,
+            Err(ConsoleError::NotFound) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         current.extend_from_slice(output);
         if current.len() > self.max_bytes {
             current = current[current.len() - self.max_bytes..].to_vec();
@@ -96,7 +132,11 @@ impl ConsoleService {
         let offset = usize::try_from(offset).map_err(|_| ConsoleError::InvalidInput)?;
         let lock = self.instance_lock(instance_id)?;
         let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
-        let current = self.read(instance_id).unwrap_or_default();
+        let current = match self.read(instance_id) {
+            Ok(current) => current,
+            Err(ConsoleError::NotFound) => Vec::new(),
+            Err(error) => return Err(error),
+        };
         if offset == 0 {
             if current.is_empty() {
                 return self.write_unlocked(instance_id, output);
@@ -124,7 +164,18 @@ impl ConsoleService {
     }
 
     pub fn read(&self, instance_id: Uuid) -> Result<Vec<u8>, ConsoleError> {
-        fs::read(self.path(instance_id)?).map_err(|error| {
+        let path = self.path(instance_id)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ConsoleError::NotFound);
+            }
+            Err(error) => return Err(ConsoleError::Storage(error)),
+        };
+        if !metadata.file_type().is_file() || metadata.len() > self.max_bytes as u64 {
+            return Err(ConsoleError::InvalidInput);
+        }
+        fs::read(path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ConsoleError::NotFound
             } else {
@@ -158,9 +209,14 @@ impl ConsoleService {
         let lock = self.instance_lock(instance_id)?;
         let _guard = lock.lock().map_err(|_| ConsoleError::InvalidInput)?;
         let path = self.path(instance_id)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            Ok(_) => return Err(ConsoleError::InvalidInput),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ConsoleError::Storage(error)),
+        }
         match fs::remove_file(path) {
             Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(ConsoleError::Storage(error)),
         }
     }
@@ -187,6 +243,8 @@ impl ConsoleService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::{PermissionsExt, symlink};
     fn service() -> Result<ConsoleService, ConsoleError> {
         ConsoleService::open(std::env::temp_dir().join(format!("o3k-console-{}", Uuid::now_v7())))
     }
@@ -243,6 +301,53 @@ mod tests {
         second.join().map_err(|_| ConsoleError::InvalidInput)??;
         let output = service.read(id)?;
         assert!(output == b"leftright" || output == b"rightleft");
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_artifacts_are_rejected_before_read_allocation() -> Result<(), ConsoleError> {
+        let service = service()?;
+        let id = Uuid::now_v7();
+        fs::write(service.path(id)?, vec![b'x'; MAX_CONSOLE_BYTES + 1])
+            .map_err(ConsoleError::Storage)?;
+        assert!(matches!(service.read(id), Err(ConsoleError::InvalidInput)));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_and_console_files_are_private_and_symlink_roots_are_rejected()
+    -> Result<(), ConsoleError> {
+        let service = service()?;
+        let id = Uuid::now_v7();
+        service.write(id, b"private")?;
+        assert_eq!(
+            fs::metadata(&service.root)
+                .map_err(ConsoleError::Storage)?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(service.path(id)?)
+                .map_err(ConsoleError::Storage)?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let target = std::env::temp_dir().join(format!("o3k-console-target-{}", Uuid::now_v7()));
+        let link = std::env::temp_dir().join(format!("o3k-console-link-{}", Uuid::now_v7()));
+        fs::create_dir(&target).map_err(ConsoleError::Storage)?;
+        symlink(&target, &link).map_err(ConsoleError::Storage)?;
+        assert!(matches!(
+            ConsoleService::open(&link),
+            Err(ConsoleError::InvalidInput)
+        ));
+        fs::remove_file(link).map_err(ConsoleError::Storage)?;
+        fs::remove_dir(target).map_err(ConsoleError::Storage)?;
         Ok(())
     }
 }
