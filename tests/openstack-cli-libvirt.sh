@@ -335,8 +335,12 @@ IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --di
 CREATED_IMAGE_ID="${IMAGE_ID}"
 CLEANUP_IMAGE_STATUS=pending
 KEYPAIR_PUBLIC_KEY="${DATA_DIR}/o3k-testlab-keypair.pub"
-printf '%s\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB8fQmFzZWRPblB1YmxpY0NsaUZpeHR1cmVLZXk= o3k-testlab' >"${KEYPAIR_PUBLIC_KEY}"
-KEYPAIR_ID="$(openstack keypair create --public-key "${KEYPAIR_PUBLIC_KEY}" o3k-testlab-keypair -f value -c id)"
+KEYPAIR_NAME=o3k-testlab-keypair
+ssh-keygen -q -t ed25519 -N '' -C o3k-testlab -f "${DATA_DIR}/o3k-testlab-keypair" >/dev/null
+chmod 0600 "${DATA_DIR}/o3k-testlab-keypair"
+chmod 0644 "${KEYPAIR_PUBLIC_KEY}"
+openstack keypair create --public-key "${KEYPAIR_PUBLIC_KEY}" "${KEYPAIR_NAME}" >/dev/null
+KEYPAIR_ID="${KEYPAIR_NAME}"
 CREATED_KEYPAIR_ID="${KEYPAIR_ID}"
 CLEANUP_KEYPAIR_STATUS=pending
 NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"
@@ -348,7 +352,7 @@ CLEANUP_SUBNET_STATUS=pending
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_ID}" --config-drive true --nic "net-id=${NETWORK_ID},subnet-id=${SUBNET_ID},fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --nic "net-id=${NETWORK_ID},subnet-id=${SUBNET_ID},fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
@@ -388,7 +392,7 @@ if ! server_is_absent "${SERVER_ID}"; then
 fi
 CLEANUP_SERVER_STATUS=verified_absent
 SERVER_ID=
-delete_resource_and_verify_absent keypair "${KEYPAIR_ID}"
+delete_resource_and_verify_absent keypair "${KEYPAIR_NAME}"
 CLEANUP_KEYPAIR_STATUS=verified_absent
 KEYPAIR_ID=
 delete_resource_and_verify_absent flavor "${FLAVOR_ID}"

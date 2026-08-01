@@ -163,10 +163,23 @@ paths:
   /v2.1/{project_id}/flavors/{id}:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
     get: {operationId: showFlavor, responses: {'200': {description: Flavor details.}, '404': {description: Flavor not found.}}}
+  /v2.1/{project_id}/os-keypairs:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
+    get:
+      operationId: listKeypairs
+      responses: {'200': {description: Project/user-scoped keypairs.}, '401': {description: Authentication required.}}
+    post:
+      operationId: createKeypair
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/KeypairCreate'}}}}
+      responses: {'200': {description: Public keypair imported.}, '400': {description: Invalid public key.}, '409': {description: Duplicate keypair name.}}
+  /v2.1/{project_id}/os-keypairs/{name}:
+    parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: name, in: path, required: true, schema: {type: string}}]
+    get: {operationId: showKeypair, responses: {'200': {description: Keypair details.}, '404': {description: Keypair not found.}}}
+    delete: {operationId: deleteKeypair, responses: {'204': {description: Keypair deleted.}, '404': {description: Keypair not found.}, '409': {description: Keypair is attached to a server.}}}
   /v2.1/{project_id}/servers:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
     get: {operationId: listServers, responses: {'200': {description: Project-scoped server list.}}}
-    post: {operationId: createServer, requestBody: {required: true, content: {application/json: {schema: {type: object}}}}, responses: {'202': {description: Server create accepted.}, '400': {description: Invalid request.}, '409': {description: Conflict.}}}
+    post: {operationId: createServer, requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ServerCreate'}}}}, responses: {'202': {description: Server create accepted.}, '400': {description: Invalid request.}, '409': {description: Conflict.}}}
   /v2.1/{project_id}/servers/{id}:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
     get: {operationId: showServer, responses: {'200': {description: Server details.}, '404': {description: Server not found.}}}
@@ -233,6 +246,34 @@ components:
             user: {type: object}
             roles: {type: array, items: {type: object}}
             catalog: {type: array, items: {type: object}}
+    KeypairCreate:
+      type: object
+      additionalProperties: false
+      required: [keypair]
+      properties:
+        keypair:
+          type: object
+          additionalProperties: false
+          required: [name, public_key]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 255}
+            public_key: {type: string, minLength: 1}
+            type: {type: string, enum: [ssh]}
+    ServerCreate:
+      type: object
+      additionalProperties: false
+      required: [server]
+      properties:
+        server:
+          type: object
+          required: [name, image, flavor, networks]
+          properties:
+            name: {type: string, minLength: 1}
+            image: {type: object}
+            flavor: {type: object}
+            networks: {type: array, minItems: 1, items: {type: object}}
+            key_name: {type: string}
+            config_drive: {type: boolean}
     ImageCreate:
       type: object
       additionalProperties: false

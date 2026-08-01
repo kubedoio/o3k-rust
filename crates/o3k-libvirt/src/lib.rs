@@ -1543,6 +1543,8 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: Some("/var/lib/o3k/image.qcow2".to_owned()),
+            key_name: None,
+            keypair_id: None,
             network_ids,
             placement_provider_id: None,
             placement_allocation_id: None,

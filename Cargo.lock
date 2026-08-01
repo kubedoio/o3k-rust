@@ -1202,6 +1202,8 @@ name = "o3k-store"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "base64",
+ "md-5",
  "sqlx",
  "thiserror",
  "tokio",

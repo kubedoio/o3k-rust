@@ -119,6 +119,14 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.1/{project_id}/flavors/detail", get(list_flavors))
         .route("/v2.1/{project_id}/flavors/{id}", get(show_flavor))
         .route(
+            "/v2.1/{project_id}/os-keypairs",
+            get(list_keypairs).post(create_keypair),
+        )
+        .route(
+            "/v2.1/{project_id}/os-keypairs/{name}",
+            get(show_keypair).delete(delete_keypair),
+        )
+        .route(
             "/v2.1/{project_id}/servers",
             get(list_servers).post(create_server),
         )
@@ -1055,6 +1063,7 @@ struct CreateServerRequest {
     networks: Option<Vec<NetworkReference>>,
     /// Recognized so an unsupported request cannot be silently dropped.
     config_drive: Option<bool>,
+    key_name: Option<String>,
 }
 #[derive(serde::Deserialize)]
 struct IdReference {
@@ -1082,6 +1091,7 @@ struct ServerResponse {
     image: IdResponse,
     flavor: IdResponse,
     addresses: serde_json::Value,
+    key_name: Option<String>,
 }
 #[derive(Serialize)]
 struct IdResponse {
@@ -1102,6 +1112,54 @@ fn server_response(server: Server) -> ServerResponse {
             id: server.flavor_id.to_string(),
         },
         addresses: serde_json::json!({}),
+        key_name: server.key_name,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateKeypairEnvelope {
+    keypair: CreateKeypairRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateKeypairRequest {
+    name: String,
+    public_key: Option<String>,
+    #[serde(rename = "type")]
+    key_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct KeypairEnvelope {
+    keypair: KeypairResponse,
+}
+
+#[derive(Serialize)]
+struct KeypairListResponse {
+    keypairs: Vec<KeypairEnvelope>,
+}
+
+#[derive(Serialize)]
+struct KeypairResponse {
+    name: String,
+    id: String,
+    user_id: String,
+    public_key: String,
+    fingerprint: String,
+    #[serde(rename = "type")]
+    key_type: String,
+    created_at: String,
+}
+
+fn keypair_response(keypair: o3k_compute::Keypair) -> KeypairResponse {
+    KeypairResponse {
+        name: keypair.name,
+        id: keypair.id.to_string(),
+        user_id: keypair.user_id,
+        public_key: keypair.public_key,
+        fingerprint: keypair.fingerprint,
+        key_type: "ssh".to_owned(),
+        created_at: keypair.created_at,
     }
 }
 
@@ -1127,6 +1185,27 @@ fn compute_error(error: ComputeError) -> axum::response::Response {
             "Bad Request",
             "invalid compute request",
         ),
+        ComputeError::Store(o3k_store::StoreError::KeypairNotFound) => {
+            keystone_error(StatusCode::NOT_FOUND, "Not Found", "keypair was not found")
+        }
+        ComputeError::Store(o3k_store::StoreError::KeypairAlreadyExists) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "compute resource already exists or conflicts with current state",
+        ),
+        ComputeError::Store(o3k_store::StoreError::KeypairInUse) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "keypair is still attached to a server",
+        ),
+        ComputeError::Store(o3k_store::StoreError::KeypairOwnershipConflict) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "keypair and server ownership do not match",
+        ),
+        ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
+            keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
+        }
         ComputeError::Store(_) | ComputeError::Reconcile(_) | ComputeError::Provider(_) => {
             keystone_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1223,6 +1302,143 @@ async fn show_flavor(
     }
 }
 
+async fn list_keypairs(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .list_keypairs(&token.user_id, &token.project_id)
+        .await
+    {
+        Ok(keypairs) => Json(KeypairListResponse {
+            keypairs: keypairs
+                .into_iter()
+                .map(|keypair| KeypairEnvelope {
+                    keypair: keypair_response(keypair),
+                })
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn create_keypair(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+    request: Result<Json<CreateKeypairEnvelope>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid keypair request",
+        );
+    };
+    if body
+        .keypair
+        .key_type
+        .as_deref()
+        .is_some_and(|key_type| key_type != "ssh")
+    {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "unsupported keypair type",
+        );
+    }
+    let Some(public_key) = body.keypair.public_key else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "public_key is required",
+        );
+    };
+    match service
+        .create_keypair(
+            &token.user_id,
+            &token.project_id,
+            body.keypair.name,
+            public_key,
+        )
+        .await
+    {
+        Ok(keypair) => (
+            StatusCode::OK,
+            Json(KeypairEnvelope {
+                keypair: keypair_response(keypair),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn show_keypair(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .show_keypair(&token.user_id, &token.project_id, &name)
+        .await
+    {
+        Ok(keypair) => Json(KeypairEnvelope {
+            keypair: keypair_response(keypair),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn delete_keypair(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, name)): Path<(String, String)>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .delete_keypair(&token.user_id, &token.project_id, &name)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
 async fn create_server(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1289,17 +1505,19 @@ async fn create_server(
         .unwrap_or(&body.server.name)
         .to_owned();
     match service
-        .create_server(
-            &token.project_id,
-            body.server.name,
-            image,
-            flavor,
-            networks
+        .create_server_for_user(o3k_compute::ServerCreateInput {
+            user_id: token.user_id,
+            project_id: token.project_id,
+            name: body.server.name,
+            image_id: image,
+            flavor_id: flavor,
+            network_ids: networks
                 .into_iter()
                 .filter_map(|network| network.uuid)
                 .collect(),
-            idempotency,
-        )
+            key_name: body.server.key_name,
+            idempotency_key: idempotency,
+        })
         .await
     {
         Ok(server) => (
