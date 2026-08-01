@@ -6,11 +6,12 @@ no evidence of CirrOS boot output or a trusted real-host artifact.
 
 ## Bounded repository implementation
 
-The libvirt compute agent now inspects the derived domain and verifies its O3K
-metadata and server ID before opening a serial console stream. Missing,
+The libvirt compute agent and adapter now inspect the derived domain and verify
+its O3K metadata and server ID before opening a serial console stream. Missing,
 malformed, or cross-server metadata is rejected, matching the ownership fence
-used by lifecycle actions. A regression test covers matching, mismatched, and
-missing metadata.
+used by lifecycle actions. Regression coverage covers matching, mismatched,
+foreign, and missing metadata. ADR-0126 records the defense-in-depth adapter
+fence.
 
 ## Decision for this bounded slice
 

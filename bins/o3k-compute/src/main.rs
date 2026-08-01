@@ -156,7 +156,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 let bytes = self
                     .adapter
-                    .read_console(name.clone(), max_bytes)
+                    .read_console(name.clone(), max_bytes, command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 Ok(CommandExecutionResult {
