@@ -5,7 +5,29 @@ LOG_DIR=/var/log/o3k
 CONFIRM=0
 while (($#)); do case "$1" in --data-dir) DATA_DIR="$2"; shift 2;; --log-dir) LOG_DIR="$2"; shift 2;; --yes) CONFIRM=1; shift;; *) echo "unknown option: $1" >&2; exit 2;; esac; done
 [[ $CONFIRM -eq 1 ]] || { echo "reset removes owned data; repeat with --yes" >&2; exit 2; }
-for path in "$DATA_DIR" "$LOG_DIR"; do [[ -n "$path" && "$path" == /* && "$path" != / ]] || { echo "refusing unsafe reset path" >&2; exit 2; }; done
+validate_reset_path() {
+  local name="$1" path="$2" current=/ component
+  [[ -n "$path" && "$path" == /* && "$path" != / ]] || {
+    echo "refusing unsafe reset path for $name: $path" >&2
+    exit 2
+  }
+  while IFS= read -r component; do
+    [[ -n "$component" ]] || continue
+    case "$component" in
+      .|..)
+        echo "refusing lexical dot component in reset path for $name: $path" >&2
+        exit 2
+        ;;
+    esac
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      echo "refusing symlink reset path for $name: $path" >&2
+      exit 2
+    fi
+  done < <(tr '/' '\n' <<< "${path#/}")
+}
+validate_reset_path data-dir "$DATA_DIR"
+validate_reset_path log-dir "$LOG_DIR"
 owned_marker() { [[ -f "$1/.o3k-owned" && ! -L "$1/.o3k-owned" ]] && grep -Fqx "o3k-owned-v1 path=$1" "$1/.o3k-owned"; }
 for path in "$DATA_DIR" "$LOG_DIR"; do
   if [[ -e "$path" ]] && ! owned_marker "$path"; then

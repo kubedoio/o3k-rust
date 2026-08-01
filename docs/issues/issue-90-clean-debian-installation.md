@@ -33,3 +33,8 @@ test covers dot- and symlink-component targets.
 Decision: [ADR-0097](../adr/ADR-0097-uninstall-precondition-order.md).
 The preflight boundary is recorded in [ADR-0111](../adr/ADR-0111-preflight-disk-space-evidence.md).
 The prefix boundary is recorded in [ADR-0120](../adr/ADR-0120-uninstall-prefix-path-fence.md).
+
+`packaging/reset.sh` now applies the same absolute, non-root, lexical-dot, and
+symlink-component fence to `--data-dir` and `--log-dir` before any ownership
+check, systemd stop, or cleanup. Portable safety tests prove unsafe reset paths
+cannot touch sentinels or issue service commands. Decision: [ADR-0131](../adr/ADR-0131-reset-path-fence.md).

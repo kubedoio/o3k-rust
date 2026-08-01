@@ -116,6 +116,23 @@ printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
 EOF
 chmod +x "$WORK_DIR/fake-bin/systemctl"
 PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
+  bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/./data" --log-dir "$WORK_DIR/log" && {
+    echo "reset accepted a lexical dot component" >&2
+    exit 1
+  }
+[[ ! -e "$WORK_DIR/systemctl.log" ]]
+mkdir -p "$WORK_DIR/reset-parent-target" "$WORK_DIR/reset-final-target"
+ln -s "$WORK_DIR/reset-parent-target" "$WORK_DIR/reset-parent"
+ln -s "$WORK_DIR/reset-final-target" "$WORK_DIR/reset-final"
+for unsafe_reset_path in "$WORK_DIR/reset-parent/data" "$WORK_DIR/reset-final"; do
+  if PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
+      bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$unsafe_reset_path" --log-dir "$WORK_DIR/log"; then
+    echo "reset accepted an unsafe path: $unsafe_reset_path" >&2
+    exit 1
+  fi
+  [[ ! -e "$WORK_DIR/systemctl.log" ]]
+done
+PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
   bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/data" --log-dir "$WORK_DIR/log"
 grep -Fqx 'stop o3k-compute.service' "$WORK_DIR/systemctl.log"
 grep -Fqx 'stop o3kd.service' "$WORK_DIR/systemctl.log"
