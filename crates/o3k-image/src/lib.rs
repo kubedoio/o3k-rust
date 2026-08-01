@@ -466,6 +466,9 @@ impl ImageService {
         if name.trim().is_empty()
             || container_format.trim().is_empty()
             || disk_format.trim().is_empty()
+            || container_format != "bare"
+            || !matches!(disk_format.as_str(), "raw" | "qcow2")
+            || visibility != "private"
         {
             return Err(ImageError::InvalidMetadata);
         }

@@ -33,7 +33,7 @@ Evidence states are independent: route implementation does not imply contract, C
 | image | image_create | POST | /v2/images | implemented | verified | verified | verified | required |
 | image | image_delete | DELETE | /v2/images/{id} | implemented | verified | pending | verified | required |
 | image | image_show | GET | /v2/images/{id} | implemented | verified | pending | verified | required |
-| image | image_download_binary | GET | /v2/images/{id}/file | missing | pending | pending | pending | required |
+| image | image_download_binary | GET | /v2/images/{id}/file | implemented | verified | pending | pending | required |
 | image | image_upload_binary | PUT | /v2/images/{id}/file | implemented | verified | verified | verified | required |
 | network | network_list | GET | /v2.0/networks | implemented | verified | pending | pending | required |
 | network | network_create | POST | /v2.0/networks | implemented | verified | pending | pending | required |
@@ -70,7 +70,7 @@ Evidence states are independent: route implementation does not imply contract, C
 - `identity.token_password_scoped`: Federation and non-password authentication are outside the alpha profile.
 - `image.collection_list`: The broad Glance filter and pagination surface is outside the alpha profile.
 - `image.collection_create`: Local filesystem storage is the only alpha backend.
-- `image.member_download`: No public authenticated image-content download route is currently registered.
+- `image.member_download`: Protected deployment verification remains a release-gate task.
 - `image.member_upload`: Import, multi-store, and signature workflows are outside the alpha profile.
 - `network.network_collection_list`: Filtering and pagination are limited to the alpha profile.
 - `network.network_collection_create`: Only the flat provider-network profile is in scope.

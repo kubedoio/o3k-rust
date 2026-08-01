@@ -611,9 +611,9 @@
         "internal/glance/images.go"
       ],
       "id": "image.member_download",
-      "implementation_state": "missing",
+      "implementation_state": "implemented",
       "known_gaps": [
-        "No public authenticated image-content download route is currently registered."
+        "Protected deployment verification remains a release-gate task."
       ],
       "method": "GET",
       "official_sources": [
@@ -621,7 +621,7 @@
       ],
       "operation": "image_download_binary",
       "path": "/v2/images/{id}/file",
-      "portable_contract": "pending",
+      "portable_contract": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [

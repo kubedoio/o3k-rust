@@ -22,6 +22,7 @@ use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
 use o3k_provider::InstanceAction;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 
 #[derive(Debug, Serialize)]
@@ -107,7 +108,10 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v3/auth/tokens", post(issue_token))
         .route("/v2/images", get(list_images).post(create_image))
         .route("/v2/images/{id}", get(show_image).delete(delete_image))
-        .route("/v2/images/{id}/file", axum::routing::put(upload_image))
+        .route(
+            "/v2/images/{id}/file",
+            get(download_image).put(upload_image),
+        )
         .route("/v2.0/networks", get(list_networks).post(create_network))
         .route(
             "/v2.0/networks/{id}",
@@ -388,6 +392,40 @@ fn image_error(error: ImageError) -> axum::response::Response {
     }
 }
 
+async fn download_image(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let token = match require_token(&state, &headers) {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    let Some(service) = &state.image else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "image service is not configured",
+        );
+    };
+    match service.resolve_artifact(&token.project_id, id) {
+        Ok(artifact) => {
+            let mut response = (StatusCode::OK, artifact.content).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+            if let Ok(value) = HeaderValue::from_str(&artifact.checksum) {
+                response
+                    .headers_mut()
+                    .insert("x-image-meta-checksum", value);
+            }
+            response
+        }
+        Err(error) => image_error(error),
+    }
+}
+
 async fn create_image(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -515,6 +553,23 @@ async fn upload_image(
                 StatusCode::BAD_REQUEST,
                 "Bad Request",
                 "declared image size does not match content",
+            );
+        }
+    }
+    if let Some(declared) = headers.get("x-openstack-image-sha256") {
+        let Ok(declared) = declared.to_str() else {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "image checksum header is invalid",
+            );
+        };
+        let actual = format!("{:x}", Sha256::digest(&body));
+        if declared != actual {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "image checksum does not match content",
             );
         }
     }
