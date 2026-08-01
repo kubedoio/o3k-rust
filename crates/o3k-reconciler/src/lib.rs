@@ -70,6 +70,24 @@ pub enum ReconcileError {
     InvalidIntent,
     #[error("retry budget exhausted")]
     RetryExhausted,
+    #[error("agent operation evidence is stale")]
+    StaleAgentEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentEvidenceFence {
+    agent_id: String,
+    agent_epoch: String,
+    sequence: u64,
+    state: i32,
+    provider_resource_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceDisposition {
+    New,
+    Duplicate,
+    Stale,
 }
 
 pub struct OperationJournal<S, P: ?Sized> {
@@ -78,6 +96,7 @@ pub struct OperationJournal<S, P: ?Sized> {
     max_attempts: u8,
     attempts: Arc<Mutex<HashMap<Uuid, u8>>>,
     events: Arc<Mutex<Vec<JournalEvent>>>,
+    agent_evidence: Arc<Mutex<HashMap<Uuid, AgentEvidenceFence>>>,
 }
 
 impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
@@ -88,6 +107,7 @@ impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
             max_attempts: self.max_attempts,
             attempts: self.attempts.clone(),
             events: self.events.clone(),
+            agent_evidence: self.agent_evidence.clone(),
         }
     }
 }
@@ -104,6 +124,61 @@ where
             max_attempts: max_attempts.max(1),
             attempts: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
+            agent_evidence: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn fence_agent_evidence(
+        &self,
+        operation_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+        sequence: u64,
+        state: i32,
+        provider_resource_id: &str,
+    ) -> Result<EvidenceDisposition, ReconcileError> {
+        if agent_id.trim().is_empty()
+            || agent_epoch.trim().is_empty()
+            || sequence == 0
+            || !valid_agent_reference(agent_id)
+            || !valid_agent_reference(agent_epoch)
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let mut evidence = self
+            .agent_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let next = AgentEvidenceFence {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: agent_epoch.to_owned(),
+            sequence,
+            state,
+            provider_resource_id: provider_resource_id.to_owned(),
+        };
+        match evidence.get(&operation_id) {
+            None => {
+                evidence.insert(operation_id, next);
+                Ok(EvidenceDisposition::New)
+            }
+            Some(previous)
+                if previous.agent_id != agent_id || previous.agent_epoch != agent_epoch =>
+            {
+                Err(ReconcileError::InvalidIntent)
+            }
+            Some(previous) if sequence < previous.sequence => Ok(EvidenceDisposition::Stale),
+            Some(previous) if sequence == previous.sequence => {
+                if previous.state == state && previous.provider_resource_id == provider_resource_id
+                {
+                    Ok(EvidenceDisposition::Duplicate)
+                } else {
+                    Err(ReconcileError::InvalidIntent)
+                }
+            }
+            Some(_) => {
+                evidence.insert(operation_id, next);
+                Ok(EvidenceDisposition::New)
+            }
         }
     }
 
@@ -186,15 +261,25 @@ where
         if operation.resource_id != resource_id {
             return Err(ReconcileError::InvalidIntent);
         }
+        let state = agent_proto::OperationState::try_from(update.state)
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let disposition = self.fence_agent_evidence(
+            operation_id,
+            &update.agent_id,
+            &update.agent_epoch,
+            update.operation_sequence,
+            update.state,
+            &update.provider_resource_id,
+        )?;
+        if disposition != EvidenceDisposition::New {
+            return Ok(operation.state);
+        }
         if matches!(
             operation.state,
             OperationState::Succeeded | OperationState::Failed
         ) {
             return Ok(operation.state);
         }
-
-        let state = agent_proto::OperationState::try_from(update.state)
-            .map_err(|_| ReconcileError::InvalidIntent)?;
         let durable_state = match state {
             agent_proto::OperationState::Accepted | agent_proto::OperationState::Running => {
                 OperationState::Running
@@ -204,6 +289,11 @@ where
             agent_proto::OperationState::UnknownOutcome => OperationState::UnknownOutcome,
             agent_proto::OperationState::Unspecified => return Err(ReconcileError::InvalidIntent),
         };
+        if operation.state == OperationState::UnknownOutcome
+            && matches!(durable_state, OperationState::Running)
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
         let error_category = if durable_state == OperationState::Failed {
             Some(agent_error_category(update.error_category)?)
         } else {
@@ -279,6 +369,17 @@ where
         let operation_id =
             Uuid::parse_str(&accepted.operation_id).map_err(|_| ReconcileError::InvalidIntent)?;
         let operation = self.store.get_operation(operation_id).await?;
+        let disposition = self.fence_agent_evidence(
+            operation_id,
+            &accepted.agent_id,
+            &accepted.agent_epoch,
+            accepted.operation_sequence,
+            accepted.state,
+            "",
+        )?;
+        if disposition != EvidenceDisposition::New {
+            return Ok(operation.state);
+        }
         if matches!(
             operation.state,
             OperationState::Succeeded | OperationState::Failed
@@ -290,6 +391,9 @@ where
         {
             agent_proto::OperationState::Accepted | agent_proto::OperationState::Running => {}
             _ => return Err(ReconcileError::InvalidIntent),
+        }
+        if operation.state == OperationState::UnknownOutcome {
+            return Err(ReconcileError::InvalidIntent);
         }
         self.store
             .update_operation(
@@ -1068,6 +1172,14 @@ fn validate_provider_operation_owner(
     Ok(())
 }
 
+fn valid_agent_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1268,6 +1380,9 @@ mod tests {
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
         let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
             operation_id: operation_id.to_string(),
             resource_id: request.o3k_server_id.to_string(),
             state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
@@ -1295,6 +1410,58 @@ mod tests {
                 .await?
                 .provider_resource_id,
             "agent-domain-1"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_evidence_rejects_foreign_and_stale_updates() -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-evidence-fence", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let succeeded = agent_proto::OperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 2,
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: agent_proto::OperationState::Succeeded as i32,
+            provider_resource_id: "domain-a".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&succeeded).await?,
+            OperationState::Succeeded
+        );
+        let stale = agent_proto::OperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 1,
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: agent_proto::OperationState::Running as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&stale).await?,
+            OperationState::Succeeded
+        );
+        let foreign = agent_proto::OperationUpdate {
+            agent_id: "agent-b".to_owned(),
+            agent_epoch: "epoch-b".to_owned(),
+            operation_sequence: 3,
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: agent_proto::OperationState::Failed as i32,
+            ..Default::default()
+        };
+        assert!(matches!(
+            journal.apply_agent_update(&foreign).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
         );
         Ok(())
     }
@@ -1379,6 +1546,9 @@ mod tests {
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
         let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
             operation_id: operation_id.to_string(),
             resource_id: request.o3k_server_id.to_string(),
             state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
@@ -1405,6 +1575,8 @@ mod tests {
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
         let accepted = agent_proto::CommandAccepted {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
             command_id: "command-1".to_owned(),
             operation_id: operation_id.to_string(),
             state: agent_proto::OperationState::Accepted as i32,
@@ -1429,7 +1601,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.operation_id == operation_id)
                 .count(),
-            3
+            2
         );
         Ok(())
     }

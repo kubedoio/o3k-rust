@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
-    let mut compute_service = if agent_control_enabled {
+    let mut compute_service = if config.provider == o3k_config::Provider::Agent {
         o3k_compute::ComputeService::new(
             store,
             Arc::new(o3k_compute::AgentComputeProvider::new(
@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
                 o3k_compute::ComputeService::new(store, Arc::new(provider))
             }
+            o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
     };
     if agent_control_enabled {
