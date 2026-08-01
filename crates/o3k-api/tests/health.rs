@@ -723,6 +723,40 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     assert_eq!(flavors.status(), StatusCode::OK);
     let flavor_json: Value =
         serde_json::from_slice(&axum::body::to_bytes(flavors.into_body(), 4096).await?)?;
+    let default_flavor_id = flavor_json["flavors"][0]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("default flavor missing"))?
+        .to_owned();
+    let custom_flavor = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/bootstrap-project/flavors")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"flavor":{"name":"api.custom","vcpus":1,"ram":768,"disk":4}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(custom_flavor.status(), StatusCode::CREATED);
+    let custom_flavor_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(custom_flavor.into_body(), 4096).await?)?;
+    let custom_flavor_id = custom_flavor_json["flavor"]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("custom flavor missing"))?
+        .to_owned();
+    let custom_show = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2.1/bootstrap-project/flavors/{custom_flavor_id}"
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(custom_show.status(), StatusCode::OK);
     let detailed_flavors = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -732,9 +766,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     assert_eq!(detailed_flavors.status(), StatusCode::OK);
-    let flavor_id = flavor_json["flavors"][0]["id"]
-        .as_str()
-        .ok_or_else(|| std::io::Error::other("flavor missing"))?;
+    let flavor_id = default_flavor_id.as_str();
     let detailed_servers = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -848,6 +880,18 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         console.read(server_uuid),
         Err(o3k_console::ConsoleError::NotFound)
     ));
+    let custom_deleted = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!(
+                    "/v2.1/bootstrap-project/flavors/{custom_flavor_id}"
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(custom_deleted.status(), StatusCode::NO_CONTENT);
     let keypair_deleted = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -859,7 +903,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .await?;
     assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
 
-    let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
+    let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":"network-1"}]}});
     let second_created = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()

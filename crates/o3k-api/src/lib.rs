@@ -122,9 +122,15 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
-        .route("/v2.1/{project_id}/flavors", get(list_flavors))
+        .route(
+            "/v2.1/{project_id}/flavors",
+            get(list_flavors).post(create_flavor),
+        )
         .route("/v2.1/{project_id}/flavors/detail", get(list_flavors))
-        .route("/v2.1/{project_id}/flavors/{id}", get(show_flavor))
+        .route(
+            "/v2.1/{project_id}/flavors/{id}",
+            get(show_flavor).delete(delete_flavor),
+        )
         .route(
             "/v2.1/{project_id}/os-keypairs",
             get(list_keypairs).post(create_keypair),
@@ -1353,10 +1359,68 @@ async fn list_flavors(
         Ok(value) => value,
         Err(response) => return response,
     };
-    Json(FlavorListResponse {
-        flavors: service.flavors().into_iter().map(flavor_response).collect(),
-    })
-    .into_response()
+    match service.flavors_for_project(&project_id).await {
+        Ok(flavors) => Json(FlavorListResponse {
+            flavors: flavors.into_iter().map(flavor_response).collect(),
+        })
+        .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreateFlavorEnvelope {
+    flavor: CreateFlavorRequest,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateFlavorRequest {
+    name: String,
+    vcpus: u32,
+    ram: u64,
+    disk: u64,
+}
+
+async fn create_flavor(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(project_id): Path<String>,
+    request: Result<Json<CreateFlavorEnvelope>, JsonRejection>,
+) -> axum::response::Response {
+    let token = match project_token(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid flavor request",
+        );
+    };
+    match service
+        .create_flavor(
+            &token.project_id,
+            body.flavor.name,
+            body.flavor.vcpus,
+            body.flavor.ram,
+            body.flavor.disk,
+        )
+        .await
+    {
+        Ok(flavor) => (
+            StatusCode::CREATED,
+            Json(FlavorEnvelope {
+                flavor: flavor_response(flavor),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error),
+    }
 }
 
 async fn show_flavor(
@@ -1371,11 +1435,29 @@ async fn show_flavor(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.flavor(id) {
+    match service.flavor_for_project(&project_id, id).await {
         Ok(flavor) => Json(FlavorEnvelope {
             flavor: flavor_response(flavor),
         })
         .into_response(),
+        Err(error) => compute_error(error),
+    }
+}
+
+async fn delete_flavor(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((project_id, id)): Path<(String, uuid::Uuid)>,
+) -> axum::response::Response {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
+    let service = match compute_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service.delete_flavor(&project_id, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => compute_error(error),
     }
 }
