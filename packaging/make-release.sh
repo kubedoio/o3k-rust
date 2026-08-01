@@ -3,6 +3,11 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
 PROFILE="${2:-fake}"
+VERSION_RE='^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
+if [[ ! "$VERSION" =~ $VERSION_RE ]]; then
+  echo "version must be a numeric release version with an optional prerelease suffix" >&2
+  exit 2
+fi
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
 if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
   echo "release source tree must be clean before packaging" >&2
