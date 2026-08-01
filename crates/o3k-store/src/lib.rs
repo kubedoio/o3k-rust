@@ -403,6 +403,7 @@ fn keypair_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<KeypairRecord, Stor
 /// Validate the public OpenSSH key form accepted by the TestLab profile.
 /// This deliberately imports public material only; private-key generation is not supported.
 pub fn validate_public_key(value: &str) -> Result<(String, String, String), StoreError> {
+    let value = value.trim();
     if value.chars().any(char::is_control) {
         return Err(StoreError::InvalidKeypair(
             "public key contains control characters".to_owned(),
@@ -997,6 +998,7 @@ mod tests {
         assert_eq!(key_type, "ssh-ed25519");
         assert_eq!(fingerprint.len(), 47);
         assert_eq!(canonical, format!("ssh-ed25519 {encoded}"));
+        assert!(validate_public_key(&format!("ssh-ed25519 {encoded}\n")).is_ok());
         assert!(validate_public_key(&format!("ssh-rsa {encoded}")).is_err());
         assert!(validate_public_key("ssh-ed25519 !!!").is_err());
         assert!(validate_public_key("ssh-dss AAAA").is_err());
