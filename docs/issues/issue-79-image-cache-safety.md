@@ -22,9 +22,13 @@ This bounded repository change hardens the existing image-cache boundary:
 - verified `ImageService` artifacts now have an explicit local
   `ImageCache::cache_artifact` bridge with size revalidation and idempotent
   publication coverage.
+- cache startup now removes regular-file overlay temporaries left by a
+  crashed `qemu-img` publication, while leaving published overlays and
+  unrelated files untouched.
 
 See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
-[ADR-0104](../adr/ADR-0104-image-overlay-backing-verification.md).
+[ADR-0104](../adr/ADR-0104-image-overlay-backing-verification.md) and
+[ADR-0135](../adr/ADR-0135-image-overlay-temporary-recovery.md).
 
 ## Explicit boundary
 
