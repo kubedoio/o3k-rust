@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "profile": "testlab-alpha",
+  "client_versions": {
+    "python-openstackclient": "10.2.1",
+    "openstacksdk": "4.17.0"
+  },
+  "client_sources": {
+    "python-openstackclient": "https://pypi.org/project/python-openstackclient/10.2.1/",
+    "openstacksdk": "https://pypi.org/project/openstacksdk/4.17.0/"
+  },
+  "fixtures": [
+    {
+      "id": "compute.flavor_collection_list",
+      "name": "flavor-list",
+      "service": "compute",
+      "method": "GET",
+      "path": "/v2.1/{project_id}/flavors",
+      "expected_status": [200],
+      "required_json_keys": ["flavors"],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#list-flavors"]
+    },
+    {
+      "id": "compute.flavor_collection_detail",
+      "name": "flavor-list-detail",
+      "service": "compute",
+      "method": "GET",
+      "path": "/v2.1/{project_id}/flavors/detail",
+      "expected_status": [200],
+      "required_json_keys": ["flavors"],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#list-flavors-with-details"]
+    },
+    {
+      "id": "compute.keypair_collection_list",
+      "name": "keypair-list",
+      "service": "compute",
+      "method": "GET",
+      "path": "/v2.1/{project_id}/os-keypairs",
+      "expected_status": [200],
+      "required_json_keys": ["keypairs"],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#list-keypairs"]
+    },
+    {
+      "id": "compute.keypair_collection_import",
+      "name": "keypair-import-delete",
+      "service": "compute",
+      "method": "POST",
+      "path": "/v2.1/{project_id}/os-keypairs",
+      "request_json": {
+        "keypair": {
+          "name": "{keypair_name}",
+          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj contract-harness"
+        }
+      },
+      "expected_status": [200, 201],
+      "required_json_keys": ["keypair"],
+      "cleanup": {
+        "method": "DELETE",
+        "path": "/v2.1/{project_id}/os-keypairs/{keypair_name}",
+        "expected_status": [204]
+      },
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#import-keypair", "https://docs.openstack.org/api-ref/compute/#delete-keypair"]
+    }
+  ]
+}

@@ -68,3 +68,27 @@ bash tests/capability-inventory.sh
 
 Do not promote a route from `implemented` to a verified evidence state without
 the corresponding executable contract, CLI, or protected-runner artifact.
+
+## Contract harness
+
+[`contract-fixtures.json`](contract-fixtures.json) contains reviewed,
+implementation-neutral public HTTP expectations. Run the same fixtures against
+an available target with:
+
+```bash
+python3 tests/compatibility-harness.py \
+  --target rust \
+  --base-url http://127.0.0.1:8774 \
+  --source-commit "$(git rev-parse HEAD)" \
+  --json-out target/compatibility/rust.json \
+  --junit-out target/compatibility/rust.xml
+```
+
+Use `--target go` or `--target openstack` for the other public HTTP targets.
+The harness reads `OS_AUTH_TOKEN` without printing it, redacts request header
+values, normalizes responses to status/header/schema data, and records the
+target source revision. `--self-test` exercises the same HTTP runner in CI;
+real-target runs are separate portable or protected evidence depending on the
+target environment. To compare two targets without changing the expected
+contract, use repeated `--compare target=base-url` arguments; agreement is
+reported separately from standards compliance.
