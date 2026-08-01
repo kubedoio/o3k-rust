@@ -379,6 +379,12 @@ impl TokenService {
                     "compute",
                     &format!("{}/v2.1/{}", self.catalog_endpoint, self.project_id),
                 ),
+                service(
+                    "placement",
+                    "placement",
+                    "placement",
+                    &format!("{}/placement", self.catalog_endpoint),
+                ),
             ],
         }
     }

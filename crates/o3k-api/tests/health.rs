@@ -215,7 +215,90 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert!(
         body["token"]["catalog"]
             .as_array()
-            .is_some_and(|items| items.len() == 4)
+            .is_some_and(|items| items.len() == 5)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_discovery_exposes_v3_without_fallback_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    for uri in ["/", "/v3"] {
+        let response = o3k_api::router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())?,
+            )
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 8192).await?)?;
+        if uri == "/" {
+            assert!(
+                body["versions"]["values"]
+                    .as_array()
+                    .is_some_and(|values| !values.is_empty())
+            );
+        } else {
+            assert_eq!(body["version"]["id"], "v3");
+            assert_eq!(body["version"]["status"], "stable");
+            assert_eq!(body["version"]["links"][0]["rel"], "self");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
+-> Result<(), Box<dyn std::error::Error>> {
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?
+    .with_catalog_endpoint("http://testlab.example.invalid/");
+    let body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let response = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(identity))
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 16384).await?)?;
+    let catalog = body["token"]["catalog"]
+        .as_array()
+        .ok_or("catalog missing")?;
+    let services: std::collections::BTreeMap<_, _> = catalog
+        .iter()
+        .filter_map(|service| {
+            Some((
+                service["type"].as_str()?,
+                service["endpoints"][0]["url"].as_str()?,
+            ))
+        })
+        .collect();
+    assert_eq!(services.len(), 5);
+    assert_eq!(services["identity"], "http://testlab.example.invalid/v3");
+    assert_eq!(services["image"], "http://testlab.example.invalid/v2");
+    assert_eq!(services["network"], "http://testlab.example.invalid/v2.0");
+    assert_eq!(
+        services["compute"],
+        "http://testlab.example.invalid/v2.1/bootstrap-project"
+    );
+    assert_eq!(
+        services["placement"],
+        "http://testlab.example.invalid/placement"
     );
     Ok(())
 }
@@ -243,6 +326,44 @@ async fn keystone_invalid_password_is_generic_unauthorized()
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     let body = axum::body::to_bytes(response.into_body(), 4096).await?;
     assert!(!String::from_utf8(body.to_vec())?.contains("wrong"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn keystone_rejects_missing_scope_and_wrong_project_without_leaking_credentials()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    for body in [
+        serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}}}}),
+        serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"other-project"}}}}),
+    ] {
+        let response =
+            o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service.clone()))
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v3/auth/tokens")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))?,
+                )
+                .await?;
+        assert!(matches!(
+            response.status(),
+            StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+        ));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let text = String::from_utf8(bytes.to_vec())?;
+        assert!(!text.contains("password"));
+        assert!(!text.contains("other-project"));
+    }
     Ok(())
 }
 

@@ -427,9 +427,9 @@
         "internal/keystone/handlers.go"
       ],
       "id": "identity.version_root",
-      "implementation_state": "partial",
+      "implementation_state": "implemented",
       "known_gaps": [
-        "Root version discovery is not covered by an independent compatibility test."
+        "Protected deployment verification remains a release-gate task."
       ],
       "method": "GET",
       "official_sources": [
@@ -437,7 +437,7 @@
       ],
       "operation": "version_discovery_root",
       "path": "/",
-      "portable_contract": "pending",
+      "portable_contract": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
@@ -453,9 +453,9 @@
         "internal/keystone/handlers.go"
       ],
       "id": "identity.version_v3",
-      "implementation_state": "partial",
+      "implementation_state": "implemented",
       "known_gaps": [
-        "The version response and discovery warning behavior need an explicit contract test."
+        "Protected deployment verification remains a release-gate task."
       ],
       "method": "GET",
       "official_sources": [
@@ -463,7 +463,7 @@
       ],
       "operation": "version_discovery_v3",
       "path": "/v3",
-      "portable_contract": "pending",
+      "portable_contract": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
