@@ -36,6 +36,7 @@ jobs:
         run: bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Download and verify CirrOS image
+        id: image
         if: steps.bootstrap.outcome == 'success'
         continue-on-error: true
         env:
@@ -43,6 +44,8 @@ jobs:
           CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
         run: |
           image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.XXXXXX")"
+          printf 'o3k-disposable-image-v1\nrun=%s\n' "${GITHUB_RUN_ID}" > "${image_path}.o3k-owned"
+          chmod 0600 "${image_path}.o3k-owned"
           printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
           printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
             "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}" >> "${GITHUB_ENV}"
@@ -55,7 +58,7 @@ jobs:
 
       - name: Probe runner capabilities
         id: capabilities
-        if: steps.bootstrap.outcome == 'success'
+        if: steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts

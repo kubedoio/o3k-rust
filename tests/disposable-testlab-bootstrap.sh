@@ -19,6 +19,7 @@ assert 'OS_PASSWORD=%s\\n' in bootstrap
 assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
+assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
@@ -34,23 +35,28 @@ pid_root="$tmp_root/o3k-testlab-pids/$run_id"
 venv="$tmp_root/o3k-openstack-venv.test"
 image="$tmp_root/cirros-0.6.3-x86_64-disk.img.test"
 mkdir -p "$state" "$pid_root" "$venv"
+printf 'o3k-disposable-venv-v1\n' >"$venv/.o3k-venv-owned"
 mkdir -p "$state/bin"
 cp /bin/sleep "$state/bin/o3kd"
 printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
 sudo chown -R o3k:o3k "$state"
 sudo chmod 0700 "$state"
-"$state/bin/o3kd" 60 & service_pid=$!
-printf '%s\n' "$service_pid" >"$pid_root/o3kd.pid"
+sudo -n -u o3k -- "$state/bin/o3kd" 60 & supervisor_pid=$!
+sleep 0.2
+service_pid="$(sudo -n pgrep -P "$supervisor_pid" -u o3k)"
+start_ticks="$(sudo -n awk '{print $22}' "/proc/$service_pid/stat")"
+printf '%s|%s|o3k|o3kd\n' "$service_pid" "$start_ticks" >"$pid_root/o3kd.pid"
 touch "$image"
+printf 'o3k-disposable-image-v1\n' >"$image.o3k-owned"
 
 RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" \
   O3K_TESTLAB_STATE_ROOT="$state" O3K_TESTLAB_PID_ROOT="$pid_root" \
   O3K_OPENSTACK_VENV="$venv" O3K_TESTLAB_IMAGE_PATH="$image" \
   bash "$CLEANUP"
 
-[[ ! -e "$state" && ! -e "$pid_root" && ! -e "$venv" && ! -e "$image" ]]
-! kill -0 "$service_pid" 2>/dev/null
+[[ ! -e "$state" && ! -e "$pid_root" && ! -e "$venv" && ! -e "$image" && ! -e "$image.o3k-owned" ]]
+! sudo -n kill -0 "$service_pid" 2>/dev/null
 
 mkdir -p "$state"
 printf 'foreign-state\n' >"$state/.o3k-run-owned"

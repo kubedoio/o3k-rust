@@ -12,14 +12,19 @@ RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
   || { echo "cleanup: account lock directory is unavailable" >&2; exit 1; }
 EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
+EXPECTED_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-$EXPECTED_ROOT}"
+INVENTORY_ROOT="${O3K_REAL_HOST_INVENTORY_ROOT:-$EXPECTED_INVENTORY_ROOT}"
 PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}}"
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-}"
 [[ "$STATE_ROOT" == "$EXPECTED_ROOT" ]] || { echo "cleanup: state root is not run-owned" >&2; exit 1; }
+[[ "$INVENTORY_ROOT" == "$EXPECTED_INVENTORY_ROOT" ]] \
+  || { echo "cleanup: inventory root is not run-owned" >&2; exit 1; }
 [[ "$PID_ROOT" == "${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}" ]] \
   || { echo "cleanup: pid root is not run-owned" >&2; exit 1; }
-for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids"; do
+for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids" \
+  "${RUNNER_TEMP}/o3k-testlab-inventory"; do
   if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
     echo "cleanup: run state parent is not an owned directory" >&2
     exit 1
@@ -30,16 +35,41 @@ if [[ -n "$OPENSTACK_VENV" ]]; then
     && "$(basename -- "$OPENSTACK_VENV")" == o3k-openstack-venv.* \
     && "$OPENSTACK_VENV" != *..* && ! -L "$OPENSTACK_VENV" ]] \
     || { echo "cleanup: OpenStack virtualenv is not run-owned" >&2; exit 1; }
+  if [[ -e "$OPENSTACK_VENV" ]]; then
+    [[ -d "$OPENSTACK_VENV" && ! -L "$OPENSTACK_VENV" ]] \
+      || { echo "cleanup: OpenStack virtualenv is not a real directory" >&2; exit 1; }
+    grep -Fqx 'o3k-disposable-venv-v1' "$OPENSTACK_VENV/.o3k-venv-owned" \
+      || { echo "cleanup: virtualenv ownership marker is invalid" >&2; exit 1; }
+  fi
 fi
 if [[ -n "$IMAGE_PATH" ]]; then
   [[ "$(dirname -- "$IMAGE_PATH")" == "${RUNNER_TEMP%/}" \
     && "$(basename -- "$IMAGE_PATH")" == cirros-0.6.3-x86_64-disk.img.* \
     && "$IMAGE_PATH" != *..* && ! -L "$IMAGE_PATH" ]] \
     || { echo "cleanup: image path is not run-owned" >&2; exit 1; }
+  if [[ -e "$IMAGE_PATH" || -e "$IMAGE_PATH.o3k-owned" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+  fi
 fi
 if [[ ! -e "$STATE_ROOT" ]]; then
+  if [[ -e "$INVENTORY_ROOT" ]]; then
+    [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+      || { echo "cleanup: inventory root is not a real directory" >&2; exit 1; }
+    grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
+      || { echo "cleanup: inventory ownership marker is invalid" >&2; exit 1; }
+    rm -rf -- "$INVENTORY_ROOT"
+  fi
   [[ -z "$OPENSTACK_VENV" || ! -e "$OPENSTACK_VENV" ]] || rm -rf -- "$OPENSTACK_VENV"
-  [[ -z "$IMAGE_PATH" || ! -e "$IMAGE_PATH" ]] || rm -f -- "$IMAGE_PATH"
+  if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+    rm -f -- "$IMAGE_PATH" "$IMAGE_PATH.o3k-owned"
+  elif [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH.o3k-owned" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+    rm -f -- "$IMAGE_PATH.o3k-owned"
+  fi
   echo "disposable TestLab cleanup: no state to remove"
   exit 0
 fi
@@ -67,21 +97,34 @@ sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/
   && group_created=true
 
 process_matches() {
-  local pid="$1" binary="$2" expected executable command_line
+  local pid="$1" binary="$2" expected executable
   expected="$STATE_ROOT/bin/$binary"
   executable="$(sudo -n readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
-  [[ "$executable" == "$expected" ]] && return 0
-  command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
-  case " $command_line " in
-    *" $expected "*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ "$executable" == "$expected" ]]
+}
+
+process_start_ticks() {
+  local pid="$1"
+  sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+process_uid() {
+  local pid="$1"
+  sudo -n ps -o user= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
+process_record_matches() {
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
+  [[ "$uid" == o3k ]] \
+    && [[ "$(process_uid "$pid")" == o3k ]] \
+    && [[ "$(process_start_ticks "$pid")" == "$start_ticks" ]] \
+    && process_matches "$pid" "$binary"
 }
 
 stop_owned_process() {
-  local pid="$1" binary="$2"
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
   sudo -n kill -0 "$pid" 2>/dev/null || return 0
-  process_matches "$pid" "$binary" \
+  process_record_matches "$pid" "$start_ticks" "$uid" "$binary" \
     || { echo "cleanup: refusing to signal a foreign process" >&2; return 1; }
   sudo -n kill "$pid" || return 1
   for _ in $(seq 1 20); do
@@ -93,22 +136,23 @@ stop_owned_process() {
 }
 for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
   if [[ -f "$pid_file" ]]; then
-    pid="$(<"$pid_file")"
-    [[ "$pid" =~ ^[0-9]+$ ]] || { echo "cleanup: invalid pid" >&2; exit 1; }
-    binary="${pid_file##*/}"
-    binary="${binary%.pid}"
-    stop_owned_process "$pid" "$binary" || exit 1
+    IFS='|' read -r pid start_ticks uid binary extra <"$pid_file"
+    [[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$start_ticks" =~ ^[0-9]+$ \
+      && ( "$binary" == o3kd || "$binary" == o3k-compute ) ]] \
+      || { echo "cleanup: invalid process identity" >&2; exit 1; }
+    stop_owned_process "$pid" "$start_ticks" "$uid" "$binary" || exit 1
   fi
 done
 for _ in $(seq 1 20); do
   alive=false
   for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
     [[ -f "$pid_file" ]] || continue
-    pid="$(<"$pid_file")"
+    IFS='|' read -r pid start_ticks uid binary extra <"$pid_file"
+    [[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$start_ticks" =~ ^[0-9]+$ \
+      && ( "$binary" == o3kd || "$binary" == o3k-compute ) ]] \
+      || { echo "cleanup: invalid process identity" >&2; exit 1; }
     if sudo -n kill -0 "$pid" 2>/dev/null; then
-      binary="${pid_file##*/}"
-      binary="${binary%.pid}"
-      process_matches "$pid" "$binary" \
+      process_record_matches "$pid" "$start_ticks" "$uid" "$binary" \
         || { echo "cleanup: refusing to wait on a foreign process" >&2; exit 1; }
       alive=true
     fi
@@ -128,10 +172,22 @@ if [[ "$account_created" == true || "$group_created" == true ]]; then
 fi
 sudo -n rm -rf -- "$STATE_ROOT"
 rm -rf -- "$PID_ROOT"
+if [[ -e "$INVENTORY_ROOT" ]]; then
+  [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+    || { echo "cleanup: inventory root is not a real directory" >&2; exit 1; }
+  grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
+    || { echo "cleanup: inventory ownership marker is invalid" >&2; exit 1; }
+  rm -rf -- "$INVENTORY_ROOT"
+fi
 if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
+  grep -Fqx 'o3k-disposable-venv-v1' "$OPENSTACK_VENV/.o3k-venv-owned" \
+    || { echo "cleanup: refusing to remove an unowned virtualenv" >&2; exit 1; }
   rm -rf -- "$OPENSTACK_VENV"
 fi
 if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
+  grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+    || { echo "cleanup: refusing to remove an unowned image" >&2; exit 1; }
   rm -f -- "$IMAGE_PATH"
+  rm -f -- "$IMAGE_PATH.o3k-owned"
 fi
 echo "disposable TestLab cleanup completed"
