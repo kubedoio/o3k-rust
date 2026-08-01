@@ -28,6 +28,11 @@ attachment. Console output must contain a bounded CirrOS/login boot marker.
 The redacted artifact records these checks as `acceptance`; a release gate
 cannot accept lifecycle booleans without them.
 
+The acceptance record includes a post-reboot `restart` observation. The
+workflow validates the server through the public `server show` response after
+stop/start/reboot and proves `ACTIVE`, the expected fixed IP, and config-drive
+attachment before recording a passing artifact.
+
 The harness configures the OpenStack client through `OS_*` environment
 variables and clears inherited `OS_CLOUD`/`OS_CLIENT_CONFIG_FILE` values. It
 does not generate a hand-interpolated `clouds.yaml`, so credential or endpoint

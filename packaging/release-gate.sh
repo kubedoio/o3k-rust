@@ -226,6 +226,16 @@ for name, (path, artifact_type) in required.items():
                 errors.append(f"{name}: acceptance.config_drive must be true")
             if acceptance.get("console_boot_marker") is not True:
                 errors.append(f"{name}: acceptance.console_boot_marker must be true")
+            restart = acceptance.get("restart")
+            if not isinstance(restart, dict):
+                errors.append(f"{name}: acceptance.restart evidence is required")
+            else:
+                if restart.get("status") != "ACTIVE":
+                    errors.append(f"{name}: acceptance.restart.status must be 'ACTIVE'")
+                if not isinstance(restart.get("fixed_ip"), str) or not restart["fixed_ip"].strip():
+                    errors.append(f"{name}: acceptance.restart.fixed_ip must be a non-empty string")
+                if restart.get("config_drive") is not True:
+                    errors.append(f"{name}: acceptance.restart.config_drive must be true")
         if value.get("public_api_only") is not True:
             errors.append(f"{name}: public_api_only must be true")
     if name == "failure_recovery":

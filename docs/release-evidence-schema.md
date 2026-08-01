@@ -20,7 +20,7 @@ The required artifact types are:
 
 | Gate input | `artifact_type` | Additional proof |
 |---|---|---|
-| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; `acceptance` must prove `ACTIVE`, a non-empty fixed IP, config-drive attachment, and a console boot marker; redacted `resources` IDs may be included |
+| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; `acceptance` must prove initial `ACTIVE`, a non-empty fixed IP, config-drive attachment, a console boot marker, and post-reboot `restart` evidence proving `ACTIVE`, fixed IP, and config-drive attachment; redacted `resources` IDs may be included |
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | `scenarios` object contains every required scenario key, each with `status: passed` |

@@ -7,6 +7,7 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-cli.XXXXXX")"
 mkdir -p "${ARTIFACT_DIR}"
 rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
     "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
+    "${ARTIFACT_DIR}/server-show-after-reboot.json" \
     "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log"
 IMAGE_ID=
 KEYPAIR_ID=
@@ -32,6 +33,9 @@ SERVER_ACTIVE=false
 SERVER_CONFIG_DRIVE=false
 SERVER_FIXED_IP=
 CONSOLE_BOOT_MARKER=false
+SERVER_RESTART_ACTIVE=false
+SERVER_RESTART_CONFIG_DRIVE=false
+SERVER_RESTART_FIXED_IP=
 
 validate_server_json() {
     local kind="$1" path="$2" expected_id="$3"
@@ -205,13 +209,16 @@ write_result() {
         "${CLEANUP_IMAGE_STATUS}" "${CLEANUP_KEYPAIR_STATUS}" "${CLEANUP_NETWORK_STATUS}" \
         "${CLEANUP_SUBNET_STATUS}" "${CLEANUP_FLAVOR_STATUS}" \
         "${CLEANUP_SERVER_STATUS}" "${SERVER_ACTIVE}" "${SERVER_CONFIG_DRIVE}" \
-        "${SERVER_FIXED_IP}" "${CONSOLE_BOOT_MARKER}" <<'PY'
+        "${SERVER_FIXED_IP}" "${CONSOLE_BOOT_MARKER}" \
+        "${SERVER_RESTART_ACTIVE}" "${SERVER_RESTART_CONFIG_DRIVE}" \
+        "${SERVER_RESTART_FIXED_IP}" <<'PY'
 import json, sys, time
 (
     path, status, reason, cleanup_status, image_id, network_id, subnet_id,
     keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
     flavor_status, server_status, server_active, server_config_drive,
-    server_fixed_ip, console_boot_marker,
+    server_fixed_ip, console_boot_marker, restart_active, restart_config_drive,
+    restart_fixed_ip,
 ) = sys.argv[1:]
 result = {
     "artifact_type": "openstack-cli-e2e",
@@ -257,6 +264,11 @@ if status == "passed":
         "fixed_ip": server_fixed_ip,
         "config_drive": server_config_drive == "true",
         "console_boot_marker": console_boot_marker == "true",
+        "restart": {
+            "status": "ACTIVE" if restart_active == "true" else "unknown",
+            "fixed_ip": restart_fixed_ip,
+            "config_drive": restart_config_drive == "true",
+        },
     }
 with open(path, "w", encoding="utf-8") as output:
     json.dump(result, output, indent=2)
@@ -364,6 +376,11 @@ mv "${ARTIFACT_DIR}/console.log.tmp" "${ARTIFACT_DIR}/console.log"
 openstack server stop --wait "${SERVER_ID}"
 openstack server start --wait "${SERVER_ID}"
 openstack server reboot --hard --wait "${SERVER_ID}"
+openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show-after-reboot.json"
+validate_server_json show "${ARTIFACT_DIR}/server-show-after-reboot.json" "${SERVER_ID}"
+SERVER_RESTART_ACTIVE=true
+SERVER_RESTART_CONFIG_DRIVE=true
+SERVER_RESTART_FIXED_IP="${EXPECTED_FIXED_IP}"
 openstack server delete --wait "${SERVER_ID}"
 if ! server_is_absent "${SERVER_ID}"; then
     echo "server deletion was not verified" >&2

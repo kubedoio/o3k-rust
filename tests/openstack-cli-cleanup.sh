@@ -127,7 +127,7 @@ import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
-assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True}
+assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}}
 assert result["resources"]["server_id"] == "server-id"
 assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "flavor", "server"}
 assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
