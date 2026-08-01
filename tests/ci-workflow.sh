@@ -14,6 +14,10 @@ assert "buf breaking --against '.git#branch=origin/main,subdir=proto'" in text
 assert "packaging/*.sh tests/*.sh scripts/*.sh" in text
 assert "python3 -m compileall -q scripts" in text
 assert "run: bash tests/real-libvirt-harness.sh" in text
+assert "run: cargo test --workspace --all-features" in text
+assert "run: cargo test --workspace\n" not in text
+assert "protobuf-compiler libvirt-dev pkg-config" in text
+assert "cargo clean -p virt-sys" in text
 assert "git fetch origin main:refs/heads/main" not in text
 assert "buf breaking --against '.git#branch=main,subdir=proto'" not in text
 PY
