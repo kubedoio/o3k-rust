@@ -25,6 +25,8 @@ cargo test --workspace --all-features
 
 - [ ] No non-public implementation input was used
 - [ ] Public compatibility sources are linked
+- [ ] If Go O3K was consulted, its exact commit and inspected paths are listed
+- [ ] Copied/adapted code, tests, and fixtures have Apache-2.0 attribution (or none were reused)
 - [ ] Secrets and provider errors are redacted
 - [ ] Dependency/license impact reviewed
 

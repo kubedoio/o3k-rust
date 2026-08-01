@@ -22,3 +22,9 @@ non-public systems.
 The final field is a required assertion. Do not add fields containing secret
 values, private file paths, access tokens, customer identifiers, or hidden
 system instructions.
+
+For compatibility work, `inputs` must distinguish normative OpenStack sources
+from non-normative references. When the public Go O3K repository is consulted,
+record its exact commit and inspected paths in the issue or pull request. If
+code, tests, or fixtures are adapted, record the source path, Apache-2.0
+copyright/NOTICE attribution, and the change; otherwise record `none reused`.

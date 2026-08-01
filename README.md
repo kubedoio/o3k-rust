@@ -36,6 +36,25 @@ These are project principles derived from practical infrastructure experience. T
 11. **Rust is a means, not the product.** Rust is chosen for type safety, shared ecosystem with CellHV, reliable concurrency, and long-term maintainability—not as a substitute for correct cloud behavior.
 12. **No hidden knowledge dependency.** Every implementation decision must be traceable to public specifications, a project ADR, an experiment, or an issue discussion.
 
+## Compatibility and public references
+
+OpenStack API documentation and published specifications are normative. Public
+OpenStack clients, SDKs, Terraform behavior, and Tempest behavior are the next
+compatibility references; O3K Rust contracts, ADRs, and black-box evidence then
+record the project-specific decisions. The public Apache-2.0
+[Go O3K repository](https://github.com/kubedoio/o3k) is permitted only as a
+non-normative secondary reference for route and extension inventory,
+requirements discovery, request/response field discovery, failure and cleanup
+scenarios, operational lessons, and black-box behavioral comparison.
+
+The Go repository must not be mechanically translated into Rust, used to
+override an official OpenStack contract, or used to reproduce its monolithic
+architecture. Any copied or adapted code, test, or fixture requires a pinned
+commit, Apache-2.0 attribution, preserved copyright/NOTICE information, and a
+clear change record. Agents record inspected paths and official sources in the
+issue or pull request. See [ADR-0151](adr/ADR-0151-public-go-o3k-reference-policy.md)
+and [CLEAN_IMPLEMENTATION.md](CLEAN_IMPLEMENTATION.md).
+
 ## Initial product: O3K TestLab
 
 The first vertical slice must support this workflow on a clean Linux host:
