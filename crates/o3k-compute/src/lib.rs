@@ -245,6 +245,13 @@ impl ComputeService {
         Ok(self.journal.apply_agent_update(update).await?)
     }
 
+    pub async fn apply_agent_acceptance(
+        &self,
+        accepted: &o3k_provider_contract::compute_proto::CommandAccepted,
+    ) -> Result<o3k_store::OperationState, ComputeError> {
+        Ok(self.journal.apply_agent_acceptance(accepted).await?)
+    }
+
     /// Applies an authenticated provider observation to the durable resource
     /// projection. This is separate from operation progress because a command
     /// may succeed while the provider remains stopped, deleting, or errored.
@@ -270,6 +277,11 @@ impl ComputeService {
                     Ok(o3k_compute_agent::AgentEvent::Operation(update)) => {
                         if let Err(error) = service.apply_agent_update(&update).await {
                             tracing::warn!(%error, "agent operation update rejected");
+                        }
+                    }
+                    Ok(o3k_compute_agent::AgentEvent::CommandAccepted(accepted)) => {
+                        if let Err(error) = service.apply_agent_acceptance(&accepted).await {
+                            tracing::warn!(%error, "agent command acceptance rejected");
                         }
                     }
                     Ok(o3k_compute_agent::AgentEvent::Observation(observation)) => {
