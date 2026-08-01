@@ -204,6 +204,7 @@ need_packages=false
 command -v genisoimage >/dev/null 2>&1 || need_packages=true
 python3 -m venv --help >/dev/null 2>&1 || need_packages=true
 command -v pkg-config >/dev/null 2>&1 || need_packages=true
+command -v protoc >/dev/null 2>&1 || need_packages=true
 if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
   command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
   sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
@@ -213,7 +214,7 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
       apt-get -o DPkg::Lock::Timeout=300 update -qq
     timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
       apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
-        genisoimage python3-venv pkg-config libvirt-dev
+        genisoimage python3-venv pkg-config libvirt-dev protobuf-compiler
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
 install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}" "${INVENTORY_ROOT%/*}"
@@ -260,6 +261,7 @@ command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable after
 python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable after dependency setup"
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
+command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
 cargo build --locked --release --bin o3kd
 # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
 # make the runtime link explicit after the host preflight proves libvirt exists.
