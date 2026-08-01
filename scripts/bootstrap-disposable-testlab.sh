@@ -269,7 +269,7 @@ RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --locked --release --features libvirt --bin o3k-compute-bin
 install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
-bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
+sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
 install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/data/agent-id"
 
