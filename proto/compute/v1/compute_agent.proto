@@ -134,6 +134,7 @@ message Capabilities {
   bool console_log = 8;
   uint64 max_console_log_bytes = 9;
   repeated CapabilityFlag flags = 10;
+  uint64 max_disk_gb = 11;
 }
 
 message CapabilityFlag {

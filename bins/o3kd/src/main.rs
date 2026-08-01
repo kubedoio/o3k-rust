@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = o3k_compute_agent::NodeRegistry::default();
     let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
         .map_err(|error| format!("open Placement ledger: {error}"))?;
-    let scheduler = o3k_scheduler::Scheduler::new(placement);
+    let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let mut compute_service = match config.provider {
         o3k_config::Provider::Libvirt => {
             return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
@@ -60,6 +60,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_scheduler(scheduler)
             .with_agent_registry(registry.clone());
     }
+    let inventory_task = agent_control_enabled
+        .then(|| o3k_compute::spawn_agent_inventory_publisher(registry.clone(), placement.clone()));
     let compute_ready = match tokio::time::timeout(
         Duration::from_secs(5),
         compute_service.provider().capabilities(),
@@ -171,6 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = event_task.await;
     console_event_task.abort();
     let _ = console_event_task.await;
+    if let Some(task) = inventory_task {
+        task.abort();
+        let _ = task.await;
+    }
     Ok(())
 }
 

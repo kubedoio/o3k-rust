@@ -219,7 +219,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let libvirt = LibvirtAdapter::new(LibvirtConfig::default())?;
     let (libvirt_ready, libvirt_error) = match libvirt.capabilities().await {
         Ok(capabilities) => {
-            config.capabilities = capabilities.to_protocol_capabilities();
+            let max_disk_gb = config.capabilities.max_disk_gb;
+            config.capabilities = o3k_provider_contract::compute_proto::Capabilities {
+                max_disk_gb,
+                ..capabilities.to_protocol_capabilities()
+            };
             (true, None)
         }
         Err(error) => {
@@ -334,6 +338,9 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
             architecture: env::consts::ARCH.to_owned(),
             agent_provider_name: "o3k-compute".to_owned(),
             agent_provider_version: env!("CARGO_PKG_VERSION").to_owned(),
+            max_disk_gb: env::var("O3K_COMPUTE_MAX_DISK_GB")
+                .unwrap_or_else(|_| "0".to_owned())
+                .parse()?,
             ..Default::default()
         },
     })
