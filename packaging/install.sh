@@ -32,6 +32,12 @@ validate_install_path() {
   local current=/ component
   while IFS= read -r component; do
     [[ -n "$component" ]] || continue
+    case "$component" in
+      .|..)
+        echo "$name must not contain lexical dot components: $path" >&2
+        exit 2
+        ;;
+    esac
     current="$current/$component"
     if [[ -L "$current" ]]; then
       echo "refusing symlink installation path for $name: $path" >&2
