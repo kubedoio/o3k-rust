@@ -77,6 +77,8 @@ pub enum ImageError {
     InvalidPath,
     #[error("image overlay tool is unavailable or failed")]
     OverlayFailed,
+    #[error("image format verification failed")]
+    FormatVerificationFailed,
 }
 
 #[derive(Clone)]
@@ -145,6 +147,9 @@ impl ImageCache {
                     && cached.len() == content.len()
                     && format!("{:x}", Sha256::digest(&cached)) == checksum
                 {
+                    if format == "qcow2" {
+                        verify_image_format(&self.qemu_img, &path, format)?;
+                    }
                     return Ok(path);
                 }
                 fs::remove_file(&path).map_err(ImageError::Storage)?;
@@ -158,6 +163,12 @@ impl ImageCache {
         if let Err(error) = fs::write(&temporary, content) {
             let _ = fs::remove_file(&temporary);
             return Err(ImageError::Storage(error));
+        }
+        if format == "qcow2" {
+            if let Err(error) = verify_image_format(&self.qemu_img, &temporary, format) {
+                let _ = fs::remove_file(&temporary);
+                return Err(error);
+            }
         }
         fs::rename(&temporary, &path).map_err(|error| {
             let _ = fs::remove_file(&temporary);
@@ -388,6 +399,23 @@ fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), Im
         if fs::canonicalize(resolved).map_err(|_| ImageError::OverlayFailed)? != expected_base {
             return Err(ImageError::OverlayFailed);
         }
+    }
+    Ok(())
+}
+
+fn verify_image_format(qemu_img: &Path, image: &Path, expected: &str) -> Result<(), ImageError> {
+    let output = std::process::Command::new(qemu_img)
+        .args(["info", "--output=json"])
+        .arg(image)
+        .output()
+        .map_err(|_| ImageError::FormatVerificationFailed)?;
+    if !output.status.success() {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| ImageError::FormatVerificationFailed)?;
+    if info.get("format").and_then(serde_json::Value::as_str) != Some(expected) {
+        return Err(ImageError::FormatVerificationFailed);
     }
     Ok(())
 }
@@ -712,7 +740,7 @@ mod tests {
             "test".to_owned(),
             "private".to_owned(),
             "bare".to_owned(),
-            "qcow2".to_owned(),
+            "raw".to_owned(),
         )?;
         service.upload("project-a", image.id, b"image-bytes")?;
         let artifact = service.resolve_artifact("project-a", image.id)?;
@@ -789,11 +817,11 @@ mod tests {
         let cache = ImageCache::open(&path, 1024)?;
         let content = b"verified-image";
         let checksum = format!("{:x}", Sha256::digest(content));
-        let first = cache.cache_base(&checksum, "qcow2", content)?;
-        let second = cache.cache_base(&checksum, "qcow2", content)?;
+        let first = cache.cache_base(&checksum, "raw", content)?;
+        let second = cache.cache_base(&checksum, "raw", content)?;
         assert_eq!(first, second);
         fs::write(&first, b"corrupted-cache-entry")?;
-        let repaired = cache.cache_base(&checksum, "qcow2", content)?;
+        let repaired = cache.cache_base(&checksum, "raw", content)?;
         assert_eq!(repaired, first);
         assert_eq!(fs::read(&repaired)?, content);
         assert!(matches!(
@@ -801,7 +829,7 @@ mod tests {
             Err(ImageError::UnsupportedFormat)
         ));
         assert!(matches!(
-            cache.cache_base(&"0".repeat(64), "qcow2", content),
+            cache.cache_base(&"0".repeat(64), "raw", content),
             Err(ImageError::ChecksumMismatch)
         ));
         assert!(matches!(
@@ -817,6 +845,70 @@ mod tests {
         assert!(!temporary.exists());
         fs::remove_dir_all(path)?;
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qcow2_cache_requires_qemu_img_format_evidence() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root("cache-format-verification");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  info)
+    if grep -q valid-qcow2 "$3"; then
+      printf '{"format":"qcow2"}\n'
+    else
+      printf '{"format":"raw"}\n'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
+            let valid = b"valid-qcow2";
+            let valid_checksum = format!("{:x}", Sha256::digest(valid));
+            let valid_path = cache.cache_base(&valid_checksum, "qcow2", valid)?;
+            assert!(valid_path.is_file());
+            fs::write(
+                &fake_qemu,
+                "#!/bin/sh\nprintf '{\\\"format\\\":\\\"raw\\\"}\\n'\n",
+            )?;
+            fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+            assert!(matches!(
+                cache.cache_base(&valid_checksum, "qcow2", valid),
+                Err(ImageError::FormatVerificationFailed)
+            ));
+            assert!(valid_path.is_file());
+
+            let invalid = b"not-a-qcow2";
+            let invalid_checksum = format!("{:x}", Sha256::digest(invalid));
+            assert!(matches!(
+                cache.cache_base(&invalid_checksum, "qcow2", invalid),
+                Err(ImageError::FormatVerificationFailed)
+            ));
+            assert!(
+                !path
+                    .join("base")
+                    .join(format!("{invalid_checksum}.qcow2"))
+                    .exists()
+            );
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&path);
+        result
     }
 
     #[test]
@@ -928,17 +1020,17 @@ esac
         let outside = path.with_file_name(format!("o3k-image-outside-{}", std::process::id()));
         fs::write(&outside, content)?;
 
-        let cached_base = path.join("base").join(format!("{checksum}.qcow2"));
+        let cached_base = path.join("base").join(format!("{checksum}.raw"));
         symlink(&outside, &cached_base)?;
         assert!(matches!(
-            cache.cache_base(&checksum, "qcow2", content),
+            cache.cache_base(&checksum, "raw", content),
             Err(ImageError::InvalidPath)
         ));
         assert_eq!(fs::read(&outside)?, content);
 
         fs::remove_file(&cached_base)?;
-        let base = cache.cache_base(&checksum, "qcow2", content)?;
-        let symlinked_base = path.join("base").join("symlinked-base.qcow2");
+        let base = cache.cache_base(&checksum, "raw", content)?;
+        let symlinked_base = path.join("base").join("symlinked-base.raw");
         symlink(&outside, &symlinked_base)?;
         assert!(matches!(
             cache.create_overlay("symlinked-base", &symlinked_base),
@@ -948,7 +1040,7 @@ esac
 
         let sibling_base_dir = path.with_file_name("base-evil");
         fs::create_dir(&sibling_base_dir)?;
-        let sibling_base = sibling_base_dir.join("sibling.qcow2");
+        let sibling_base = sibling_base_dir.join("sibling.raw");
         fs::write(&sibling_base, content)?;
         assert!(matches!(
             cache.create_overlay("sibling", &sibling_base),
