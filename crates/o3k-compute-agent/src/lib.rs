@@ -771,6 +771,117 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
     })
 }
 
+/// The lifecycle mutations that can be dispatched after a provider resource
+/// has been resolved.  Keeping this list typed prevents callers from turning
+/// an arbitrary string into a host command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleCommand {
+    Inspect,
+    Start,
+    Stop,
+    HardReboot,
+    Delete,
+}
+
+/// Builds a deterministic, fenced lifecycle command for the selected agent.
+/// The command identity is stable for the operation and resource, so a
+/// reconnect or retry cannot silently become a second mutation.
+pub fn build_lifecycle_command(
+    action: LifecycleCommand,
+    agent_id: &str,
+    agent_epoch: &str,
+    operation_id: &str,
+    resource_id: &str,
+) -> Result<proto::Command, AgentError> {
+    if !valid_reference(agent_id)
+        || !valid_reference(agent_epoch)
+        || !valid_reference(operation_id)
+        || !valid_reference(resource_id)
+    {
+        return Err(AgentError::Protocol(
+            "lifecycle command identity is invalid".to_owned(),
+        ));
+    }
+    let action_name = match action {
+        LifecycleCommand::Inspect => "inspect",
+        LifecycleCommand::Start => "start",
+        LifecycleCommand::Stop => "stop",
+        LifecycleCommand::HardReboot => "hard-reboot",
+        LifecycleCommand::Delete => "delete",
+    };
+    let canonical_action = match action {
+        LifecycleCommand::Inspect => {
+            proto::canonical_command_payload::Action::Inspect(proto::InspectCommand {})
+        }
+        LifecycleCommand::Start => {
+            proto::canonical_command_payload::Action::Start(proto::StartCommand {})
+        }
+        LifecycleCommand::Stop => {
+            proto::canonical_command_payload::Action::Stop(proto::StopCommand {})
+        }
+        LifecycleCommand::HardReboot => {
+            proto::canonical_command_payload::Action::Reboot(proto::RebootCommand {
+                r#type: proto::reboot_command::RebootType::Hard as i32,
+            })
+        }
+        LifecycleCommand::Delete => {
+            proto::canonical_command_payload::Action::Delete(proto::DeleteCommand {})
+        }
+    };
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: operation_id.to_owned(),
+        resource_id: resource_id.to_owned(),
+        action: Some(canonical_action.clone()),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let mut payload_fingerprint_sha256 = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
+            .expect("writing to an in-memory string cannot fail");
+    }
+    let action = match canonical_action {
+        proto::canonical_command_payload::Action::Inspect(value) => {
+            proto::command::Action::Inspect(value)
+        }
+        proto::canonical_command_payload::Action::Start(value) => {
+            proto::command::Action::Start(value)
+        }
+        proto::canonical_command_payload::Action::Stop(value) => {
+            proto::command::Action::Stop(value)
+        }
+        proto::canonical_command_payload::Action::Reboot(value) => {
+            proto::command::Action::Reboot(value)
+        }
+        proto::canonical_command_payload::Action::Delete(value) => {
+            proto::command::Action::Delete(value)
+        }
+        proto::canonical_command_payload::Action::Create(_)
+        | proto::canonical_command_payload::Action::ConsoleLog(_) => {
+            return Err(AgentError::Protocol(
+                "unsupported lifecycle command action".to_owned(),
+            ));
+        }
+    };
+    let idempotency_key = format!("{action_name}:{resource_id}:{operation_id}");
+    Ok(proto::Command {
+        command_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:lifecycle-command:{agent_id}:{operation_id}").as_bytes(),
+        )
+        .to_string(),
+        operation_id: operation_id.to_owned(),
+        idempotency_key,
+        agent_id: agent_id.to_owned(),
+        agent_epoch: agent_epoch.to_owned(),
+        resource_id: resource_id.to_owned(),
+        deadline_unix_ms: unix_ms().saturating_add(10_000),
+        protocol_version: Some(PROTOCOL_VERSION),
+        payload_fingerprint_sha256,
+        action: Some(action),
+    })
+}
+
 /// Builds a bounded, fenced console-log query using the existing protocol.
 pub fn build_console_log_command(
     agent_id: &str,
@@ -2546,6 +2657,44 @@ mod tests {
         assert_ne!(
             first.payload_fingerprint_sha256,
             changed.payload_fingerprint_sha256
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_commands_are_fenced_and_deterministic() -> Result<(), AgentError> {
+        let first = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "agent-1",
+            "epoch-1",
+            "operation-1",
+            "resource-1",
+        )?;
+        let second = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "agent-1",
+            "epoch-1",
+            "operation-1",
+            "resource-1",
+        )?;
+        assert_eq!(first, second);
+        assert!(first.deadline_unix_ms > unix_ms());
+        assert!(first.idempotency_key.starts_with("hard-reboot:resource-1:"));
+        assert!(matches!(
+            first.action,
+            Some(proto::command::Action::Reboot(proto::RebootCommand {
+                r#type: value
+            })) if value == proto::reboot_command::RebootType::Hard as i32
+        ));
+        assert!(
+            build_lifecycle_command(
+                LifecycleCommand::Delete,
+                "agent/invalid",
+                "epoch-1",
+                "operation-1",
+                "resource-1",
+            )
+            .is_err()
         );
         Ok(())
     }
