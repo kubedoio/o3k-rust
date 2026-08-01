@@ -38,6 +38,14 @@ SH
 chmod +x "${FAKE_BIN}/ip"
 cat >"${FAKE_BIN}/openstack" <<'SH'
 #!/usr/bin/env bash
+if [[ "$*" == flavor\ list\ * ]]; then
+    if [[ "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
+        echo '[{"ID":"leaked-openstack-resource","Name":"o3k-testlab-flavor"}]'
+    else
+        echo '[]'
+    fi
+    exit 0
+fi
 if [[ "$*" == *" list "* && "${O3K_FAKE_OPENSTACK_LEAK:-false}" == true ]]; then
     echo leaked-openstack-resource
 fi
