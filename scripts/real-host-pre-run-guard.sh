@@ -165,7 +165,8 @@ if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${INVENTORY_PATH}"
 elif ! python3 - "${INVENTORY_PATH}" <<'PY'
 import json, sys
 inventory = json.load(open(sys.argv[1], encoding="utf-8"))
-if inventory.get("status") != "available" or inventory.get("domains"):
+if (inventory.get("status") != "available" or inventory.get("domains")
+        or inventory.get("network_links")):
     raise SystemExit(1)
 if any(inventory.get("openstack", {}).get("resources", {}).values()):
     raise SystemExit(1)

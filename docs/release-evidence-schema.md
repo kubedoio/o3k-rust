@@ -61,6 +61,11 @@ subnet, flavor, and server cleanup. A failed cleanup retains
 the owned resource's `not_verified` or `pending` disposition instead of
 implying that an unsuccessful delete command established absence.
 
+The protected `resource-leak-result` artifact may expose owned
+`leaks.network_links`, containing only validated `o3k-*` interface names. A
+new owned link relative to the baseline is a leak; foreign interface names
+remain represented only by the redacted `foreign_state` digest.
+
 The gate captures one current epoch timestamp for the invocation and applies
 the same timestamp policy to every artifact. A timestamp equal to the maximum
 age boundary is accepted; timestamps older than that boundary, non-positive

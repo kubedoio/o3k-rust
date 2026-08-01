@@ -119,8 +119,9 @@ def protected_paths_digest() -> str | None:
     return digest(records)
 
 
-def foreign_link_lines(output: str) -> list[str]:
-    lines = []
+def classify_link_lines(output: str) -> tuple[list[str], list[str]]:
+    owned: list[str] = []
+    foreign: list[str] = []
     for line in output.splitlines():
         value = line.strip()
         if not value:
@@ -129,9 +130,13 @@ def foreign_link_lines(output: str) -> list[str]:
         # name. Keep only non-O3K interfaces in the foreign-state digest.
         fields = value.split(":", 2)
         name = fields[1].strip().split("@", 1)[0] if len(fields) > 1 else ""
-        if not name.startswith("o3k-"):
-            lines.append(value)
-    return lines
+        if name.startswith("o3k-"):
+            if SAFE_ID.fullmatch(name) is None:
+                return [], []
+            owned.append(name)
+        else:
+            foreign.append(value)
+    return sorted(set(owned)), foreign
 
 
 def snapshot() -> dict[str, object] | None:
@@ -172,6 +177,14 @@ def snapshot() -> dict[str, object] | None:
     else:
         resources = {resource: [] for resource in RESOURCES}
 
+    network_links, foreign_links = classify_link_lines(link_output)
+    if not network_links and any(
+        line.strip() and line.split(":", 2)[1].strip().split("@", 1)[0].startswith("o3k-")
+        for line in link_output.splitlines()
+        if len(line.split(":", 2)) > 1
+    ):
+        return None
+
     protected_paths = protected_paths_digest()
     if protected_paths is None:
         return None
@@ -181,12 +194,11 @@ def snapshot() -> dict[str, object] | None:
         "status": "available",
         "redacted": True,
         "domains": sorted(set(domains)),
+        "network_links": network_links,
         "openstack": {"status": openstack_status, "resources": resources},
         "foreign_state": {
             "domains_sha256": digest(foreign_domains),
-            "network_links_sha256": digest(
-                foreign_link_lines(link_output)
-            ),
+            "network_links_sha256": digest(foreign_links),
             "protected_paths_sha256": protected_paths,
         },
     }
