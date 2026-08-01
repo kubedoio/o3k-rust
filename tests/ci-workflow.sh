@@ -11,6 +11,8 @@ import sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "git fetch origin main:refs/remotes/origin/main" in text
 assert "buf breaking --against '.git#branch=origin/main,subdir=proto'" in text
+assert "packaging/*.sh tests/*.sh scripts/*.sh" in text
+assert "python3 -m compileall -q scripts" in text
 assert "git fetch origin main:refs/heads/main" not in text
 assert "buf breaking --against '.git#branch=main,subdir=proto'" not in text
 PY
