@@ -363,6 +363,17 @@ impl ComputeService {
                 let existing_request: CreateInstanceRequest =
                     serde_json::from_str(&existing.desired_state)
                         .map_err(|_| ComputeError::Conflict)?;
+                let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
+                    existing_request.placement_provider_id.as_deref()
+                        == Some(decision.provider_id.as_str())
+                        && existing_request.placement_allocation_id.as_deref()
+                            == Some(decision.allocation_id.as_str())
+                });
+                if let Some(decision) = placement.as_ref() {
+                    if !owns_persisted_placement {
+                        self.release_placement_decision(decision)?;
+                    }
+                }
                 if existing_request != request {
                     return Err(ComputeError::Conflict);
                 }
@@ -958,6 +969,90 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(placement_root);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_race_releases_placement_not_owned_by_winner() -> Result<(), ComputeError> {
+        let placement_root =
+            PathBuf::from(format!("/tmp/o3k-placement-create-race-{}", Uuid::now_v7()));
+        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let inventory = |vcpus| {
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: vcpus,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 512,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 10,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ])
+        };
+        placement
+            .register_provider("node-a", inventory(2))
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement
+            .register_provider("node-b", inventory(3))
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let service = service("create-race")
+            .await?
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let flavor = service.flavors()[0].id;
+        let left = service.create_server(
+            "project-a",
+            "racing".to_owned(),
+            "image-1".to_owned(),
+            flavor,
+            vec!["network-1".to_owned()],
+            "same-request".to_owned(),
+        );
+        let right = service.create_server(
+            "project-a",
+            "racing".to_owned(),
+            "image-1".to_owned(),
+            flavor,
+            vec!["network-1".to_owned()],
+            "same-request".to_owned(),
+        );
+        let (left, right) = tokio::join!(left, right);
+        assert!(
+            left.is_ok() || right.is_ok(),
+            "both creates failed: {left:?} {right:?}"
+        );
+        assert!(
+            left.is_ok() && (right.is_ok() || matches!(right, Err(ComputeError::Conflict)))
+                || right.is_ok() && matches!(left, Err(ComputeError::Conflict)),
+            "unexpected race results: {left:?} {right:?}"
+        );
+        let allocation_count = placement
+            .providers()
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+            .into_iter()
+            .map(|provider| provider.allocations.len())
+            .sum::<usize>();
+        assert_eq!(allocation_count, 1);
         let _ = std::fs::remove_dir_all(placement_root);
         Ok(())
     }
