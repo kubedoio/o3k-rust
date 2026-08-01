@@ -1133,6 +1133,23 @@ fn compute_error(error: ComputeError) -> axum::response::Response {
     }
 }
 
+fn cached_console_response(
+    console: &o3k_console::ConsoleService,
+    id: uuid::Uuid,
+    offset: u64,
+    length: usize,
+) -> Option<axum::response::Response> {
+    console.read_from(id, offset, length).ok().map(|chunk| {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "output": String::from_utf8_lossy(&chunk.bytes)
+            })),
+        )
+            .into_response()
+    })
+}
+
 fn project_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -1463,6 +1480,11 @@ async fn server_action(
                             Ok(observation) => observation,
                             Err(error) => {
                                 tracing::warn!(%error, server_id = %id, "agent console query failed");
+                                if let Some(response) =
+                                    cached_console_response(console, id, offset, length)
+                                {
+                                    return response;
+                                }
                                 return keystone_error(
                                     StatusCode::SERVICE_UNAVAILABLE,
                                     "Service Unavailable",
@@ -1477,13 +1499,15 @@ async fn server_action(
                         ) {
                             tracing::warn!(%error, server_id = %id, "agent console observation persistence failed");
                         }
-                        return (
-                            StatusCode::OK,
-                            Json(serde_json::json!({
-                                "output": String::from_utf8_lossy(&observation.console_log_bytes)
-                            })),
-                        )
-                            .into_response();
+                        if let Some(response) = cached_console_response(console, id, offset, length)
+                        {
+                            return response;
+                        }
+                        return keystone_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Service Unavailable",
+                            "compute agent console output could not be persisted",
+                        );
                     }
                     Ok(None) => {}
                     Err(error) => return compute_error(error),
