@@ -68,7 +68,9 @@ release evidence.
 
 The failure-recovery artifact must contain these scenario keys under
 `scenarios`. Each value is a machine-readable result object whose `status` is
-`passed`; missing, unknown, or non-passed scenarios block the gate:
+`passed` and whose `evidence` object identifies a non-empty `artifact` and a
+non-empty list of `checks`; missing, unknown, non-passed, or evidence-less
+scenarios block the gate:
 
 ```text
 control-plane-crash-before-dispatch
