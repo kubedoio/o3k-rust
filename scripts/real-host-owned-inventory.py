@@ -45,13 +45,29 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
             env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             check=True,
             timeout=10,
             text=True,
         )
-    except (OSError, UnicodeError, subprocess.SubprocessError):
+    except FileNotFoundError:
         LAST_FAILURE_REASON = "command_unavailable:" + ":".join(args[:3])
+        return None
+    except subprocess.TimeoutExpired:
+        LAST_FAILURE_REASON = "command_timeout:" + ":".join(args[:3])
+        return None
+    except subprocess.CalledProcessError as error:
+        stderr = error.stderr if isinstance(error.stderr, str) else ""
+        status = next(
+            (code for code in (401, 403, 404, 409, 500, 502, 503, 504)
+             if str(code) in stderr),
+            None,
+        )
+        suffix = f":http{status}" if status is not None else f":exit{error.returncode}"
+        LAST_FAILURE_REASON = "command_failed:" + ":".join(args[:3]) + suffix
+        return None
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        LAST_FAILURE_REASON = "command_error:" + ":".join(args[:3])
         return None
     return result.stdout
 
