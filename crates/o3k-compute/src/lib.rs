@@ -224,6 +224,20 @@ impl ComputeProvider for ProviderBackend {
     }
 }
 
+fn requests_match_with_keypair_migration(
+    existing: &CreateInstanceRequest,
+    requested: &CreateInstanceRequest,
+) -> bool {
+    if existing.keypair_id.is_some() || requested.keypair_id.is_none() {
+        return false;
+    }
+    let migrated = CreateInstanceRequest {
+        keypair_id: requested.keypair_id,
+        ..existing.clone()
+    };
+    migrated == *requested
+}
+
 impl ComputeService {
     #[must_use]
     pub fn new<P>(store: Arc<SqliteStore>, provider: Arc<P>) -> Self
@@ -459,9 +473,25 @@ impl ComputeService {
                     placement_allocation_id: None,
                     ..existing_request
                 };
-                if existing_request == request {
+                let legacy_keypair_intent =
+                    requests_match_with_keypair_migration(&existing_request, &request);
+                if existing_request == request || legacy_keypair_intent {
                     if existing.observed_state == "DELETED" {
                         return Err(ComputeError::NotFound);
+                    }
+                    if legacy_keypair_intent {
+                        let desired_state =
+                            serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
+                        self.store
+                            .update_resource(
+                                existing.id,
+                                existing.generation,
+                                &desired_state,
+                                &existing.observed_state,
+                                existing.observed_generation,
+                                existing.provider_id.as_deref(),
+                            )
+                            .await?;
                     }
                     let attached = self.store.get_server_keypair_name(server_id).await?;
                     let mut repaired_association = false;
@@ -594,11 +624,27 @@ impl ComputeService {
                         self.release_placement_decision(decision)?;
                     }
                 }
-                if existing_request != request {
+                let legacy_keypair_intent =
+                    requests_match_with_keypair_migration(&existing_request, &request);
+                if existing_request != request && !legacy_keypair_intent {
                     return Err(ComputeError::Conflict);
                 }
                 if existing.observed_state == "DELETED" {
                     return Err(ComputeError::NotFound);
+                }
+                if legacy_keypair_intent {
+                    let desired_state =
+                        serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
+                    self.store
+                        .update_resource(
+                            existing.id,
+                            existing.generation,
+                            &desired_state,
+                            &existing.observed_state,
+                            existing.observed_generation,
+                            existing.provider_id.as_deref(),
+                        )
+                        .await?;
                 }
                 let attached = self.store.get_server_keypair_name(id).await?;
                 let mut repaired_association = false;
