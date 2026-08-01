@@ -213,6 +213,10 @@ impl DhcpService {
             format!("interface={}", config.interface),
             "bind-interfaces".to_owned(),
             format!(
+                "dhcp-leasefile={}",
+                self.root.join("dnsmasq.leases").display()
+            ),
+            format!(
                 "dhcp-range={},static,{}",
                 config.subnet, config.lease_seconds
             ),
@@ -258,6 +262,10 @@ impl DhcpService {
 
     pub fn managed_config_path(&self) -> PathBuf {
         self.root.join("dnsmasq.conf")
+    }
+
+    pub fn managed_lease_path(&self) -> PathBuf {
+        self.root.join("dnsmasq.leases")
     }
 
     fn persist(&self) -> Result<(), DhcpError> {
@@ -363,6 +371,12 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
+        assert!(rendered.contains("dhcp-leasefile="));
+        assert!(
+            service
+                .managed_lease_path()
+                .ends_with("o3k-dhcp-tests/dnsmasq.leases")
+        );
         Ok(())
     }
 

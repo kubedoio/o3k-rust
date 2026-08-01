@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs, io,
     net::Ipv4Addr,
     path::PathBuf,
@@ -87,7 +88,7 @@ mod host_network_tests {
             Err(HostNetworkError::InvalidMac)
         ));
         assert!(interface_output_is_owned(
-            "2: o3ktap-abcd: <BROADCAST> mtu 1500 master o3k-br0 state UP\\n\\\tlink/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
+            "2: o3ktap-abcd: <BROADCAST> mtu 1500 master o3k-br0 state UP\\n\\\ttun type tap\\n\\\tlink/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
             "02:00:00:00:00:01",
             "o3k-br0"
         ));
@@ -207,7 +208,7 @@ mod host_network_tests {
             Response::output(true, "2: o3ktap-abcd: <BROADCAST>"),
             Response::output(
                 true,
-                "2: o3ktap-abcd: <BROADCAST> master o3k-br0 link/ether 02:00:00:00:00:02",
+                "2: o3ktap-abcd: <BROADCAST> master o3k-br0\\n\\ttun type tap\\n\\tlink/ether 02:00:00:00:00:02",
             ),
         ]);
         let manager = test_manager(command.clone(), None);
@@ -234,6 +235,7 @@ mod host_network_tests {
         let command = FakeNetworkCommand::new([Response::output(
             true,
             "2: o3ktap-owned: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP\n\
+             tun type tap\n\
              3: o3ktap-detached: <BROADCAST,UP> mtu 1500 state UP\n\
              4: o3ktap-foreign: <BROADCAST,UP> mtu 1500 master other-br0 state UP",
         )]);
@@ -248,17 +250,22 @@ mod host_network_tests {
     #[test]
     fn ownership_tokens_are_matched_without_prefix_collisions() {
         assert!(interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP tun type tap link/ether 02:00:00:00:00:01",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br01 state UP tun type tap link/ether 02:00:00:00:00:01",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP tun type tap link/ether 02:00:00:00:00:010",
+            "02:00:00:00:00:01",
+            "o3k-br0"
+        ));
+        assert!(!interface_output_is_owned(
             "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP link/ether 02:00:00:00:00:01",
-            "02:00:00:00:00:01",
-            "o3k-br0"
-        ));
-        assert!(!interface_output_is_owned(
-            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br01 state UP link/ether 02:00:00:00:00:01",
-            "02:00:00:00:00:01",
-            "o3k-br0"
-        ));
-        assert!(!interface_output_is_owned(
-            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP link/ether 02:00:00:00:00:010",
             "02:00:00:00:00:01",
             "o3k-br0"
         ));
@@ -525,21 +532,11 @@ impl HostNetworkManager {
         Ok(())
     }
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
-        let output = self.command_output(["-o", "link", "show"])?;
+        let output = self.command_output(["-d", "link", "show"])?;
         if !output.success {
             return Err(HostNetworkError::CommandFailed);
         }
-        Ok(output
-            .stdout
-            .lines()
-            .filter_map(|line| {
-                let (_, rest) = line.split_once(": ")?;
-                let name = rest.split(':').next()?.to_owned();
-                (name.starts_with("o3ktap-")
-                    && interface_is_attached_to(line, &self.config.bridge_name))
-                .then_some(name)
-            })
-            .collect())
+        Ok(managed_tap_names(&output.stdout, &self.config.bridge_name))
     }
 
     fn link_exists(&self, name: &str) -> bool {
@@ -639,7 +636,7 @@ fn interface_is_owned_with(
     bridge_name: &str,
 ) -> Result<bool, HostNetworkError> {
     let output = command
-        .output(["-o", "link", "show", "dev", name].as_slice())
+        .output(["-d", "link", "show", "dev", name].as_slice())
         .map_err(|_| HostNetworkError::CommandFailed)?;
     if !output.success {
         return Err(HostNetworkError::CommandFailed);
@@ -652,8 +649,55 @@ fn interface_is_owned_with(
 }
 
 fn interface_output_is_owned(output: &str, expected_mac: &str, bridge_name: &str) -> bool {
-    has_link_token(output, "link/ether", expected_mac)
+    interface_output_is_tap(output)
+        && has_link_token(output, "link/ether", expected_mac)
         && has_link_token(output, "master", bridge_name)
+}
+
+fn interface_output_is_tap(output: &str) -> bool {
+    output.contains("tun type tap")
+        || output.lines().any(|line| {
+            let tokens = line.split_whitespace().collect::<Vec<_>>();
+            tokens
+                .windows(3)
+                .any(|window| window == ["tun", "type", "tap"])
+        })
+}
+
+fn managed_tap_names(output: &str, bridge_name: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current_name = None;
+    let mut current_output = String::new();
+    let finish = |name: &mut Option<String>, block: &mut String, names: &mut Vec<String>| {
+        if let Some(name) = name.take() {
+            if name.starts_with("o3ktap-")
+                && interface_output_is_tap(block)
+                && interface_is_attached_to(block, bridge_name)
+            {
+                names.push(name);
+            }
+        }
+        block.clear();
+    };
+    for line in output.lines() {
+        if let Some((_, rest)) = line.split_once(": ") {
+            if line
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+                && rest.split(':').next().is_some_and(|name| !name.is_empty())
+            {
+                finish(&mut current_name, &mut current_output, &mut names);
+                current_name = rest.split(':').next().map(str::to_owned);
+            }
+        }
+        if current_name.is_some() {
+            current_output.push_str(line);
+            current_output.push('\n');
+        }
+    }
+    finish(&mut current_name, &mut current_output, &mut names);
+    names
 }
 
 fn interface_is_attached_to(output: &str, bridge_name: &str) -> bool {
@@ -758,6 +802,14 @@ impl NetworkService {
                 port.mac_address = deterministic_port_mac(port.id);
                 migrated = true;
             }
+        }
+        let mut macs = HashSet::new();
+        if data
+            .ports
+            .iter()
+            .any(|port| !macs.insert(port.mac_address.to_ascii_lowercase()))
+        {
+            return Err(NetworkError::Conflict);
         }
         let inner = Inner { root, data };
         if migrated {
@@ -978,12 +1030,21 @@ impl NetworkService {
             let address = Ipv4Addr::from(candidate);
             if address != gateway && !used.contains(&address) {
                 let id = Uuid::now_v7();
+                let mac_address = deterministic_port_mac(id);
+                if inner
+                    .data
+                    .ports
+                    .iter()
+                    .any(|port| port.mac_address.eq_ignore_ascii_case(&mac_address))
+                {
+                    return Err(NetworkError::Conflict);
+                }
                 let port = PortRecord {
                     id,
                     network_id,
                     project_id: project_id.to_owned(),
                     name,
-                    mac_address: deterministic_port_mac(id),
+                    mac_address,
                     fixed_ip: address,
                     status: "ACTIVE".to_owned(),
                 };
