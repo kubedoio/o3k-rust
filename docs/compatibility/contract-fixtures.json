@@ -31,6 +31,36 @@
       "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#version-discovery"]
     },
     {
+      "id": "network.network_collection_list",
+      "name": "network-list",
+      "service": "network",
+      "method": "GET",
+      "path": "/v2.0/networks",
+      "expected_status": [200],
+      "required_json_keys": ["networks"],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#list-networks"]
+    },
+    {
+      "id": "network.subnet_collection_list",
+      "name": "subnet-list",
+      "service": "network",
+      "method": "GET",
+      "path": "/v2.0/subnets",
+      "expected_status": [200],
+      "required_json_keys": ["subnets"],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#list-subnets"]
+    },
+    {
+      "id": "network.port_collection_list",
+      "name": "port-list",
+      "service": "network",
+      "method": "GET",
+      "path": "/v2.0/ports",
+      "expected_status": [200],
+      "required_json_keys": ["ports"],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#list-ports"]
+    },
+    {
       "id": "compute.flavor_collection_list",
       "name": "flavor-list",
       "service": "compute",
