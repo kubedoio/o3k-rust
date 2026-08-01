@@ -19,9 +19,11 @@ Image metadata is persisted in an atomically replaced `metadata.json` file under
 the configured data directory. Content paths are derived only from UUIDs under
 `images/content`; names and request fields never become filesystem paths. Upload
 content is written to a temporary file and renamed before metadata is marked
-active. The adapter uses a 16 MiB default limit and does not expose staging or
-filesystem errors publicly.
+active. Authenticated `GET /v2/images/{id}/file` revalidates ownership, size,
+and SHA-256 before returning bytes. The adapter uses a bounded upload limit and
+does not expose staging or filesystem errors publicly.
 
-SQLite image metadata integration and process-level OpenStack CLI evidence remain
-follow-ups for the durable resource/API workflow issues. The compatibility
-matrix therefore marks the Glance rows `implemented`, not `verified`.
+SQLite image metadata integration and protected OpenStack CLI evidence remain
+follow-ups for the durable resource/API workflow issues. Portable API evidence
+is recorded in the compatibility inventory; protected-runner evidence is not
+fabricated.

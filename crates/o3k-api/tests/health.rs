@@ -418,6 +418,18 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
         .as_str()
         .ok_or_else(|| std::io::Error::other("image id missing"))?
         .to_owned();
+    let checksum_mismatch = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2/images/{id}/file"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .header("x-openstack-image-sha256", "00")
+                .body(Body::from("image-content"))?,
+        )
+        .await?;
+    assert_eq!(checksum_mismatch.status(), StatusCode::BAD_REQUEST);
     let upload_response = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -452,6 +464,38 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
         serde_json::from_slice(&axum::body::to_bytes(show_response.into_body(), 4096).await?)?;
     assert_eq!(show_json["status"], "active");
     assert_eq!(show_json["size"], 13);
+    let download_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/v2/images/{id}/file"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(download_response.status(), StatusCode::OK);
+    assert_eq!(
+        download_response.headers()[header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    assert_eq!(download_response.headers()[header::CONTENT_LENGTH], "13");
+    assert_eq!(
+        axum::body::to_bytes(download_response.into_body(), 4096).await?,
+        "image-content"
+    );
+    let invalid_format = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2/images")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"invalid","visibility":"private","container_format":"bare","disk_format":"vmdk"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(invalid_format.status(), StatusCode::BAD_REQUEST);
     let delete_response = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()

@@ -160,12 +160,12 @@
       "go_locations": ["internal/glance/images.go"],
       "rust_locations": ["crates/o3k-api/src/lib.rs", "crates/o3k-image/src/lib.rs"],
       "cli_command": "openstack image save",
-      "implementation_state": "missing",
-      "portable_contract": "pending",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["No public authenticated image-content download route is currently registered."]
+      "known_gaps": ["Protected deployment verification remains a release-gate task."]
     },
     {
       "id": "network.network_collection_create",
