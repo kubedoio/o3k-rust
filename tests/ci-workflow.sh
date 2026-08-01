@@ -40,6 +40,8 @@ assert "target/real-host-workflow-artifacts/openstack-cli-result.json" in real_h
 assert "Download and verify CirrOS image" in real_host_text
 assert "CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img" in real_host_text
 assert "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b" in real_host_text
+assert "--connect-timeout 15 --max-time 300" in real_host_text
+assert "timeout-minutes: 60" in real_host_text
 PY
 
 echo "CI workflow contract tests passed"

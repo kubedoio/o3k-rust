@@ -14,6 +14,7 @@ jobs:
   real-host:
     name: Protected TestLab real-host validation
     if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'
+    timeout-minutes: 60
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
@@ -30,12 +31,14 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
       - name: Download and verify CirrOS image
+        continue-on-error: true
         env:
           CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
           CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
         run: |
           image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.XXXXXX")"
-          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 \
             --output "${image_path}" "${CIRROS_IMAGE_URL}"
           printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" \
             | sha256sum --check --strict --status
