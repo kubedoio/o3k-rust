@@ -6,6 +6,12 @@ claimed by this repository change.
 
 ## Bounded repository implementation
 
+The portable real-libvirt harness now models creation and verified absence of
+every dependent OpenStack resource, so its cleanup contract cannot pass from a
+fake CLI that merely returns success. Normal CI runs this harness. This is a
+fixture and contract improvement only; it does not claim real CirrOS, libvirt,
+or protected-runner acceptance.
+
 The public CLI harness now creates a public-only keypair, passes it to the
 server, and verifies absence after deleting every resource it created:
 server, keypair, flavor, subnet, network, and image. A successful delete
