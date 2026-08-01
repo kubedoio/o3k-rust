@@ -490,6 +490,15 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let flavor_id = flavor_json["flavors"][0]["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("flavor missing"))?;
+    let detailed_servers = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/bootstrap-project/servers/detail")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(detailed_servers.status(), StatusCode::OK);
     let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
     let created = o3k_api::router_with_state(state.clone())
         .oneshot(
