@@ -15,6 +15,12 @@ ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflo
 STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
 INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
+SERVICE_STATE_BASE=/var/lib/o3k-testlab
+if [[ "$RUN_ID" =~ ^local- ]]; then
+  STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
+else
+  STATE_ROOT="${SERVICE_STATE_BASE}/${RUN_ID}"
+fi
 SERVICE_ACCOUNT=o3k
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 APT_LOCK=/run/lock/o3k-testlab-apt.lock
@@ -145,7 +151,7 @@ sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is 
 for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
   ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
 done
-for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids" \
+for parent in "${RUNNER_TEMP}/o3k-testlab-pids" \
   "${RUNNER_TEMP}/o3k-testlab-inventory"; do
   if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
     fail "run state parent is not an owned directory: ${parent}"
@@ -217,7 +223,8 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
         genisoimage python3-venv pkg-config libvirt-dev protobuf-compiler
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
-install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}" "${INVENTORY_ROOT%/*}"
+sudo -n install -d -o root -g root -m 0755 "$SERVICE_STATE_BASE"
+install -d -m 0755 "${PID_ROOT%/*}" "${INVENTORY_ROOT%/*}"
 [[ ! -e "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] || fail "run inventory state already exists"
 install -d -m 0755 "$INVENTORY_ROOT"
 printf 'o3k-disposable-inventory-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" \

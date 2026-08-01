@@ -13,6 +13,10 @@ sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
   || { echo "cleanup: account lock directory is unavailable" >&2; exit 1; }
 EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 EXPECTED_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
+EXPECTED_ROOT="/var/lib/o3k-testlab/${RUN_ID}"
+if [[ "$RUN_ID" =~ ^local- ]]; then
+  EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
+fi
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-$EXPECTED_ROOT}"
 INVENTORY_ROOT="${O3K_REAL_HOST_INVENTORY_ROOT:-$EXPECTED_INVENTORY_ROOT}"
 PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}}"
@@ -23,7 +27,7 @@ IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-}"
   || { echo "cleanup: inventory root is not run-owned" >&2; exit 1; }
 [[ "$PID_ROOT" == "${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}" ]] \
   || { echo "cleanup: pid root is not run-owned" >&2; exit 1; }
-for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids" \
+for parent in "${RUNNER_TEMP}/o3k-testlab-pids" \
   "${RUNNER_TEMP}/o3k-testlab-inventory"; do
   if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
     echo "cleanup: run state parent is not an owned directory" >&2

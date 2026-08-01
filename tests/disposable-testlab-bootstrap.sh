@@ -20,6 +20,7 @@ assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
+assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
