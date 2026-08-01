@@ -82,6 +82,33 @@ bash "$ROOT_DIR/packaging/install.sh" \
   --profile fake --noninteractive --binary "$BINARY" \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
+
+# Uninstall must apply the same path boundary as install. A dot component
+# resolving to the installed prefix must be rejected before any helper or
+# binary is removed.
+if bash "$ROOT_DIR/packaging/uninstall.sh" \
+    --prefix "$WORK_DIR/./prefix" --data-dir "$WORK_DIR/data" \
+    --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"; then
+  echo "uninstall accepted a lexical dot component in its prefix" >&2
+  exit 1
+fi
+[[ -x "$WORK_DIR/prefix/bin/o3kd" && -f "$WORK_DIR/prefix/share/o3k/uninstall.sh" ]]
+
+# Purge targets must reject the same lexical path tricks as install targets;
+# otherwise ownership checks could be applied to a resolved directory outside
+# the requested path.
+mkdir -p "$WORK_DIR/purge-target"
+ln -s "$WORK_DIR/purge-target" "$WORK_DIR/purge-link"
+for unsafe_path in "$WORK_DIR/./purge-target" "$WORK_DIR/purge-link/state"; do
+  if bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
+      --prefix "$WORK_DIR/prefix" --data-dir "$unsafe_path" \
+      --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"; then
+    echo "uninstall accepted an unsafe purge target: $unsafe_path" >&2
+    exit 1
+  fi
+done
+[[ -d "$WORK_DIR/purge-target" ]]
+
 mkdir -p "$WORK_DIR/fake-bin"
 cat >"$WORK_DIR/fake-bin/systemctl" <<'EOF'
 #!/usr/bin/env bash

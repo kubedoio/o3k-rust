@@ -15,6 +15,13 @@ The preflight disk-space check also fails closed when `df` produces no
 parseable capacity row, rather than treating missing evidence as sufficient
 free space. A portable fake-`df` regression test covers this boundary.
 
+The uninstall helper now applies the install path fence to `--prefix` and all
+purge targets before any removal or ownership check. Relative, root, lexical
+dot-component, and symlink-component paths are rejected, including for
+non-purge uninstall, so binary/helper cleanup and purge ownership checks cannot
+be redirected outside the requested installation layout. The packaging safety
+test covers dot- and symlink-component targets.
+
 ## Explicit non-goals
 
 - no Debian package installation or host execution;
@@ -25,3 +32,4 @@ free space. A portable fake-`df` regression test covers this boundary.
 
 Decision: [ADR-0097](../adr/ADR-0097-uninstall-precondition-order.md).
 The preflight boundary is recorded in [ADR-0111](../adr/ADR-0111-preflight-disk-space-evidence.md).
+The prefix boundary is recorded in [ADR-0120](../adr/ADR-0120-uninstall-prefix-path-fence.md).
