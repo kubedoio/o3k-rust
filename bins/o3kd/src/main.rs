@@ -85,15 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let console_event_task =
         spawn_console_event_consumer(registry.clone(), console_service.clone());
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
-        (Some(password), Some(signing_key)) => Some(o3k_identity::TokenService::new(
-            "bootstrap-user".to_owned(),
-            "admin".to_owned(),
-            o3k_identity::Secret::new(password.expose().to_owned()),
-            "bootstrap-project".to_owned(),
-            "admin".to_owned(),
-            o3k_identity::Secret::new(signing_key.expose().to_owned()),
-            Duration::from_secs(3600),
-        )?),
+        (Some(password), Some(signing_key)) => Some(
+            o3k_identity::TokenService::new(
+                "bootstrap-user".to_owned(),
+                "admin".to_owned(),
+                o3k_identity::Secret::new(password.expose().to_owned()),
+                "bootstrap-project".to_owned(),
+                "admin".to_owned(),
+                o3k_identity::Secret::new(signing_key.expose().to_owned()),
+                Duration::from_secs(3600),
+            )?
+            .with_catalog_endpoint(format!("http://{}", config.listen_addr)),
+        ),
         _ => None,
     };
     let listener = TcpListener::bind(config.listen_addr).await?;
