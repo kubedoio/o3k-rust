@@ -23,6 +23,9 @@ while :; do sleep 1; done
 EOF
 cat >"$WORK_DIR/bin/curl" <<'EOF'
 #!/usr/bin/env bash
+if [[ -n "${FAKE_MEASURE_DELAY:-}" ]]; then
+  sleep "$FAKE_MEASURE_DELAY"
+fi
 if [[ "$*" == *'/readyz'* ]]; then
   exit 0
 elif [[ "$*" == *'/v3/auth/tokens'* && "$*" == *'-fsSi'* ]]; then
@@ -103,5 +106,32 @@ assert diagnostic["reason"] == "port_occupied"
 assert diagnostic["pid"] is None
 assert diagnostic["port"] == 19153
 PY
+
+SHARED_DIR="$WORK_DIR/shared"
+mkdir -p "$SHARED_DIR"
+set +e
+FAKE_PORT_STATE=free FAKE_O3KD_STATE=alive FAKE_MEASURE_DELAY=2 \
+  O3K_MEASURE_PROFILE=fake O3K_MEASURE_SAMPLES=1 \
+  O3K_MEASURE_BINARY="$WORK_DIR/bin/fake-o3kd" \
+  O3K_MEASURE_PORT=19154 O3K_MEASURE_PORT_CHECKER="$WORK_DIR/bin/port-checker" \
+  O3K_MEASURE_ARTIFACT_DIR="$SHARED_DIR" PATH="$WORK_DIR/bin:$PATH" \
+  bash "$ROOT_DIR/tests/measure-testlab.sh" >/dev/null 2>&1 &
+FIRST_PID=$!
+for _ in $(seq 1 100); do
+  [[ -e "$SHARED_DIR/.measurement.lock" ]] && break
+  sleep 0.01
+done
+FAKE_PORT_STATE=free FAKE_O3KD_STATE=alive \
+  O3K_MEASURE_PROFILE=fake O3K_MEASURE_SAMPLES=1 \
+  O3K_MEASURE_BINARY="$WORK_DIR/bin/fake-o3kd" \
+  O3K_MEASURE_PORT=19155 O3K_MEASURE_PORT_CHECKER="$WORK_DIR/bin/port-checker" \
+  O3K_MEASURE_ARTIFACT_DIR="$SHARED_DIR" PATH="$WORK_DIR/bin:$PATH" \
+  bash "$ROOT_DIR/tests/measure-testlab.sh" >/dev/null 2>&1
+SECOND_STATUS=$?
+wait "$FIRST_PID"
+FIRST_STATUS=$?
+set -e
+[[ "$SECOND_STATUS" == 1 ]]
+[[ "$FIRST_STATUS" == 0 ]]
 
 echo "measurement process ownership tests passed"
