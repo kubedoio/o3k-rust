@@ -260,6 +260,15 @@ impl SqliteStore {
     }
 
     pub async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {
+        let (key_type, fingerprint, canonical) = validate_public_key(&keypair.public_key)?;
+        if keypair.key_type != key_type
+            || keypair.fingerprint != fingerprint
+            || keypair.public_key != canonical
+        {
+            return Err(StoreError::InvalidKeypair(
+                "keypair record is not canonical".to_owned(),
+            ));
+        }
         let result = sqlx::query("INSERT INTO keypairs (id, user_id, project_id, name, key_type, public_key, fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(keypair.id.to_string()).bind(&keypair.user_id).bind(&keypair.project_id)
             .bind(&keypair.name).bind(&keypair.key_type).bind(&keypair.public_key)
@@ -329,18 +338,20 @@ impl SqliteStore {
         server_id: Uuid,
         keypair_id: Uuid,
     ) -> Result<(), StoreError> {
-        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resources JOIN keypairs ON keypairs.project_id = resources.project_id WHERE resources.id = ? AND keypairs.id = ?")
-            .bind(server_id.to_string()).bind(keypair_id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resources JOIN keypairs ON keypairs.project_id = resources.project_id WHERE resources.id = ? AND resources.kind = 'compute_instance' AND keypairs.id = ?")
+            .bind(server_id.to_string()).bind(keypair_id.to_string()).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
         if owned != 1 {
+            transaction.rollback().await.map_err(StoreError::Database)?;
             return Err(StoreError::KeypairOwnershipConflict);
         }
         sqlx::query("INSERT INTO server_keypairs (server_id, keypair_id) VALUES (?, ?)")
             .bind(server_id.to_string())
             .bind(keypair_id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
-            .map(|_| ())
-            .map_err(StoreError::Database)
+            .map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)
     }
 
     pub async fn detach_server_keypair(&self, server_id: Uuid) -> Result<(), StoreError> {
@@ -988,14 +999,15 @@ mod tests {
         .chain([9_u8; 32])
         .collect::<Vec<_>>();
         let public_key = format!("ssh-ed25519 {}", BASE64.encode(blob));
+        let (key_type, fingerprint, canonical) = validate_public_key(&public_key)?;
         let record = KeypairRecord {
             id: Uuid::now_v7(),
             user_id: "user-a".to_owned(),
             project_id: "project-a".to_owned(),
             name: "test-key".to_owned(),
-            key_type: "ssh-ed25519".to_owned(),
-            public_key: public_key.clone(),
-            fingerprint: "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00".to_owned(),
+            key_type,
+            public_key: canonical,
+            fingerprint,
             created_at: "1".to_owned(),
         };
         {

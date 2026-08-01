@@ -459,6 +459,9 @@ impl ComputeService {
                     ..existing_request
                 };
                 if existing_request == request {
+                    if existing.observed_state == "DELETED" {
+                        return Err(ComputeError::NotFound);
+                    }
                     let attached = self.store.get_server_keypair_name(server_id).await?;
                     if attached != key_name {
                         if attached.is_none() {
@@ -573,6 +576,9 @@ impl ComputeService {
                 }
                 if existing_request != request {
                     return Err(ComputeError::Conflict);
+                }
+                if existing.observed_state == "DELETED" {
+                    return Err(ComputeError::NotFound);
                 }
                 let attached = self.store.get_server_keypair_name(id).await?;
                 if attached != request.key_name {
