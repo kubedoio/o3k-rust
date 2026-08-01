@@ -22,7 +22,8 @@ assert set(operations) <= inventory_ids, "baseline references unknown inventory 
 assert set(baseline["workflow"]) <= set(operations), "workflow references unclassified operation"
 assert operations["compute.flavor_collection_list"]["status"] == "required"
 assert 405 in operations["compute.flavor_collection_list"]["errors"]
-assert operations["compute.flavor_collection_create"]["status"] == "unsupported"
+assert operations["compute.flavor_collection_create"]["status"] == "required"
+assert operations["compute.flavor_member_delete"]["status"] == "required"
 assert operations["compute.keypair_collection_import"]["status"] == "required"
 assert operations["compute.keypair_collection_import"]["issue"] == 293
 assert baseline["inventory_scope"]["unlisted_status"] == "unsupported"

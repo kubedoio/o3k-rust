@@ -376,6 +376,126 @@ impl ComputeService {
         ]
     }
 
+    pub async fn flavors_for_project(&self, project_id: &str) -> Result<Vec<Flavor>, ComputeError> {
+        let mut flavors = self.flavors();
+        for resource in self
+            .store
+            .list_resources(project_id, "compute_flavor")
+            .await?
+        {
+            if resource.observed_state == "DELETED" {
+                continue;
+            }
+            let flavor: Flavor = serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ComputeError::Conflict)?;
+            flavors.push(flavor);
+        }
+        Ok(flavors)
+    }
+
+    pub async fn create_flavor(
+        &self,
+        project_id: &str,
+        name: String,
+        vcpus: u32,
+        ram_mib: u64,
+        disk_gib: u64,
+    ) -> Result<Flavor, ComputeError> {
+        if project_id.trim().is_empty() || name.trim().is_empty() || vcpus == 0 || ram_mib == 0 {
+            return Err(ComputeError::InvalidRequest);
+        }
+        if self
+            .flavors_for_project(project_id)
+            .await?
+            .iter()
+            .any(|flavor| flavor.name == name)
+        {
+            return Err(ComputeError::Conflict);
+        }
+        let flavor = Flavor {
+            id: Uuid::now_v7(),
+            name,
+            vcpus,
+            ram_mib,
+            disk_gib,
+        };
+        let resource = o3k_store::ResourceRecord {
+            id: flavor.id,
+            kind: "compute_flavor".to_owned(),
+            project_id: project_id.to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: serde_json::to_string(&flavor).map_err(|_| ComputeError::Conflict)?,
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: None,
+        };
+        self.store.insert_resource(&resource).await?;
+        Ok(flavor)
+    }
+
+    pub async fn flavor_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<Flavor, ComputeError> {
+        if let Some(flavor) = self.flavors().into_iter().find(|flavor| flavor.id == id) {
+            return Ok(flavor);
+        }
+        self.flavors_for_project(project_id)
+            .await?
+            .into_iter()
+            .find(|flavor| flavor.id == id)
+            .ok_or(ComputeError::NotFound)
+    }
+
+    pub async fn delete_flavor(&self, project_id: &str, id: Uuid) -> Result<(), ComputeError> {
+        if self.flavors().into_iter().any(|flavor| flavor.id == id) {
+            return Err(ComputeError::Conflict);
+        }
+        let resource = self
+            .store
+            .get_resource(id)
+            .await
+            .map_err(|error| match error {
+                StoreError::ResourceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        if resource.kind != "compute_flavor" || resource.project_id != project_id {
+            return Err(ComputeError::NotFound);
+        }
+        let flavor: Flavor =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        for server in self
+            .store
+            .list_resources(project_id, "compute_instance")
+            .await?
+        {
+            if !server.observed_state.eq_ignore_ascii_case("DELETED")
+                && serde_json::from_str::<serde_json::Value>(&server.desired_state)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("vcpus").and_then(serde_json::Value::as_u64)
+                            == Some(u64::from(flavor.vcpus))
+                            && value.get("memory_mib").and_then(serde_json::Value::as_u64)
+                                == Some(flavor.ram_mib)
+                    })
+            {
+                return Err(ComputeError::Conflict);
+            }
+        }
+        self.store
+            .update_resource(
+                id,
+                resource.generation,
+                &resource.desired_state,
+                "DELETED",
+                resource.observed_generation,
+                None,
+            )
+            .await?;
+        Ok(())
+    }
+
     pub fn flavor(&self, id: Uuid) -> Result<Flavor, ComputeError> {
         self.flavors()
             .into_iter()
@@ -439,7 +559,7 @@ impl ComputeService {
             ),
             None => None,
         };
-        let flavor = self.flavor(flavor_id)?;
+        let flavor = self.flavor_for_project(&project_id, flavor_id).await?;
         let server_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("o3k:server:{project_id}:{idempotency_key}").as_bytes(),
@@ -710,13 +830,14 @@ impl ComputeService {
     }
 
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
+        let flavors = self.flavors_for_project(project_id).await?;
         let resources = self
             .store
             .list_resources(project_id, "compute_instance")
             .await?;
         let mut servers = Vec::new();
         for resource in resources {
-            if let Ok(mut server) = server_from_resource(resource, &self.flavors()) {
+            if let Ok(mut server) = server_from_resource(resource, &flavors) {
                 if server.status != "DELETED" {
                     server.key_name = self.store.get_server_keypair_name(server.id).await?;
                     servers.push(server);
@@ -738,8 +859,9 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        let mut server = server_from_resource(resource, &self.flavors())
-            .map_err(|_| ComputeError::InvalidRequest)?;
+        let flavors = self.flavors_for_project(project_id).await?;
+        let mut server =
+            server_from_resource(resource, &flavors).map_err(|_| ComputeError::InvalidRequest)?;
         if server.status == "DELETED" {
             return Err(ComputeError::NotFound);
         }
@@ -1041,6 +1163,72 @@ mod tests {
             Arc::new(SqliteStore::connect_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
+    }
+
+    #[tokio::test]
+    async fn custom_flavors_are_project_scoped_durable_and_delete_safely()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-compute-flavor-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let service = ComputeService::new(store, Arc::new(FakeComputeProvider::new()));
+        let flavor = service
+            .create_flavor("project-a", "custom.small".to_owned(), 1, 1024, 5)
+            .await?;
+        assert!(
+            service
+                .flavors_for_project("project-b")
+                .await?
+                .iter()
+                .all(|value| value.id != flavor.id)
+        );
+        assert!(
+            service
+                .flavors_for_project("project-a")
+                .await?
+                .iter()
+                .any(|value| value == &flavor)
+        );
+        let reopened = ComputeService::new(
+            Arc::new(SqliteStore::connect_file(&path).await?),
+            Arc::new(FakeComputeProvider::new()),
+        );
+        assert_eq!(
+            reopened.flavor_for_project("project-a", flavor.id).await?,
+            flavor
+        );
+        let server = reopened
+            .create_server(
+                "project-a",
+                "custom-flavor-server".to_owned(),
+                "image-1".to_owned(),
+                flavor.id,
+                vec!["network-1".to_owned()],
+                "custom-flavor-request".to_owned(),
+            )
+            .await?;
+        assert_eq!(
+            reopened
+                .show_server("project-a", server.id)
+                .await?
+                .flavor_id,
+            flavor.id
+        );
+        assert!(matches!(
+            reopened.delete_flavor("project-a", flavor.id).await,
+            Err(ComputeError::Conflict)
+        ));
+        reopened.delete_server("project-a", server.id).await?;
+        reopened.delete_flavor("project-a", flavor.id).await?;
+        assert!(matches!(
+            reopened.flavor_for_project("project-a", flavor.id).await,
+            Err(ComputeError::NotFound)
+        ));
+        std::fs::remove_file(path)?;
+        Ok(())
     }
 
     #[test]

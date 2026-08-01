@@ -13,6 +13,7 @@ SERVER_ID=""
 IMAGE_ID=""
 NETWORK_ID=""
 SUBNET_ID=""
+PORT_ID=""
 STARTED_AT="$(date -u +%s)"
 mkdir -p "${ARTIFACT_DIR}"
 
@@ -69,8 +70,9 @@ IMAGE_ID="$(json -X POST "${BASE_URL}/v2/images" -H 'content-type: application/j
 curl -fsS -X PUT "${BASE_URL}/v2/images/${IMAGE_ID}/file" -H "x-auth-token: ${TOKEN}" -H 'content-type: application/octet-stream' --data-binary 'testlab-image-bytes' >/dev/null
 NETWORK_ID="$(json -X POST "${BASE_URL}/v2.0/networks" -H 'content-type: application/json' --data '{"network":{"name":"testlab-network"}}' | field network.id)"
 SUBNET_ID="$(json -X POST "${BASE_URL}/v2.0/subnets" -H 'content-type: application/json' --data "{\"subnet\":{\"name\":\"testlab-subnet\",\"network_id\":\"${NETWORK_ID}\",\"cidr\":\"192.0.2.0/29\"}}" | field subnet.id)"
+PORT_ID="$(json -X POST "${BASE_URL}/v2.0/ports" -H 'content-type: application/json' --data "{\"port\":{\"name\":\"testlab-port\",\"network_id\":\"${NETWORK_ID}\"}}" | field port.id)"
 FLAVOR_ID="$(json "${BASE_URL}/v2.1/bootstrap-project/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
-SERVER_ID="$(json -X POST "${BASE_URL}/v2.1/bootstrap-project/servers" -H 'content-type: application/json' -H 'x-openstack-request-id: testlab-server-create' --data "{\"server\":{\"name\":\"testlab-server\",\"image\":{\"id\":\"${IMAGE_ID}\"},\"flavor\":{\"id\":\"${FLAVOR_ID}\"},\"networks\":[{\"uuid\":\"${NETWORK_ID}\"}]}}" | field server.id)"
+SERVER_ID="$(json -X POST "${BASE_URL}/v2.1/bootstrap-project/servers" -H 'content-type: application/json' -H 'x-openstack-request-id: testlab-server-create' --data "{\"server\":{\"name\":\"testlab-server\",\"image\":{\"id\":\"${IMAGE_ID}\"},\"flavor\":{\"id\":\"${FLAVOR_ID}\"},\"networks\":[{\"uuid\":\"${PORT_ID}\"}]}}" | field server.id)"
 
 kill -TERM "${O3KD_PID}"; wait "${O3KD_PID}"; unset O3KD_PID
 O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" --log-filter warn >>"${LOG_FILE}" 2>&1 &
@@ -80,9 +82,9 @@ json "${BASE_URL}/v2.1/bootstrap-project/servers/${SERVER_ID}" >/dev/null
 json "${BASE_URL}/v2.1/bootstrap-project/servers" >/dev/null
 
 json -X DELETE "${BASE_URL}/v2.1/bootstrap-project/servers/${SERVER_ID}" >/dev/null
+json -X DELETE "${BASE_URL}/v2.0/ports/${PORT_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2.0/subnets/${SUBNET_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2.0/networks/${NETWORK_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2/images/${IMAGE_ID}" >/dev/null
 write_result passed
 echo "TestLab workflow passed; artifacts: ${ARTIFACT_DIR}"
-

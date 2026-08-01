@@ -11,7 +11,7 @@
   },
   "rust_reference": {
     "repository": "https://github.com/kubedoio/o3k-rust",
-    "commit": "1f053f2fc76b092c9eae3b4a6fe48b31cf39317d"
+    "commit": "5ca770f3156741a7a283603b3e42b5cd9d5920a4"
   },
   "operations": [
     {
@@ -438,12 +438,12 @@
       "go_locations": ["internal/nova/handlers.go", "internal/nova/flavors.go"],
       "rust_locations": [],
       "cli_command": "openstack flavor create",
-      "implementation_state": "missing",
-      "portable_contract": "pending",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["The current fixed flavor catalog has no administrative create route."]
+      "known_gaps": ["Protected deployment verification remains a release-gate task."]
     },
     {
       "id": "compute.flavor_member_delete",
@@ -455,12 +455,12 @@
       "go_locations": ["internal/nova/handlers.go", "internal/nova/flavors.go"],
       "rust_locations": [],
       "cli_command": "openstack flavor delete",
-      "implementation_state": "missing",
-      "portable_contract": "pending",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["Flavor deletion and immutable resource ownership are planned in #293."]
+      "known_gaps": ["Protected deployment verification remains a release-gate task."]
     },
     {
       "id": "compute.keypair_collection_list",
