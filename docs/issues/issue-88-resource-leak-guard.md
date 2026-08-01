@@ -16,6 +16,8 @@ The protected workflow inventory now:
 - records O3K-owned domain/provider identities, including public keypairs
   created by the CLI acceptance harness, while representing foreign
   domain and non-O3K link state only as redacted SHA-256 digests;
+- records validated `o3k-*` network-link identities so leaked TAPs or bridges
+  are included in the owned-resource delta;
 - hashes the explicit newline-separated `O3K_REAL_HOST_PROTECTED_PATHS`
   allowlist, including descendants and file contents, without publishing raw
   paths or contents; missing, unreadable, or oversized entries fail closed;

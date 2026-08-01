@@ -23,7 +23,8 @@ publication uses a same-directory temporary file and
 complete snapshot.
 
 The inventory includes O3K-owned domain and provider identities, including
-keypairs created by the public CLI workflow. Foreign
+keypairs created by the public CLI workflow, and validated `o3k-*` network-link
+identities so owned TAPs and bridges can be compared across snapshots. Foreign
 libvirt domain names and non-O3K link records are represented only by sorted
 SHA-256 digests; their raw identities are never written to the artifact. The
 foreign-state digest also covers the explicit newline-separated
@@ -37,7 +38,7 @@ owned-resource delta and foreign-state digest comparison are clean.
 ## Consequences
 
 - Portable tests cover unstable collection, atomic redacted output, clean
-  results, owned-resource leaks, foreign link mutation, and protected-path
+  results, owned domain/network-link leaks, foreign link mutation, and protected-path
   mutation.
 - A changing host can produce a blocked/failed guard rather than a false clean
   result; operators must rerun after establishing a quiet baseline.

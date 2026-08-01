@@ -74,6 +74,9 @@ if status == "ready" and inventory_status == "available":
         after_resources = after.get("openstack", {}).get("resources", {})
         result_leaks = {
             "domains": sorted(set(after.get("domains", [])) - set(baseline.get("domains", []))),
+            "network_links": sorted(
+                set(after.get("network_links", [])) - set(baseline.get("network_links", []))
+            ),
             "openstack": {
                 name: sorted(set(after_resources.get(name, [])) - set(baseline_resources.get(name, [])))
                 for name in sorted(set(baseline_resources) | set(after_resources))
@@ -92,7 +95,7 @@ elif status != "ready":
 elif inventory_status != "available" or after is None or after.get("status") != "available" or result_leaks is None:
     final_status = "failed"
     reason = "owned_inventory_unavailable_after_workflow"
-elif result_leaks["domains"] or result_leaks["openstack"]:
+elif result_leaks["domains"] or result_leaks["network_links"] or result_leaks["openstack"]:
     final_status = "failed"
     reason = "resource_leak_detected"
 elif foreign_state_changed:

@@ -23,6 +23,9 @@ cat >"${FAKE_BIN}/ip" <<'SH'
 if [[ "${O3K_FAKE_IP_DIRTY:-false}" == true ]]; then
     echo '2: foreign0: <BROADCAST> mtu 1500 state UP'
 fi
+if [[ "${O3K_FAKE_IP_OWNED_LEAK:-false}" == true ]]; then
+    echo '3: o3k-tap-leak: <BROADCAST> mtu 1500 state UP'
+fi
 if [[ "${O3K_FAKE_IP_UNSTABLE:-false}" == true ]]; then
     counter_file="${O3K_FAKE_IP_COUNTER:?}"
     count=0
@@ -73,6 +76,7 @@ assert set(value["inventory_baseline"]["openstack"]["resources"]) == {
 assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 assert value["inventory_baseline"]["foreign_state"]["protected_paths_sha256"]
+assert value["inventory_baseline"]["network_links"] == []
 PY
 
 unset O3K_REAL_HOST_PROTECTED_PATHS
@@ -188,7 +192,7 @@ PY
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
 printf 'mutated protected state\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"
-export O3K_FAKE_VIRSH_DIRTY=true O3K_FAKE_OPENSTACK_LEAK=true O3K_FAKE_IP_DIRTY=true
+export O3K_FAKE_VIRSH_DIRTY=true O3K_FAKE_OPENSTACK_LEAK=true O3K_FAKE_IP_DIRTY=true O3K_FAKE_IP_OWNED_LEAK=true
 if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
     echo "owned resource leak was accepted" >&2
     exit 1
@@ -198,6 +202,7 @@ import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "failed" and value["reason"] == "resource_leak_detected"
 assert "o3k-preexisting-domain" in value["leaks"]["domains"]
+assert "o3k-tap-leak" in value["leaks"]["network_links"]
 assert "leaked-openstack-resource" in value["leaks"]["openstack"]["image"]
 assert "leaked-openstack-resource" in value["leaks"]["openstack"]["keypair"]
 assert value["foreign_state_changed"] is True
@@ -210,7 +215,7 @@ value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "failed"
 assert value["foreign_state_changed"] is True
 PY
-unset O3K_FAKE_VIRSH_DIRTY O3K_FAKE_OPENSTACK_LEAK O3K_FAKE_IP_DIRTY
+unset O3K_FAKE_VIRSH_DIRTY O3K_FAKE_OPENSTACK_LEAK O3K_FAKE_IP_DIRTY O3K_FAKE_IP_OWNED_LEAK
 
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
