@@ -31,7 +31,9 @@ The gate also requires `--human-review` and `--source-commit`. The human
 review path must pass
 `packaging/validate-human-review.sh --require-approved`, and its
 `reviewed_commit` must equal the supplied 40-character lowercase
-`--source-commit`. This is a governance artifact, not host evidence: the gate
+`--source-commit`. The supplied commit must also equal `git rev-parse HEAD` in
+the source checkout running the gate; missing or mismatched checkout provenance
+blocks readiness. This is a governance artifact, not host evidence: the gate
 does not establish reviewer identity, judgment, signatures, or publication.
 
 The benchmark summary and raw artifact are separate required inputs. Their

@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT=release-evidence.json
 E2E=
 INSTALL_UBUNTU=
@@ -37,12 +38,13 @@ else
     HUMAN_REVIEW_VALIDATION_ERROR="human_review: validator rejected artifact: ${HUMAN_REVIEW_VALIDATION_OUTPUT//$'\n'/; }"
   fi
 fi
-export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW HUMAN_REVIEW OUTPUT SOURCE_COMMIT HUMAN_REVIEW_VALIDATION_ERROR
+export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW HUMAN_REVIEW OUTPUT SOURCE_COMMIT HUMAN_REVIEW_VALIDATION_ERROR REPOSITORY_ROOT
 python3 <<'PY'
 import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -85,6 +87,21 @@ if not source_commit:
     errors.append("source_commit: value was not supplied")
 elif not re.fullmatch(r"[0-9a-f]{40}", source_commit):
     errors.append("source_commit: must be a 40-character lowercase commit SHA")
+else:
+    try:
+        checkout_commit = subprocess.run(
+            ["git", "-C", os.environ["REPOSITORY_ROOT"], "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        checkout_commit = ""
+    if not re.fullmatch(r"[0-9a-f]{40}", checkout_commit):
+        errors.append("source_commit: could not verify the repository checkout HEAD")
+    elif source_commit != checkout_commit:
+        errors.append("source_commit: must match the repository checkout HEAD")
 human_review = None
 if human_review_path:
     human_review_real_path = os.path.realpath(human_review_path)
