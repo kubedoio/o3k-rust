@@ -294,22 +294,16 @@ if [[ -z "${IMAGE_PATH}" || ! -f "${IMAGE_PATH}" ]]; then
     exit 0
 fi
 
-CLOUDS_FILE="${DATA_DIR}/clouds.yaml"
-cat >"${CLOUDS_FILE}" <<EOF
-clouds:
-  o3k-testlab:
-    auth:
-      auth_url: ${OS_AUTH_URL:-http://127.0.0.1:8080/v3}
-      username: ${OS_USERNAME:-admin}
-      password: ${OS_PASSWORD:-}
-      project_name: ${OS_PROJECT_NAME:-bootstrap-project}
-      user_domain_name: Default
-      project_domain_name: Default
-    region_name: ${OS_REGION_NAME:-RegionOne}
-    interface: public
-    identity_api_version: 3
-EOF
-export OS_CLOUD=o3k-testlab OS_CLIENT_CONFIG_FILE="${CLOUDS_FILE}"
+# Use the OpenStack client's environment configuration directly. This avoids
+# interpolating credentials and endpoint values into hand-written YAML, where
+# colons, quotes, or newlines could change the parsed configuration.
+unset OS_CLOUD OS_CLIENT_CONFIG_FILE
+export OS_AUTH_URL="${OS_AUTH_URL:-http://127.0.0.1:8080/v3}"
+export OS_USERNAME="${OS_USERNAME:-admin}"
+export OS_PROJECT_NAME="${OS_PROJECT_NAME:-bootstrap-project}"
+export OS_REGION_NAME="${OS_REGION_NAME:-RegionOne}"
+export OS_USER_DOMAIN_NAME=Default OS_PROJECT_DOMAIN_NAME=Default
+export OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
 if [[ -z "${OS_PASSWORD:-}" ]]; then
     write_result skipped "OS_PASSWORD is not configured"
     echo "OpenStack CLI workflow skipped: configure OS_PASSWORD" >&2

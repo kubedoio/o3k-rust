@@ -28,6 +28,11 @@ attachment. Console output must contain a bounded CirrOS/login boot marker.
 The redacted artifact records these checks as `acceptance`; a release gate
 cannot accept lifecycle booleans without them.
 
+The harness configures the OpenStack client through `OS_*` environment
+variables and clears inherited `OS_CLOUD`/`OS_CLIENT_CONFIG_FILE` values. It
+does not generate a hand-interpolated `clouds.yaml`, so credential or endpoint
+characters cannot change the configuration parser's structure.
+
 ## Consequences
 
 - Image, keypair, network, subnet, flavor, and server cleanup now has observable
@@ -40,6 +45,8 @@ cannot accept lifecycle booleans without them.
   before acceptance.
 - Portable fakes exercise the acceptance shape, but do not claim real guest
   boot, network, or config-drive consumption.
+- Portable fakes exercise credentials containing YAML-special characters to
+  keep this configuration boundary regression-tested.
 
 ## Provenance
 

@@ -81,7 +81,9 @@ export O3K_MOCK_STATE="${WORK_DIR}/server-present"
 export O3K_MOCK_STATE_DIR="${WORK_DIR}/resource-state"
 mkdir -p "${O3K_MOCK_STATE_DIR}"
 export O3K_TESTLAB_ARTIFACT_DIR="${ARTIFACT_DIR}"
-export O3K_TESTLAB_PROFILE=libvirt OS_PASSWORD=test-password
+export O3K_TESTLAB_PROFILE=libvirt OS_PASSWORD=$'test:password\nwith-special-characters'
+export OS_AUTH_URL='https://identity.example.test/v3?scope=a:b'
+export OS_USERNAME='user:with:colon' OS_PROJECT_NAME='project:with:colon' OS_REGION_NAME='Region:One'
 IMAGE_PATH="${WORK_DIR}/cirros.img"
 printf 'test image\n' >"${IMAGE_PATH}"
 export O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH}" O3K_TESTLAB_CONSOLE_ATTEMPTS=1
