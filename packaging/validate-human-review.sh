@@ -91,6 +91,13 @@ else:
                 errors.append(f"findings[{index}].severity is invalid")
             if finding.get("disposition") not in {"fixed", "accepted", "deferred", "not-applicable"}:
                 errors.append(f"findings[{index}].disposition is invalid")
+            if finding.get("severity") in {"critical", "high"} and finding.get("disposition") in {
+                "deferred",
+                "not-applicable",
+            }:
+                errors.append(
+                    f"findings[{index}] critical/high findings must be fixed or explicitly accepted"
+                )
             finding_id = finding.get("id")
             if isinstance(finding_id, str) and finding_id.strip():
                 if finding_id in finding_ids:
