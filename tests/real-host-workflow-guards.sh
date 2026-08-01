@@ -71,7 +71,7 @@ import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "ready" and value["redacted"] is True
 assert set(value["inventory_baseline"]["openstack"]["resources"]) == {
-    "server", "image", "network", "subnet", "flavor", "keypair"
+    "server", "image", "network", "subnet", "flavor"
 }
 assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
@@ -216,7 +216,7 @@ assert value["status"] == "failed" and value["reason"] == "resource_leak_detecte
 assert "o3k-preexisting-domain" in value["leaks"]["domains"]
 assert "o3k-tap-leak" in value["leaks"]["network_links"]
 assert "leaked-openstack-resource" in value["leaks"]["openstack"]["image"]
-assert "leaked-openstack-resource" in value["leaks"]["openstack"]["keypair"]
+assert "leaked-openstack-resource" in value["leaks"]["openstack"]["flavor"]
 assert value["foreign_state_changed"] is True
 assert "foreign0" not in json.dumps(value)
 assert "do-not-upload-this-value" not in json.dumps(value)
