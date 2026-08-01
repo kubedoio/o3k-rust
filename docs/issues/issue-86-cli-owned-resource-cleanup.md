@@ -30,6 +30,11 @@ Console evidence must contain a bounded CirrOS/login boot marker. These
 assertions are emitted as redacted `acceptance` evidence and are required by
 the release gate; they still do not substitute for a protected real-host run.
 
+OpenStack authentication and endpoint settings are passed through `OS_*`
+environment variables, with inherited cloud-selection variables cleared. The
+harness no longer writes credentials into hand-interpolated YAML; special
+characters are covered by the portable cleanup fake.
+
 ## Explicit non-goals
 
 - no real OpenStack, libvirt, or CirrOS execution;
