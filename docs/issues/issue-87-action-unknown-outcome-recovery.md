@@ -23,6 +23,14 @@ ID must equal the durable journal operation ID. A mismatched provider record is
 rejected without changing the operation or resource state, preventing stale
 or cross-wired provider observations from being accepted as convergence.
 
+Partial create completion is also observation-gated. The provider returns a
+non-terminal running operation and stable resource ID while the instance is
+`CREATING`; the journal persists that reference and `BUILD` state, then
+finishes the same operation only after a later observation reports `RUNNING`.
+The provider's idempotency record ensures recovery does not issue a duplicate
+create. Provider `ERROR` observation is recorded as a failed operation rather
+than an `ACTIVE` resource.
+
 The release gate now also rejects an incomplete or failed aggregate recovery
 artifact: all required crash, restart, interruption, timeout, duplicate,
 image, host-tool, and cleanup scenario keys must be present with a passed

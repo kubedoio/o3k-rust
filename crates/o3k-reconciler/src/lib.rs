@@ -693,7 +693,7 @@ where
         match self.provider.create_instance(request).await {
             Ok(provider_operation) => {
                 validate_provider_operation_owner(operation_id, &provider_operation)?;
-                self.finish(
+                self.finish_create(
                     operation_id,
                     resource,
                     provider_operation.provider_operation_id.to_string(),
@@ -751,22 +751,20 @@ where
         self.event(operation.id, resource.id, JournalEventKind::UnknownObserved);
         if provider_operation.state == ProviderOperationState::UnknownOutcome {
             if let Some(resource_id) = provider_operation.provider_resource_id {
-                if self.provider.get_instance(&resource_id).await.is_ok() {
-                    return self
-                        .finish(
-                            operation.id,
-                            resource,
-                            provider_id.to_owned(),
-                            Some(resource_id),
-                        )
-                        .await;
-                }
+                return self
+                    .finish_create(
+                        operation.id,
+                        resource,
+                        provider_id.to_owned(),
+                        Some(resource_id),
+                    )
+                    .await;
             }
             return Ok(OperationState::UnknownOutcome);
         }
         if provider_operation.state == ProviderOperationState::Succeeded {
             return self
-                .finish(
+                .finish_create(
                     operation.id,
                     resource,
                     provider_id.to_owned(),
@@ -775,6 +773,79 @@ where
                 .await;
         }
         Ok(OperationState::Retryable)
+    }
+
+    async fn finish_create(
+        &self,
+        operation_id: Uuid,
+        resource: ResourceRecord,
+        provider_operation_id: String,
+        provider_resource_id: Option<String>,
+    ) -> Result<OperationState, ReconcileError> {
+        let provider_resource_id = provider_resource_id.ok_or(ReconcileError::InvalidIntent)?;
+        let instance = self.provider.get_instance(&provider_resource_id).await?;
+        let observed_state = match instance.state {
+            o3k_provider::InstanceState::Running => "active",
+            o3k_provider::InstanceState::Creating => "BUILD",
+            o3k_provider::InstanceState::Stopped => "SHUTOFF",
+            o3k_provider::InstanceState::Deleting => "DELETING",
+            o3k_provider::InstanceState::Deleted => "DELETED",
+            o3k_provider::InstanceState::Error => "ERROR",
+        };
+        if instance.state == o3k_provider::InstanceState::Error {
+            self.store
+                .update_operation(
+                    operation_id,
+                    OperationState::Failed,
+                    Some(&provider_operation_id),
+                    Some("terminal"),
+                    Some("provider instance entered an error state"),
+                )
+                .await?;
+            self.store
+                .update_resource(
+                    resource.id,
+                    resource.generation,
+                    &resource.desired_state,
+                    observed_state,
+                    resource.generation,
+                    Some(&provider_resource_id),
+                )
+                .await?;
+            self.event(operation_id, resource.id, JournalEventKind::Failed);
+            return Ok(OperationState::Failed);
+        }
+        if instance.state == o3k_provider::InstanceState::Running {
+            return self
+                .finish(
+                    operation_id,
+                    resource,
+                    provider_operation_id,
+                    Some(provider_resource_id),
+                )
+                .await;
+        }
+        self.store
+            .update_operation(
+                operation_id,
+                OperationState::Running,
+                Some(&provider_operation_id),
+                None,
+                None,
+            )
+            .await?;
+        self.store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                observed_state,
+                resource.generation,
+                Some(&provider_resource_id),
+            )
+            .await?;
+        self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
+        Ok(OperationState::Running)
     }
 
     async fn finish(
@@ -1226,6 +1297,38 @@ mod tests {
             store.get_operation(operation_id).await?.state,
             OperationState::Succeeded
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_create_waits_for_observed_running_without_duplicate_create()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("partial-create", 2).await?;
+        provider.set_failure(FailureInjection::PartialCompletion)?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Running
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "BUILD");
+        assert!(resource.provider_id.is_some());
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "active"
+        );
+        assert_eq!(provider.instance_count(), 1);
         Ok(())
     }
 

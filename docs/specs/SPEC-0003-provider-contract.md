@@ -21,6 +21,9 @@ Network and storage contracts will be added only with their vertical slices.
 - commands include an O3K operation ID;
 - provider reports accepted operation identity;
 - synchronous success does not replace later observation;
+- a partial create may return `RUNNING` with a provider resource ID while the
+  instance is still `CREATING`; the resource must be observed before the
+  operation is reported as successful;
 - timeout returns unknown outcome when acceptance cannot be disproved;
 - provider errors map to typed categories;
 - provider-specific debug details are retained internally and redacted publicly;
@@ -39,6 +42,11 @@ future provider adapters.
 Successful and unknown operations retain an optional provider resource ID so a
 reconciler can observe the resource after a lost response without issuing a
 duplicate create.
+
+Partial completion is recoverable: repeated delivery with the same idempotency
+key returns the original operation and resource, and a later observation may
+converge the instance to `RUNNING`. A provider must not require a second create
+to complete that transition.
 
 Provider errors intentionally expose categories and operation identity only;
 provider-specific payloads and diagnostics are not part of the public error.

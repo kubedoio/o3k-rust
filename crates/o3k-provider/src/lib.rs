@@ -316,10 +316,10 @@ impl ComputeProvider for FakeComputeProvider {
             observed_message: None,
         };
         state.instances.insert(provider_id.clone(), instance);
-        let operation_state = if state.failure == FailureInjection::Timeout {
-            OperationState::UnknownOutcome
-        } else {
-            OperationState::Succeeded
+        let operation_state = match state.failure {
+            FailureInjection::Timeout => OperationState::UnknownOutcome,
+            FailureInjection::PartialCompletion => OperationState::Running,
+            _ => OperationState::Succeeded,
         };
         let operation = Self::operation(
             &mut state,
@@ -342,9 +342,16 @@ impl ComputeProvider for FakeComputeProvider {
     }
 
     async fn get_instance(&self, provider_instance_id: &str) -> Result<Instance, ProviderError> {
-        let state = self.lock()?;
+        let mut state = self.lock()?;
         if state.failure == FailureInjection::StaleState {
             return Err(ProviderError::StaleState);
+        }
+        if state.failure == FailureInjection::None {
+            if let Some(instance) = state.instances.get_mut(provider_instance_id) {
+                if instance.state == InstanceState::Creating {
+                    instance.state = InstanceState::Running;
+                }
+            }
         }
         state
             .instances
@@ -588,6 +595,32 @@ mod tests {
             provider.get_operation(operation_id).await?.state,
             OperationState::UnknownOutcome
         );
+        assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_create_is_running_and_converges_without_duplicate_instance()
+    -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        provider.set_failure(FailureInjection::PartialCompletion)?;
+        let create = request("partial");
+        let operation = provider.create_instance(create.clone()).await?;
+        assert_eq!(operation.state, OperationState::Running);
+        let provider_id = operation
+            .provider_resource_id
+            .clone()
+            .ok_or(ProviderError::Storage)?;
+        assert_eq!(
+            provider.get_instance(&provider_id).await?.state,
+            InstanceState::Creating
+        );
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            provider.get_instance(&provider_id).await?.state,
+            InstanceState::Running
+        );
+        assert_eq!(provider.create_instance(create).await?, operation);
         assert_eq!(provider.instance_count(), 1);
         Ok(())
     }

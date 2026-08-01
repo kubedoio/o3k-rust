@@ -11,6 +11,12 @@ therefore be reconstructed after process restart using the operation ID. The
 provider operation ID and provider resource reference are persisted as soon
 as they are known.
 
+Create completion is observation-gated. If a provider reports an accepted or
+running operation while its resource is still creating, the journal persists
+the provider reference and a `BUILD` observation but keeps the operation
+non-terminal. Only an observed running resource may transition the create
+operation to success and the durable resource to `active`.
+
 Unknown outcomes are never replayed immediately. The next reconciliation pass
 first observes the provider operation and, when necessary, the provider
 resource. Retryable failures use a bounded deterministic attempt budget;
