@@ -463,18 +463,25 @@ impl ComputeService {
                         return Err(ComputeError::NotFound);
                     }
                     let attached = self.store.get_server_keypair_name(server_id).await?;
+                    let mut repaired_association = false;
                     if attached != key_name {
                         if attached.is_none() {
                             if let Some(keypair) = keypair.as_ref() {
                                 self.store
                                     .attach_server_keypair(server_id, keypair.id)
                                     .await?;
+                                repaired_association = true;
                             } else {
                                 return Err(ComputeError::Conflict);
                             }
                         } else {
                             return Err(ComputeError::Conflict);
                         }
+                    }
+                    if repaired_association {
+                        self.journal
+                            .reconcile_once(existing_request.operation_id)
+                            .await?;
                     }
                     return self.show_server(&project_id, server_id).await;
                 }
@@ -581,16 +588,21 @@ impl ComputeService {
                     return Err(ComputeError::NotFound);
                 }
                 let attached = self.store.get_server_keypair_name(id).await?;
+                let mut repaired_association = false;
                 if attached != request.key_name {
                     if attached.is_none() {
                         if let Some(keypair) = keypair.as_ref() {
                             self.store.attach_server_keypair(id, keypair.id).await?;
+                            repaired_association = true;
                         } else {
                             return Err(ComputeError::Conflict);
                         }
                     } else {
                         return Err(ComputeError::Conflict);
                     }
+                }
+                if repaired_association {
+                    self.journal.reconcile_once(request.operation_id).await?;
                 }
                 return self.show_server(&project_id, id).await;
             }
@@ -601,6 +613,7 @@ impl ComputeService {
         }
         let reconcile_state = self.journal.reconcile_once(request.operation_id).await?;
         if reconcile_state == o3k_store::OperationState::Failed {
+            self.store.detach_server_keypair(id).await?;
             if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
                 self.scheduler.as_ref(),
                 request.placement_provider_id.as_deref(),
