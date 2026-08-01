@@ -13,6 +13,9 @@ assert "git fetch origin main:refs/remotes/origin/main" in text
 assert "buf breaking --against '.git#branch=origin/main,subdir=proto'" in text
 assert "packaging/*.sh tests/*.sh scripts/*.sh" in text
 assert "python3 -m compileall -q scripts" in text
+assert "github.com/rhysd/actionlint/cmd/actionlint@v1.7.7" in text
+assert "run: bash scripts/validate-workflows.sh actionlint" in text
+assert "run: bash tests/workflow-validation.sh actionlint" in text
 assert "run: bash tests/real-libvirt-harness.sh" in text
 assert "run: cargo test --workspace --all-features" in text
 assert "run: cargo test --workspace\n" not in text

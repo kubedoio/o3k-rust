@@ -30,6 +30,16 @@ jobs:
         run: |
           for file in packaging/*.sh tests/*.sh scripts/*.sh; do bash -n "$file"; done
           python3 -m compileall -q scripts
+      - name: Install pinned actionlint
+        run: |
+          install_dir="${RUNNER_TEMP}/actionlint/bin"
+          mkdir -p "${install_dir}"
+          GOBIN="${install_dir}" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          echo "${install_dir}" >> "${GITHUB_PATH}"
+      - name: Validate GitHub Actions workflows
+        run: bash scripts/validate-workflows.sh actionlint
+      - name: Test workflow validation and duplicate-key regression
+        run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
       - name: Test CI workflow contracts

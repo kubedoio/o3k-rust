@@ -75,7 +75,6 @@ jobs:
           OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
           OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
           OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
-          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
         run: bash tests/testlab-libvirt.sh
 
       - name: Post-run result guard

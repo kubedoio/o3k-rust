@@ -262,6 +262,9 @@ PY
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
+workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
+assert workflow_step.count("          OS_PASSWORD:") == 1
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
