@@ -1051,6 +1051,8 @@ struct CreateServerRequest {
     image: Option<IdReference>,
     flavor: Option<IdReference>,
     networks: Option<Vec<NetworkReference>>,
+    /// Recognized so an unsupported request cannot be silently dropped.
+    config_drive: Option<bool>,
 }
 #[derive(serde::Deserialize)]
 struct IdReference {
@@ -1240,6 +1242,13 @@ async fn create_server(
             "invalid server request",
         );
     };
+    if body.server.config_drive == Some(true) {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "config-drive attachment is not supported by this profile",
+        );
+    }
     let Some(image) = body
         .server
         .image
@@ -1568,5 +1577,20 @@ mod tests {
         assert!(should_query_live_console(0));
         assert!(!should_query_live_console(1));
         assert!(!should_query_live_console(u64::MAX));
+    }
+
+    #[test]
+    fn unsupported_config_drive_requests_are_explicitly_recognized() -> Result<(), serde_json::Error>
+    {
+        let request = serde_json::json!({
+            "name": "server",
+            "image": {"id": "image"},
+            "flavor": {"id": "1"},
+            "networks": [{"uuid": "network"}],
+            "config_drive": true
+        });
+        let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
+        assert_eq!(parsed.config_drive, Some(true));
+        Ok(())
     }
 }

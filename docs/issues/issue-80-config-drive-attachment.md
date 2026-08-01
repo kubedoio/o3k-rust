@@ -15,6 +15,9 @@ config-drive publisher:
 - libvirt config-drive attachment now accepts a typed path-plus-SHA-256
   artifact and refuses altered, non-regular, or ambiguous host files before
   XML generation.
+- the API now recognizes `config_drive: true` and rejects it explicitly before
+  lifecycle intent is persisted, instead of silently dropping the request;
+  `config_drive: false` remains accepted as a no-op in the current profile.
 
 See [ADR-0088](../adr/ADR-0088-config-drive-failed-generation-cleanup.md) and
 [ADR-0105](../adr/ADR-0105-config-drive-manifest-integrity.md).
@@ -22,7 +25,7 @@ See [ADR-0088](../adr/ADR-0088-config-drive-failed-generation-cleanup.md) and
 ## Explicit boundary
 
 Issue #80 remains open for deterministic ISO/VFAT media, real libvirt
-attachment, Nova/compute-agent wiring, guest cloud-init consumption, reboot
-preservation, and trusted real-host evidence. This repository change makes no
-claim about those behaviors or about media generation from the directory
-publisher.
+attachment from a materialized artifact, Nova/compute-agent wiring, guest
+cloud-init consumption, reboot preservation, and trusted real-host evidence.
+This repository change makes no claim about those behaviors or about media
+generation from the directory publisher.

@@ -12,6 +12,12 @@ reference. Creation journals the request in SQLite before invoking the fake
 compute provider. The reconciler projects provider success to `ACTIVE` and
 retains provider references for delete and action operations.
 
+The optional Nova `config_drive` request field is recognized. `false` is
+accepted as an explicit no-op in this profile; `true` is rejected with `400`
+before lifecycle intent is persisted because this profile does not yet
+materialize or attach config-drive media. The API does not silently ignore a
+request for config-drive data.
+
 Observed powered-off instances are exposed with Nova's `SHUTOFF` status. The
 provider's internal `Stopped` state is not exposed as the non-Nova `STOPPED`
 string.
