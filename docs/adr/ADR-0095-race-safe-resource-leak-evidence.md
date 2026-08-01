@@ -26,6 +26,10 @@ The inventory includes O3K-owned domain and provider identities, including
 keypairs created by the public CLI workflow. Foreign
 libvirt domain names and non-O3K link records are represented only by sorted
 SHA-256 digests; their raw identities are never written to the artifact. The
+foreign-state digest also covers the explicit newline-separated
+`O3K_REAL_HOST_PROTECTED_PATHS` allowlist. It hashes path identities,
+descendants, metadata, and regular-file or symlink contents without publishing
+raw paths or contents; missing, unreadable, or oversized entries fail closed.
 post-run guard compares those digests and emits
 `resource-leak-result.json`, whose `passed` status is possible only when the
 owned-resource delta and foreign-state digest comparison are clean.
@@ -33,7 +37,8 @@ owned-resource delta and foreign-state digest comparison are clean.
 ## Consequences
 
 - Portable tests cover unstable collection, atomic redacted output, clean
-  results, owned-resource leaks, and foreign link mutation.
+  results, owned-resource leaks, foreign link mutation, and protected-path
+  mutation.
 - A changing host can produce a blocked/failed guard rather than a false clean
   result; operators must rerun after establishing a quiet baseline.
 - The inventory remains intentionally bounded. It does not yet inventory

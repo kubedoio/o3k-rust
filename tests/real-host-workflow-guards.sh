@@ -46,9 +46,11 @@ export O3K_REAL_HOST_KVM_PATH=/dev/null GITHUB_REPOSITORY=kubedoio/o3k-rust
 export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_HEAD_REF= GITHUB_BASE_REF=
 export GITHUB_OUTPUT="${WORK_DIR}/github-output" O3K_TEST_SECRET=do-not-upload-this-value
 export O3K_REAL_HOST_OPENSTACK_INVENTORY=true OS_PASSWORD=fake-password
+export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
 export O3K_REAL_HOST_WORKFLOW_RUN_ID=guard-run-1 O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT=1
 export GITHUB_SHA=0123456789abcdef0123456789abcdef01234567
 mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
+printf 'original protected state\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/runner-capabilities.json" <<'PY'
 import json, sys
 json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
@@ -70,7 +72,15 @@ assert set(value["inventory_baseline"]["openstack"]["resources"]) == {
 }
 assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
+assert value["inventory_baseline"]["foreign_state"]["protected_paths_sha256"]
 PY
+
+unset O3K_REAL_HOST_PROTECTED_PATHS
+if bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/missing-protected-paths.json"; then
+    echo "missing protected-path configuration was accepted" >&2
+    exit 1
+fi
+export O3K_REAL_HOST_PROTECTED_PATHS="${WORK_DIR}/protected-state.txt"
 
 unset OS_PASSWORD
 if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
@@ -177,6 +187,7 @@ PY
 
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+printf 'mutated protected state\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"
 export O3K_FAKE_VIRSH_DIRTY=true O3K_FAKE_OPENSTACK_LEAK=true O3K_FAKE_IP_DIRTY=true
 if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
     echo "owned resource leak was accepted" >&2
@@ -251,6 +262,7 @@ for needle in ("workflow_dispatch:",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
                "Probe runner capabilities", "runner-capabilities.json",
                "contents: read",
+               "O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}",
                "if: always()", "actions/upload-artifact@v4",
                "retention-days: 14"):
     assert needle in text, needle
