@@ -93,7 +93,7 @@ assert result["artifact_type"] == "openstack-cli-e2e"
 assert result["status"] == "passed"
 assert result["public_api_only"] is True
 assert result["cleanup"]["status"] == "passed"
-assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True}
+assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}}
 assert set(result["lifecycle"]) == {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
 assert all(result["lifecycle"].values())
 PY

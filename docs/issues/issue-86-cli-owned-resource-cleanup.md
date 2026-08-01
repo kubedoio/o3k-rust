@@ -30,6 +30,11 @@ Console evidence must contain a bounded CirrOS/login boot marker. These
 assertions are emitted as redacted `acceptance` evidence and are required by
 the release gate; they still do not substitute for a protected real-host run.
 
+The harness also captures a second public `server show` after the
+stop/start/reboot sequence. A passing artifact must prove that the server is
+again `ACTIVE` with the expected fixed IP and config-drive attachment; the
+release gate rejects artifacts that only prove the pre-restart state.
+
 OpenStack authentication and endpoint settings are passed through `OS_*`
 environment variables, with inherited cloud-selection variables cleared. The
 harness no longer writes credentials into hand-interpolated YAML; special
