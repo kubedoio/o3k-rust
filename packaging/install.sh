@@ -114,12 +114,68 @@ mark_owned_dir() {
   chmod 0644 "$marker"
 }
 
+for path in "$PREFIX/bin" "$PREFIX/share" "$PREFIX/share/o3k"; do
+  if [[ -L "$path" ]]; then
+    echo "refusing symlink installation path: $path" >&2
+    exit 2
+  fi
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    echo "installation child path is not a directory: $path" >&2
+    exit 2
+  fi
+done
 install -d -m 0755 "$PREFIX/bin" "$PREFIX/share/o3k"
+INSTALL_MANIFEST="$PREFIX/share/o3k/.o3k-installed"
+if [[ -L "$INSTALL_MANIFEST" || ( -e "$INSTALL_MANIFEST" && ! -f "$INSTALL_MANIFEST" ) ]]; then
+  echo "refusing invalid installation ownership manifest: $INSTALL_MANIFEST" >&2
+  exit 2
+fi
+manifest_owns() {
+  [[ -f "$INSTALL_MANIFEST" ]] && grep -Fqx "$1" "$INSTALL_MANIFEST"
+}
+if [[ -f "$INSTALL_MANIFEST" ]] && ! grep -Fqx "o3k-installed-v1 prefix=$PREFIX" "$INSTALL_MANIFEST"; then
+  echo "refusing unrecognized installation ownership manifest: $INSTALL_MANIFEST" >&2
+  exit 2
+fi
+install_owned_file() {
+  local source="$1" destination="$2" relative="$3" mode="$4"
+  if [[ -L "$destination" ]]; then
+    echo "refusing symlink installation target: $destination" >&2
+    exit 2
+  fi
+  if [[ -e "$destination" ]] && ! manifest_owns "$relative"; then
+    echo "refusing to overwrite foreign installation file: $destination" >&2
+    exit 2
+  fi
+  install -m "$mode" "$source" "$destination"
+}
 for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do mark_owned_dir "$path"; done
-install -m 0755 "$BINARY" "$PREFIX/bin/o3kd"
-install -m 0644 "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service"
-install -m 0755 "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$PREFIX/share/o3k/"
-if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute"; install -m 0644 "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service"; fi
+INSTALLED_FILES=(
+  bin/o3kd
+  share/o3k/o3kd.service
+  share/o3k/reset.sh
+  share/o3k/uninstall.sh
+  share/o3k/diagnose.sh
+  share/o3k/preflight.sh
+  share/o3k/bootstrap-certs.sh
+)
+install_owned_file "$BINARY" "$PREFIX/bin/o3kd" bin/o3kd 0755
+install_owned_file "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service" share/o3k/o3kd.service 0644
+for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh; do
+  install_owned_file "$ROOT_DIR/packaging/$file" "$PREFIX/share/o3k/$file" "share/o3k/$file" 0755
+done
+if [[ "$PROFILE" == libvirt ]]; then
+  install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
+  install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
+  INSTALLED_FILES+=(bin/o3k-compute share/o3k/o3k-compute.service)
+fi
+MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
+{
+  printf 'o3k-installed-v1 prefix=%s\n' "$PREFIX"
+  printf '%s\n' "${INSTALLED_FILES[@]}"
+} >"$MANIFEST_TEMP"
+mv -f -- "$MANIFEST_TEMP" "$INSTALL_MANIFEST"
+chmod 0644 "$INSTALL_MANIFEST"
 ENV_FILE="$CONFIG_DIR/o3kd.env"
 if [[ ! -e "$ENV_FILE" ]]; then
   umask 077

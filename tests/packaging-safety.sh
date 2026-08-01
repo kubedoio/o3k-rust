@@ -92,10 +92,46 @@ if bash "$ROOT_DIR/packaging/install.sh" \
 fi
 [[ -f "$WORK_DIR/preexisting/user-data" ]]
 
+mkdir -p "$WORK_DIR/symlink-bin-target" "$WORK_DIR/symlink-bin-prefix"
+ln -s "$WORK_DIR/symlink-bin-target" "$WORK_DIR/symlink-bin-prefix/bin"
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" \
+    --prefix "$WORK_DIR/symlink-bin-prefix" --data-dir "$WORK_DIR/symlink-bin-data" \
+    --config-dir "$WORK_DIR/symlink-bin-config" --log-dir "$WORK_DIR/symlink-bin-log"; then
+  echo "installer accepted a symlinked prefix/bin directory" >&2
+  exit 1
+fi
+[[ -z "$(find "$WORK_DIR/symlink-bin-target" -mindepth 1 -print -quit)" ]]
+
+mkdir -p "$WORK_DIR/foreign-prefix/bin" "$WORK_DIR/foreign-prefix/share/o3k"
+printf 'foreign binary\n' >"$WORK_DIR/foreign-prefix/bin/o3kd"
+printf 'foreign helper\n' >"$WORK_DIR/foreign-prefix/share/o3k/reset.sh"
+if bash "$ROOT_DIR/packaging/install.sh" \
+    --profile fake --noninteractive --binary "$BINARY" \
+    --prefix "$WORK_DIR/foreign-prefix" --data-dir "$WORK_DIR/foreign-data" \
+    --config-dir "$WORK_DIR/foreign-config" --log-dir "$WORK_DIR/foreign-log"; then
+  echo "installer overwrote foreign O3K-named files" >&2
+  exit 1
+fi
+grep -Fqx 'foreign binary' "$WORK_DIR/foreign-prefix/bin/o3kd"
+grep -Fqx 'foreign helper' "$WORK_DIR/foreign-prefix/share/o3k/reset.sh"
+
+mkdir -p "$WORK_DIR/foreign-uninstall-prefix/bin" "$WORK_DIR/foreign-uninstall-prefix/share/o3k"
+printf 'foreign binary\n' >"$WORK_DIR/foreign-uninstall-prefix/bin/o3kd"
+if bash "$ROOT_DIR/packaging/uninstall.sh" \
+    --prefix "$WORK_DIR/foreign-uninstall-prefix" --data-dir "$WORK_DIR/foreign-uninstall-data" \
+    --config-dir "$WORK_DIR/foreign-uninstall-config" --log-dir "$WORK_DIR/foreign-uninstall-log"; then
+  echo "uninstall removed files without an ownership manifest" >&2
+  exit 1
+fi
+grep -Fqx 'foreign binary' "$WORK_DIR/foreign-uninstall-prefix/bin/o3kd"
+
 bash "$ROOT_DIR/packaging/install.sh" \
   --profile fake --noninteractive --binary "$BINARY" \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
+grep -Fqx "o3k-installed-v1 prefix=$WORK_DIR/prefix" "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+grep -Fqx 'bin/o3kd' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 
 # Uninstall must apply the same path boundary as install. A dot component
 # resolving to the installed prefix must be rejected before any helper or
@@ -190,10 +226,14 @@ ownership_line="$(grep -n 'refusing purge of unowned path' "$ROOT_DIR/packaging/
 systemd_line="$(grep -n 'systemctl disable --now o3kd.service' "$ROOT_DIR/packaging/uninstall.sh" | head -n1 | cut -d: -f1)"
 [[ -n "$ownership_line" && -n "$systemd_line" && "$ownership_line" -lt "$systemd_line" ]]
 
+bash "$ROOT_DIR/packaging/install.sh" \
+  --profile fake --noninteractive --binary "$BINARY" \
+  --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
+  --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
-  --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
-  --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
-[[ ! -e "$WORK_DIR/data" && ! -e "$WORK_DIR/config" && ! -e "$WORK_DIR/log" ]]
+  --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
+  --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"
+[[ ! -e "$WORK_DIR/purge-data" && ! -e "$WORK_DIR/purge-config" && ! -e "$WORK_DIR/purge-log" ]]
 
 TLS_DIR="$WORK_DIR/certs-root/tls"
 bash "$ROOT_DIR/packaging/bootstrap-certs.sh" \

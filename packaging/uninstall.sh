@@ -31,6 +31,44 @@ validate_path() {
   done < <(tr '/' '\n' <<< "${path#/}")
 }
 validate_path prefix "$PREFIX"
+for path in "$PREFIX/bin" "$PREFIX/share" "$PREFIX/share/o3k"; do
+  if [[ -L "$path" ]]; then
+    echo "refusing symlink uninstall path: $path" >&2
+    exit 2
+  fi
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    echo "uninstall path is not a directory: $path" >&2
+    exit 2
+  fi
+done
+INSTALL_MANIFEST="$PREFIX/share/o3k/.o3k-installed"
+[[ -f "$INSTALL_MANIFEST" && ! -L "$INSTALL_MANIFEST" ]] || {
+  echo "refusing to remove files without an installation ownership manifest: $INSTALL_MANIFEST" >&2
+  exit 2
+}
+MANIFEST_HEADER="o3k-installed-v1 prefix=$PREFIX"
+[[ "$(head -n 1 "$INSTALL_MANIFEST")" == "$MANIFEST_HEADER" ]] || {
+  echo "refusing unrecognized installation ownership manifest: $INSTALL_MANIFEST" >&2
+  exit 2
+}
+MANIFEST_FILES=()
+while IFS= read -r line; do
+  [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
+  [[ "$line" == "$MANIFEST_HEADER" ]] && continue
+  case "$line" in
+    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh)
+      MANIFEST_FILES+=("$line")
+      ;;
+    *)
+      echo "refusing unrecognized installation ownership entry: $line" >&2
+      exit 2
+      ;;
+  esac
+done < "$INSTALL_MANIFEST"
+(( ${#MANIFEST_FILES[@]} > 0 )) || {
+  echo "refusing empty installation ownership manifest: $INSTALL_MANIFEST" >&2
+  exit 2
+}
 owned_marker() { [[ -f "$1/.o3k-owned" && ! -L "$1/.o3k-owned" ]] && grep -Fqx "o3k-owned-v1 path=$1" "$1/.o3k-owned"; }
 SYSTEM_INSTALL=0
 if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" == /etc/o3k && "$LOG_DIR" == /var/log/o3k ]]; then SYSTEM_INSTALL=1; fi
@@ -52,26 +90,22 @@ if [[ $PURGE -eq 1 ]]; then
   for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do [[ -e "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; [[ -f "$path/.o3k-owned" ]] && rm -f -- "$path/.o3k-owned"; rmdir "$path" 2>/dev/null || true; done
 fi
 
-# Keep this inventory explicit: uninstall must not remove foreign files from
-# the shared helper directory. The running uninstall script is deliberately
-# removed last; bash has already read the current file and needs no later
-# source-file access.
-O3K_SHARE_FILES=(
-  o3kd.service
-  o3k-compute.service
-  reset.sh
-  uninstall.sh
-  diagnose.sh
-  preflight.sh
-  bootstrap-certs.sh
-)
-rm -f -- "$PREFIX/bin/o3kd" "$PREFIX/bin/o3k-compute"
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   rm -f -- /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service
 fi
-for file in "${O3K_SHARE_FILES[@]}"; do
-  rm -f -- "$PREFIX/share/o3k/$file"
+for relative in "${MANIFEST_FILES[@]}"; do
+  destination="$PREFIX/$relative"
+  if [[ -L "$destination" ]]; then
+    echo "refusing to remove symlink installation target: $destination" >&2
+    exit 2
+  fi
+  if [[ -e "$destination" && ! -f "$destination" ]]; then
+    echo "refusing to remove non-file installation target: $destination" >&2
+    exit 2
+  fi
+  [[ -e "$destination" ]] && rm -f -- "$destination"
 done
+rm -f -- "$INSTALL_MANIFEST"
 if [[ $PURGE -eq 1 ]]; then
   echo "o3k binaries, helper files, and owned state removed"
 else
