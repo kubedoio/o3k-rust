@@ -231,6 +231,11 @@ message CommandAccepted {
   string operation_id = 2;
   OperationState state = 3;
   uint64 operation_sequence = 4;
+  // The authenticated stream identity that accepted this command. Additive
+  // fields preserve compatibility with older readers while allowing the
+  // control plane to reject unbound evidence.
+  string agent_id = 5;
+  string agent_epoch = 6;
 }
 
 enum OperationState {
@@ -263,6 +268,9 @@ message OperationUpdate {
   string redacted_message = 5;
   uint64 operation_sequence = 6;
   string provider_resource_id = 7;
+  // The authenticated stream identity that produced this update.
+  string agent_id = 8;
+  string agent_epoch = 9;
 }
 
 message Observation {

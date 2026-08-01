@@ -45,7 +45,10 @@ explicit, operator-declared Placement disk-capacity bound. Its default is
 `0`, which intentionally keeps the agent unschedulable until the operator
 provides a trusted value; disk format support is not capacity evidence.
 
-`log_format` accepts `json` or `pretty`; `provider` accepts `fake` or `cellhv`.
+`log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`, or
+`agent`. The `agent` provider requires complete compute TLS configuration and
+an authorized-agent mapping. TLS can also be enabled independently while the
+`fake` provider is selected, which is useful for protected protocol tests.
 Although `libvirt` remains a reserved profile value for packaging and release
 tracking, `o3kd` rejects it before startup because no agent-backed provider
 path exists. The daemon must never construct or open a local libvirt adapter;

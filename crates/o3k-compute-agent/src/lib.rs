@@ -1325,6 +1325,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         }
                     }
                     Some(proto::control_request::Body::Operation(operation)) => {
+                        if !matches_stream_identity(
+                            &operation.agent_id,
+                            &operation.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         if !registry
                             .connection_is_current(&agent_id, &agent_epoch)
                             .await
@@ -1356,6 +1369,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         registry.publish_event(AgentEvent::Observation(observation));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
+                        if !matches_stream_identity(
+                            &accepted.agent_id,
+                            &accepted.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         if !registry
                             .connection_is_current(&agent_id, &agent_epoch)
                             .await
@@ -2005,6 +2031,8 @@ impl AgentClient {
                                         operation_id: command.operation_id.clone(),
                                         state: proto::OperationState::Accepted as i32,
                                         operation_sequence,
+                                        agent_id: agent_id.to_owned(),
+                                        agent_epoch: epoch.clone(),
                                     },
                                 )),
                             })
@@ -2012,6 +2040,7 @@ impl AgentClient {
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                             let result = executor.execute(&command).await;
                             if let Ok(result) = &result {
+                                operation_sequence = operation_sequence.saturating_add(1);
                                 tx.send(proto::ControlRequest {
                                     body: Some(proto::control_request::Body::Observation(
                                         observation_from_result(
@@ -2037,6 +2066,8 @@ impl AgentClient {
                                     redacted_message: result.redacted_message,
                                     operation_sequence,
                                     provider_resource_id: result.provider_resource_id,
+                                    agent_id: String::new(),
+                                    agent_epoch: String::new(),
                                 },
                                 Err(_) => proto::OperationUpdate {
                                     operation_id: command.operation_id,
@@ -2046,7 +2077,19 @@ impl AgentClient {
                                     redacted_message: "command execution failed".to_owned(),
                                     operation_sequence,
                                     provider_resource_id: String::new(),
+                                    agent_id: String::new(),
+                                    agent_epoch: String::new(),
                                 },
+                            };
+                            operation_sequence = operation_sequence.saturating_add(1);
+                            let update_agent_id = agent_id.to_owned();
+                            let update_agent_epoch = epoch.clone();
+                            let update_sequence = operation_sequence;
+                            let update = proto::OperationUpdate {
+                                agent_id: update_agent_id,
+                                agent_epoch: update_agent_epoch,
+                                operation_sequence: update_sequence,
+                                ..update
                             };
                             tx.send(proto::ControlRequest {
                                 body: Some(proto::control_request::Body::Operation(update)),
