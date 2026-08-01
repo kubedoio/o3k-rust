@@ -98,11 +98,13 @@ impl ImageCache {
         qemu_img: &Path,
     ) -> Result<Self, ImageError> {
         let root = root.into();
-        fs::create_dir_all(root.join("base")).map_err(ImageError::Storage)?;
+        ensure_managed_directory(&root)?;
+        let base = root.join("base");
+        ensure_managed_directory(&base)?;
         let overlays = root.join("overlays");
-        fs::create_dir_all(&overlays).map_err(ImageError::Storage)?;
-        remove_temporary_files(&root)?;
-        remove_temporary_files(&overlays)?;
+        ensure_managed_directory(&overlays)?;
+        remove_temporary_files(&base, TemporaryKind::Base)?;
+        remove_temporary_files(&overlays, TemporaryKind::Overlay)?;
         Ok(Self {
             root,
             max_bytes,
@@ -217,6 +219,7 @@ impl ImageCache {
                 if !metadata.file_type().is_file() {
                     return Err(ImageError::InvalidPath);
                 }
+                verify_overlay(&self.qemu_img, &overlay, base)?;
                 return Ok(overlay);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -272,17 +275,46 @@ impl ImageCache {
             .root
             .join("overlays")
             .join(format!("{instance_id}.qcow2"));
-        if path.exists() {
-            fs::remove_file(path).map_err(ImageError::Storage)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(path).map_err(ImageError::Storage)?;
+            }
+            Ok(_) => return Err(ImageError::InvalidPath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ImageError::Storage(error)),
         }
         Ok(())
     }
 }
 
-fn remove_temporary_files(directory: &Path) -> Result<(), ImageError> {
+fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => Err(ImageError::InvalidPath),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(ImageError::Storage)
+        }
+        Err(error) => Err(ImageError::Storage(error)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemporaryKind {
+    Base,
+    Overlay,
+    Upload,
+}
+
+fn remove_temporary_files(directory: &Path, kind: TemporaryKind) -> Result<(), ImageError> {
     for entry in fs::read_dir(directory).map_err(ImageError::Storage)? {
         let entry = entry.map_err(ImageError::Storage)?;
-        if !entry.file_name().to_string_lossy().contains(".tmp-") {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let matches = match kind {
+            TemporaryKind::Base => is_base_temporary(&name),
+            TemporaryKind::Overlay => is_overlay_temporary(&name),
+            TemporaryKind::Upload => is_upload_temporary(&name),
+        };
+        if !matches {
             continue;
         }
         let metadata = fs::symlink_metadata(entry.path()).map_err(ImageError::Storage)?;
@@ -291,6 +323,33 @@ fn remove_temporary_files(directory: &Path) -> Result<(), ImageError> {
         }
     }
     Ok(())
+}
+
+fn is_base_temporary(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("base-") else {
+        return false;
+    };
+    let Some((checksum, suffix)) = rest.split_once(".tmp-") else {
+        return false;
+    };
+    is_checksum(checksum) && Uuid::parse_str(suffix).is_ok()
+}
+
+fn is_overlay_temporary(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((instance, suffix)) = rest.split_once(".tmp-") else {
+        return false;
+    };
+    !instance.is_empty() && Uuid::parse_str(suffix).is_ok()
+}
+
+fn is_upload_temporary(name: &str) -> bool {
+    let Some((image_id, suffix)) = name.split_once(".upload-") else {
+        return false;
+    };
+    Uuid::parse_str(image_id).is_ok() && Uuid::parse_str(suffix).is_ok()
 }
 
 fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), ImageError> {
@@ -351,7 +410,10 @@ struct Inner {
 impl ImageService {
     pub fn open(root: impl Into<PathBuf>, max_upload_bytes: usize) -> Result<Self, ImageError> {
         let root = root.into();
-        fs::create_dir_all(root.join("content")).map_err(ImageError::Storage)?;
+        ensure_managed_directory(&root)?;
+        let content = root.join("content");
+        ensure_managed_directory(&content)?;
+        remove_temporary_files(&content, TemporaryKind::Upload)?;
         let metadata_path = root.join("metadata.json");
         let images = if metadata_path.exists() {
             let data = fs::read(&metadata_path).map_err(ImageError::Storage)?;
@@ -701,6 +763,26 @@ mod tests {
     }
 
     #[test]
+    fn image_service_restart_cleans_only_upload_temporaries()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("upload-restart");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(path.join("content"))?;
+        let image_id = Uuid::now_v7();
+        let stale = path
+            .join("content")
+            .join(format!("{image_id}.upload-{}", Uuid::now_v7()));
+        let unrelated = path.join("content").join("foreign.upload-user");
+        fs::write(&stale, b"partial")?;
+        fs::write(&unrelated, b"keep")?;
+        let _service = ImageService::open(&path, 1024)?;
+        assert!(!stale.exists());
+        assert_eq!(fs::read(&unrelated)?, b"keep");
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
     fn content_addressed_cache_is_atomic_and_rejects_bad_inputs()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("cache");
@@ -745,17 +827,20 @@ mod tests {
         let cache = ImageCache::open(&path, 1024)?;
         let stale = path
             .join("overlays")
-            .join(format!(".instance.tmp-{}", std::process::id()));
+            .join(format!(".instance.tmp-{}", Uuid::now_v7()));
         let published = path.join("overlays").join("instance.qcow2");
         let unrelated = path.join("overlays").join("keep.txt");
+        let unrelated_temporary = path.join("overlays").join("foo.tmp-user");
         fs::write(&stale, b"stale")?;
         fs::write(&published, b"published")?;
         fs::write(&unrelated, b"keep")?;
+        fs::write(&unrelated_temporary, b"keep")?;
 
         let _reopened = ImageCache::open(&path, 1024)?;
         assert!(!stale.exists());
         assert_eq!(fs::read(&published)?, b"published");
         assert_eq!(fs::read(&unrelated)?, b"keep");
+        assert_eq!(fs::read(&unrelated_temporary)?, b"keep");
         fs::remove_dir_all(path)?;
         drop(cache);
         Ok(())
@@ -802,6 +887,7 @@ esac
 
             let overlay = cache.create_overlay("valid", &base)?;
             assert!(overlay.is_file());
+            assert_eq!(cache.create_overlay("valid", &base)?, overlay);
 
             for instance in ["wrong-format", "wrong-backing", "missing-backing"] {
                 assert!(matches!(
@@ -887,6 +973,34 @@ esac
         fs::remove_dir_all(path)?;
         fs::remove_dir_all(sibling_base_dir)?;
         fs::remove_file(outside)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_rejects_symlinked_managed_directories() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let path = root("cache-symlink-directories");
+        let outside = root("cache-symlink-directories-outside");
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&outside)?;
+        fs::create_dir_all(&path)?;
+        symlink(outside.join("base"), path.join("base"))?;
+        assert!(matches!(
+            ImageCache::open(&path, 1024),
+            Err(ImageError::InvalidPath)
+        ));
+        fs::remove_file(path.join("base"))?;
+        fs::create_dir(path.join("base"))?;
+        symlink(outside.join("overlays"), path.join("overlays"))?;
+        assert!(matches!(
+            ImageCache::open(&path, 1024),
+            Err(ImageError::InvalidPath)
+        ));
+        let _ = fs::remove_dir_all(path);
+        let _ = fs::remove_dir_all(outside);
         Ok(())
     }
 }
