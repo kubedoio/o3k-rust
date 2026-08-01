@@ -84,8 +84,8 @@ remove_created_identity() {
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     set -euo pipefail
     pgrep -u o3k >/dev/null 2>&1 && exit 42 || true
-    if [[ "$1" == true ]]; then userdel o3k; fi
-    if [[ "$2" == true ]]; then groupdel o3k; fi
+    if [[ "$1" == true ]] && id o3k >/dev/null 2>&1; then userdel o3k; fi
+    if [[ "$2" == true ]] && getent group o3k >/dev/null 2>&1; then groupdel o3k; fi
   ' _ "$ACCOUNT_CREATED" "$GROUP_CREATED"
 }
 
@@ -397,6 +397,7 @@ fi
 grep -Fqx 'o3k-disposable-venv-v1' "$OPENSTACK_VENV/.o3k-venv-owned" \
   || fail "OpenStack virtualenv is not owned by this bootstrap"
 export PATH="$OPENSTACK_VENV/bin:$PATH"
+printf '%s\n' "$OPENSTACK_VENV/bin" >>"${GITHUB_PATH:-/dev/null}"
 export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSWORD="$PASSWORD" \
   OS_PROJECT_NAME=admin OS_REGION_NAME=RegionOne OS_USER_DOMAIN_NAME=Default \
   OS_PROJECT_DOMAIN_NAME=Default OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
