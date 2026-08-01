@@ -100,6 +100,8 @@ impl AppState {
 
 pub fn router_with_state(state: AppState) -> Router {
     Router::new()
+        .route("/", get(keystone_root))
+        .route("/v3", get(keystone_v3))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .route("/v3/auth/tokens", post(issue_token))
@@ -147,6 +149,24 @@ pub fn router_with_state(state: AppState) -> Router {
 
 async fn health() -> impl IntoResponse {
     Json(HealthResponse { status: "ok" })
+}
+
+fn keystone_version() -> serde_json::Value {
+    serde_json::json!({
+        "id": "v3",
+        "status": "stable",
+        "updated": "2024-01-01T00:00:00Z",
+        "links": [{"rel": "self", "href": "/v3"}],
+        "media-types": [{"base": "application/json", "type": "application/vnd.openstack.identity-v3+json"}]
+    })
+}
+
+async fn keystone_root() -> impl IntoResponse {
+    Json(serde_json::json!({"versions": {"values": [keystone_version()]}}))
+}
+
+async fn keystone_v3() -> impl IntoResponse {
+    Json(serde_json::json!({"version": keystone_version()}))
 }
 
 async fn ready(State(state): State<AppState>) -> impl IntoResponse {

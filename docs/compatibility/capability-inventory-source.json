@@ -24,12 +24,12 @@
       "go_locations": ["internal/keystone/handlers.go"],
       "rust_locations": ["crates/o3k-api/src/lib.rs:103-105"],
       "cli_command": "openstack token issue",
-      "implementation_state": "partial",
-      "portable_contract": "pending",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["Root version discovery is not covered by an independent compatibility test."]
+      "known_gaps": ["Protected deployment verification remains a release-gate task."]
     },
     {
       "id": "identity.version_v3",
@@ -41,12 +41,12 @@
       "go_locations": ["internal/keystone/handlers.go"],
       "rust_locations": ["crates/o3k-api/src/lib.rs:103-105"],
       "cli_command": "openstack token issue",
-      "implementation_state": "partial",
-      "portable_contract": "pending",
+      "implementation_state": "implemented",
+      "portable_contract": "verified",
       "cli_verification": "pending",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "known_gaps": ["The version response and discovery warning behavior need an explicit contract test."]
+      "known_gaps": ["Protected deployment verification remains a release-gate task."]
     },
     {
       "id": "identity.token_password_scoped",

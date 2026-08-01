@@ -379,6 +379,12 @@ impl TokenService {
                     "compute",
                     &format!("{}/v2.1/{}", self.catalog_endpoint, self.project_id),
                 ),
+                service(
+                    "placement",
+                    "placement",
+                    "placement",
+                    &format!("{}/placement", self.catalog_endpoint),
+                ),
             ],
         }
     }
@@ -567,6 +573,7 @@ mod tests {
                 "http://127.0.0.1:18080/v2",
                 "http://127.0.0.1:18080/v2.0",
                 "http://127.0.0.1:18080/v2.1/project-1",
+                "http://127.0.0.1:18080/placement",
             ]
         );
         Ok(())

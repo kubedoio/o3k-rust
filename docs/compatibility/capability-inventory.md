@@ -26,8 +26,8 @@ Evidence states are independent: route implementation does not imply contract, C
 | compute | server_delete | DELETE | /v2.1/{project_id}/servers/{id} | implemented | verified | pending | pending | required |
 | compute | server_show | GET | /v2.1/{project_id}/servers/{id} | implemented | verified | pending | pending | required |
 | compute | server_actions_start_stop_reboot_console | POST | /v2.1/{project_id}/servers/{id}/action | implemented | verified | pending | pending | required |
-| identity | version_discovery_root | GET | / | partial | pending | pending | pending | required |
-| identity | version_discovery_v3 | GET | /v3 | partial | pending | pending | pending | required |
+| identity | version_discovery_root | GET | / | implemented | verified | pending | pending | required |
+| identity | version_discovery_v3 | GET | /v3 | implemented | verified | pending | pending | required |
 | identity | password_authentication_scoped_token | POST | /v3/auth/tokens | implemented | verified | verified | verified | required |
 | image | image_list | GET | /v2/images | implemented | verified | pending | verified | required |
 | image | image_create | POST | /v2/images | implemented | verified | verified | verified | required |
@@ -65,8 +65,8 @@ Evidence states are independent: route implementation does not imply contract, C
 - `compute.server_collection_create`: Real Placement and compute-agent dispatch remain pending.
 - `compute.server_member_delete`: Real provider resource cleanup is tracked by later infrastructure issues.
 - `compute.server_member_actions`: Console output is bounded API data; real guest serial output is tracked by #84.
-- `identity.version_root`: Root version discovery is not covered by an independent compatibility test.
-- `identity.version_v3`: The version response and discovery warning behavior need an explicit contract test.
+- `identity.version_root`: Protected deployment verification remains a release-gate task.
+- `identity.version_v3`: Protected deployment verification remains a release-gate task.
 - `identity.token_password_scoped`: Federation and non-password authentication are outside the alpha profile.
 - `image.collection_list`: The broad Glance filter and pagination surface is outside the alpha profile.
 - `image.collection_create`: Local filesystem storage is the only alpha backend.
