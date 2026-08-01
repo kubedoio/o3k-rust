@@ -24,6 +24,15 @@ REQUIRED_CLOSURE_ISSUES = {
     76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94
 }
 CLOSURE_PENDING_MARKER = re.compile(r"closure evidence:\s*([a-z-]+)")
+FORBIDDEN_CLOSURE_CLAIMS = (
+    "release-ready: true",
+    "published: true",
+    "signed: true",
+    "program closure is claimed",
+)
+
+def is_positive_claim(value, claim):
+    return claim in value and f"no {claim}" not in value
 
 path = os.environ["INPUT"]
 try:
@@ -93,14 +102,16 @@ for issue in REQUIRED_CLOSURE_ISSUES:
         errors.append(
             f"issue #{issue} closure row must contain exactly 'closure evidence: pending'"
         )
+    value = " | ".join(rows[issue]).lower()
+    for claim in FORBIDDEN_CLOSURE_CLAIMS:
+        if is_positive_claim(value, claim):
+            errors.append(f"issue #{issue} row contains forbidden positive claim: {claim}")
 
 row_93 = rows.get(93)
 if row_93:
     value = " | ".join(row_93).lower()
     if "blocked" not in value or "no release-ready" not in value:
         errors.append("issue #93 row must remain explicitly blocked and non-claiming")
-    if any(word in value for word in ("release-ready: true", "published: true", "signed: true")):
-        errors.append("issue #93 row contains a forbidden positive release claim")
 
 row_94 = rows.get(94)
 if row_94:

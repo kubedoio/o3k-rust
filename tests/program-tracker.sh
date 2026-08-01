@@ -8,7 +8,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" \
   --input "${ROOT_DIR}/docs/release-tracker.md"
 
-python3 - "${ROOT_DIR}/docs/release-tracker.md" "${WORK_DIR}/ready.md" "${WORK_DIR}/claimed.md" "${WORK_DIR}/release-ready.md" "${WORK_DIR}/missing-row.md" "${WORK_DIR}/missing-marker.md" <<'PY'
+python3 - "${ROOT_DIR}/docs/release-tracker.md" "${WORK_DIR}/ready.md" "${WORK_DIR}/claimed.md" "${WORK_DIR}/release-ready.md" "${WORK_DIR}/missing-row.md" "${WORK_DIR}/missing-marker.md" "${WORK_DIR}/row-claim.md" <<'PY'
 import pathlib
 import sys
 
@@ -33,6 +33,14 @@ pathlib.Path(sys.argv[6]).write_text(
     source.replace("closure evidence: pending", "closure evidence: passed", 1),
     encoding="utf-8",
 )
+pathlib.Path(sys.argv[7]).write_text(
+    source.replace(
+        "host-gated: real CirrOS/libvirt measurements",
+        "release-ready: true; host-gated: real CirrOS/libvirt measurements",
+        1,
+    ),
+    encoding="utf-8",
+)
 PY
 
 if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/ready.md"; then
@@ -53,6 +61,10 @@ if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}
 fi
 if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/missing-marker.md"; then
   echo "accepted tracker with a positive closure-evidence marker" >&2
+  exit 1
+fi
+if bash "${ROOT_DIR}/packaging/validate-program-tracker.sh" --input "${WORK_DIR}/row-claim.md"; then
+  echo "accepted a positive claim in a non-release tracker row" >&2
   exit 1
 fi
 

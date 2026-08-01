@@ -20,7 +20,9 @@ Add a small, source-controlled tracker contract with explicit ownership
 fail-closed `blocked`/`pending` state. Validate the contract in CI, require
 an explicit row for every issue in #94's closure chain, require each such row
 to carry exactly `closure evidence: pending`, and require the decision log and
-evidence-closure sections to remain present. PR #85 is a
+evidence-closure sections to remain present. Every closure row also rejects
+positive `release-ready`, `published`, `signed`, or program-closure claims.
+PR #85 is a
 pre-existing prerequisite in #94, not a closure issue, so it is intentionally
 not part of that row set. The validator checks documentation shape and
 non-claiming state only; it does not inspect host artifacts, verify a human
@@ -38,7 +40,8 @@ reviewer, verify signatures, or publish a release.
 ## Verification
 
 `tests/program-tracker.sh` validates the current tracker, rejects a `ready`
-program state or an explicit closure claim, rejects removal of a required
-closure-chain row, and rejects a non-pending closure-evidence marker on any
-required row. The check is documentation validation only and intentionally
-leaves host, human, signing, and publication evidence pending.
+program state or an explicit closure claim, rejects positive claims in any
+closure-chain row, rejects removal of a required closure-chain row, and rejects
+a non-pending closure-evidence marker on any required row. The check is
+documentation validation only and intentionally leaves host, human, signing,
+and publication evidence pending.
