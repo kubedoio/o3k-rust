@@ -6,12 +6,26 @@ use std::{
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use md5::{Digest as Md5Digest, Md5};
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use thiserror::Error;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeypairRecord {
+    pub id: Uuid,
+    pub user_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub key_type: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub created_at: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationState {
@@ -117,6 +131,14 @@ pub enum StoreError {
     InvalidUuid(#[source] uuid::Error),
     #[error("corrupt durable state: {0}")]
     Corrupt(String),
+    #[error("keypair not found")]
+    KeypairNotFound,
+    #[error("keypair already exists")]
+    KeypairAlreadyExists,
+    #[error("invalid keypair: {0}")]
+    InvalidKeypair(String),
+    #[error("keypair is still attached to a server")]
+    KeypairInUse,
 }
 
 #[async_trait]
@@ -224,16 +246,234 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 3 {
+        if table_count != 5 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
     }
+
+    pub async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {
+        let result = sqlx::query("INSERT INTO keypairs (id, user_id, project_id, name, key_type, public_key, fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(keypair.id.to_string()).bind(&keypair.user_id).bind(&keypair.project_id)
+            .bind(&keypair.name).bind(&keypair.key_type).bind(&keypair.public_key)
+            .bind(&keypair.fingerprint).bind(&keypair.created_at).execute(&self.pool).await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::KeypairAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn list_keypairs(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<KeypairRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, user_id, project_id, name, key_type, public_key, fingerprint, created_at FROM keypairs WHERE user_id = ? AND project_id = ? ORDER BY name")
+            .bind(user_id).bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(keypair_from_row).collect()
+    }
+
+    pub async fn get_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<KeypairRecord, StoreError> {
+        let row = sqlx::query("SELECT id, user_id, project_id, name, key_type, public_key, fingerprint, created_at FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?")
+            .bind(user_id).bind(project_id).bind(name).fetch_optional(&self.pool).await.map_err(StoreError::Database)?
+            .ok_or(StoreError::KeypairNotFound)?;
+        keypair_from_row(&row)
+    }
+
+    pub async fn delete_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        let attached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_keypairs WHERE keypair_id = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?)")
+            .bind(user_id).bind(project_id).bind(name).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if attached > 0 {
+            return Err(StoreError::KeypairInUse);
+        }
+        let result =
+            sqlx::query("DELETE FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?")
+                .bind(user_id)
+                .bind(project_id)
+                .bind(name)
+                .execute(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            Err(StoreError::KeypairNotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn attach_server_keypair(
+        &self,
+        server_id: Uuid,
+        keypair_id: Uuid,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO server_keypairs (server_id, keypair_id) VALUES (?, ?)")
+            .bind(server_id.to_string())
+            .bind(keypair_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(StoreError::Database)
+    }
+
+    pub async fn detach_server_keypair(&self, server_id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM server_keypairs WHERE server_id = ?")
+            .bind(server_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(StoreError::Database)
+    }
+
+    pub async fn get_server_keypair_name(
+        &self,
+        server_id: Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        sqlx::query_scalar("SELECT keypairs.name FROM server_keypairs JOIN keypairs ON keypairs.id = server_keypairs.keypair_id WHERE server_keypairs.server_id = ?")
+            .bind(server_id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)
+    }
+}
+
+fn keypair_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<KeypairRecord, StoreError> {
+    Ok(KeypairRecord {
+        id: parse_uuid(row.get("id"))?,
+        user_id: row.get("user_id"),
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        key_type: row.get("key_type"),
+        public_key: row.get("public_key"),
+        fingerprint: row.get("fingerprint"),
+        created_at: row.get("created_at"),
+    })
+}
+
+/// Validate the public OpenSSH key form accepted by the TestLab profile.
+/// This deliberately imports public material only; private-key generation is not supported.
+pub fn validate_public_key(value: &str) -> Result<(String, String, String), StoreError> {
+    if value.chars().any(char::is_control) {
+        return Err(StoreError::InvalidKeypair(
+            "public key contains control characters".to_owned(),
+        ));
+    }
+    let mut fields = value.split_whitespace();
+    let key_type = fields
+        .next()
+        .ok_or_else(|| StoreError::InvalidKeypair("public key is empty".to_owned()))?;
+    if !matches!(key_type, "ssh-ed25519" | "ssh-rsa" | "ecdsa-sha2-nistp256") {
+        return Err(StoreError::InvalidKeypair(
+            "unsupported public key type".to_owned(),
+        ));
+    }
+    let encoded = fields
+        .next()
+        .ok_or_else(|| StoreError::InvalidKeypair("public key data is missing".to_owned()))?;
+    let comment = fields.collect::<Vec<_>>().join(" ");
+    if comment.len() > 256 || encoded.len() > 16_384 {
+        return Err(StoreError::InvalidKeypair(
+            "public key is too large".to_owned(),
+        ));
+    }
+    let decoded = BASE64
+        .decode(encoded)
+        .map_err(|_| StoreError::InvalidKeypair("public key data is not base64".to_owned()))?;
+    if decoded.is_empty() {
+        return Err(StoreError::InvalidKeypair(
+            "public key data is empty".to_owned(),
+        ));
+    }
+    let mut cursor = 0;
+    let embedded_type = ssh_string(&decoded, &mut cursor)?;
+    if embedded_type != key_type.as_bytes() {
+        return Err(StoreError::InvalidKeypair(
+            "key type does not match public key data".to_owned(),
+        ));
+    }
+    match key_type {
+        "ssh-ed25519" => {
+            let key_data = ssh_string(&decoded, &mut cursor)?;
+            if key_data.len() != 32 || cursor != decoded.len() {
+                return Err(StoreError::InvalidKeypair(
+                    "ed25519 key data has the wrong length".to_owned(),
+                ));
+            }
+        }
+        "ssh-rsa" => {
+            let exponent = ssh_string(&decoded, &mut cursor)?;
+            let modulus = ssh_string(&decoded, &mut cursor)?;
+            if exponent.is_empty() || modulus.is_empty() || cursor != decoded.len() {
+                return Err(StoreError::InvalidKeypair(
+                    "rsa key data is invalid".to_owned(),
+                ));
+            }
+        }
+        "ecdsa-sha2-nistp256" => {
+            let curve = ssh_string(&decoded, &mut cursor)?;
+            let point = ssh_string(&decoded, &mut cursor)?;
+            if curve != b"nistp256"
+                || point.len() != 65
+                || point.first() != Some(&4)
+                || cursor != decoded.len()
+            {
+                return Err(StoreError::InvalidKeypair(
+                    "ecdsa key data is invalid".to_owned(),
+                ));
+            }
+        }
+        _ => unreachable!(),
+    }
+    let digest = Md5::digest(&decoded);
+    let fingerprint = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(":");
+    Ok((
+        key_type.to_owned(),
+        fingerprint,
+        format!("{key_type} {}", BASE64.encode(decoded)),
+    ))
+}
+
+fn ssh_string<'a>(data: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], StoreError> {
+    let header_end = cursor
+        .checked_add(4)
+        .ok_or_else(|| StoreError::InvalidKeypair("truncated public key data".to_owned()))?;
+    let header = data
+        .get(*cursor..header_end)
+        .ok_or_else(|| StoreError::InvalidKeypair("truncated public key data".to_owned()))?;
+    let length = u32::from_be_bytes(
+        header
+            .try_into()
+            .map_err(|_| StoreError::InvalidKeypair("invalid public key length".to_owned()))?,
+    ) as usize;
+    let end = header_end
+        .checked_add(length)
+        .ok_or_else(|| StoreError::InvalidKeypair("truncated public key data".to_owned()))?;
+    if end > data.len() {
+        return Err(StoreError::InvalidKeypair(
+            "truncated public key data".to_owned(),
+        ));
+    }
+    let value = &data[header_end..end];
+    *cursor = end;
+    Ok(value)
 }
 
 #[async_trait]
@@ -702,6 +942,83 @@ mod tests {
         fs::write(&path, b"not a sqlite database")?;
         let result = SqliteStore::connect_file(&path).await;
         assert!(result.is_err());
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_key_validation_is_canonical_and_rejects_mismatches() -> Result<(), StoreError> {
+        let blob = [
+            0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0,
+            32,
+        ]
+        .into_iter()
+        .chain([7_u8; 32])
+        .collect::<Vec<_>>();
+        let encoded = BASE64.encode(&blob);
+        let (key_type, fingerprint, canonical) =
+            validate_public_key(&format!("ssh-ed25519 {encoded} comment"))?;
+        assert_eq!(key_type, "ssh-ed25519");
+        assert_eq!(fingerprint.len(), 47);
+        assert_eq!(canonical, format!("ssh-ed25519 {encoded}"));
+        assert!(validate_public_key(&format!("ssh-rsa {encoded}")).is_err());
+        assert!(validate_public_key("ssh-ed25519 !!!").is_err());
+        assert!(validate_public_key("ssh-dss AAAA").is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keypairs_are_scoped_unique_and_survive_restart() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!("/tmp/o3k-keypairs-{}.sqlite", std::process::id()));
+        let blob = [
+            0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0,
+            32,
+        ]
+        .into_iter()
+        .chain([9_u8; 32])
+        .collect::<Vec<_>>();
+        let public_key = format!("ssh-ed25519 {}", BASE64.encode(blob));
+        let record = KeypairRecord {
+            id: Uuid::now_v7(),
+            user_id: "user-a".to_owned(),
+            project_id: "project-a".to_owned(),
+            name: "test-key".to_owned(),
+            key_type: "ssh-ed25519".to_owned(),
+            public_key: public_key.clone(),
+            fingerprint: "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00".to_owned(),
+            created_at: "1".to_owned(),
+        };
+        {
+            let store = SqliteStore::connect_file(&path).await?;
+            store.insert_keypair(&record).await?;
+            assert!(matches!(
+                store.insert_keypair(&record).await,
+                Err(StoreError::KeypairAlreadyExists)
+            ));
+            assert!(
+                store
+                    .get_keypair("user-b", "project-a", "test-key")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(store.list_keypairs("user-a", "project-a").await?.len(), 1);
+        }
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened
+                .get_keypair("user-a", "project-a", "test-key")
+                .await?,
+            record
+        );
+        reopened
+            .delete_keypair("user-a", "project-a", "test-key")
+            .await?;
+        assert!(matches!(
+            reopened
+                .delete_keypair("user-a", "project-a", "test-key")
+                .await,
+            Err(StoreError::KeypairNotFound)
+        ));
         fs::remove_file(path)?;
         Ok(())
     }

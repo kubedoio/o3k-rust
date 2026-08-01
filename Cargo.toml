@@ -35,6 +35,7 @@ repository = "https://github.com/kubedoio/o3k-rust"
 axum = "0.8"
 async-trait = "0.1"
 base64 = "0.22"
+md-5 = "0.10"
 hmac = "0.12"
 http = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }

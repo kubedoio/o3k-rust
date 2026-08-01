@@ -508,7 +508,45 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     assert_eq!(detailed_servers.status(), StatusCode::OK);
-    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
+    let keypair_create = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/bootstrap-project/os-keypairs")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"keypair":{"name":"nova-test-key","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test"}}).to_string()))?,
+        )
+        .await?;
+    assert_eq!(keypair_create.status(), StatusCode::OK);
+    let keypair_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(keypair_create.into_body(), 8192).await?)?;
+    assert_eq!(keypair_json["keypair"]["name"], "nova-test-key");
+    assert_eq!(keypair_json["keypair"]["type"], "ssh");
+    assert_eq!(
+        keypair_json["keypair"]["fingerprint"]
+            .as_str()
+            .map(str::len),
+        Some(47)
+    );
+    let keypair_list = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/bootstrap-project/os-keypairs")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(keypair_list.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &axum::body::to_bytes(keypair_list.into_body(), 8192).await?
+        )?["keypairs"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}],"key_name":"nova-test-key"}});
     let created = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -574,6 +612,16 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         console.read(server_uuid),
         Err(o3k_console::ConsoleError::NotFound)
     ));
+    let keypair_deleted = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/v2.1/bootstrap-project/os-keypairs/nova-test-key")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
 
     let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}]}});
     let second_created = o3k_api::router_with_state(state.clone())

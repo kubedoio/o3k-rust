@@ -14,7 +14,7 @@ use o3k_store::{DurableStore, SqliteStore, StoreError};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,6 +36,31 @@ pub struct Server {
     pub flavor_id: Uuid,
     pub image_id: String,
     pub status: String,
+    pub key_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Keypair {
+    pub id: Uuid,
+    pub user_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub key_type: String,
+    pub public_key: String,
+    pub fingerprint: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCreateInput {
+    pub user_id: String,
+    pub project_id: String,
+    pub name: String,
+    pub image_id: String,
+    pub flavor_id: Uuid,
+    pub network_ids: Vec<String>,
+    pub key_name: Option<String>,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Error)]
@@ -353,6 +378,33 @@ impl ComputeService {
         network_ids: Vec<String>,
         idempotency_key: String,
     ) -> Result<Server, ComputeError> {
+        self.create_server_for_user(ServerCreateInput {
+            user_id: String::new(),
+            project_id: project_id.to_owned(),
+            name,
+            image_id,
+            flavor_id,
+            network_ids,
+            key_name: None,
+            idempotency_key,
+        })
+        .await
+    }
+
+    pub async fn create_server_for_user(
+        &self,
+        input: ServerCreateInput,
+    ) -> Result<Server, ComputeError> {
+        let ServerCreateInput {
+            user_id,
+            project_id,
+            name,
+            image_id,
+            flavor_id,
+            network_ids,
+            key_name,
+            idempotency_key,
+        } = input;
         if name.trim().is_empty()
             || image_id.trim().is_empty()
             || network_ids.is_empty()
@@ -361,6 +413,18 @@ impl ComputeService {
         {
             return Err(ComputeError::InvalidRequest);
         }
+        let keypair = match key_name.as_deref() {
+            Some(name) => Some(
+                self.store
+                    .get_keypair(&user_id, &project_id, name)
+                    .await
+                    .map_err(|error| match error {
+                        StoreError::KeypairNotFound => ComputeError::NotFound,
+                        other => ComputeError::Store(other),
+                    })?,
+            ),
+            None => None,
+        };
         let flavor = self.flavor(flavor_id)?;
         let server_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -394,7 +458,21 @@ impl ComputeService {
                     ..existing_request
                 };
                 if existing_request == request {
-                    return self.show_server(project_id, server_id).await;
+                    let attached = self.store.get_server_keypair_name(server_id).await?;
+                    if attached != key_name {
+                        if attached.is_none() {
+                            if let Some(keypair) = keypair.as_ref() {
+                                self.store
+                                    .attach_server_keypair(server_id, keypair.id)
+                                    .await?;
+                            } else {
+                                return Err(ComputeError::Conflict);
+                            }
+                        } else {
+                            return Err(ComputeError::Conflict);
+                        }
+                    }
+                    return self.show_server(&project_id, server_id).await;
                 }
                 return Err(ComputeError::Conflict);
             }
@@ -405,7 +483,7 @@ impl ComputeService {
         // before reserving Placement capacity; the second check below still
         // protects against a concurrent create racing this read.
         if self
-            .list_servers(project_id)
+            .list_servers(&project_id)
             .await?
             .iter()
             .any(|server| server.name == name && server.status != "DELETED")
@@ -451,7 +529,7 @@ impl ComputeService {
                 .map(|decision| decision.allocation_id.clone()),
             ..request
         };
-        let servers = match self.list_servers(project_id).await {
+        let servers = match self.list_servers(&project_id).await {
             Ok(servers) => servers,
             Err(error) => {
                 if let Some(decision) = placement.as_ref() {
@@ -474,7 +552,7 @@ impl ComputeService {
             ..request
         };
         let id = request.o3k_server_id;
-        match self.journal.begin_create(project_id, &request).await {
+        match self.journal.begin_create(&project_id, &request).await {
             Ok(_) => {}
             Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
                 let existing = self.store.get_resource(id).await?;
@@ -495,9 +573,12 @@ impl ComputeService {
                 if existing_request != request {
                     return Err(ComputeError::Conflict);
                 }
-                return self.show_server(project_id, id).await;
+                return self.show_server(&project_id, id).await;
             }
             Err(error) => return Err(ComputeError::Reconcile(error)),
+        }
+        if let Some(keypair) = keypair {
+            self.store.attach_server_keypair(id, keypair.id).await?;
         }
         let reconcile_state = self.journal.reconcile_once(request.operation_id).await?;
         if reconcile_state == o3k_store::OperationState::Failed {
@@ -518,7 +599,7 @@ impl ComputeService {
             }
             return Err(ComputeError::Conflict);
         }
-        self.show_server(project_id, id).await
+        self.show_server(&project_id, id).await
     }
 
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
@@ -526,12 +607,16 @@ impl ComputeService {
             .store
             .list_resources(project_id, "compute_instance")
             .await?;
-        resources
-            .into_iter()
-            .filter_map(|resource| server_from_resource(resource, &self.flavors()).ok())
-            .filter(|server| server.status != "DELETED")
-            .collect::<Vec<_>>()
-            .pipe(Ok)
+        let mut servers = Vec::new();
+        for resource in resources {
+            if let Ok(mut server) = server_from_resource(resource, &self.flavors()) {
+                if server.status != "DELETED" {
+                    server.key_name = self.store.get_server_keypair_name(server.id).await?;
+                    servers.push(server);
+                }
+            }
+        }
+        Ok(servers)
     }
 
     pub async fn show_server(&self, project_id: &str, id: Uuid) -> Result<Server, ComputeError> {
@@ -546,12 +631,95 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        let server = server_from_resource(resource, &self.flavors())
+        let mut server = server_from_resource(resource, &self.flavors())
             .map_err(|_| ComputeError::InvalidRequest)?;
         if server.status == "DELETED" {
             return Err(ComputeError::NotFound);
         }
+        server.key_name = self.store.get_server_keypair_name(server.id).await?;
         Ok(server)
+    }
+
+    pub async fn create_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: String,
+        public_key: String,
+    ) -> Result<Keypair, ComputeError> {
+        validate_keypair_name(&name)?;
+        let (key_type, fingerprint, public_key) =
+            o3k_store::validate_public_key(&public_key).map_err(ComputeError::Store)?;
+        let record = o3k_store::KeypairRecord {
+            id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:keypair:{user_id}:{project_id}:{name}").as_bytes(),
+            ),
+            user_id: user_id.to_owned(),
+            project_id: project_id.to_owned(),
+            name,
+            key_type,
+            public_key,
+            fingerprint,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| ComputeError::InvalidRequest)?
+                .as_secs()
+                .to_string(),
+        };
+        self.store
+            .insert_keypair(&record)
+            .await
+            .map_err(|error| match error {
+                StoreError::KeypairAlreadyExists => ComputeError::Conflict,
+                other => ComputeError::Store(other),
+            })?;
+        Ok(keypair_from_record(record))
+    }
+
+    pub async fn list_keypairs(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<Keypair>, ComputeError> {
+        Ok(self
+            .store
+            .list_keypairs(user_id, project_id)
+            .await?
+            .into_iter()
+            .map(keypair_from_record)
+            .collect())
+    }
+
+    pub async fn show_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<Keypair, ComputeError> {
+        self.store
+            .get_keypair(user_id, project_id, name)
+            .await
+            .map(keypair_from_record)
+            .map_err(|error| match error {
+                StoreError::KeypairNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })
+    }
+
+    pub async fn delete_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<(), ComputeError> {
+        self.store
+            .delete_keypair(user_id, project_id, name)
+            .await
+            .map_err(|error| match error {
+                StoreError::KeypairNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })
     }
 
     /// Returns the placement agent bound to a project-owned server.
@@ -585,6 +753,7 @@ impl ComputeService {
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
             self.release_placement_allocation(id, &intent)?;
+            self.store.detach_server_keypair(id).await?;
             return Ok(());
         }
         if resource.provider_id.is_none() {
@@ -610,6 +779,7 @@ impl ComputeService {
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         self.release_placement_allocation(id, &intent)?;
+        self.store.detach_server_keypair(id).await?;
         Ok(())
     }
 
@@ -719,15 +889,34 @@ fn server_from_resource(
         flavor_id: flavor.id,
         image_id: request.image_id.unwrap_or_default(),
         status: resource.observed_state.to_ascii_uppercase(),
+        key_name: None,
     })
 }
 
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
+fn validate_keypair_name(name: &str) -> Result<(), ComputeError> {
+    if name.is_empty()
+        || name.len() > 255
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(ComputeError::InvalidRequest);
+    }
+    Ok(())
+}
+
+fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
+    Keypair {
+        id: record.id,
+        user_id: record.user_id,
+        project_id: record.project_id,
+        name: record.name,
+        key_type: record.key_type,
+        public_key: record.public_key,
+        fingerprint: record.fingerprint,
+        created_at: record.created_at,
     }
 }
-impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
@@ -879,6 +1068,81 @@ mod tests {
             service.show_server("project-a", server.id).await,
             Err(ComputeError::NotFound)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keypair_crud_is_user_scoped_and_server_validation_precedes_provider()
+    -> Result<(), ComputeError> {
+        let service = service("keypairs").await?;
+        let public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test".to_owned();
+        let keypair = service
+            .create_keypair(
+                "user-a",
+                "project-a",
+                "test-key".to_owned(),
+                public_key.clone(),
+            )
+            .await?;
+        assert_eq!(service.list_keypairs("user-a", "project-a").await?.len(), 1);
+        assert!(matches!(
+            service
+                .show_keypair("user-b", "project-a", "test-key")
+                .await,
+            Err(ComputeError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .create_keypair("user-a", "project-a", "test-key".to_owned(), public_key)
+                .await,
+            Err(ComputeError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .create_server_for_user(ServerCreateInput {
+                    user_id: "user-a".to_owned(),
+                    project_id: "project-a".to_owned(),
+                    name: "server".to_owned(),
+                    image_id: "image".to_owned(),
+                    flavor_id: service.flavors()[0].id,
+                    network_ids: vec!["network".to_owned()],
+                    key_name: Some("missing".to_owned()),
+                    idempotency_key: "request".to_owned(),
+                })
+                .await,
+            Err(ComputeError::NotFound)
+        ));
+        let server = service
+            .create_server_for_user(ServerCreateInput {
+                user_id: "user-a".to_owned(),
+                project_id: "project-a".to_owned(),
+                name: "server".to_owned(),
+                image_id: "image".to_owned(),
+                flavor_id: service.flavors()[0].id,
+                network_ids: vec!["network".to_owned()],
+                key_name: Some("test-key".to_owned()),
+                idempotency_key: "request-2".to_owned(),
+            })
+            .await?;
+        assert_eq!(server.key_name.as_deref(), Some("test-key"));
+        assert_eq!(
+            service
+                .show_server("project-a", server.id)
+                .await?
+                .key_name
+                .as_deref(),
+            Some("test-key")
+        );
+        assert!(matches!(
+            service
+                .delete_keypair("user-a", "project-a", &keypair.name)
+                .await,
+            Err(ComputeError::Store(StoreError::KeypairInUse))
+        ));
+        service.delete_server("project-a", server.id).await?;
+        service
+            .delete_keypair("user-a", "project-a", &keypair.name)
+            .await?;
         Ok(())
     }
 
