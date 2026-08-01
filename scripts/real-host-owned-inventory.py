@@ -51,7 +51,7 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
             text=True,
         )
     except (OSError, UnicodeError, subprocess.SubprocessError):
-        LAST_FAILURE_REASON = f"command_unavailable:{args[0]}"
+        LAST_FAILURE_REASON = "command_unavailable:" + ":".join(args[:3])
         return None
     return result.stdout
 
