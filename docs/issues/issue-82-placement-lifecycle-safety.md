@@ -27,6 +27,13 @@ The duplicate-name pre-check now runs before scheduling as well as after it.
 The latter remains a race fence; the former avoids a reservation/release cycle
 for a conflict already visible in durable control-plane state.
 
+The `o3kd` daemon now opens a durable Placement ledger below its configured
+data directory and attaches one scheduler plus the authenticated-agent
+registry when the compute-agent control plane is configured. Production
+agent-backed create requests therefore use the same agent-eligibility and
+Placement path as the tested compute service, while the local fake profile
+without an agent control plane retains its standalone contract.
+
 ## Evidence
 
 - `o3k-placement` regression coverage forces the final publication rename to
@@ -41,6 +48,7 @@ for a conflict already visible in durable control-plane state.
   leave the provider generation and allocation set unchanged.
 - The normal workspace tests continue to cover idempotency, stale-generation
   fencing, rollback, restart persistence, and reported-usage reconciliation.
+- `cargo check -p o3kd` verifies the daemon wiring and dependency boundary.
 - No real OpenStack Placement service, agent-backed Nova lifecycle, or
   real-host acceptance is claimed.
 
