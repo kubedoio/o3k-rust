@@ -443,6 +443,7 @@ impl ComputeService {
             memory_mib: flavor.ram_mib,
             image_id: Some(image_id.clone()),
             key_name: key_name.clone(),
+            keypair_id: keypair.as_ref().map(|value| value.id),
             network_ids: network_ids.clone(),
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -633,7 +634,13 @@ impl ComputeService {
         if let Some(keypair) = keypair {
             self.store.attach_server_keypair(id, keypair.id).await?;
         }
-        let reconcile_state = self.journal.reconcile_once(request.operation_id).await?;
+        let reconcile_state = match self.journal.reconcile_once(request.operation_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                self.store.detach_server_keypair(id).await?;
+                return Err(ComputeError::Reconcile(error));
+            }
+        };
         if reconcile_state == o3k_store::OperationState::Failed {
             self.store.detach_server_keypair(id).await?;
             if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
@@ -1227,6 +1234,7 @@ mod tests {
             memory_mib: 512,
             image_id: Some("image-1".to_owned()),
             key_name: None,
+            keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -1275,6 +1283,7 @@ mod tests {
             memory_mib: 512,
             image_id: Some("image-1".to_owned()),
             key_name: None,
+            keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -1645,6 +1654,7 @@ mod tests {
             memory_mib: flavor.ram_mib,
             image_id: Some("image-1".to_owned()),
             key_name: None,
+            keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,

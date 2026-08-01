@@ -48,6 +48,7 @@ pub mod mapping {
             memory_mib: request.memory_mib,
             image_id: (!request.image_id.is_empty()).then_some(request.image_id),
             key_name: None,
+            keypair_id: None,
             network_ids: request.network_ids,
             placement_provider_id: None,
             placement_allocation_id: None,
