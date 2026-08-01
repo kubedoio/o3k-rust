@@ -13,8 +13,8 @@ The protected workflow inventory now:
   instead of accepting an empty resource set;
 - publishes inventory JSON atomically, preventing a partial write from being
   consumed as evidence;
-- records O3K-owned domain/provider identities, including public keypairs
-  created by the CLI acceptance harness, while representing foreign
+- records O3K-owned domain/provider identities for the currently exposed
+  public resource APIs, while representing foreign
   domain and non-O3K link state only as redacted SHA-256 digests;
 - records validated `o3k-*` network-link identities so leaked TAPs or bridges
   are included in the owned-resource delta;
@@ -43,3 +43,7 @@ TAPs, DHCP state, protected filesystem paths, ports, Placement allocations,
 operations, temporary files, and processes. No real-host evidence is claimed.
 
 Decision: [ADR-0095](../adr/ADR-0095-race-safe-resource-leak-evidence.md).
+
+Keypair inventory remains a follow-up because the current O3K public API does
+not expose a keypair endpoint; the guard does not treat that unsupported API
+as an empty clean inventory.
