@@ -30,6 +30,13 @@ durable journal record. A provider-operation UUID alone is not sufficient
 evidence: a mismatched or stale operation is rejected as invalid intent and
 cannot complete the resource transition.
 
+Create recovery uses the same observation boundary. A partial create returns a
+running provider operation with its resource reference, remains durable as a
+non-terminal journal operation, and records `BUILD` until a provider
+observation reports `RUNNING`. The journal then completes the existing
+operation without issuing another create. An observed provider error becomes a
+visible failed operation and `ERROR` resource state.
+
 The release-gate aggregate must also carry a non-empty evidence artifact
 identifier and checks list for every required failure-recovery scenario. A
 passed status without those references is not sufficient evidence shape.
@@ -37,8 +44,8 @@ passed status without those references is not sufficient evidence shape.
 ## Consequences
 
 - Repository tests cover timeout-after-action, duplicate delivery,
-  observation-based convergence, and rejection of foreign provider-operation
-  identities.
+  partial-create recovery without duplicate creation, observation-based
+  convergence, and rejection of foreign provider-operation identities.
 - Unknown actions are fail-closed when observation does not prove convergence;
   a later policy may create a fresh operation identity after an explicit
   recovery decision.
