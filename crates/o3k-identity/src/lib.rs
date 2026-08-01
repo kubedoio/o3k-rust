@@ -170,6 +170,7 @@ pub struct TokenService {
     project_name: String,
     signing_key: Secret,
     token_ttl: Duration,
+    catalog_endpoint: String,
 }
 
 impl TokenService {
@@ -196,7 +197,15 @@ impl TokenService {
             project_name,
             signing_key,
             token_ttl,
+            catalog_endpoint: "http://127.0.0.1:8080".to_owned(),
         })
+    }
+
+    /// Set the public base URL advertised in issued service catalogs.
+    #[must_use]
+    pub fn with_catalog_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.catalog_endpoint = endpoint.into().trim_end_matches('/').to_owned();
+        self
     }
 
     pub fn issue(
@@ -350,20 +359,25 @@ impl TokenService {
                     "identity",
                     "identity",
                     "identity",
-                    "http://127.0.0.1:8080/v3",
+                    &format!("{}/v3", self.catalog_endpoint),
                 ),
-                service("image", "image", "image", "http://127.0.0.1:8080/v2"),
+                service(
+                    "image",
+                    "image",
+                    "image",
+                    &format!("{}/v2", self.catalog_endpoint),
+                ),
                 service(
                     "network",
                     "network",
                     "network",
-                    "http://127.0.0.1:8080/v2.0",
+                    &format!("{}/v2.0", self.catalog_endpoint),
                 ),
                 service(
                     "compute",
                     "compute",
                     "compute",
-                    "http://127.0.0.1:8080/v2.1",
+                    &format!("{}/v2.1", self.catalog_endpoint),
                 ),
             ],
         }
@@ -529,6 +543,32 @@ mod tests {
         assert!(token.split('.').count() == 3);
         assert_eq!(response.token.project.id, "project-1");
         assert_eq!(service.verify(&token, now)?.user_id, "user-1");
+        Ok(())
+    }
+
+    #[test]
+    fn catalog_uses_configured_endpoint() -> Result<(), AuthError> {
+        let service = service()?.with_catalog_endpoint("http://127.0.0.1:18080/");
+        let (_, response) = service.issue(
+            &request("password"),
+            UNIX_EPOCH + Duration::from_secs(1_000),
+        )?;
+        let urls: Vec<_> = response
+            .token
+            .catalog
+            .iter()
+            .flat_map(|item| item.endpoints.iter())
+            .map(|endpoint| endpoint.url.as_str())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                "http://127.0.0.1:18080/v3",
+                "http://127.0.0.1:18080/v2",
+                "http://127.0.0.1:18080/v2.0",
+                "http://127.0.0.1:18080/v2.1",
+            ]
+        );
         Ok(())
     }
 
