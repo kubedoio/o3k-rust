@@ -269,6 +269,45 @@ where
         Ok(durable_state)
     }
 
+    /// Commits an authenticated command acceptance before the agent executes
+    /// the command. Duplicate acceptances are idempotent because the durable
+    /// operation is simply kept in `running` state.
+    pub async fn apply_agent_acceptance(
+        &self,
+        accepted: &agent_proto::CommandAccepted,
+    ) -> Result<OperationState, ReconcileError> {
+        let operation_id =
+            Uuid::parse_str(&accepted.operation_id).map_err(|_| ReconcileError::InvalidIntent)?;
+        let operation = self.store.get_operation(operation_id).await?;
+        if matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::Failed
+        ) {
+            return Ok(operation.state);
+        }
+        match agent_proto::OperationState::try_from(accepted.state)
+            .map_err(|_| ReconcileError::InvalidIntent)?
+        {
+            agent_proto::OperationState::Accepted | agent_proto::OperationState::Running => {}
+            _ => return Err(ReconcileError::InvalidIntent),
+        }
+        self.store
+            .update_operation(
+                operation_id,
+                OperationState::Running,
+                operation.provider_operation_id.as_deref(),
+                operation.error_category.as_deref(),
+                operation.error_message.as_deref(),
+            )
+            .await?;
+        self.event(
+            operation_id,
+            operation.resource_id,
+            JournalEventKind::ProviderStarted,
+        );
+        Ok(OperationState::Running)
+    }
+
     /// Applies the provider state carried by an authenticated agent
     /// observation. Operation updates describe command progress; observations
     /// are the only live input that may change the durable resource state.
@@ -1306,6 +1345,41 @@ mod tests {
         assert_eq!(
             operation.error_message.as_deref(),
             Some("agent operation failed")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_acceptance_is_durable_and_idempotent() -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-acceptance", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let accepted = agent_proto::CommandAccepted {
+            command_id: "command-1".to_owned(),
+            operation_id: operation_id.to_string(),
+            state: agent_proto::OperationState::Accepted as i32,
+            operation_sequence: 1,
+        };
+
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+        assert_eq!(
+            journal
+                .events()
+                .iter()
+                .filter(|event| event.operation_id == operation_id)
+                .count(),
+            3
         );
         Ok(())
     }
