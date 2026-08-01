@@ -23,7 +23,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
     let registry = o3k_compute_agent::NodeRegistry::default();
-    let compute_service = match config.provider {
+    let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
+        .map_err(|error| format!("open Placement ledger: {error}"))?;
+    let scheduler = o3k_scheduler::Scheduler::new(placement);
+    let mut compute_service = match config.provider {
         o3k_config::Provider::Libvirt => {
             return Err(o3k_config::ConfigError::DirectLibvirtProviderUnavailable.into());
         }
@@ -49,6 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             o3k_compute::ComputeService::new(store, Arc::new(provider))
         }
     };
+    let agent_control_enabled = config.compute_server_certificate.is_some()
+        && config.compute_server_private_key.is_some()
+        && config.compute_client_ca.is_some();
+    if agent_control_enabled {
+        compute_service = compute_service
+            .with_scheduler(scheduler)
+            .with_agent_registry(registry.clone());
+    }
     let compute_ready = match tokio::time::timeout(
         Duration::from_secs(5),
         compute_service.provider().capabilities(),
