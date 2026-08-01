@@ -287,8 +287,9 @@ for needle in ("workflow_dispatch:",
                "retention-days: 14"):
     assert needle in text, needle
 assert "if: github.ref == 'refs/heads/main'" in text
-assert "ref: refs/heads/main" in text
+assert "ref: ${{ github.sha }}" in text
 assert "persist-credentials: false" in text
+assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
