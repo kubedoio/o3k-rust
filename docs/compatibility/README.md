@@ -71,6 +71,12 @@ the corresponding executable contract, CLI, or protected-runner artifact.
 
 ## Contract harness
 
+The normative TestLab release contract is frozen in
+[`../specs/TESTLAB_API_BASELINE.md`](../specs/TESTLAB_API_BASELINE.md), with
+machine-readable rules in
+[`../specs/testlab-api-baseline.json`](../specs/testlab-api-baseline.json).
+Contract fixtures must reference operations classified as `required` there.
+
 [`contract-fixtures.json`](contract-fixtures.json) contains reviewed,
 implementation-neutral public HTTP expectations. Run the same fixtures against
 an available target with:
