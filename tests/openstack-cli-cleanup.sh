@@ -102,7 +102,7 @@ result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == sys.argv[2]
 assert result["resources"]["server_id"] == "server-id"
-assert result["resources"]["keypair_id"] == "keypair-id"
+assert result["resources"]["keypair_id"] == "o3k-testlab-keypair"
 PY
 }
 
@@ -116,7 +116,7 @@ import sys
 assert not (pathlib.Path(sys.argv[2]) / "console-error.log").exists()
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
-                "keypair delete keypair-id" "subnet delete subnet-id" \
+                "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
                 "network delete network-id" "image delete image-id"; do
   grep -Fq "${resource}" "${O3K_MOCK_LOG}"
 done

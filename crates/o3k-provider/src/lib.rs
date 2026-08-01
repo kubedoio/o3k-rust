@@ -26,6 +26,8 @@ pub struct CreateInstanceRequest {
     pub memory_mib: u64,
     pub image_id: Option<String>,
     #[serde(default)]
+    pub key_name: Option<String>,
+    #[serde(default)]
     pub network_ids: Vec<String>,
     #[serde(default)]
     pub placement_provider_id: Option<String>,
@@ -544,6 +546,7 @@ pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(
         vcpus: 1,
         memory_mib: 128,
         image_id: None,
+        key_name: None,
         network_ids: Vec::new(),
         placement_provider_id: None,
         placement_allocation_id: None,
@@ -576,6 +579,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: None,
+            key_name: None,
             network_ids: Vec::new(),
             placement_provider_id: None,
             placement_allocation_id: None,

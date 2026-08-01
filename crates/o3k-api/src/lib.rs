@@ -1198,6 +1198,11 @@ fn compute_error(error: ComputeError) -> axum::response::Response {
             "Conflict",
             "keypair is still attached to a server",
         ),
+        ComputeError::Store(o3k_store::StoreError::KeypairOwnershipConflict) => keystone_error(
+            StatusCode::CONFLICT,
+            "Conflict",
+            "keypair and server ownership do not match",
+        ),
         ComputeError::Store(o3k_store::StoreError::InvalidKeypair(_)) => {
             keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "invalid public key")
         }

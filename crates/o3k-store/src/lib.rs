@@ -139,6 +139,8 @@ pub enum StoreError {
     InvalidKeypair(String),
     #[error("keypair is still attached to a server")]
     KeypairInUse,
+    #[error("keypair and server ownership do not match")]
+    KeypairOwnershipConflict,
 }
 
 #[async_trait]
@@ -299,9 +301,11 @@ impl SqliteStore {
         project_id: &str,
         name: &str,
     ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let attached: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM server_keypairs WHERE keypair_id = (SELECT id FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?)")
-            .bind(user_id).bind(project_id).bind(name).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+            .bind(user_id).bind(project_id).bind(name).fetch_one(&mut *transaction).await.map_err(StoreError::Database)?;
         if attached > 0 {
+            transaction.rollback().await.map_err(StoreError::Database)?;
             return Err(StoreError::KeypairInUse);
         }
         let result =
@@ -309,9 +313,10 @@ impl SqliteStore {
                 .bind(user_id)
                 .bind(project_id)
                 .bind(name)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(StoreError::Database)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
             Err(StoreError::KeypairNotFound)
         } else {
@@ -324,6 +329,11 @@ impl SqliteStore {
         server_id: Uuid,
         keypair_id: Uuid,
     ) -> Result<(), StoreError> {
+        let owned: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resources JOIN keypairs ON keypairs.project_id = resources.project_id WHERE resources.id = ? AND keypairs.id = ?")
+            .bind(server_id.to_string()).bind(keypair_id.to_string()).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+        if owned != 1 {
+            return Err(StoreError::KeypairOwnershipConflict);
+        }
         sqlx::query("INSERT INTO server_keypairs (server_id, keypair_id) VALUES (?, ?)")
             .bind(server_id.to_string())
             .bind(keypair_id.to_string())

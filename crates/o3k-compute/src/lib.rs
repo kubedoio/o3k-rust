@@ -442,6 +442,7 @@ impl ComputeService {
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
             image_id: Some(image_id.clone()),
+            key_name: key_name.clone(),
             network_ids: network_ids.clone(),
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -1135,6 +1136,21 @@ mod tests {
         );
         assert!(matches!(
             service
+                .create_server_for_user(ServerCreateInput {
+                    user_id: "user-a".to_owned(),
+                    project_id: "project-a".to_owned(),
+                    name: "server".to_owned(),
+                    image_id: "image".to_owned(),
+                    flavor_id: service.flavors()[0].id,
+                    network_ids: vec!["network".to_owned()],
+                    key_name: None,
+                    idempotency_key: "request-2".to_owned(),
+                })
+                .await,
+            Err(ComputeError::Conflict)
+        ));
+        assert!(matches!(
+            service
                 .delete_keypair("user-a", "project-a", &keypair.name)
                 .await,
             Err(ComputeError::Store(StoreError::KeypairInUse))
@@ -1157,6 +1173,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             image_id: Some("image-1".to_owned()),
+            key_name: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -1204,6 +1221,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 512,
             image_id: Some("image-1".to_owned()),
+            key_name: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
@@ -1573,6 +1591,7 @@ mod tests {
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
             image_id: Some("image-1".to_owned()),
+            key_name: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,

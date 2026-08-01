@@ -47,6 +47,7 @@ pub mod mapping {
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
             image_id: (!request.image_id.is_empty()).then_some(request.image_id),
+            key_name: None,
             network_ids: request.network_ids,
             placement_provider_id: None,
             placement_allocation_id: None,

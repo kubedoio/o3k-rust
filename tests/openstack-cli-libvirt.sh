@@ -339,7 +339,8 @@ KEYPAIR_NAME=o3k-testlab-keypair
 ssh-keygen -q -t ed25519 -N '' -C o3k-testlab -f "${DATA_DIR}/o3k-testlab-keypair" >/dev/null
 chmod 0600 "${DATA_DIR}/o3k-testlab-keypair"
 chmod 0644 "${KEYPAIR_PUBLIC_KEY}"
-KEYPAIR_ID="$(openstack keypair create --public-key "${KEYPAIR_PUBLIC_KEY}" "${KEYPAIR_NAME}" -f value -c id)"
+openstack keypair create --public-key "${KEYPAIR_PUBLIC_KEY}" "${KEYPAIR_NAME}" >/dev/null
+KEYPAIR_ID="${KEYPAIR_NAME}"
 CREATED_KEYPAIR_ID="${KEYPAIR_ID}"
 CLEANUP_KEYPAIR_STATUS=pending
 NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"

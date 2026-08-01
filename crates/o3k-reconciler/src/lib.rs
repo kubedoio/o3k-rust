@@ -1084,6 +1084,7 @@ mod tests {
             vcpus: 1,
             memory_mib: 128,
             image_id: None,
+            key_name: None,
             network_ids: Vec::new(),
             placement_provider_id: None,
             placement_allocation_id: None,
