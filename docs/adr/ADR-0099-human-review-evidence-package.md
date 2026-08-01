@@ -19,9 +19,10 @@ Define a versioned `human-architecture-security-review` JSON artifact and a
 threat-model checklist covering the privileged and security-critical surfaces
 listed by issue #92. Validate it with
 `packaging/validate-human-review.sh`. Validation is fail-closed for missing
-independent-review identity, scope, findings/dispositions, commit binding,
-review record URL, unresolved-risk disclosure, and explicit approvals. A
-release invocation must additionally pass `--require-approved`.
+independent-review identity, complete threat-model scope,
+findings/dispositions, commit binding, review record URL, unresolved-risk
+disclosure, and explicit approvals. A release invocation must additionally
+pass `--require-approved`.
 
 The repository does not generate or commit a `human-review.json` artifact.
 The validator checks declarations and structure, not the truth of a person's
