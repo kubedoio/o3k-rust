@@ -33,7 +33,7 @@ for workflow in pathlib.Path(sys.argv[1]).parent.glob("*.y*ml"):
             assert re.search(r"uses:\s+[^\s]+@[0-9a-f]{40}(?:\s+#.*)?$", line), line
 real_host = pathlib.Path(sys.argv[1]).parent / "real-host-validation.yml"
 real_host_text = real_host.read_text(encoding="utf-8")
-assert "if: github.ref == 'refs/heads/main'" in real_host_text
+assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in real_host_text
 assert "target/real-host-workflow-artifacts/console.log" not in real_host_text
 assert "target/real-host-workflow-artifacts/server-show.json" not in real_host_text
 assert "target/real-host-workflow-artifacts/openstack-cli-result.json" in real_host_text
