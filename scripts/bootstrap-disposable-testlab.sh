@@ -14,6 +14,7 @@ SOURCE_COMMIT="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
+INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
 SERVICE_ACCOUNT=o3k
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 APT_LOCK=/run/lock/o3k-testlab-apt.lock
@@ -118,6 +119,10 @@ failure_cleanup() {
         sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
       fi
       rm -rf -- "$PID_ROOT" 2>/dev/null || true
+      if [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+        && grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" 2>/dev/null; then
+        rm -rf -- "$INVENTORY_ROOT" 2>/dev/null || true
+      fi
       remove_created_identity 2>/dev/null || true
     else
       echo "disposable TestLab cleanup incomplete; preserving owned state for retry" >&2
@@ -140,12 +145,15 @@ sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is 
 for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
   ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
 done
-for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids"; do
+for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids" \
+  "${RUNNER_TEMP}/o3k-testlab-inventory"; do
   if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
     fail "run state parent is not an owned directory: ${parent}"
   fi
 done
 if [[ ! -e "$STATE_ROOT" ]]; then
+  [[ ! -e "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+    || fail "run inventory state already exists without matching service state"
   for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
     if ss -H -ltn 2>/dev/null | awk -v suffix=":${port}" \
       'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit !found}'; then
@@ -166,6 +174,10 @@ if [[ -e "$STATE_ROOT" ]]; then
     || fail "existing run state has a foreign ownership marker"
   grep -Fqx "commit=$SOURCE_COMMIT" <<<"$marker" \
     || fail "existing run state belongs to a different source commit"
+  [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+    || fail "existing run state has no inventory state"
+  grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
+    || fail "existing inventory state is not owned by this bootstrap"
   PASSWORD="$(sudo -n cat "$STATE_ROOT/.password" 2>/dev/null)" \
     || fail "existing run state has no readable protected password"
   [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] \
@@ -204,7 +216,12 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
         genisoimage python3-venv pkg-config libvirt-dev
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
-install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}"
+install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}" "${INVENTORY_ROOT%/*}"
+[[ ! -e "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] || fail "run inventory state already exists"
+install -d -m 0755 "$INVENTORY_ROOT"
+printf 'o3k-disposable-inventory-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" \
+  >"$INVENTORY_ROOT/.o3k-inventory-owned"
+chmod 0644 "$INVENTORY_ROOT/.o3k-inventory-owned"
 account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
   set -euo pipefail
   group_created=false
@@ -369,7 +386,8 @@ openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenSta
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
-printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_OPENSTACK_VENV=%s\n' "$STATE_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \
+  "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
 printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\n' \
   "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
 write_result passed authenticated

@@ -12,14 +12,19 @@ RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
   || { echo "cleanup: account lock directory is unavailable" >&2; exit 1; }
 EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
+EXPECTED_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-$EXPECTED_ROOT}"
+INVENTORY_ROOT="${O3K_REAL_HOST_INVENTORY_ROOT:-$EXPECTED_INVENTORY_ROOT}"
 PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}}"
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-}"
 [[ "$STATE_ROOT" == "$EXPECTED_ROOT" ]] || { echo "cleanup: state root is not run-owned" >&2; exit 1; }
+[[ "$INVENTORY_ROOT" == "$EXPECTED_INVENTORY_ROOT" ]] \
+  || { echo "cleanup: inventory root is not run-owned" >&2; exit 1; }
 [[ "$PID_ROOT" == "${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}" ]] \
   || { echo "cleanup: pid root is not run-owned" >&2; exit 1; }
-for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids"; do
+for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids" \
+  "${RUNNER_TEMP}/o3k-testlab-inventory"; do
   if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
     echo "cleanup: run state parent is not an owned directory" >&2
     exit 1
@@ -38,6 +43,13 @@ if [[ -n "$IMAGE_PATH" ]]; then
     || { echo "cleanup: image path is not run-owned" >&2; exit 1; }
 fi
 if [[ ! -e "$STATE_ROOT" ]]; then
+  if [[ -e "$INVENTORY_ROOT" ]]; then
+    [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+      || { echo "cleanup: inventory root is not a real directory" >&2; exit 1; }
+    grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
+      || { echo "cleanup: inventory ownership marker is invalid" >&2; exit 1; }
+    rm -rf -- "$INVENTORY_ROOT"
+  fi
   [[ -z "$OPENSTACK_VENV" || ! -e "$OPENSTACK_VENV" ]] || rm -rf -- "$OPENSTACK_VENV"
   [[ -z "$IMAGE_PATH" || ! -e "$IMAGE_PATH" ]] || rm -f -- "$IMAGE_PATH"
   echo "disposable TestLab cleanup: no state to remove"
@@ -142,6 +154,13 @@ if [[ "$account_created" == true || "$group_created" == true ]]; then
 fi
 sudo -n rm -rf -- "$STATE_ROOT"
 rm -rf -- "$PID_ROOT"
+if [[ -e "$INVENTORY_ROOT" ]]; then
+  [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
+    || { echo "cleanup: inventory root is not a real directory" >&2; exit 1; }
+  grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" \
+    || { echo "cleanup: inventory ownership marker is invalid" >&2; exit 1; }
+  rm -rf -- "$INVENTORY_ROOT"
+fi
 if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
   rm -rf -- "$OPENSTACK_VENV"
 fi
