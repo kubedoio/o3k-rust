@@ -61,6 +61,8 @@ jobs:
         run: bash tests/program-tracker.sh
       - name: Test capability inventory generation
         run: bash tests/capability-inventory.sh
+      - name: Test normative TestLab API baseline
+        run: bash tests/testlab-api-baseline.sh
       - name: Test cross-implementation contract harness
         run: bash tests/compatibility-harness.sh
       - name: Test OpenStack CLI failure cleanup

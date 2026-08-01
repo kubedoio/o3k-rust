@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "status": "normative",
+  "release": "v0.2.0-testlab",
+  "source_policy": {
+    "official": [
+      "https://docs.openstack.org/api-ref/identity/v3/",
+      "https://docs.openstack.org/api-ref/image/v2/index.html",
+      "https://docs.openstack.org/api-ref/network/v2/index.html",
+      "https://docs.openstack.org/api-ref/compute/",
+      "https://docs.openstack.org/api-ref/placement/"
+    ],
+    "client_versions": {
+      "python-openstackclient": "10.2.1",
+      "openstacksdk": "4.17.0"
+    }
+  },
+  "workflow": [
+    "identity.token_password_scoped",
+    "image.collection_create",
+    "image.member_upload",
+    "image.collection_list",
+    "network.network_collection_create",
+    "network.subnet_collection_create",
+    "network.port_collection_create",
+    "compute.flavor_collection_list",
+    "compute.flavor_collection_detail",
+    "compute.keypair_collection_import",
+    "compute.server_collection_create",
+    "compute.server_member_show",
+    "compute.server_member_delete",
+    "network.port_member_delete",
+    "network.subnet_member_delete",
+    "network.network_member_delete",
+    "image.member_delete"
+  ],
+  "policies": {
+    "project_paths": {
+      "rule": "The authenticated project is authoritative. A project path that differs from the token project is not cross-project access.",
+      "mismatch_status": 404,
+      "missing_project_status": 400
+    },
+    "microversions": {
+      "nova_baseline": "2.1",
+      "client_rule": "Baseline clients omit X-OpenStack-Nova-API-Version.",
+      "requested_above_baseline": 406,
+      "negotiation_required": false
+    },
+    "extensions": {
+      "rule": "Only extensions named by an operation in this document are supported; unknown extensions are rejected predictably.",
+      "unknown_status": 404
+    },
+    "errors": {
+      "content_type": "application/json",
+      "envelope": {
+        "required_top_level": "error",
+        "required_fields": ["code", "title", "message"],
+        "field_types": {"code": "integer", "title": "string", "message": "string"}
+      },
+      "status_meanings": {
+        "400": "invalid request",
+        "401": "missing or invalid authentication",
+        "403": "authenticated but not authorized",
+        "404": "resource absent or project boundary concealed",
+        "405": "method not part of the baseline",
+        "409": "conflict with current resource state",
+        "413": "request or image payload too large",
+        "406": "unsupported requested microversion"
+      },
+      "security": "Error messages contain no tokens, passwords, private keys, provider credentials, or unredacted provider payloads."
+    }
+  },
+  "operations": [
+    {"id": "identity.token_password_scoped", "status": "required", "success": [201], "errors": [400, 401, 403], "issue": 290},
+    {"id": "image.collection_create", "status": "required", "success": [201], "errors": [400, 401, 403, 409], "issue": 291},
+    {"id": "image.member_upload", "status": "required", "success": [204], "errors": [400, 401, 403, 404, 409, 413], "issue": 79},
+    {"id": "image.collection_list", "status": "required", "success": [200], "errors": [401, 403], "issue": 291},
+    {"id": "image.member_download", "status": "required", "success": [200], "errors": [401, 403, 404], "issue": 79},
+    {"id": "image.member_delete", "status": "required", "success": [204], "errors": [401, 403, 404, 409], "issue": 291},
+    {"id": "network.network_collection_create", "status": "required", "success": [201], "errors": [400, 401, 403, 409], "issue": 292},
+    {"id": "network.subnet_collection_create", "status": "required", "success": [201], "errors": [400, 401, 403, 404, 409], "issue": 292},
+    {"id": "network.port_collection_create", "status": "required", "success": [201], "errors": [400, 401, 403, 404, 409], "issue": 81},
+    {"id": "network.port_member_delete", "status": "required", "success": [204], "errors": [401, 403, 404, 409], "issue": 81},
+    {"id": "network.subnet_member_delete", "status": "required", "success": [204], "errors": [401, 403, 404, 409], "issue": 292},
+    {"id": "network.network_member_delete", "status": "required", "success": [204], "errors": [401, 403, 404, 409], "issue": 292},
+    {"id": "compute.flavor_collection_list", "status": "required", "success": [200], "errors": [401, 403, 404, 405], "issue": 293, "evidence": "protected GET currently returns 405; this is a planned Nova gap, not permission to change the contract."},
+    {"id": "compute.flavor_collection_detail", "status": "required", "success": [200], "errors": [401, 403, 404, 405], "issue": 293},
+    {"id": "compute.flavor_member_show", "status": "required", "success": [200], "errors": [401, 403, 404], "issue": 293},
+    {"id": "compute.flavor_collection_create", "status": "unsupported", "success": [], "errors": [405], "issue": 293},
+    {"id": "compute.keypair_collection_import", "status": "required", "success": [200, 201], "errors": [400, 401, 403, 409], "issue": 293, "evidence": "protected contract fixture covers import and cleanup."},
+    {"id": "compute.keypair_collection_list", "status": "required", "success": [200], "errors": [401, 403], "issue": 293},
+    {"id": "compute.keypair_member_show", "status": "required", "success": [200], "errors": [401, 403, 404], "issue": 293},
+    {"id": "compute.keypair_member_delete", "status": "required", "success": [204], "errors": [401, 403, 404], "issue": 293},
+    {"id": "compute.server_collection_create", "status": "required", "success": [202], "errors": [400, 401, 403, 404, 409], "issue": 293},
+    {"id": "compute.server_collection_list", "status": "required", "success": [200], "errors": [401, 403], "issue": 293},
+    {"id": "compute.server_member_show", "status": "required", "success": [200], "errors": [401, 403, 404], "issue": 293},
+    {"id": "compute.server_member_delete", "status": "required", "success": [204], "errors": [401, 403, 404, 409], "issue": 293},
+    {"id": "compute.server_member_actions", "status": "required", "success": [202], "errors": [400, 401, 403, 404, 409], "issue": 293},
+    {"id": "placement.provider_collection_list", "status": "optional", "success": [200], "errors": [401, 403, 404], "issue": 82},
+    {"id": "placement.provider_member_show", "status": "optional", "success": [200], "errors": [401, 403, 404], "issue": 82},
+    {"id": "placement.inventory_member_show", "status": "optional", "success": [200], "errors": [401, 403, 404], "issue": 82},
+    {"id": "placement.allocation_candidates_list", "status": "optional", "success": [200], "errors": [400, 401, 403, 404], "issue": 82},
+    {"id": "placement.allocation_member_set", "status": "optional", "success": [204], "errors": [400, 401, 403, 404, 409], "issue": 82}
+  ],
+  "inventory_scope": {
+    "source": "docs/compatibility/capability-inventory.json",
+    "rule": "Every inventory operation must be classified here before it is advertised or added to a contract fixture.",
+    "unlisted_status": "unsupported"
+  },
+  "issue_map": {
+    "78": "dispatch and operation identity",
+    "79": "real Glance content",
+    "80": "config-drive",
+    "81": "real Neutron ports",
+    "82": "Placement",
+    "83": "domain and project lifecycle",
+    "84": "console output",
+    "85": "reconciliation",
+    "86": "complete CLI",
+    "87": "failure-path testing",
+    "88": "secret and error leak audit",
+    "89": "Ubuntu packaging",
+    "90": "Debian packaging",
+    "91": "benchmark and soak evidence",
+    "92": "human compatibility review",
+    "93": "release gate",
+    "290": "Keystone token baseline",
+    "291": "Glance baseline",
+    "292": "Neutron baseline",
+    "293": "Nova baseline"
+  }
+}

@@ -22,16 +22,21 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE_PATH = ROOT / "docs/compatibility/contract-fixtures.json"
 INVENTORY_PATH = ROOT / "docs/compatibility/capability-inventory.json"
+BASELINE_PATH = ROOT / "docs/specs/testlab-api-baseline.json"
 
 
 def load_fixtures() -> dict[str, Any]:
     source = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     inventory = json.loads(INVENTORY_PATH.read_text(encoding="utf-8"))
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     for client, version in source.get("client_versions", {}).items():
         source_url = source.get("client_sources", {}).get(client, "")
         if not version or not source_url.startswith("https://pypi.org/project/"):
             raise ValueError(f"client {client} lacks a pinned public source")
     inventory_ids = {entry["id"] for entry in inventory["operations"]}
+    baseline_operations = {
+        entry["id"]: entry for entry in baseline.get("operations", [])
+    }
     fixtures = source.get("fixtures")
     if not isinstance(fixtures, list) or not fixtures:
         raise ValueError("contract fixtures must be a non-empty array")
@@ -43,6 +48,8 @@ def load_fixtures() -> dict[str, Any]:
         seen.add(fixture_id)
         if fixture_id not in inventory_ids:
             raise ValueError(f"fixture {fixture_id} is absent from capability inventory")
+        if baseline_operations.get(fixture_id, {}).get("status") != "required":
+            raise ValueError(f"fixture {fixture_id} is not required by the normative baseline")
         if fixture.get("method") not in {"DELETE", "GET", "POST", "PUT"}:
             raise ValueError(f"fixture {fixture_id} has invalid method")
         if not isinstance(fixture.get("path"), str) or not fixture["path"].startswith("/"):
