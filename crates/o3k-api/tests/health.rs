@@ -487,6 +487,15 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     assert_eq!(flavors.status(), StatusCode::OK);
     let flavor_json: Value =
         serde_json::from_slice(&axum::body::to_bytes(flavors.into_body(), 4096).await?)?;
+    let detailed_flavors = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.1/bootstrap-project/flavors/detail")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(detailed_flavors.status(), StatusCode::OK);
     let flavor_id = flavor_json["flavors"][0]["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("flavor missing"))?;
