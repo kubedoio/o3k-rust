@@ -52,6 +52,18 @@ for invalid_version in '../../../o3k-release-escape' '1.2.3/escape' '1.2.3 bad' 
 done
 rm -f -- "$ESCAPE_SENTINEL"
 
+DIST_TARGET="$WORK_DIR/dist-target"
+DIST_LINK="$WORK_DIR/dist-link"
+mkdir -p "$DIST_TARGET"
+ln -s "$DIST_TARGET" "$DIST_LINK"
+if O3K_RELEASE_DIST_DIR="$DIST_LINK" CARGO_MARKER="$WORK_DIR/symlink-dist-cargo" \
+    PATH="$CARGO_DIR:$PATH" bash "$ROOT_DIR/packaging/make-release.sh" 0.0-symlink-dist fake; then
+  echo "release builder accepted a symlinked dist root" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/symlink-dist-cargo" ]]
+[[ -z "$(find "$DIST_TARGET" -mindepth 1 -print -quit)" ]]
+
 PREFIX="$WORK_DIR/prefix"
 CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
   --profile fake --noninteractive \

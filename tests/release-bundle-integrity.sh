@@ -33,4 +33,11 @@ if bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR"; then
   exit 1
 fi
 
+rm "$BUNDLE_DIR/bin/linked-o3kd"
+mkfifo "$BUNDLE_DIR/docs/unlisted-pipe"
+if bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$BUNDLE_DIR"; then
+  echo "bundle verifier accepted a special file" >&2
+  exit 1
+fi
+
 echo "release bundle integrity tests passed"

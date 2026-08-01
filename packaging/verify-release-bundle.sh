@@ -6,6 +6,7 @@ BUNDLE_DIR="${1:?usage: verify-release-bundle.sh BUNDLE_DIR}"
 
 python3 - "$BUNDLE_DIR" <<'PY'
 import pathlib
+import stat
 import subprocess
 import sys
 
@@ -17,9 +18,12 @@ if not checksums.is_file() or checksums.is_symlink():
 files = set()
 for path in bundle.rglob("*"):
     relative = path.relative_to(bundle)
-    if path.is_symlink():
+    mode = path.lstat().st_mode
+    if stat.S_ISLNK(mode):
         raise SystemExit(f"release bundle must not contain symlinks: {relative}")
-    if path.is_file() and path != checksums:
+    if not stat.S_ISREG(mode) and not stat.S_ISDIR(mode):
+        raise SystemExit(f"release bundle must not contain special files: {relative}")
+    if stat.S_ISREG(mode) and path != checksums:
         files.add(f"./{relative.as_posix()}")
 
 entries = {}

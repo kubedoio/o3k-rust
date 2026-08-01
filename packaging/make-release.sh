@@ -13,7 +13,13 @@ if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   echo "release source tree must be clean before packaging" >&2
   exit 2
 fi
-OUT_DIR="$ROOT_DIR/dist/o3k-$VERSION"
+DIST_ROOT="${O3K_RELEASE_DIST_DIR:-$ROOT_DIR/dist}"
+if [[ -L "$DIST_ROOT" || ( -e "$DIST_ROOT" && ! -d "$DIST_ROOT" ) ]]; then
+  echo "release dist root must be a real directory, not a symlink or special file" >&2
+  exit 2
+fi
+mkdir -p -- "$DIST_ROOT"
+OUT_DIR="$DIST_ROOT/o3k-$VERSION"
 cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
 if [[ "$PROFILE" == libvirt ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute; fi
 rm -rf -- "$OUT_DIR"
