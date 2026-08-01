@@ -336,7 +336,7 @@ start_service() {
         child="$candidate"
         break
       fi
-    done < <(sudo -n pgrep -P "$supervisor" -u "$SERVICE_ACCOUNT" 2>/dev/null || true)
+    done < <(sudo -n pgrep -u "$SERVICE_ACCOUNT" -x "$(basename "$binary")" 2>/dev/null || true)
     [[ -n "$child" ]] && break
     sudo -n kill -0 "$supervisor" 2>/dev/null || break
     sleep 0.1
