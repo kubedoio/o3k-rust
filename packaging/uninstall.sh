@@ -8,12 +8,35 @@ PURGE=0
 CONFIRM=0
 while (($#)); do case "$1" in --prefix) PREFIX="$2"; shift 2;; --data-dir) DATA_DIR="$2"; shift 2;; --config-dir) CONFIG_DIR="$2"; shift 2;; --log-dir) LOG_DIR="$2"; shift 2;; --purge) PURGE=1; shift;; --yes) CONFIRM=1; shift;; *) echo "unknown option: $1" >&2; exit 2;; esac; done
 [[ $PURGE -eq 0 || $CONFIRM -eq 1 ]] || { echo "--purge requires --yes" >&2; exit 2; }
+validate_path() {
+  local name="$1" path="$2"
+  [[ -n "$path" && "$path" == /* && "$path" != / ]] || {
+    echo "$name must be an absolute non-root path: $path" >&2
+    exit 2
+  }
+  local current=/ component
+  while IFS= read -r component; do
+    [[ -n "$component" ]] || continue
+    case "$component" in
+      .|..)
+        echo "$name must not contain lexical dot components: $path" >&2
+        exit 2
+        ;;
+    esac
+    current="$current/$component"
+    if [[ -L "$current" ]]; then
+      echo "refusing symlink uninstall path for $name: $path" >&2
+      exit 2
+    fi
+  done < <(tr '/' '\n' <<< "${path#/}")
+}
+validate_path prefix "$PREFIX"
 owned_marker() { [[ -f "$1/.o3k-owned" && ! -L "$1/.o3k-owned" ]] && grep -Fqx "o3k-owned-v1 path=$1" "$1/.o3k-owned"; }
 SYSTEM_INSTALL=0
 if [[ "$PREFIX" == /usr/local && "$DATA_DIR" == /var/lib/o3k && "$CONFIG_DIR" == /etc/o3k && "$LOG_DIR" == /var/log/o3k ]]; then SYSTEM_INSTALL=1; fi
 if [[ $PURGE -eq 1 ]]; then
   for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do
-    [[ -n "$path" && "$path" == /* && "$path" != / ]] || { echo "refusing unsafe purge path" >&2; exit 2; }
+    validate_path purge-target "$path"
     if [[ -e "$path" ]] && ! owned_marker "$path"; then
       echo "refusing purge of unowned path: $path" >&2
       exit 2
