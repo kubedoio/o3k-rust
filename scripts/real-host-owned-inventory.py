@@ -28,7 +28,7 @@ RESOURCE_COMMANDS = {
     "image": ("image", "list", "--name", "o3k-testlab-image", "-f", "value", "-c", "ID"),
     "network": ("network", "list", "--name", "o3k-testlab-network", "-f", "value", "-c", "ID"),
     "subnet": ("subnet", "list", "--name", "o3k-testlab-subnet", "-f", "value", "-c", "ID"),
-    "flavor": ("flavor", "list", "--name", "o3k-testlab-flavor", "-f", "value", "-c", "ID"),
+    "flavor": ("flavor", "list", "-f", "json"),
 }
 LAST_FAILURE_REASON = "inventory_collection_failed"
 
@@ -192,11 +192,21 @@ def snapshot() -> dict[str, object] | None:
             output = command(("openstack", *RESOURCE_COMMANDS[resource]), scrub_provider_config=True)
             if output is None:
                 return None
-            values = []
-            for value in (line.strip() for line in output.splitlines() if line.strip()):
-                if SAFE_ID.fullmatch(value) is None:
+            if resource == "flavor" and output.strip():
+                try:
+                    flavor_records = json.loads(output)
+                except json.JSONDecodeError:
                     return None
-                values.append(value)
+                values = [
+                    record["ID"]
+                    for record in flavor_records
+                    if record.get("Name") == "o3k-testlab-flavor"
+                    and isinstance(record.get("ID"), str)
+                ]
+            else:
+                values = [line.strip() for line in output.splitlines() if line.strip()]
+            if any(SAFE_ID.fullmatch(value) is None for value in values):
+                return None
             resources[resource] = sorted(set(values))
     else:
         resources = {resource: [] for resource in RESOURCES}
