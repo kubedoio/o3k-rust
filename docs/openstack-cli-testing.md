@@ -6,7 +6,7 @@ Run the end-to-end workflow only against an explicitly provisioned TestLab:
 O3K_TESTLAB_PROFILE=libvirt \
 O3K_TESTLAB_IMAGE_PATH=/path/to/cirros.img \
 OS_AUTH_URL=https://control.example/v3 \
-OS_USERNAME=admin OS_PASSWORD='...' OS_PROJECT_NAME=bootstrap-project \
+OS_USERNAME=admin OS_PASSWORD='...' OS_PROJECT_NAME=admin \
   bash tests/openstack-cli-libvirt.sh
 ```
 

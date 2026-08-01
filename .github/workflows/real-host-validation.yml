@@ -28,32 +28,34 @@ jobs:
       - name: Verify immutable source checkout
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
-      - name: Prepare protected TestLab dependencies
+      - name: Bootstrap disposable TestLab
+        id: bootstrap
         continue-on-error: true
         env:
-          O3K_PASSWORD_FILE: ${{ vars.O3K_PASSWORD_FILE || '/etc/o3k/o3kd.env' }}
-          O3K_OPENSTACK_VERSION: 10.2.1
-          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
-        run: bash scripts/real-host-bootstrap.sh
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+        run: bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Download and verify CirrOS image
+        if: steps.bootstrap.outcome == 'success'
         continue-on-error: true
         env:
           CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
           CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
         run: |
-          printf 'O3K_TESTLAB_IMAGE_PATH=\n' >> "${GITHUB_ENV}"
           image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.XXXXXX")"
+          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
+          printf 'O3K_REAL_HOST_PROTECTED_PATHS<<O3K_PATHS_EOF\n%s\n%s\nO3K_PATHS_EOF\n' \
+            "${O3K_REAL_HOST_PROTECTED_PATHS}" "${image_path}" >> "${GITHUB_ENV}"
           curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
             --proto '=https' --tlsv1.2 \
             --output "${image_path}" "${CIRROS_IMAGE_URL}"
           printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" \
             | sha256sum --check --strict --status
           chmod 0644 "${image_path}"
-          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
 
       - name: Probe runner capabilities
         id: capabilities
+        if: steps.bootstrap.outcome == 'success'
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
@@ -65,6 +67,7 @@ jobs:
 
       - name: Pre-run host and trust guard
         id: guard
+        if: always()
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
@@ -76,10 +79,6 @@ jobs:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
-          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
-          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
-          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
-          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
         run: bash scripts/real-host-pre-run-guard.sh
 
       - name: Run public real-host lifecycle
@@ -91,10 +90,6 @@ jobs:
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
-          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
-          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
-          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
-          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
         run: bash tests/testlab-libvirt.sh
 
       - name: Post-run result guard
@@ -102,12 +97,12 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
-          OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
-          OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
-          OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
-          OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
+
+      - name: Stop and remove disposable TestLab
+        if: always()
+        run: bash scripts/cleanup-disposable-testlab.sh
 
       - name: Upload redacted real-host artifacts
         if: always()
@@ -116,11 +111,12 @@ jobs:
           name: real-host-workflow-artifacts
           path: |
             target/real-host-workflow-artifacts/runner-capabilities.json
+            target/real-host-workflow-artifacts/disposable-testlab-bootstrap.json
             target/real-host-workflow-artifacts/real-host-owned-inventory-baseline.json
             target/real-host-workflow-artifacts/real-host-owned-inventory-after.json
             target/real-host-workflow-artifacts/real-host-workflow-result.json
             target/real-host-workflow-artifacts/resource-leak-result.json
             target/real-host-workflow-artifacts/libvirt-result.json
             target/real-host-workflow-artifacts/openstack-cli-result.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
