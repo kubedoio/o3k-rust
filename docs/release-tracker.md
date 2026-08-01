@@ -196,4 +196,11 @@ artifacts; it does not provide a runner, host evidence, or issue closure.
 ADR-0114 records that successful compute-agent command results all emit a
 protocol observation, while explicitly limiting the issue #78 slice to
 evidence completeness; it does not claim the full `o3kd` lifecycle adapter or
-real mTLS execution.
+real mTLS execution. ADR-0134 records daemon Placement/scheduler wiring while
+preserving the standalone fake-provider profile; it does not substitute for
+agent inventory or host scheduling evidence. ADR-0135 records cleanup of
+stale image-overlay publication temporaries on restart. ADR-0136 records
+release output-root and bundle special-file fences. ADR-0137 records the
+default SBOM output-root fence. ADR-0138 records exclusive ownership of
+measurement artifact directories. Each remains a repository safety decision,
+not host, publication, or independent-human evidence.
