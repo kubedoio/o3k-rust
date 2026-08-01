@@ -18,8 +18,6 @@ jobs:
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
-    env:
-      O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}
     steps:
       - name: Check out the canonical repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -29,6 +27,14 @@ jobs:
 
       - name: Verify immutable source checkout
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Prepare protected TestLab dependencies
+        continue-on-error: true
+        env:
+          O3K_PASSWORD_FILE: ${{ vars.O3K_PASSWORD_FILE || '/etc/o3k/o3kd.env' }}
+          O3K_OPENSTACK_VERSION: 10.2.1
+          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+        run: bash scripts/real-host-bootstrap.sh
 
       - name: Download and verify CirrOS image
         continue-on-error: true
@@ -52,7 +58,6 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
-          O3K_REAL_HOST_SERVICE_ACCOUNT: ${{ vars.O3K_REAL_HOST_SERVICE_ACCOUNT || 'o3k-testlab' }}
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_SHA: ${{ github.sha }}
@@ -75,7 +80,6 @@ jobs:
           OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
           OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
           OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
-          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
         run: bash scripts/real-host-pre-run-guard.sh
 
       - name: Run public real-host lifecycle
@@ -86,7 +90,6 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
-          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
           OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
           OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
@@ -103,7 +106,6 @@ jobs:
           OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
           OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
           OS_REGION_NAME: ${{ vars.O3K_TESTLAB_REGION || 'RegionOne' }}
-          OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
 
