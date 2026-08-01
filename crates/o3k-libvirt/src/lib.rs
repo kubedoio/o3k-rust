@@ -550,6 +550,7 @@ impl LibvirtAdapter {
         &self,
         name: String,
         max_bytes: usize,
+        expected_server_id: String,
     ) -> Result<Vec<u8>, LibvirtError> {
         if max_bytes == 0 || max_bytes > 64 * 1024 {
             return Err(LibvirtError::new(
@@ -557,8 +558,15 @@ impl LibvirtAdapter {
                 "console read bound is invalid",
             ));
         }
+        if expected_server_id.trim().is_empty() {
+            return Err(LibvirtError::new(
+                ErrorCategory::InvalidRequest,
+                "console owner is invalid",
+            ));
+        }
         let uri = self.config.uri.clone();
-        run_blocking(move || backend_read_console(&uri, &name, max_bytes)).await
+        run_blocking(move || backend_read_console(&uri, &name, max_bytes, &expected_server_id))
+            .await
     }
 
     pub async fn define(&self, definition: DomainDefinition) -> Result<(), LibvirtError> {
@@ -649,7 +657,7 @@ fn backend_list(_: &str, _: &str) -> Result<Vec<String>, LibvirtError> {
     unavailable()
 }
 #[cfg(not(feature = "libvirt"))]
-fn backend_read_console(_: &str, _: &str, _: usize) -> Result<Vec<u8>, LibvirtError> {
+fn backend_read_console(_: &str, _: &str, _: usize, _: &str) -> Result<Vec<u8>, LibvirtError> {
     unavailable()
 }
 #[cfg(not(feature = "libvirt"))]
@@ -795,10 +803,22 @@ fn backend_list(uri: &str, prefix: &str) -> Result<Vec<String>, LibvirtError> {
 }
 
 #[cfg(feature = "libvirt")]
-fn backend_read_console(uri: &str, name: &str, max_bytes: usize) -> Result<Vec<u8>, LibvirtError> {
+fn backend_read_console(
+    uri: &str,
+    name: &str,
+    max_bytes: usize,
+    expected_server_id: &str,
+) -> Result<Vec<u8>, LibvirtError> {
     let connection = open(uri)?;
     let domain = Domain::lookup_by_name(&connection, name)
         .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain metadata unavailable",
+        )
+    })?;
+    validate_console_ownership(name, &xml, expected_server_id)?;
     let stream = Stream::new(&connection, virt::sys::VIR_STREAM_NONBLOCK).map_err(|_| {
         LibvirtError::new(
             ErrorCategory::OperationFailed,
@@ -829,6 +849,22 @@ fn backend_read_console(uri: &str, name: &str, max_bytes: usize) -> Result<Vec<u
     }
     let _ = stream.abort();
     Ok(output)
+}
+
+fn validate_console_ownership(
+    name: &str,
+    xml: &str,
+    expected_server_id: &str,
+) -> Result<(), LibvirtError> {
+    match discover_domain_xml(name, xml) {
+        DiscoveryResult::Owned { metadata, .. } if metadata.server_id == expected_server_id => {
+            Ok(())
+        }
+        _ => Err(LibvirtError::new(
+            ErrorCategory::NotFound,
+            "domain is not owned by the requested server",
+        )),
+    }
 }
 
 #[cfg(feature = "libvirt")]
@@ -1329,6 +1365,59 @@ mod tests {
             )
             .is_empty()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn console_reads_require_exact_owned_server_metadata() -> Result<(), LibvirtError> {
+        let spec = DomainSpec {
+            metadata: DomainMetadata {
+                server_id: "console-server".to_owned(),
+                project_id: "project".to_owned(),
+                generation: 1,
+                operation_id: "operation".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+            vcpus: 1,
+            memory_mib: 128,
+            image_id: "/var/lib/o3k/image.qcow2".to_owned(),
+            config_drive_image: None,
+            network_interfaces: Vec::new(),
+        };
+        let owned_xml = build_domain_xml(&spec)?.xml;
+        assert!(
+            validate_console_ownership(
+                &stable_domain_name("console-server"),
+                &owned_xml,
+                "console-server"
+            )
+            .is_ok()
+        );
+        for (name, xml, expected) in [
+            (
+                stable_domain_name("console-server"),
+                owned_xml.as_str(),
+                "other-server",
+            ),
+            (
+                "o3k-foreign".to_owned(),
+                "<domain><name>o3k-foreign</name></domain>",
+                "console-server",
+            ),
+            (
+                "o3k-malformed".to_owned(),
+                "<domain><metadata><o3k:domain xmlns:o3k=\"urn:o3k:compute:domain\" /></metadata></domain>",
+                "console-server",
+            ),
+        ] {
+            assert!(matches!(
+                validate_console_ownership(&name, xml, expected),
+                Err(LibvirtError {
+                    category: ErrorCategory::NotFound,
+                    ..
+                })
+            ));
+        }
         Ok(())
     }
 
