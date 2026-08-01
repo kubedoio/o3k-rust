@@ -12,6 +12,16 @@ PORT="${O3K_MEASURE_PORT:-$((19080 + ($$ % 500)))}"
 BASE_URL="http://127.0.0.1:${PORT}"
 LISTEN_ADDR="127.0.0.1:${PORT}"
 mkdir -p "$ARTIFACT_DIR"
+LOCK_PATH="$ARTIFACT_DIR/.measurement.lock"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "measurement requires flock for artifact ownership" >&2
+  exit 2
+fi
+exec 9>"$LOCK_PATH"
+if ! flock -n 9; then
+  echo "measurement artifact directory is already in use: $ARTIFACT_DIR" >&2
+  exit 1
+fi
 rm -f "$ARTIFACT_DIR/raw.json" "$ARTIFACT_DIR/summary.json" "$ARTIFACT_DIR/diagnostic.json" "$ARTIFACT_DIR/o3kd.log"
 O3KD_PID=
 write_diagnostic() {
