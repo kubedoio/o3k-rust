@@ -34,6 +34,13 @@ agent-backed create requests therefore use the same agent-eligibility and
 Placement path as the tested compute service, while the local fake profile
 without an agent control plane retains its standalone contract.
 
+The daemon also periodically projects authenticated agent capability snapshots
+into that ledger. VCPU, MEMORY_MB, and an explicit operator-declared
+`max_disk_gb` become provider inventory; incomplete capacity and unavailable
+or disabled agents are published fail-closed, while draining providers retain
+existing allocations. This is inventory publication only and does not claim
+agent lifecycle dispatch or real-host evidence.
+
 ## Evidence
 
 - `o3k-placement` regression coverage forces the final publication rename to
@@ -49,12 +56,14 @@ without an agent control plane retains its standalone contract.
 - The normal workspace tests continue to cover idempotency, stale-generation
   fencing, rollback, restart persistence, and reported-usage reconciliation.
 - `cargo check -p o3kd` verifies the daemon wiring and dependency boundary.
+- `o3k-compute` regression coverage verifies explicit disk-capacity mapping,
+  durable allocation retention, and draining-state projection.
 - No real OpenStack Placement service, agent-backed Nova lifecycle, or
   real-host acceptance is claimed.
 
 ## Remaining blockers
 
 - issue #78's agent-backed provider path;
-- real agent inventory publication and server create/delete dispatch;
+- server create/delete dispatch through the real agent provider;
 - real guest scheduling/allocation evidence and restart recovery;
 - trusted real-host artifact with `status: passed`.
