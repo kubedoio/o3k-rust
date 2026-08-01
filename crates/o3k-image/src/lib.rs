@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
