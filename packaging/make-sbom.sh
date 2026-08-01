@@ -2,8 +2,18 @@
 set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT="${1:-$ROOT_DIR/dist/sbom.spdx.json}"
-mkdir -p "$(dirname "$OUTPUT")"
+if [[ $# -eq 0 ]]; then
+  DIST_ROOT="${O3K_RELEASE_DIST_DIR:-$ROOT_DIR/dist}"
+  if [[ -L "$DIST_ROOT" || ( -e "$DIST_ROOT" && ! -d "$DIST_ROOT" ) ]]; then
+    echo "SBOM dist root must be a real directory, not a symlink or special file" >&2
+    exit 2
+  fi
+  mkdir -p -- "$DIST_ROOT"
+  OUTPUT="$DIST_ROOT/sbom.spdx.json"
+else
+  OUTPUT="$1"
+  mkdir -p -- "$(dirname "$OUTPUT")"
+fi
 
 METADATA_FILE="$(mktemp)"
 trap 'rm -f "$METADATA_FILE"' EXIT
