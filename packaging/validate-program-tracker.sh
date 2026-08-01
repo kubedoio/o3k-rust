@@ -23,6 +23,7 @@ import sys
 REQUIRED_CLOSURE_ISSUES = {
     76, 77, 78, 79, 80, 81, 82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94
 }
+CLOSURE_PENDING_MARKER = re.compile(r"closure evidence:\s*([a-z-]+)")
 
 path = os.environ["INPUT"]
 try:
@@ -85,6 +86,13 @@ for line in text.splitlines():
 for issue in REQUIRED_CLOSURE_ISSUES:
     if issue not in rows:
         errors.append(f"required issue #94 closure row #{issue} is missing")
+        continue
+    evidence = " ".join(rows[issue][3].lower().split())
+    markers = CLOSURE_PENDING_MARKER.findall(evidence)
+    if markers != ["pending"]:
+        errors.append(
+            f"issue #{issue} closure row must contain exactly 'closure evidence: pending'"
+        )
 
 row_93 = rows.get(93)
 if row_93:
