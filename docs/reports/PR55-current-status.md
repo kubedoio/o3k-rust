@@ -2,104 +2,159 @@
 
 **Report date:** 2026-08-01  
 **Repository:** `kubedoio/o3k-rust`  
-**Upstream:** `https://github.com/kubedoio/o3k-rust`  
-**Current main:** [`ad2a801`](https://github.com/kubedoio/o3k-rust/commit/ad2a801134316696aac4bb3032bf37829ef7a6ff)  
-**Baseline working tree:** clean before creating this report branch; local `main` was synchronized with `origin/main`.
+**Current main analyzed:** [`6c9bbba`](https://github.com/kubedoio/o3k-rust/commit/6c9bbbabe0ad146532e0f32a80e223c584c8f5e5)  
+**Release target:** `v0.2.0-alpha.1` libvirt TestLab  
 
 ## Executive summary
 
-The repository-side review and hardening pass is complete for the highest-confidence slices found in PR55's issue chain. The following additional changes were implemented, independently reviewed, CI-verified, and merged:
+The repository contains a large amount of repository-side implementation, safety hardening, test-contract work, and release-evidence validation. The open release program is still **not real-host verified** and no alpha release claim is justified.
 
-- authenticated agent inventory publication to Placement;
-- durable observation epoch/sequence fencing;
-- durable console offset routing and private cache safety;
-- qcow2 format verification before image-cache publication/reuse;
-- explicit rejection of unsupported `config_drive: true` requests;
-- durable command acceptance and unknown-outcome recovery.
-
-The complete PR55 program is **not yet release-complete**. The release tracker correctly leaves real-host, protected-runner, independent-human-review, and coupled lifecycle/network work outstanding. No host or human evidence should be inferred from the green repository CI checks.
-
-## Merged implementation PRs from this pass
-
-| PR | Commit | Scope |
-|---:|---|---|
-| [#225](https://github.com/kubedoio/o3k-rust/pull/225) | `d324f651` | protected-path inventory boundary |
-| [#226](https://github.com/kubedoio/o3k-rust/pull/226) | `2beace...` | release-gate source provenance |
-| [#227](https://github.com/kubedoio/o3k-rust/pull/227) | `178ed423` | release-version path fence |
-| [#228](https://github.com/kubedoio/o3k-rust/pull/228) | `742d5fa...` | real-libvirt E2E acceptance evidence shape |
-| [#229](https://github.com/kubedoio/o3k-rust/pull/229) | `bdb7c7a...` | reset-path fence |
-| [#230](https://github.com/kubedoio/o3k-rust/pull/230) | `3dcde21...` | configured data-filesystem preflight |
-| [#231](https://github.com/kubedoio/o3k-rust/pull/231) | `5d601ff...` | OpenStack credential-file safety |
-| [#232](https://github.com/kubedoio/o3k-rust/pull/232) | `6db3226...` | all-features CI test coverage |
-| [#233](https://github.com/kubedoio/o3k-rust/pull/233) | `9dadc0a...` | owned O3K network links |
-| [#234](https://github.com/kubedoio/o3k-rust/pull/234) | `0979026...` | partial-create recovery |
-| [#235](https://github.com/kubedoio/o3k-rust/pull/235) | `b404256...` | post-reboot acceptance evidence |
-| [#236](https://github.com/kubedoio/o3k-rust/pull/236) | `5a42615...` | durable console-cache fallback |
-| [#237](https://github.com/kubedoio/o3k-rust/pull/237) | `24aa945...` | daemon Placement/scheduler/agent-registry wiring |
-| [#238](https://github.com/kubedoio/o3k-rust/pull/238) | `7805bf1...` | stale image-overlay temporary cleanup |
-| [#239](https://github.com/kubedoio/o3k-rust/pull/239) | `8c05ea2...` | release bundle file-type fences |
-| [#240](https://github.com/kubedoio/o3k-rust/pull/240) | `bbc0ed5...` | default SBOM output-root fence |
-| [#241](https://github.com/kubedoio/o3k-rust/pull/241) | `0aa7622...` | measurement artifact lock |
-| [#242](https://github.com/kubedoio/o3k-rust/pull/242) | `960ca6a...` | tracker ADR references |
-| [#243](https://github.com/kubedoio/o3k-rust/pull/243) | `bd3ba0f...` | installer-owned file fences |
-| [#244](https://github.com/kubedoio/o3k-rust/pull/244) | `345a3fa...` | TAP/DHCP/MAC safety fences |
-| [#245](https://github.com/kubedoio/o3k-rust/pull/245) | `95edfd8...` | replaced-agent stream fencing |
-| [#246](https://github.com/kubedoio/o3k-rust/pull/246) | `b54c27e...` | image-cache ownership fences |
-| [#247](https://github.com/kubedoio/o3k-rust/pull/247) | `5fa12db` | console storage and bounded reads |
-| [#248](https://github.com/kubedoio/o3k-rust/pull/248) | `acb99a9` | observation watermark/epoch fence |
-| [#249](https://github.com/kubedoio/o3k-rust/pull/249) | `b74b563` | nonzero console-offset cache routing |
-| [#250](https://github.com/kubedoio/o3k-rust/pull/250) | `6ccc741` | authenticated agent inventory publication |
-| [#251](https://github.com/kubedoio/o3k-rust/pull/251) | `85af494` | qcow2 format verification |
-| [#252](https://github.com/kubedoio/o3k-rust/pull/252) | `a0a83c0` | durable command acceptance |
-| [#253](https://github.com/kubedoio/o3k-rust/pull/253) | `8bdf950` | explicit config-drive request rejection |
-| [#254](https://github.com/kubedoio/o3k-rust/pull/254) | `ad2a801` | stronger unknown-outcome recovery |
-
-Every PR in this pass received an exact-head second-pass review comment and was merged only after the required `rust` and `supply-chain` checks passed. GitHub self-approval is unavailable for the PR author, so the second-pass reviews are recorded as comments rather than false approvals.
-
-## Current issue and gate status
-
-The authoritative detailed status is [`docs/release-tracker.md`](../release-tracker.md). The important decision points are:
-
-### Repository slices substantially complete
-
-- **#76/#77:** protected runner and real-host validation workflow guards are implemented; execution still requires the protected labeled environment.
-- **#78:** stream fencing and durable command acceptance are implemented. Durable command replay, command-id persistence, the complete daemon lifecycle adapter, and real mTLS execution remain open.
-- **#79:** managed image-cache safety and qcow2 format verification are implemented. Authenticated image transfer, durable host ownership, agent realization, and real-host qemu-img evidence remain open.
-- **#80:** config-drive artifact safety and explicit unsupported-request behavior are implemented. Deterministic media, agent wiring, guest consumption, reboot behavior, and host evidence remain open.
-- **#81:** repository TAP/bridge/DHCP/MAC safety boundaries are implemented. Production agent-backed network attachment and guest fixed-IP orchestration remain open.
-- **#82:** authenticated agent inventory publication and fail-closed capacity mapping are implemented. Agent-backed create/delete wiring, restart recovery, and real scheduling evidence remain open.
-- **#83/#84:** observed-state fencing, durable observation watermarks, console ownership, bounded storage, and offset routing are implemented. Real lifecycle/console evidence remains open.
-- **#87:** deterministic repository recovery and evidence-shape validation are implemented. Protected real-host failure-injection scenarios remain open.
-
-### External gates still outstanding
-
-- **Host-gated:** #76, #77, #79, #80, #81, #82, #83, #84, #86, #87, #88, #89, #90, and #91 require a configured protected runner/TestLab/libvirt host, real CirrOS, credentials, and trusted artifacts.
-- **Human-gated:** #92 requires an identified non-LLM reviewer to inspect the exact release commit, record findings and dispositions, and publish `human-review.json`.
-- **Release-gated:** #93 additionally requires real host evidence, clean-install artifacts, measured benchmarks, human approval, a signed tag, reproducible publication, and operator verification.
-- **Coupled repository work:** #78 and #81 still contain production lifecycle/network attachment work that should not be claimed complete merely because their safety boundaries and fake-provider tests pass.
-
-## Verification evidence
-
-Successful local verification on the merged state includes:
+The immediate blocker is no longer missing application code. The first blocker is an invalid GitHub Actions workflow:
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-cargo test -p o3k-provider -p o3k-reconciler
+Invalid workflow file: .github/workflows/real-host-validation.yml
+(Line: 78, Col: 11): 'OS_PASSWORD' is already defined
 ```
 
-The required `rust` and `supply-chain` GitHub checks passed for the merged PRs. `cargo test --workspace --all-features` was also attempted; it cannot link in this environment because native libvirt symbols such as `virConnectOpen`, `virDomainCreate`, and `virDomainDefineXML` are unavailable. This is an environment limitation, not evidence that the all-features path passed.
+In the `Run public real-host lifecycle` step, `OS_PASSWORD` appears twice in the same `env` mapping. GitHub rejects the workflow before scheduling any job. The self-hosted runner, KVM, libvirt, scripts, credentials, and application code are therefore never reached.
 
-The default workspace tests emit pre-existing dead-code warnings in the non-native libvirt build; they do not fail the test command. Workspace Clippy with warnings denied passed on the reviewed repository state.
+This must be fixed before continuing any downstream issue. Until the workflow parses and a protected real-host run uploads a successful artifact, issues #76 and #77 remain unverified and issues #78–#93 remain dependency-blocked for real-host acceptance.
 
-## Recommended next decisions for the next LLM
+## Current repository state
 
-1. **Choose whether to implement #81/#78 production wiring next.** The safest coherent slice is an explicit pre-created Neutron-port attachment contract: persist authoritative port ID/MAC/fixed-IP bindings, propagate them through the provider protocol, and render deterministic libvirt NIC XML. Do not mix this with host TAP/dnsmasq supervision unless the issue/spec is expanded.
-2. **If protected infrastructure is available, run #77/#86/#87/#88/#89/#90/#91 host workflows before adding more repository-only safety patches.** Those artifacts now provide more decision value than additional speculative integration code.
-3. **Schedule #92 independent review against the exact release commit.** Do not generate or accept a human-review artifact from the same LLM author.
-4. **Only after host and human evidence exist, evaluate #93 release publication.** Keep the release gate fail-closed.
+- No open pull request was found at the time of this report update.
+- Issues #76 through #94 remain open.
+- Repository-side slices for the compute-agent protocol, Placement, image cache, config-drive safety, network ownership, lifecycle observation, console storage, recovery, packaging, evidence schemas, and release guards have been merged.
+- The repository has extensive fail-closed evidence validation, but this is not a substitute for executing the protected workflow on the QEMU/KVM server.
+- README/release status must remain pre-alpha until real-host and human-review gates pass.
+
+## Immediate CI root cause
+
+File:
+
+```text
+.github/workflows/real-host-validation.yml
+```
+
+Affected step:
+
+```yaml
+- name: Run public real-host lifecycle
+  env:
+    ...
+    OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+    ...
+    OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
+```
+
+YAML mappings cannot contain the same key twice for GitHub Actions workflow validation. This is a workflow-definition failure, not an authentication failure and not a runner failure.
+
+The existing `tests/ci-workflow.sh` validates only `.github/workflows/ci.yml` through text assertions. It does not parse every workflow and therefore did not detect the duplicate key in `real-host-validation.yml`.
+
+## Required corrective phase — workflow recovery
+
+Before resuming issue #76 or any later issue:
+
+1. Create a dedicated branch for the workflow fix.
+2. Remove the duplicate `OS_PASSWORD` entry and keep exactly one secret mapping in each step that needs it.
+3. Add `actionlint` or an equivalent real GitHub Actions workflow parser to portable CI.
+4. Validate every file under `.github/workflows/*.yml` and `.github/workflows/*.yaml`.
+5. Add a regression test proving duplicate YAML keys make CI fail.
+6. Ensure no secret value is printed during validation or runtime.
+7. Open one focused PR, run independent review, fix findings, and merge only with green CI.
+8. Manually dispatch the protected workflow on the labeled self-hosted runner.
+9. Upload and inspect machine-readable runner/workflow artifacts.
+10. Close #76/#77 only if their required artifacts report `passed`.
+
+Do not begin speculative repository hardening while the workflow cannot be parsed.
+
+## Open issue dependency status
+
+### Blocked at workflow layer
+
+- **#76 — runner provisioning:** implementation may exist, but no accepted runner-capabilities artifact can be generated while the workflow is invalid.
+- **#77 — protected workflow:** not complete; the workflow currently cannot be loaded by GitHub Actions.
+
+### Blocked behind #77 real execution
+
+- **#78:** complete real `o3kd → o3k-compute` mTLS command/observation execution.
+- **#79:** authenticated image transfer and real compute-host qcow2 evidence.
+- **#80:** real config-drive media, attachment, and guest consumption.
+- **#81:** production TAP/bridge/libvirt NIC/dnsmasq orchestration and guest fixed IP.
+- **#82:** real agent-backed scheduling, allocation lifecycle, and restart evidence.
+- **#83:** complete real domain assembly and observed Nova lifecycle.
+- **#84:** actual CirrOS serial output through the Nova console-log API.
+- **#86:** complete public OpenStack CLI CirrOS acceptance workflow.
+- **#87:** protected real-host failure injection.
+- **#88:** independent real-host leak and foreign-state verification.
+- **#89/#90:** clean Ubuntu and Debian installation evidence.
+- **#91:** measured real-libvirt benchmark evidence.
+- **#92:** independent non-LLM human architecture/security approval.
+- **#93:** signed and verified alpha release after every gate passes.
+- **#94:** authoritative program tracker; must remain fail-closed.
+
+## Correct execution order from the current state
+
+```text
+Workflow syntax and validation fix
+  ↓
+#76 runner capabilities evidence
+  ↓
+#77 protected workflow evidence
+  ↓
+#78 real compute-agent command path
+  ↓
+(#79 image, #81 network, #82 Placement)
+  ↓
+#80 config-drive
+  ↓
+#83 complete libvirt guest lifecycle
+  ↓
+#84 real console
+  ↓
+#86 public CLI E2E
+  ↓
+(#87 recovery, #88 leak guard, #91 measurements)
+  ↓
+(#89 Ubuntu, #90 Debian)
+  ↓
+#92 independent human review
+  ↓
+#93 release
+```
+
+## Rules for the next LLM goal
+
+The next goal must be recovery-oriented rather than open-ended.
+
+- Fix the workflow parser failure first and verify it with a real parser.
+- Work on only the first unblocked dependency.
+- Do not create dozens of speculative safety PRs when the current gate cannot execute.
+- Use a dedicated branch and focused PR for each issue.
+- Use implementation and review subagents, but do not treat an LLM review as the required human approval for #92.
+- Never duplicate environment keys or define the same credential in multiple places in one step.
+- Centralize repeated non-secret OpenStack values at job level when appropriate; keep secrets at the narrowest required step scope.
+- A merged script is not evidence. Real-host issues close only with `passed`, benchmarks with `measured`, and #92 with independent human `approved` evidence.
+- After each merge, re-read the current workflow and tracker before selecting the next issue.
+- Stop and report the exact blocker when required infrastructure, secret, runner label, or human review is unavailable; do not invent a passing artifact.
+
+## Release truth
+
+At this point:
+
+```text
+repository implementation: substantial
+portable CI contracts: substantial
+workflow parser status: failed
+protected runner execution: not reached
+real CirrOS boot evidence: missing
+clean-install evidence: missing
+human approval: missing
+release status: blocked
+```
+
+No `v0.2.0-alpha.1` tag should be created until the workflow parses, all real-host artifacts pass, and the independent human review is approved.
 
 ## Report provenance
 
-This report is an independently authored repository status summary based on the current Git history, `docs/release-tracker.md`, ADRs, issue documents, local test output, and GitHub PR/check state. It makes no claim of host acceptance or human approval.
+This report was updated from the current GitHub repository state, open issues #76–#94, the current workflow source, merged PR history, and the existing release tracker. It makes no claim of host acceptance, human approval, signing, or release readiness.
