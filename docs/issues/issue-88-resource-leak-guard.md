@@ -13,7 +13,8 @@ The protected workflow inventory now:
   instead of accepting an empty resource set;
 - publishes inventory JSON atomically, preventing a partial write from being
   consumed as evidence;
-- records O3K-owned domain/provider identities while representing foreign
+- records O3K-owned domain/provider identities, including public keypairs
+  created by the CLI acceptance harness, while representing foreign
   domain and non-O3K link state only as redacted SHA-256 digests;
 - fails the post-run guard when a foreign-state digest changes; and
 - writes `resource-leak-result.json`, with `status: passed` reserved for a

@@ -65,6 +65,9 @@ python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "ready" and value["redacted"] is True
+assert set(value["inventory_baseline"]["openstack"]["resources"]) == {
+    "server", "image", "network", "subnet", "flavor", "keypair"
+}
 assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 PY
@@ -185,6 +188,7 @@ value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "failed" and value["reason"] == "resource_leak_detected"
 assert "o3k-preexisting-domain" in value["leaks"]["domains"]
 assert "leaked-openstack-resource" in value["leaks"]["openstack"]["image"]
+assert "leaked-openstack-resource" in value["leaks"]["openstack"]["keypair"]
 assert value["foreign_state_changed"] is True
 assert "foreign0" not in json.dumps(value)
 assert "do-not-upload-this-value" not in json.dumps(value)
