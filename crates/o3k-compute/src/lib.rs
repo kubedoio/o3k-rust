@@ -479,9 +479,21 @@ impl ComputeService {
                         }
                     }
                     if repaired_association {
-                        self.journal
+                        match self
+                            .journal
                             .reconcile_once(existing_request.operation_id)
-                            .await?;
+                            .await
+                        {
+                            Ok(o3k_store::OperationState::Failed) => {
+                                self.store.detach_server_keypair(server_id).await?;
+                                return Err(ComputeError::Conflict);
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                self.store.detach_server_keypair(server_id).await?;
+                                return Err(ComputeError::Reconcile(error));
+                            }
+                        }
                     }
                     return self.show_server(&project_id, server_id).await;
                 }
@@ -602,7 +614,17 @@ impl ComputeService {
                     }
                 }
                 if repaired_association {
-                    self.journal.reconcile_once(request.operation_id).await?;
+                    match self.journal.reconcile_once(request.operation_id).await {
+                        Ok(o3k_store::OperationState::Failed) => {
+                            self.store.detach_server_keypair(id).await?;
+                            return Err(ComputeError::Conflict);
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            self.store.detach_server_keypair(id).await?;
+                            return Err(ComputeError::Reconcile(error));
+                        }
+                    }
                 }
                 return self.show_server(&project_id, id).await;
             }

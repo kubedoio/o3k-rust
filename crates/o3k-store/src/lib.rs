@@ -317,6 +317,18 @@ impl SqliteStore {
             transaction.rollback().await.map_err(StoreError::Database)?;
             return Err(StoreError::KeypairInUse);
         }
+        let pending_reference: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM resources WHERE project_id = ? AND kind = 'compute_instance' AND observed_state != 'DELETED' AND json_extract(desired_state, '$.key_name') = ?",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if pending_reference > 0 {
+            transaction.rollback().await.map_err(StoreError::Database)?;
+            return Err(StoreError::KeypairInUse);
+        }
         let result =
             sqlx::query("DELETE FROM keypairs WHERE user_id = ? AND project_id = ? AND name = ?")
                 .bind(user_id)
