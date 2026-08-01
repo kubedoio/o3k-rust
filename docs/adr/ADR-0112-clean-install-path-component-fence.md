@@ -1,4 +1,4 @@
-# ADR-0112 — Reject symlink components in clean-install paths
+# ADR-0112 — Reject unsafe components in clean-install paths
 
 ## Status
 
@@ -8,15 +8,18 @@ Accepted for the repository-side portion of issue #89.
 
 The installer rejected a requested path when the path itself was a symlink,
 but an existing symlink in a parent component could redirect publication into
-an unintended directory. That weakens the clean-install ownership boundary
-even when the final path does not yet exist.
+an unintended directory. Lexical `.` and `..` components were also accepted;
+they can make a path that is textually non-root resolve to `/` or another
+unexpected publication target. Both cases weaken the clean-install ownership
+boundary even when the final path does not yet exist.
 
 ## Decision
 
 Before any installer mutation, inspect every component of each configured
-absolute path and reject the path if any component is a symlink. Keep the
-validation lexical and deterministic; the installer still rejects relative,
-root, non-directory-compatible, and populated unowned paths as before.
+absolute path and reject the path if any component is a symlink or is `.`/`..`.
+Keep the validation lexical and deterministic; the installer still rejects
+relative, root, non-directory-compatible, and populated unowned paths as
+before.
 
 ## Non-goals
 
@@ -27,8 +30,9 @@ root, non-directory-compatible, and populated unowned paths as before.
 
 ## Verification
 
-`tests/packaging-safety.sh` uses a temporary symlink parent and verifies that
-the installer rejects the path before creating state under the symlink target.
+`tests/packaging-safety.sh` uses temporary symlink-parent and dot-component
+inputs and verifies that the installer rejects each path before creating state
+under a redirected or resolved target.
 
 ## Provenance
 

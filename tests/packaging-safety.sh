@@ -35,6 +35,16 @@ fi
   exit 1
 fi)
 [[ ! -e "$WORK_DIR/relative-prefix" ]]
+for dot_path in "$WORK_DIR/./dot-prefix" "$WORK_DIR/../dot-prefix"; do
+  if bash "$ROOT_DIR/packaging/install.sh" \
+      --profile fake --noninteractive --binary "$BINARY" \
+      --prefix "$dot_path" --data-dir "$WORK_DIR/dot-data" \
+      --config-dir "$WORK_DIR/dot-config" --log-dir "$WORK_DIR/dot-log"; then
+    echo "installer accepted a lexical dot component: $dot_path" >&2
+    exit 1
+  fi
+done
+[[ ! -e "$WORK_DIR/dot-prefix" && ! -e "$WORK_DIR/dot-data" && ! -e "$WORK_DIR/dot-config" ]]
 mkdir -p "$WORK_DIR/symlink-target"
 ln -s "$WORK_DIR/symlink-target" "$WORK_DIR/symlink-data"
 if bash "$ROOT_DIR/packaging/install.sh" \
