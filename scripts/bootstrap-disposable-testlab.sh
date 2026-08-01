@@ -16,6 +16,7 @@ STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
 SERVICE_ACCOUNT=o3k
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
+APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
 COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
@@ -123,6 +124,21 @@ sudo -n true 2>/dev/null || fail "passwordless sudo is required"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is unavailable"
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
 
+need_packages=false
+command -v genisoimage >/dev/null 2>&1 || need_packages=true
+python3 -m venv --help >/dev/null 2>&1 || need_packages=true
+command -v pkg-config >/dev/null 2>&1 || need_packages=true
+if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
+  command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
+  sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
+  sudo -n flock -x "$APT_LOCK" bash -c '
+    set -euo pipefail
+    env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      genisoimage python3-venv pkg-config libvirt-dev
+  ' || fail "cannot install required host packages"
+fi
+
 for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
   ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
 done
@@ -206,10 +222,10 @@ if [[ "$GROUP_CREATED" == true ]]; then
   printf 'o3k-disposable-group-v1\n' >"$STATE_ROOT/.o3k-group-created"
   chmod 0600 "$STATE_ROOT/.o3k-group-created"
 fi
-command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable; provision the runner dependency"
-python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable; provision the runner dependency"
-command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable; provision the runner dependency"
-pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable; provision libvirt-dev"
+command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable after dependency setup"
+python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable after dependency setup"
+command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
+pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 cargo build --locked --release --bin o3kd
 # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
 # make the runtime link explicit after the host preflight proves libvirt exists.
