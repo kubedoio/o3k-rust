@@ -1,0 +1,86 @@
+# TestLab capability inventory
+
+This file is generated from `capability-inventory-source.json`; edit the source and rerun the generator.
+
+- Profile: `testlab-alpha`
+- Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
+- Rust reference: `ff0bb9a993555767e7fc3de2225d70fc9099f090`
+- Operations: `41`
+
+Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.
+
+| Service | Operation | Method | Canonical path | Implementation | Contract | CLI | Protected runner | Relevance |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| compute | flavor_list | GET | /v2.1/{project_id}/flavors | implemented | verified | pending | failed | required |
+| compute | flavor_create | POST | /v2.1/{project_id}/flavors | missing | pending | pending | pending | required |
+| compute | flavor_list_detail | GET | /v2.1/{project_id}/flavors/detail | implemented | verified | pending | pending | required |
+| compute | flavor_delete | DELETE | /v2.1/{project_id}/flavors/{id} | missing | pending | pending | pending | required |
+| compute | flavor_show | GET | /v2.1/{project_id}/flavors/{id} | implemented | verified | pending | pending | required |
+| compute | keypair_list | GET | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
+| compute | keypair_import | POST | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
+| compute | keypair_delete | DELETE | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | verified | required |
+| compute | keypair_show | GET | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | verified | required |
+| compute | server_list | GET | /v2.1/{project_id}/servers | implemented | verified | pending | pending | required |
+| compute | server_create | POST | /v2.1/{project_id}/servers | implemented | verified | pending | pending | required |
+| compute | server_list_detail | GET | /v2.1/{project_id}/servers/detail | implemented | verified | pending | pending | required |
+| compute | server_delete | DELETE | /v2.1/{project_id}/servers/{id} | implemented | verified | pending | pending | required |
+| compute | server_show | GET | /v2.1/{project_id}/servers/{id} | implemented | verified | pending | pending | required |
+| compute | server_actions_start_stop_reboot_console | POST | /v2.1/{project_id}/servers/{id}/action | implemented | verified | pending | pending | required |
+| identity | version_discovery_root | GET | / | partial | pending | pending | pending | required |
+| identity | version_discovery_v3 | GET | /v3 | partial | pending | pending | pending | required |
+| identity | password_authentication_scoped_token | POST | /v3/auth/tokens | implemented | verified | verified | verified | required |
+| image | image_list | GET | /v2/images | implemented | verified | pending | verified | required |
+| image | image_create | POST | /v2/images | implemented | verified | verified | verified | required |
+| image | image_delete | DELETE | /v2/images/{id} | implemented | verified | pending | verified | required |
+| image | image_show | GET | /v2/images/{id} | implemented | verified | pending | verified | required |
+| image | image_download_binary | GET | /v2/images/{id}/file | missing | pending | pending | pending | required |
+| image | image_upload_binary | PUT | /v2/images/{id}/file | implemented | verified | verified | verified | required |
+| network | network_list | GET | /v2.0/networks | implemented | verified | pending | pending | required |
+| network | network_create | POST | /v2.0/networks | implemented | verified | pending | pending | required |
+| network | network_delete | DELETE | /v2.0/networks/{id} | implemented | verified | pending | pending | required |
+| network | network_show | GET | /v2.0/networks/{id} | implemented | verified | pending | pending | required |
+| network | port_list | GET | /v2.0/ports | implemented | verified | pending | pending | required |
+| network | port_create | POST | /v2.0/ports | implemented | verified | pending | pending | required |
+| network | port_delete | DELETE | /v2.0/ports/{id} | implemented | verified | pending | pending | required |
+| network | port_show | GET | /v2.0/ports/{id} | implemented | verified | pending | pending | required |
+| network | subnet_list | GET | /v2.0/subnets | implemented | verified | pending | pending | required |
+| network | subnet_create | POST | /v2.0/subnets | implemented | verified | pending | pending | required |
+| network | subnet_delete | DELETE | /v2.0/subnets/{id} | implemented | verified | pending | pending | required |
+| network | subnet_show | GET | /v2.0/subnets/{id} | implemented | verified | pending | pending | required |
+| placement | allocation_candidates_list | GET | /allocation_candidates | missing | pending | pending | pending | supporting |
+| placement | consumer_allocations_set | PUT | /allocations/{consumer_uuid} | missing | pending | pending | pending | supporting |
+| placement | resource_provider_list | GET | /resource_providers | partial | pending | pending | pending | supporting |
+| placement | resource_provider_show | GET | /resource_providers/{uuid} | partial | pending | pending | pending | supporting |
+| placement | resource_provider_inventory_list | GET | /resource_providers/{uuid}/inventories | partial | pending | pending | pending | supporting |
+
+## Known gaps
+
+- `compute.flavor_collection_list`: Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200.
+- `compute.flavor_collection_create`: The current fixed flavor catalog has no administrative create route.
+- `compute.flavor_member_delete`: Flavor deletion and immutable resource ownership are planned in #293.
+- `compute.keypair_collection_list`: Private-key generation is intentionally unsupported.
+- `compute.keypair_collection_import`: The private key never crosses the API boundary.
+- `compute.keypair_member_delete`: Deletion is rejected while an owned server still references the keypair.
+- `compute.server_collection_list`: The broader Nova filter and pagination surface is deferred.
+- `compute.server_collection_create`: Real Placement and compute-agent dispatch remain pending.
+- `compute.server_member_delete`: Real provider resource cleanup is tracked by later infrastructure issues.
+- `compute.server_member_actions`: Console output is bounded API data; real guest serial output is tracked by #84.
+- `identity.version_root`: Root version discovery is not covered by an independent compatibility test.
+- `identity.version_v3`: The version response and discovery warning behavior need an explicit contract test.
+- `identity.token_password_scoped`: Federation and non-password authentication are outside the alpha profile.
+- `image.collection_list`: The broad Glance filter and pagination surface is outside the alpha profile.
+- `image.collection_create`: Local filesystem storage is the only alpha backend.
+- `image.member_download`: No public authenticated image-content download route is currently registered.
+- `image.member_upload`: Import, multi-store, and signature workflows are outside the alpha profile.
+- `network.network_collection_list`: Filtering and pagination are limited to the alpha profile.
+- `network.network_collection_create`: Only the flat provider-network profile is in scope.
+- `network.network_member_delete`: Routers, floating IPs, security groups, VXLAN, and DVR are out of scope.
+- `network.port_collection_create`: One deterministic fixed IPv4 allocation is targeted initially.
+- `network.port_member_delete`: Host TAP/bridge attachment is a later real-network slice.
+- `network.subnet_collection_create`: One flat subnet/allocation profile is targeted initially.
+- `network.subnet_member_delete`: Delete conflicts with dependent ports and networks must be tested against the public API.
+- `placement.allocation_candidates_list`: Allocation candidates and generation-aware scheduling are tracked by #82.
+- `placement.allocation_member_set`: Durable local allocation state is not a public Placement allocation API.
+- `placement.provider_collection_list`: Rust currently has a local durable ledger, not an HTTP Placement service.
+- `placement.provider_member_show`: Provider generations and HTTP error semantics are not exposed yet.
+- `placement.inventory_member_show`: Capability projection exists locally; the public Placement inventory route is missing.
