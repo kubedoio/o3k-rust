@@ -30,6 +30,12 @@ durable journal record. A provider-operation UUID alone is not sufficient
 evidence: a mismatched or stale operation is rejected as invalid intent and
 cannot complete the resource transition.
 
+Recovery persists an observed `accepted` or `running` provider operation back
+into the durable journal before returning. An observed provider failure is
+persisted as a terminal operation failure. This prevents a restart from
+retaining an obsolete `unknown_outcome` state after stronger provider evidence
+has been observed.
+
 Create recovery uses the same observation boundary. A partial create returns a
 running provider operation with its resource reference, remains durable as a
 non-terminal journal operation, and records `BUILD` until a provider

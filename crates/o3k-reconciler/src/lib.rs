@@ -516,6 +516,15 @@ where
                     .await
             }
             ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::Running,
+                        Some(provider_operation_id),
+                        None,
+                        None,
+                    )
+                    .await?;
                 Ok(OperationState::Running)
             }
             ProviderOperationState::Failed => {
@@ -790,30 +799,69 @@ where
             .await?;
         validate_provider_operation_owner(operation.id, &provider_operation)?;
         self.event(operation.id, resource.id, JournalEventKind::UnknownObserved);
-        if provider_operation.state == ProviderOperationState::UnknownOutcome {
-            if let Some(resource_id) = provider_operation.provider_resource_id {
-                return self
-                    .finish_create(
-                        operation.id,
-                        resource,
-                        provider_id.to_owned(),
-                        Some(resource_id),
-                    )
-                    .await;
+        match provider_operation.state {
+            ProviderOperationState::UnknownOutcome => {
+                if let Some(resource_id) = provider_operation.provider_resource_id {
+                    return self
+                        .finish_create(
+                            operation.id,
+                            resource,
+                            provider_id.to_owned(),
+                            Some(resource_id),
+                        )
+                        .await;
+                }
+                Ok(OperationState::UnknownOutcome)
             }
-            return Ok(OperationState::UnknownOutcome);
-        }
-        if provider_operation.state == ProviderOperationState::Succeeded {
-            return self
-                .finish_create(
+            ProviderOperationState::Succeeded => {
+                self.finish_create(
                     operation.id,
                     resource,
                     provider_id.to_owned(),
                     provider_operation.provider_resource_id,
                 )
-                .await;
+                .await
+            }
+            ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                if let Some(resource_id) = provider_operation.provider_resource_id {
+                    return self
+                        .finish_create(
+                            operation.id,
+                            resource,
+                            provider_id.to_owned(),
+                            Some(resource_id),
+                        )
+                        .await;
+                }
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::Running,
+                        Some(provider_id),
+                        None,
+                        None,
+                    )
+                    .await?;
+                Ok(OperationState::Running)
+            }
+            ProviderOperationState::Retryable => {
+                self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
+                    .await
+            }
+            ProviderOperationState::Failed => {
+                self.store
+                    .update_operation(
+                        operation.id,
+                        OperationState::Failed,
+                        Some(provider_id),
+                        Some("terminal"),
+                        Some("provider operation failed"),
+                    )
+                    .await?;
+                self.event(operation.id, resource.id, JournalEventKind::Failed);
+                Ok(OperationState::Failed)
+            }
         }
-        Ok(OperationState::Retryable)
     }
 
     async fn finish_create(
@@ -1460,6 +1508,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_create_records_observed_provider_failure() -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("unknown-create-failed", 2).await?;
+        provider.set_failure(FailureInjection::Timeout)?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        provider
+            .set_operation_state(provider_operation_id, o3k_provider::OperationState::Failed)?;
+
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Failed
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn unknown_delete_is_observed_without_repeating_mutation() -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("delete-unknown", 2).await?;
         let request = request();
@@ -1514,6 +1593,28 @@ mod tests {
             store.get_operation(operation_id).await?.state,
             OperationState::UnknownOutcome
         );
+
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        provider
+            .set_operation_state(provider_operation_id, o3k_provider::OperationState::Running)?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Running
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+        provider.set_operation_state(
+            provider_operation_id,
+            o3k_provider::OperationState::Succeeded,
+        )?;
 
         provider.set_failure(FailureInjection::None)?;
         assert_eq!(

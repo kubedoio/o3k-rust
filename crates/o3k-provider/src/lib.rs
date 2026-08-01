@@ -213,6 +213,29 @@ impl FakeComputeProvider {
             .map_err(|_| ProviderError::Storage)
     }
 
+    /// Advance a recorded provider operation for deterministic recovery tests.
+    ///
+    /// A real provider may report an operation as still running after the
+    /// original transport response was lost. The fake exposes that transition
+    /// without pretending to inject a process or host failure.
+    pub fn set_operation_state(
+        &self,
+        operation_id: Uuid,
+        operation_state: OperationState,
+    ) -> Result<(), ProviderError> {
+        self.inner
+            .lock()
+            .map_err(|_| ProviderError::Storage)?
+            .operations
+            .get_mut(&operation_id)
+            .map(|operation| {
+                operation.state = operation_state;
+                operation.error_category = (operation_state == OperationState::UnknownOutcome)
+                    .then_some(ErrorCategory::UnknownOutcome);
+            })
+            .ok_or(ProviderError::NotFound)
+    }
+
     #[must_use]
     pub fn instance_count(&self) -> usize {
         self.inner

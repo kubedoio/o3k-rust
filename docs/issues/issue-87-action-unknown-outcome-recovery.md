@@ -23,6 +23,12 @@ ID must equal the durable journal operation ID. A mismatched provider record is
 rejected without changing the operation or resource state, preventing stale
 or cross-wired provider observations from being accepted as convergence.
 
+When recovery observes an `accepted` or `running` provider operation, it now
+persists that stronger state before returning. When it observes a provider
+terminal failure, it persists a failed journal operation rather than returning
+an ambiguous retry result. Portable tests exercise both transitions, including
+an action that was applied before the original response was lost.
+
 Partial create completion is also observation-gated. The provider returns a
 non-terminal running operation and stable resource ID while the instance is
 `CREATING`; the journal persists that reference and `BUILD` state, then
