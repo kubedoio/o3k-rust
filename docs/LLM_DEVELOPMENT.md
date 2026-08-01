@@ -10,6 +10,7 @@ LLM agents are implementation workers operating inside explicit engineering cont
 
 - converts an approved product requirement into a normative spec;
 - identifies public sources and uncertainties;
+- records any public Go O3K paths and pinned commit used as a non-normative reference;
 - writes acceptance criteria and negative cases;
 - does not implement code in the same step.
 
@@ -43,6 +44,7 @@ Every implementation issue must contain:
 - context and user outcome;
 - normative spec links;
 - public source links;
+- normative OpenStack sources and any non-normative reference inputs;
 - in-scope and out-of-scope behavior;
 - acceptance criteria;
 - expected tests;
@@ -66,6 +68,14 @@ Do not paste private code or internal documents. Do not ask an agent to “imple
 
 Agents should read the minimum necessary code after mandatory project documents. Large-context ingestion increases accidental coupling and weakens review. Prefer named files, interfaces, and tests.
 
+The public Apache-2.0 Go O3K repository may be used for route inventory,
+requirements mining, field discovery, failure/cleanup scenarios, operational
+lessons, and black-box comparison. It is not normative. Agents must not
+mechanically translate Go source, copy its architecture, or resolve a conflict
+with an official OpenStack specification in favor of Go behavior. Any reused
+code, test, or fixture requires pinned-commit provenance and Apache-2.0
+copyright/NOTICE attribution.
+
 ## Evidence record
 
 PRs must record:
@@ -73,6 +83,8 @@ PRs must record:
 - AI system/model when known;
 - material prompts or task instructions;
 - public sources used;
+- public Go O3K commit and inspected paths, when applicable;
+- copied/adapted artifact attribution, or an explicit statement that none was reused;
 - tests executed;
 - human reviewer decisions for architecture or security.
 

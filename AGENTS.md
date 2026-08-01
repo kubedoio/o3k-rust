@@ -14,11 +14,22 @@ When instructions conflict, use this order:
 2. accepted ADRs in `docs/adr/`;
 3. normative specs in `docs/specs/`;
 4. public contracts under `contracts/` and `proto/`;
-5. issue acceptance criteria;
-6. tests;
-7. existing implementation.
+5. official OpenStack documentation and published specifications;
+6. public OpenStack client, SDK, Terraform, and Tempest behavior;
+7. O3K Rust contracts, tests, and black-box evidence;
+8. public Go O3K as a non-normative secondary reference;
+9. issue acceptance criteria;
+10. tests;
+11. existing implementation.
 
 Do not silently resolve a conflict. Stop, describe it in the issue or PR, and propose the smallest corrective change.
+
+For OpenStack compatibility questions specifically, use this source priority:
+
+1. official OpenStack API documentation and published specifications;
+2. public OpenStack client, SDK, Terraform, and Tempest behavior;
+3. O3K Rust ADRs, contracts, tests, and black-box evidence;
+4. public Go O3K as a non-normative secondary reference.
 
 ## Mandatory reading order
 
@@ -47,6 +58,7 @@ Before code changes, post or record:
 - the issue being solved;
 - files expected to change;
 - contracts and specs affected;
+- public reference inputs, pinned revisions, and provenance records;
 - tests to add first;
 - known uncertainties;
 - explicit non-goals.
@@ -77,7 +89,7 @@ Agents must not:
 - add generated code whose source contract is not committed;
 - remove attribution or license notices.
 
-Public OpenStack documentation, public API schemas, public SDK behavior, public standards, and independently written black-box tests are allowed inputs. Record sources in specs or test comments.
+Public OpenStack documentation, public API schemas, public SDK behavior, public standards, and independently written black-box tests are allowed inputs. The public Apache-2.0 Go O3K repository may also be used as a non-normative secondary reference under [ADR-0151](docs/adr/ADR-0151-public-go-o3k-reference-policy.md). Record every inspected Go path, pinned commit, and official source in the issue/PR or the affected spec.
 
 ## Test-first acceptance
 
@@ -114,6 +126,18 @@ Every agent-authored PR description must include:
 - **Risks:** unresolved concerns;
 - **Provenance:** public sources and AI tools used;
 - **Follow-ups:** separate issues, not hidden TODOs.
+
+When the public Go O3K repository is consulted, the PR must additionally record:
+
+- the repository URL and exact commit;
+- Go files, handlers, routes, tests, or fixtures inspected;
+- whether any artifact was copied or adapted (normally none);
+- Apache-2.0 attribution and NOTICE handling for every reused artifact.
+
+Go behavior is requirements and comparison evidence only. Official OpenStack
+specifications and public client behavior remain normative, and mechanical
+translation or reproduction of Go architecture is prohibited unless a separate
+accepted decision explicitly authorizes it.
 
 ## Definition of done
 
