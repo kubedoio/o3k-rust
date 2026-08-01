@@ -10,7 +10,8 @@ agent cannot provide that evidence.
 
 This change adds a threat-model checklist, a machine-readable review evidence
 schema, and a fail-closed validator for future `human-review.json` artifacts.
-The validator checks identity declarations, reviewed commit binding, scope,
+The validator checks identity declarations, reviewed commit binding, complete
+threat-model scope,
 finding severity/disposition, unresolved-risk disclosure, and explicit
 release/destructive-cleanup approvals. `--require-approved` is required for a
 release decision.

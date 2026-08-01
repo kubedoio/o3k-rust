@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-human-review.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-python3 - "${WORK_DIR}/pending.json" "${WORK_DIR}/approved.json" "${WORK_DIR}/bad-reviewer.json" "${WORK_DIR}/bad-finding.json" "${WORK_DIR}/duplicate-finding.json" <<'PY'
+python3 - "${WORK_DIR}/pending.json" "${WORK_DIR}/approved.json" "${WORK_DIR}/bad-reviewer.json" "${WORK_DIR}/bad-finding.json" "${WORK_DIR}/duplicate-finding.json" "${WORK_DIR}/missing-scope.json" <<'PY'
 import json
 import sys
 
@@ -21,18 +21,25 @@ base = {
     },
     "reviewed_commit": "0123456789abcdef0123456789abcdef01234567",
     "review_record_url": "https://example.invalid/review/92",
-    "scope": ["compute-agent mTLS", "libvirt ownership"],
+    "scope": [
+        "Keystone and project isolation", "Compute-agent mTLS",
+        "Journal and reconciliation", "Placement and scheduler",
+        "Images and paths", "Config-drive", "Libvirt and ownership",
+        "Bridge/TAP/DHCP", "Console and logs",
+        "Installer/reset/uninstall/runner",
+    ],
     "findings": [{"id": "SEC-001", "severity": "low", "disposition": "fixed"}],
     "approvals": {"release_blocking_findings": True, "destructive_cleanup": True},
     "unresolved_risks": ["Real-host evidence is still required."],
 }
-values = [dict(base), dict(base, status="approved"), dict(base), dict(base), dict(base)]
+values = [dict(base), dict(base, status="approved"), dict(base), dict(base), dict(base), dict(base)]
 values[2]["reviewer"] = dict(base["reviewer"], is_implementing_agent=True)
 values[3]["findings"] = [{"id": "SEC-001", "severity": "high"}]
 values[4]["findings"] = [
     {"id": "SEC-001", "severity": "low", "disposition": "fixed"},
     {"id": "SEC-001", "severity": "medium", "disposition": "accepted"},
 ]
+values[5]["scope"] = ["Keystone and project isolation"]
 for path, value in zip(sys.argv[1:], values):
     with open(path, "w", encoding="utf-8") as stream:
         json.dump(value, stream)
@@ -51,6 +58,10 @@ if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/ba
 fi
 if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/duplicate-finding.json"; then
   echo "accepted duplicate finding identifier" >&2
+  exit 1
+fi
+if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/missing-scope.json"; then
+  echo "accepted review with incomplete threat-model scope" >&2
   exit 1
 fi
 if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/pending.json" --require-approved; then

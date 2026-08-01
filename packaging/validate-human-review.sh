@@ -59,6 +59,22 @@ else:
     scope = value.get("scope")
     if not isinstance(scope, list) or not scope or not all(isinstance(item, str) and item.strip() for item in scope):
         errors.append("scope must be a non-empty list of strings")
+    else:
+        required_scope = {
+            "Keystone and project isolation",
+            "Compute-agent mTLS",
+            "Journal and reconciliation",
+            "Placement and scheduler",
+            "Images and paths",
+            "Config-drive",
+            "Libvirt and ownership",
+            "Bridge/TAP/DHCP",
+            "Console and logs",
+            "Installer/reset/uninstall/runner",
+        }
+        missing_scope = sorted(required_scope - set(scope))
+        if missing_scope:
+            errors.append("scope is missing threat-model surfaces: " + ", ".join(missing_scope))
     findings = value.get("findings")
     if not isinstance(findings, list):
         errors.append("findings must be a list")

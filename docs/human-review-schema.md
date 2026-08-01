@@ -13,7 +13,7 @@ The artifact is a JSON object with `schema_version: 1` and
 | `reviewer` | non-empty `name`, `organization`, `role`, and `is_implementing_agent: false` |
 | `reviewed_commit` | exact 40-character lowercase commit SHA |
 | `review_record_url` | durable `https://` link to the human review record |
-| `scope` | non-empty list of reviewed surfaces |
+| `scope` | list containing every threat-model surface from `docs/security-review-checklist.md` |
 | `findings` | list of objects with unique, non-empty `id`, severity, and disposition; severity is `critical`, `high`, `medium`, `low`, or `informational`; disposition is `fixed`, `accepted`, `deferred`, or `not-applicable` |
 | `approvals` | `release_blocking_findings: true` and `destructive_cleanup: true` only when explicitly approved by the reviewer |
 | `unresolved_risks` | list of strings, including an empty list when none remain |
