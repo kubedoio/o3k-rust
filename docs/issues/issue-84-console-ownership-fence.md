@@ -13,6 +13,12 @@ used by lifecycle actions. Regression coverage covers matching, mismatched,
 foreign, and missing metadata. ADR-0126 records the defense-in-depth adapter
 fence.
 
+Registered-agent API reads now prime and read through the durable console cache.
+An unavailable agent stream or an empty/stale live observation therefore still
+returns previously persisted output with the requested offset and bound, while
+an unpersistable observation fails closed when no cache exists. Portable API
+coverage exercises the registered-agent fallback after an agent restart.
+
 ## Decision for this bounded slice
 
 After the authenticated API has completed `ComputeService::delete_server`, it

@@ -19,6 +19,12 @@ rejected by the production snapshot source because a live PTY is not a
 seekable historical log; the persisted daemon cache remains responsible for
 sequential paging.
 
+Authenticated API reads prime that durable cache and serve the response from
+it. If an agent is registered but its control stream is unavailable, or if a
+live observation is empty or stale, the API falls back to the persisted cache
+with the requested offset and bound. It does not report an unpersisted live
+snapshot as durable console evidence.
+
 ## Consequences
 
 Real agents can now return bounded current console bytes when the host and

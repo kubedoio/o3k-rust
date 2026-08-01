@@ -23,6 +23,144 @@ async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
+async fn registered_agent_console_reads_fall_back_to_durable_cache()
+-> Result<(), Box<dyn std::error::Error>> {
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?;
+    let store_path = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-agent-console-{}.sqlite",
+        uuid::Uuid::now_v7()
+    ));
+    let store = std::sync::Arc::new(SqliteStore::connect_file(&store_path).await?);
+    let provider = std::sync::Arc::new(FakeComputeProvider::new());
+    let registry = o3k_compute_agent::NodeRegistry::default();
+    registry
+        .register(&o3k_provider_contract::compute_proto::RegisterRequest {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            software_version: "test".to_owned(),
+            host_label: "host".to_owned(),
+            supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+            capabilities: Some(o3k_provider_contract::compute_proto::Capabilities {
+                architecture: "x86_64".to_owned(),
+                agent_provider_name: "test".to_owned(),
+                agent_provider_version: "1".to_owned(),
+                ..Default::default()
+            }),
+        })
+        .await?;
+    let placement_root = format!("/tmp/o3k-api-agent-placement-{}", uuid::Uuid::now_v7());
+    let placement = o3k_placement::PlacementLedger::open(&placement_root)?;
+    placement.register_provider(
+        "agent-1",
+        std::collections::BTreeMap::from([
+            (
+                o3k_placement::VCPU.to_owned(),
+                o3k_placement::Inventory {
+                    total: 8,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+            (
+                o3k_placement::MEMORY_MB.to_owned(),
+                o3k_placement::Inventory {
+                    total: 8192,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+            (
+                o3k_placement::DISK_GB.to_owned(),
+                o3k_placement::Inventory {
+                    total: 100,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            ),
+        ]),
+    )?;
+    let compute = ComputeService::new(store, provider)
+        .with_scheduler(o3k_scheduler::Scheduler::new(placement))
+        .with_agent_registry(registry.clone());
+    let console = o3k_console::ConsoleService::open(format!(
+        "/tmp/o3k-api-agent-console-cache-{}",
+        uuid::Uuid::now_v7()
+    ))?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_compute(compute)
+        .with_console(console.clone())
+        .with_agent_registry(registry);
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let auth_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = auth_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("token missing"))?
+        .to_str()?
+        .to_owned();
+    let create = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.1/bootstrap-project/servers")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"server":{"name":"agent-console","image":{"id":"image-1"},"flavor":{"id":"00000000-0000-0000-0000-000000000001"},"networks":[{"uuid":"network-1"}]}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(create.status(), StatusCode::ACCEPTED);
+    let server: Value =
+        serde_json::from_slice(&axum::body::to_bytes(create.into_body(), 8192).await?)?;
+    let server_id = server["server"]["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("server missing"))?;
+    let server_uuid = server_id.parse::<uuid::Uuid>()?;
+    console.write(server_uuid, b"0123456789abcdef")?;
+
+    let response = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!(
+                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                ))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"os-getConsoleOutput":{"offset":4,"length":6}}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    assert_eq!(body["output"], "456789");
+    Ok(())
+}
+
+#[tokio::test]
 async fn readiness_reports_startup_failure() -> Result<(), Box<dyn std::error::Error>> {
     let state = o3k_api::AppState::new();
     let request = Request::builder().uri("/readyz").body(Body::empty())?;

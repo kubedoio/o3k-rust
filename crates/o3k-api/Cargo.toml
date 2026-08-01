@@ -27,6 +27,9 @@ uuid.workspace = true
 http.workspace = true
 o3k-identity = { path = "../o3k-identity" }
 o3k-store = { path = "../o3k-store" }
+o3k-placement = { path = "../o3k-placement" }
+o3k-provider-contract = { path = "../o3k-provider-contract" }
+o3k-scheduler = { path = "../o3k-scheduler" }
 serde_json.workspace = true
 tokio.workspace = true
 tower.workspace = true
