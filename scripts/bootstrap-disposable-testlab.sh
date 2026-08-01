@@ -4,12 +4,18 @@ set -Eeuo pipefail
 # Build and run an isolated O3K profile for one protected workflow run.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+[[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] \
+  || { echo "disposable TestLab bootstrap failed: runner temp path is unsafe" >&2; exit 1; }
+command -v realpath >/dev/null 2>&1 \
+  || { echo "disposable TestLab bootstrap failed: realpath is unavailable" >&2; exit 1; }
+RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
 RUN_ID="${GITHUB_RUN_ID:-local-$$}"
 SOURCE_COMMIT="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
 SERVICE_ACCOUNT=o3k
+ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
 COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
@@ -18,14 +24,48 @@ COMPUTE_PID=
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 O3KD_READY=false
 COMPUTE_READY=false
+ACCOUNT_CREATED=false
+GROUP_CREATED=false
 FAIL_REASON=bootstrap_failed
 
 fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
 
 process_matches() {
-  local pid="$1" binary="$2" command_line
+  local pid="$1" binary="$2" expected command_line executable
+  expected="$STATE_ROOT/bin/$binary"
+  executable="$(sudo -n readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
+  [[ "$executable" == "$expected" ]] && return 0
   command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
-  [[ "$command_line" == *"$STATE_ROOT/bin/$binary"* ]]
+  case " $command_line " in
+    *" $expected "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_owned_process() {
+  local pid="$1" binary="$2"
+  sudo -n kill -0 "$pid" 2>/dev/null || return 0
+  process_matches "$pid" "$binary" || {
+    echo "disposable TestLab cleanup refused foreign process ${pid}" >&2
+    return 1
+  }
+  sudo -n kill "$pid" || return 1
+  for _ in $(seq 1 20); do
+    sudo -n kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  echo "disposable TestLab cleanup timed out stopping ${binary}" >&2
+  return 1
+}
+
+remove_created_identity() {
+  [[ "$ACCOUNT_CREATED" == true || "$GROUP_CREATED" == true ]] || return 0
+  sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+    set -euo pipefail
+    pgrep -u o3k >/dev/null 2>&1 && exit 42 || true
+    if [[ "$1" == true ]]; then userdel o3k; fi
+    if [[ "$2" == true ]]; then groupdel o3k; fi
+  ' _ "$ACCOUNT_CREATED" "$GROUP_CREATED"
 }
 
 write_result() {
@@ -54,14 +94,20 @@ failure_cleanup() {
   local status="$?"
   if ((status != 0)); then
     write_result failed "$FAIL_REASON" 2>/dev/null || true
-    [[ -z "$COMPUTE_PID" ]] || sudo -n kill "$COMPUTE_PID" 2>/dev/null || true
-    [[ -z "$O3KD_PID" ]] || sudo -n kill "$O3KD_PID" 2>/dev/null || true
-    if [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
-      && -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
-      && grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" 2>/dev/null; then
-      sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
+    cleanup_failed=false
+    [[ -z "$COMPUTE_PID" ]] || stop_owned_process "$COMPUTE_PID" o3k-compute || cleanup_failed=true
+    [[ -z "$O3KD_PID" ]] || stop_owned_process "$O3KD_PID" o3kd || cleanup_failed=true
+    if [[ "$cleanup_failed" == false ]]; then
+      if [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
+        && -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
+        && sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" 2>/dev/null; then
+        sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
+      fi
+      rm -rf -- "$PID_ROOT" 2>/dev/null || true
+      remove_created_identity 2>/dev/null || true
+    else
+      echo "disposable TestLab cleanup incomplete; preserving owned state for retry" >&2
     fi
-    rm -rf -- "$PID_ROOT" 2>/dev/null || true
   fi
   exit "$status"
 }
@@ -70,21 +116,32 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo; do command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"; done
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath; do
+  command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
+done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
+sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is unavailable"
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
 
+for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
+  ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
+done
+for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids"; do
+  if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
+    fail "run state parent is not an owned directory: ${parent}"
+  fi
+done
 if [[ ! -e "$STATE_ROOT" ]]; then
   for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
-    if command -v ss >/dev/null 2>&1 && ss -H -ltn 2>/dev/null | awk '{print $4}' \
-        | grep -Eq "(^|:):${port}$|:${port}$"; then
+    if ss -H -ltn 2>/dev/null | awk -v suffix=":${port}" \
+      'length($4) >= length(suffix) && substr($4, length($4)-length(suffix)+1) == suffix {found=1} END {exit !found}'; then
       fail "run port ${port} is already occupied by an existing service"
     fi
   done
 fi
 
 REUSE=false
-PASSWORD="${OS_PASSWORD:-}"
+PASSWORD=
 if [[ -e "$STATE_ROOT" ]]; then
   [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state is not a directory"
   [[ -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
@@ -95,8 +152,11 @@ if [[ -e "$STATE_ROOT" ]]; then
     || fail "existing run state has a foreign ownership marker"
   grep -Fqx "commit=$SOURCE_COMMIT" <<<"$marker" \
     || fail "existing run state belongs to a different source commit"
+  PASSWORD="$(sudo -n cat "$STATE_ROOT/.password" 2>/dev/null)" \
+    || fail "existing run state has no readable protected password"
   [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] \
-    || fail "existing run state requires the previously exported protected password"
+    || fail "existing run state contains an invalid protected password"
+  echo "::add-mask::${PASSWORD}"
   [[ -f "$PID_ROOT/o3kd.pid" && -f "$PID_ROOT/o3k-compute.pid" ]] \
     || fail "existing run state has no complete process identity"
   O3KD_PID="$(<"$PID_ROOT/o3kd.pid")"
@@ -110,10 +170,25 @@ if [[ -e "$STATE_ROOT" ]]; then
 fi
 
 if [[ "$REUSE" == false ]]; then
-id "$SERVICE_ACCOUNT" >/dev/null 2>&1 || fail "packaged o3k service account is unavailable"
+mkdir -p "${STATE_ROOT%/*}"
+account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+  set -euo pipefail
+  group_created=false
+  account_created=false
+  if ! getent group o3k >/dev/null 2>&1; then
+    groupadd --system o3k
+    group_created=true
+  fi
+  if ! id o3k >/dev/null 2>&1; then
+    useradd --system --no-create-home --gid o3k --home-dir "$1" \
+      --shell /usr/sbin/nologin o3k
+    account_created=true
+  fi
+  printf "%s %s\\n" "$account_created" "$group_created"
+' _ "$STATE_ROOT/home")" || fail "cannot provision packaged o3k service account"
+read -r ACCOUNT_CREATED GROUP_CREATED <<<"$account_state"
 [[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
 
-mkdir -p "${STATE_ROOT%/*}"
 mkdir -p "${PID_ROOT%/*}"
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
@@ -123,6 +198,14 @@ printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_I
 chmod 0600 "$STATE_ROOT/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$STATE_ROOT" >"$STATE_ROOT/.o3k-owned"
 chmod 0640 "$STATE_ROOT/.o3k-owned"
+if [[ "$ACCOUNT_CREATED" == true ]]; then
+  printf 'o3k-disposable-account-v1\n' >"$STATE_ROOT/.o3k-account-created"
+  chmod 0600 "$STATE_ROOT/.o3k-account-created"
+fi
+if [[ "$GROUP_CREATED" == true ]]; then
+  printf 'o3k-disposable-group-v1\n' >"$STATE_ROOT/.o3k-group-created"
+  chmod 0600 "$STATE_ROOT/.o3k-group-created"
+fi
 command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable; provision the runner dependency"
 python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable; provision the runner dependency"
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable; provision the runner dependency"
