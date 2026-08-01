@@ -78,10 +78,28 @@ process_matches() {
   esac
 }
 
+process_start_ticks() {
+  local pid="$1"
+  sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+process_uid() {
+  local pid="$1"
+  sudo -n ps -o user= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
+process_record_matches() {
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
+  [[ "$uid" == o3k ]] \
+    && [[ "$(process_uid "$pid")" == o3k ]] \
+    && [[ "$(process_start_ticks "$pid")" == "$start_ticks" ]] \
+    && process_matches "$pid" "$binary"
+}
+
 stop_owned_process() {
-  local pid="$1" binary="$2"
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
   sudo -n kill -0 "$pid" 2>/dev/null || return 0
-  process_matches "$pid" "$binary" \
+  process_record_matches "$pid" "$start_ticks" "$uid" "$binary" \
     || { echo "cleanup: refusing to signal a foreign process" >&2; return 1; }
   sudo -n kill "$pid" || return 1
   for _ in $(seq 1 20); do
@@ -93,22 +111,23 @@ stop_owned_process() {
 }
 for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
   if [[ -f "$pid_file" ]]; then
-    pid="$(<"$pid_file")"
-    [[ "$pid" =~ ^[0-9]+$ ]] || { echo "cleanup: invalid pid" >&2; exit 1; }
-    binary="${pid_file##*/}"
-    binary="${binary%.pid}"
-    stop_owned_process "$pid" "$binary" || exit 1
+    IFS='|' read -r pid start_ticks uid binary extra <"$pid_file"
+    [[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$start_ticks" =~ ^[0-9]+$ \
+      && ( "$binary" == o3kd || "$binary" == o3k-compute ) ]] \
+      || { echo "cleanup: invalid process identity" >&2; exit 1; }
+    stop_owned_process "$pid" "$start_ticks" "$uid" "$binary" || exit 1
   fi
 done
 for _ in $(seq 1 20); do
   alive=false
   for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
     [[ -f "$pid_file" ]] || continue
-    pid="$(<"$pid_file")"
+    IFS='|' read -r pid start_ticks uid binary extra <"$pid_file"
+    [[ -z "${extra:-}" && "$pid" =~ ^[0-9]+$ && "$start_ticks" =~ ^[0-9]+$ \
+      && ( "$binary" == o3kd || "$binary" == o3k-compute ) ]] \
+      || { echo "cleanup: invalid process identity" >&2; exit 1; }
     if sudo -n kill -0 "$pid" 2>/dev/null; then
-      binary="${pid_file##*/}"
-      binary="${binary%.pid}"
-      process_matches "$pid" "$binary" \
+      process_record_matches "$pid" "$start_ticks" "$uid" "$binary" \
         || { echo "cleanup: refusing to wait on a foreign process" >&2; exit 1; }
       alive=true
     fi

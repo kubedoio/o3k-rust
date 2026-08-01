@@ -40,8 +40,11 @@ printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3
 printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
 sudo chown -R o3k:o3k "$state"
 sudo chmod 0700 "$state"
-"$state/bin/o3kd" 60 & service_pid=$!
-printf '%s\n' "$service_pid" >"$pid_root/o3kd.pid"
+sudo -n -u o3k -- "$state/bin/o3kd" 60 & supervisor_pid=$!
+sleep 0.2
+service_pid="$(sudo -n pgrep -P "$supervisor_pid" -u o3k)"
+start_ticks="$(sudo -n awk '{print $22}' "/proc/$service_pid/stat")"
+printf '%s|%s|o3k|o3kd\n' "$service_pid" "$start_ticks" >"$pid_root/o3kd.pid"
 touch "$image"
 
 RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" \
@@ -50,7 +53,7 @@ RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" \
   bash "$CLEANUP"
 
 [[ ! -e "$state" && ! -e "$pid_root" && ! -e "$venv" && ! -e "$image" ]]
-! kill -0 "$service_pid" 2>/dev/null
+! sudo -n kill -0 "$service_pid" 2>/dev/null
 
 mkdir -p "$state"
 printf 'foreign-state\n' >"$state/.o3k-run-owned"

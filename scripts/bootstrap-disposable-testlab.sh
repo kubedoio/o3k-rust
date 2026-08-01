@@ -43,6 +43,24 @@ process_matches() {
   esac
 }
 
+process_start_ticks() {
+  local pid="$1"
+  sudo -n awk '{print $22}' "/proc/$pid/stat" 2>/dev/null
+}
+
+process_uid() {
+  local pid="$1"
+  sudo -n ps -o user= -p "$pid" 2>/dev/null | tr -d ' '
+}
+
+process_record_matches() {
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
+  [[ "$uid" == "$SERVICE_ACCOUNT" ]] \
+    && [[ "$(process_uid "$pid")" == "$SERVICE_ACCOUNT" ]] \
+    && [[ "$(process_start_ticks "$pid")" == "$start_ticks" ]] \
+    && process_matches "$pid" "$binary"
+}
+
 stop_owned_process() {
   local pid="$1" binary="$2"
   sudo -n kill -0 "$pid" 2>/dev/null || return 0
@@ -117,7 +135,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -160,12 +178,15 @@ if [[ -e "$STATE_ROOT" ]]; then
   echo "::add-mask::${PASSWORD}"
   [[ -f "$PID_ROOT/o3kd.pid" && -f "$PID_ROOT/o3k-compute.pid" ]] \
     || fail "existing run state has no complete process identity"
-  O3KD_PID="$(<"$PID_ROOT/o3kd.pid")"
-  COMPUTE_PID="$(<"$PID_ROOT/o3k-compute.pid")"
-  [[ "$O3KD_PID" =~ ^[0-9]+$ && "$COMPUTE_PID" =~ ^[0-9]+$ ]] \
+  IFS='|' read -r O3KD_PID O3KD_START O3KD_UID O3KD_BINARY <"$PID_ROOT/o3kd.pid"
+  IFS='|' read -r COMPUTE_PID COMPUTE_START COMPUTE_UID COMPUTE_BINARY <"$PID_ROOT/o3k-compute.pid"
+  [[ "$O3KD_PID" =~ ^[0-9]+$ && "$COMPUTE_PID" =~ ^[0-9]+$ \
+    && "$O3KD_START" =~ ^[0-9]+$ && "$COMPUTE_START" =~ ^[0-9]+$ \
+    && "$O3KD_BINARY" == o3kd && "$COMPUTE_BINARY" == o3k-compute ]] \
     || fail "existing run state has an invalid process identity"
-  process_matches "$O3KD_PID" o3kd && process_matches "$COMPUTE_PID" o3k-compute \
-    && kill -0 "$O3KD_PID" 2>/dev/null && kill -0 "$COMPUTE_PID" 2>/dev/null \
+  process_record_matches "$O3KD_PID" "$O3KD_START" "$O3KD_UID" o3kd \
+    && process_record_matches "$COMPUTE_PID" "$COMPUTE_START" "$COMPUTE_UID" o3k-compute \
+    && sudo -n kill -0 "$O3KD_PID" 2>/dev/null && sudo -n kill -0 "$COMPUTE_PID" 2>/dev/null \
     || fail "existing run state services are not running"
   REUSE=true
 fi
@@ -181,9 +202,11 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
   sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
   sudo -n flock -x "$APT_LOCK" bash -c '
     set -euo pipefail
-    timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive apt-get update -qq
     timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
-      apt-get install -y --no-install-recommends genisoimage python3-venv pkg-config libvirt-dev
+      apt-get -o DPkg::Lock::Timeout=300 update -qq
+    timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
+      apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
+        genisoimage python3-venv pkg-config libvirt-dev
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
 install -d -m 0755 "${STATE_ROOT%/*}" "${PID_ROOT%/*}"
@@ -298,7 +321,11 @@ start_service() {
     sudo -n kill "$supervisor" 2>/dev/null || true
     fail "$name did not start as the packaged service account"
   fi
-  printf '%s\n' "$child" >"$pid_file"
+  start_ticks="$(process_start_ticks "$child")"
+  uid="$(process_uid "$child")"
+  [[ "$start_ticks" =~ ^[0-9]+$ && "$uid" == "$SERVICE_ACCOUNT" ]] \
+    || fail "$name did not expose a valid service identity"
+  printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
   if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
 }
   start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
