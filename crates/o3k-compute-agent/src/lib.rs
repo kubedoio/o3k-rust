@@ -323,6 +323,14 @@ impl NodeRegistry {
         }
     }
 
+    async fn connection_is_current(&self, agent_id: &str, agent_epoch: &str) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(agent_id)
+            .is_some_and(|connection| connection.epoch == agent_epoch)
+    }
+
     pub async fn dispatch_command(&self, command: proto::Command) -> Result<(), AgentError> {
         validate_command(&command)?;
         let node = self
@@ -1206,6 +1214,12 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         }
                     }
                     Some(proto::control_request::Body::Operation(operation)) => {
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
                         registry.publish_event(AgentEvent::Operation(operation));
                     }
                     Some(proto::control_request::Body::Observation(observation)) => {
@@ -1222,13 +1236,31 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                                 .await;
                             break;
                         }
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
                         registry.publish_event(AgentEvent::Observation(observation));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
                         registry.publish_event(AgentEvent::CommandAccepted(accepted));
                     }
                     Some(proto::control_request::Body::ResyncSnapshot(_)) | None => {}
                     Some(proto::control_request::Body::Error(error)) => {
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
                         registry.publish_event(AgentEvent::Error(error));
                     }
                     Some(proto::control_request::Body::Register(_)) => {
@@ -2131,6 +2163,27 @@ mod tests {
         let node = registry.snapshot("node").await.ok_or("node retained")?;
         assert_eq!(node.availability, Availability::Unavailable);
         assert_eq!(node.capabilities.architecture, "x86_64");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn replacing_a_connection_fences_the_old_event_stream()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch-1")).await?;
+        let (old_sender, _) = mpsc::channel(1);
+        registry
+            .attach_connection("node", "epoch-1", old_sender)
+            .await?;
+        assert!(registry.connection_is_current("node", "epoch-1").await);
+
+        registry.register(&register("node", "epoch-2")).await?;
+        let (new_sender, _) = mpsc::channel(1);
+        registry
+            .attach_connection("node", "epoch-2", new_sender)
+            .await?;
+        assert!(!registry.connection_is_current("node", "epoch-1").await);
+        assert!(registry.connection_is_current("node", "epoch-2").await);
         Ok(())
     }
 
