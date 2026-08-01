@@ -59,7 +59,7 @@ artifacts = {
                 "dnsmasq-failure",
                 "disk-full",
                 "repeated-delete",
-        "partial-cleanup",
+                "partial-cleanup",
             )
         },
     },
