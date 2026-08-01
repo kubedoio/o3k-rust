@@ -24,6 +24,20 @@ if PATH="$WORK_DIR/fake-preflight-bin:/usr/bin:/bin" \
   echo "preflight accepted missing disk-space evidence" >&2
   exit 1
 fi
+mkdir -p "$WORK_DIR/custom-data" "$WORK_DIR/path-preflight-bin"
+cat >"$WORK_DIR/path-preflight-bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${DF_PATH_LOG:?}"
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/test 1000000 0 100000 1%% /custom\n'
+EOF
+chmod +x "$WORK_DIR/path-preflight-bin/df"
+if PATH="$WORK_DIR/path-preflight-bin:/usr/bin:/bin" DF_PATH_LOG="$WORK_DIR/df-path.log" \
+  bash "$ROOT_DIR/packaging/preflight.sh" --profile fake --data-dir "$WORK_DIR/custom-data/nested"; then
+  echo "preflight accepted low space on the configured data filesystem" >&2
+  exit 1
+fi
+grep -Fq -- "$WORK_DIR/custom-data" "$WORK_DIR/df-path.log"
 
 # Invalid installation paths must be rejected before the installer creates a
 # partial prefix or state directory.

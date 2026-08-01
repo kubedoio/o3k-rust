@@ -13,6 +13,12 @@ libvirt profile validates its complete TLS input set and agent fingerprint
 before filesystem publication. Release-bundle and packaging safety tests
 verify that invalid inputs do not leave a partial installation.
 
+Libvirt preflight now receives the configured `--data-dir` and checks free
+space on that filesystem (or its nearest existing ancestor), rather than
+always checking `/var/lib`. Malformed or low-space evidence still fails closed.
+This is documented in [ADR-0132](../adr/ADR-0132-preflight-data-filesystem.md)
+and covered by a custom-path fake-`df` regression.
+
 ## Explicit non-goals
 
 - no Ubuntu package installation or host execution;
