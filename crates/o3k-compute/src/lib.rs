@@ -179,6 +179,18 @@ impl ComputeService {
                         }
                     }
                     Ok(o3k_compute_agent::AgentEvent::Observation(observation)) => {
+                        let current_epoch = registry
+                            .snapshot(&observation.agent_id)
+                            .await
+                            .map(|node| node.agent_epoch);
+                        if current_epoch.as_deref() != Some(observation.agent_epoch.as_str()) {
+                            tracing::warn!(
+                                agent_id = %observation.agent_id,
+                                agent_epoch = %observation.agent_epoch,
+                                "ignored observation from a replaced agent epoch"
+                            );
+                            continue;
+                        }
                         if let Err(error) = service.apply_agent_observation(&observation).await {
                             tracing::warn!(%error, "agent resource observation rejected");
                         }

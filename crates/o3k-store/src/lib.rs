@@ -62,6 +62,16 @@ pub struct ResourceRecord {
     pub provider_id: Option<String>,
 }
 
+pub struct ObservationUpdate<'a> {
+    pub expected_generation: i64,
+    pub desired_state: &'a str,
+    pub observed_state: &'a str,
+    pub observed_generation: i64,
+    pub provider_id: Option<&'a str>,
+    pub agent_epoch: &'a str,
+    pub observation_sequence: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationRecord {
     pub id: Uuid,
@@ -126,6 +136,11 @@ pub trait DurableStore: Send + Sync {
         observed_state: &str,
         observed_generation: i64,
         provider_id: Option<&str>,
+    ) -> Result<ResourceRecord, StoreError>;
+    async fn update_resource_from_observation(
+        &self,
+        id: Uuid,
+        update: &ObservationUpdate<'_>,
     ) -> Result<ResourceRecord, StoreError>;
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
@@ -297,6 +312,75 @@ impl DurableStore for SqliteStore {
             };
         }
         self.get_resource(id).await
+    }
+
+    async fn update_resource_from_observation(
+        &self,
+        id: Uuid,
+        update: &ObservationUpdate<'_>,
+    ) -> Result<ResourceRecord, StoreError> {
+        let ObservationUpdate {
+            expected_generation,
+            desired_state,
+            observed_state,
+            observed_generation,
+            provider_id,
+            agent_epoch,
+            observation_sequence,
+        } = update;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let resource_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let current = resource_from_row(&resource_row)?;
+        if current.generation != *expected_generation {
+            return Err(StoreError::StaleGeneration);
+        }
+        let watermark = sqlx::query(
+            "SELECT agent_epoch, observation_sequence FROM observation_watermarks WHERE resource_id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if let Some(watermark) = watermark {
+            let previous_epoch: String = watermark.get("agent_epoch");
+            let previous_sequence: i64 = watermark.get("observation_sequence");
+            if previous_epoch == *agent_epoch
+                && *observation_sequence <= u64::try_from(previous_sequence).unwrap_or(u64::MAX)
+            {
+                transaction.rollback().await.map_err(StoreError::Database)?;
+                return Ok(current);
+            }
+        }
+        sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
+            .bind(*desired_state)
+            .bind(*observed_state)
+            .bind(*observed_generation)
+            .bind(*provider_id)
+            .bind(id.to_string())
+            .bind(*expected_generation)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO observation_watermarks (resource_id, agent_epoch, observation_sequence) VALUES (?, ?, ?) ON CONFLICT(resource_id) DO UPDATE SET agent_epoch = excluded.agent_epoch, observation_sequence = excluded.observation_sequence")
+            .bind(id.to_string())
+            .bind(*agent_epoch)
+            .bind(i64::try_from(*observation_sequence).map_err(|_| StoreError::Corrupt("observation sequence exceeds SQLite range".to_owned()))?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let updated_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let updated = resource_from_row(&updated_row)?;
+        transaction.commit().await.map_err(StoreError::Database)?;
+        Ok(updated)
     }
 
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {

@@ -8,7 +8,8 @@ use o3k_provider::{
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_store::{
-    DurableStore, OperationRecord, OperationState, ProviderReference, ResourceRecord, StoreError,
+    DurableStore, ObservationUpdate, OperationRecord, OperationState, ProviderReference,
+    ResourceRecord, StoreError,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -295,11 +296,6 @@ where
         let provider_id = (!observation.provider_resource_id.is_empty())
             .then_some(observation.provider_resource_id.as_str())
             .or(resource.provider_id.as_deref());
-        if resource.observed_state == observed_state
-            && resource.provider_id.as_deref() == provider_id
-        {
-            return Ok(());
-        }
         if let Some(provider_resource_id) = provider_id {
             match self
                 .store
@@ -320,16 +316,22 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
-        self.store
-            .update_resource(
-                resource_id,
-                resource.generation,
-                &resource.desired_state,
-                observed_state,
-                resource.generation,
-                provider_id,
-            )
+        let update = ObservationUpdate {
+            expected_generation: resource.generation,
+            desired_state: &resource.desired_state,
+            observed_state,
+            observed_generation: resource.generation,
+            provider_id,
+            agent_epoch: &observation.agent_epoch,
+            observation_sequence: observation.observation_sequence,
+        };
+        let updated = self
+            .store
+            .update_resource_from_observation(resource_id, &update)
             .await?;
+        if updated.generation == resource.generation {
+            return Ok(());
+        }
         self.event(operation_id, resource_id, JournalEventKind::UnknownObserved);
         Ok(())
     }
@@ -1230,6 +1232,36 @@ mod tests {
         let replay = store.get_resource(request.o3k_server_id).await?;
         assert_eq!(replay.generation, first.generation);
         assert_eq!(replay.observed_state, "SHUTOFF");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_agent_observation_cannot_regress_projected_state() -> Result<(), ReconcileError>
+    {
+        let (journal, store, _) = journal("agent-observation-order", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let active = o3k_provider_contract::compute_proto::Observation {
+            agent_id: "compute-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            resource_id: request.o3k_server_id.to_string(),
+            provider_resource_id: "agent-domain".to_owned(),
+            operation_id: operation_id.to_string(),
+            operation_state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            state: o3k_provider_contract::compute_proto::ResourceState::Running as i32,
+            observation_sequence: 10,
+            ..Default::default()
+        };
+        journal.apply_agent_observation(&active).await?;
+        let stale = o3k_provider_contract::compute_proto::Observation {
+            state: o3k_provider_contract::compute_proto::ResourceState::Stopped as i32,
+            observation_sequence: 9,
+            ..active.clone()
+        };
+        journal.apply_agent_observation(&stale).await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "ACTIVE");
+        assert_eq!(resource.provider_id.as_deref(), Some("agent-domain"));
         Ok(())
     }
 
