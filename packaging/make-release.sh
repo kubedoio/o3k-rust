@@ -4,6 +4,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
 PROFILE="${2:-fake}"
 [[ "$PROFILE" == fake || "$PROFILE" == libvirt ]] || { echo "profile must be fake or libvirt" >&2; exit 2; }
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
+  echo "release source tree must be clean before packaging" >&2
+  exit 2
+fi
 OUT_DIR="$ROOT_DIR/dist/o3k-$VERSION"
 cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
 if [[ "$PROFILE" == libvirt ]]; then cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute; fi

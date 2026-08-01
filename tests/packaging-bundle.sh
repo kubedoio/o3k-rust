@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-bundle.XXXXXX")"
-trap 'rm -rf -- "${WORK_DIR}"' EXIT
+DIRTY_MARKER="$ROOT_DIR/.o3k-release-dirty-test"
+cleanup() { rm -f -- "$DIRTY_MARKER"; rm -rf -- "$WORK_DIR"; }
+trap cleanup EXIT
 
 BUNDLE_DIR="$WORK_DIR/bundle"
 mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging"
@@ -27,6 +29,15 @@ printf 'cargo must not be called for a release bundle\n' >&2
 exit 97
 EOF
 chmod 0755 "$CARGO_DIR/cargo"
+
+touch "$DIRTY_MARKER"
+if CARGO_MARKER="$WORK_DIR/dirty-cargo-invoked" PATH="$CARGO_DIR:$PATH" \
+    bash "$ROOT_DIR/packaging/make-release.sh" 0.0-dirty-test fake; then
+  echo "release builder accepted a dirty source tree" >&2
+  exit 1
+fi
+[[ ! -e "$WORK_DIR/dirty-cargo-invoked" ]]
+rm -f -- "$DIRTY_MARKER"
 
 PREFIX="$WORK_DIR/prefix"
 CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
