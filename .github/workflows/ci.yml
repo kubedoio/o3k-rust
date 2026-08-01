@@ -28,6 +28,8 @@ jobs:
         run: for file in packaging/*.sh tests/*.sh; do bash -n "$file"; done
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test CI workflow contracts
+        run: bash tests/ci-workflow.sh
       - name: Test real-host capability probe
         run: bash tests/real-host-capability-probe.sh
       - name: Test release evidence gate
@@ -59,9 +61,9 @@ jobs:
           version: 1.50.0
           github_token: ${{ github.token }}
       - name: Fetch protobuf compatibility baseline
-        run: git fetch origin main:refs/heads/main
+        run: git fetch origin main:refs/remotes/origin/main
       - name: Check protobuf compatibility
-        run: buf breaking --against '.git#branch=main,subdir=proto'
+        run: buf breaking --against '.git#branch=origin/main,subdir=proto'
       - name: TestLab fake-provider workflow
         run: bash tests/testlab.sh
       - name: Test measurement authentication input
