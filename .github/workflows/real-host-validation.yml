@@ -2,11 +2,6 @@ name: Real-host validation
 
 on:
   workflow_dispatch:
-    inputs:
-      image_path:
-        description: Absolute path to a prepared local CirrOS image on the runner
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -34,6 +29,19 @@ jobs:
       - name: Verify immutable source checkout
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
+      - name: Download and verify CirrOS image
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          image_path="$(mktemp "${RUNNER_TEMP}/cirros-0.6.3-x86_64-disk.img.XXXXXX")"
+          curl --fail --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "${image_path}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image_path}" \
+            | sha256sum --check --strict --status
+          chmod 0644 "${image_path}"
+          printf 'O3K_TESTLAB_IMAGE_PATH=%s\n' "${image_path}" >> "${GITHUB_ENV}"
+
       - name: Probe runner capabilities
         id: capabilities
         continue-on-error: true
@@ -44,7 +52,6 @@ jobs:
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_SHA: ${{ github.sha }}
-          O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
         run: bash scripts/real-host-capability-probe.sh
 
       - name: Pre-run host and trust guard
@@ -77,7 +84,6 @@ jobs:
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
-          O3K_TESTLAB_IMAGE_PATH: ${{ inputs.image_path }}
           OS_AUTH_URL: ${{ vars.O3K_TESTLAB_AUTH_URL || 'http://127.0.0.1:8080/v3' }}
           OS_USERNAME: ${{ vars.O3K_TESTLAB_USERNAME || 'admin' }}
           OS_PROJECT_NAME: ${{ vars.O3K_TESTLAB_PROJECT || 'bootstrap-project' }}
