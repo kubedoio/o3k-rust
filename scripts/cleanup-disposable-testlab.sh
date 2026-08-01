@@ -169,8 +169,8 @@ if [[ "$account_created" == true || "$group_created" == true ]]; then
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     set -euo pipefail
     pgrep -u o3k >/dev/null 2>&1 && exit 42 || true
-    if [[ "$1" == true ]]; then userdel o3k; fi
-    if [[ "$2" == true ]]; then groupdel o3k; fi
+    if [[ "$1" == true ]] && id o3k >/dev/null 2>&1; then userdel o3k; fi
+    if [[ "$2" == true ]] && getent group o3k >/dev/null 2>&1; then groupdel o3k; fi
   ' _ "$account_created" "$group_created" \
     || { echo "cleanup: run-created o3k identity is in use or could not be removed" >&2; exit 1; }
 fi
