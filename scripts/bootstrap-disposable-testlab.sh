@@ -1,0 +1,235 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+# Build and run an isolated O3K profile for one protected workflow run.
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+RUN_ID="${GITHUB_RUN_ID:-local-$$}"
+SOURCE_COMMIT="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
+ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
+STATE_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
+PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}"
+SERVICE_ACCOUNT=o3k
+AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
+CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
+COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
+O3KD_PID=
+COMPUTE_PID=
+OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
+O3KD_READY=false
+COMPUTE_READY=false
+FAIL_REASON=bootstrap_failed
+
+fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
+
+process_matches() {
+  local pid="$1" binary="$2" command_line
+  command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
+  [[ "$command_line" == *"$STATE_ROOT/bin/$binary"* ]]
+}
+
+write_result() {
+  local status="$1" reason="$2"
+  mkdir -p "$ARTIFACT_DIR"
+  python3 - "$ARTIFACT_DIR/disposable-testlab-bootstrap.json" "$status" "$reason" \
+    "$SOURCE_COMMIT" "$STATE_ROOT" "$SERVICE_ACCOUNT" "$AUTH_PORT" \
+    "${O3KD_PID:-}" "${COMPUTE_PID:-}" "$O3KD_READY" "$COMPUTE_READY" <<'PY'
+import json, sys, time
+path, status, reason, commit, state, account, port, o3kd_pid, compute_pid, o3kd_ready, compute_ready = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({"artifact_type": "disposable-testlab-bootstrap", "status": status,
+               "reason": reason, "redacted": True, "source_commit": commit,
+               "state_directory": state, "service_account": account,
+               "auth_url": f"http://127.0.0.1:{port}/v3", "username": "admin",
+               "project": "admin", "project_id": "bootstrap-project",
+               "region": "RegionOne", "o3kd_pid": o3kd_pid or None,
+               "compute_pid": compute_pid or None,
+               "readiness": {"o3kd": o3kd_ready == "true", "compute": compute_ready == "true"},
+               "finished_at": int(time.time())}, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+}
+
+failure_cleanup() {
+  local status="$?"
+  if ((status != 0)); then
+    write_result failed "$FAIL_REASON" 2>/dev/null || true
+    [[ -z "$COMPUTE_PID" ]] || sudo -n kill "$COMPUTE_PID" 2>/dev/null || true
+    [[ -z "$O3KD_PID" ]] || sudo -n kill "$O3KD_PID" 2>/dev/null || true
+    if [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
+      && -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
+      && grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" 2>/dev/null; then
+      sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
+    fi
+    rm -rf -- "$PID_ROOT" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap failure_cleanup EXIT
+
+[[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
+[[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
+[[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
+for command in cargo openssl python3 curl sudo; do command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"; done
+sudo -n true 2>/dev/null || fail "passwordless sudo is required"
+[[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
+
+if [[ ! -e "$STATE_ROOT" ]]; then
+  for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
+    if command -v ss >/dev/null 2>&1 && ss -H -ltn 2>/dev/null | awk '{print $4}' \
+        | grep -Eq "(^|:):${port}$|:${port}$"; then
+      fail "run port ${port} is already occupied by an existing service"
+    fi
+  done
+fi
+
+REUSE=false
+PASSWORD="${OS_PASSWORD:-}"
+if [[ -e "$STATE_ROOT" ]]; then
+  [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state is not a directory"
+  [[ -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
+    || fail "existing run state is not owned by this bootstrap"
+  marker="$(sudo -n cat "$STATE_ROOT/.o3k-run-owned" 2>/dev/null)" \
+    || fail "cannot inspect existing run ownership marker"
+  grep -Fqx 'o3k-disposable-testlab-v1' <<<"$marker" \
+    || fail "existing run state has a foreign ownership marker"
+  grep -Fqx "commit=$SOURCE_COMMIT" <<<"$marker" \
+    || fail "existing run state belongs to a different source commit"
+  [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "existing run state requires the previously exported protected password"
+  [[ -f "$PID_ROOT/o3kd.pid" && -f "$PID_ROOT/o3k-compute.pid" ]] \
+    || fail "existing run state has no complete process identity"
+  O3KD_PID="$(<"$PID_ROOT/o3kd.pid")"
+  COMPUTE_PID="$(<"$PID_ROOT/o3k-compute.pid")"
+  [[ "$O3KD_PID" =~ ^[0-9]+$ && "$COMPUTE_PID" =~ ^[0-9]+$ ]] \
+    || fail "existing run state has an invalid process identity"
+  process_matches "$O3KD_PID" o3kd && process_matches "$COMPUTE_PID" o3k-compute \
+    && kill -0 "$O3KD_PID" 2>/dev/null && kill -0 "$COMPUTE_PID" 2>/dev/null \
+    || fail "existing run state services are not running"
+  REUSE=true
+fi
+
+if [[ "$REUSE" == false ]]; then
+id "$SERVICE_ACCOUNT" >/dev/null 2>&1 || fail "packaged o3k service account is unavailable"
+[[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
+
+mkdir -p "${STATE_ROOT%/*}"
+mkdir -p "${PID_ROOT%/*}"
+[[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
+install -d -m 0700 "$PID_ROOT"
+[[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state already exists"
+install -d -m 0700 "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/data" "$STATE_ROOT/log" "$STATE_ROOT/tls"
+printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" >"$STATE_ROOT/.o3k-run-owned"
+chmod 0600 "$STATE_ROOT/.o3k-run-owned"
+printf 'o3k-owned-v1 path=%s\n' "$STATE_ROOT" >"$STATE_ROOT/.o3k-owned"
+chmod 0640 "$STATE_ROOT/.o3k-owned"
+command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable; provision the runner dependency"
+python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable; provision the runner dependency"
+command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable; provision the runner dependency"
+pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable; provision libvirt-dev"
+cargo build --locked --release --bin o3kd
+# virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
+# make the runtime link explicit after the host preflight proves libvirt exists.
+RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
+  cargo build --locked --release --features libvirt --bin o3k-compute-bin
+install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
+install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
+bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
+  --server-name o3k-control-plane --agent-id compute-agent
+install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/data/agent-id"
+
+PASSWORD="$(openssl rand -hex 32)"
+[[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
+echo "::add-mask::${PASSWORD}"
+SIGNING_KEY="$(openssl rand -hex 48)"
+printf '%s\n' "$PASSWORD" >"$STATE_ROOT/.password"
+chmod 0600 "$STATE_ROOT/.password"
+cat >"$STATE_ROOT/o3kd.env" <<EOF
+O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
+O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
+O3K_PROVIDER=fake
+O3K_LOG_FORMAT=json
+O3K_LOG_FILTER=warn
+O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
+O3K_TOKEN_SIGNING_KEY=$(printf '%q' "$SIGNING_KEY")
+O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
+O3K_COMPUTE_SERVER_CERTIFICATE=$(printf '%q' "$STATE_ROOT/tls/server.pem")
+O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
+O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
+O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(<"$STATE_ROOT/tls/agent-fingerprint")
+EOF
+cat >"$STATE_ROOT/o3k-compute.env" <<EOF
+O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
+O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")
+O3K_COMPUTE_SERVER_NAME=o3k-control-plane
+O3K_COMPUTE_HOST_LABEL=o3k-testlab
+O3K_COMPUTE_TLS_DIR=$(printf '%q' "$STATE_ROOT/tls")
+O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
+O3K_COMPUTE_MAX_DISK_GB=10
+EOF
+chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/o3k-compute.env"
+sudo -n chown -R "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT"
+sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
+  || fail "o3k service account cannot traverse the run state root"
+
+start_service() {
+  local name="$1" env_file="$2" binary="$3" log_file="$4" pid_file="$5"
+  sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+    "$env_file" "$binary" "$log_file" &
+  local pid=$!
+  printf '%s\n' "$pid" >"$pid_file"
+  kill -0 "$pid" 2>/dev/null || fail "$name did not start"
+  if [[ "$name" == o3kd ]]; then O3KD_PID="$pid"; else COMPUTE_PID="$pid"; fi
+}
+  start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
+for _ in $(seq 1 60); do
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/healthz" >/dev/null 2>&1 && break
+  sleep 1
+done
+curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 || fail "o3kd did not become ready"
+O3KD_READY=true
+start_service o3k-compute "$STATE_ROOT/o3k-compute.env" "$STATE_ROOT/bin/o3k-compute" \
+  "$STATE_ROOT/log/o3k-compute.log" "$PID_ROOT/o3k-compute.pid"
+for _ in $(seq 1 30); do
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 && break
+  sleep 1
+done
+curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 \
+  || fail "o3k-compute health endpoint did not become ready"
+COMPUTE_READY=true
+else
+  echo "reusing authenticated disposable TestLab for run ${RUN_ID}"
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 \
+    || fail "reused o3kd is not ready"
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 \
+    || fail "reused o3k-compute is not healthy"
+  O3KD_READY=true
+  COMPUTE_READY=true
+fi
+
+if [[ -z "$OPENSTACK_VENV" ]]; then
+  OPENSTACK_VENV="$(mktemp -d "${RUNNER_TEMP%/}/o3k-openstack-venv.XXXXXX")"
+else
+  [[ "$OPENSTACK_VENV" == "${RUNNER_TEMP%/}/o3k-openstack-venv."* ]] \
+    || fail "OpenStack virtualenv is not run-owned"
+fi
+if [[ ! -x "$OPENSTACK_VENV/bin/openstack" ]]; then
+  python3 -m venv "$OPENSTACK_VENV"
+  PIP_CONFIG_FILE=/dev/null PIP_NO_CACHE_DIR=1 "$OPENSTACK_VENV/bin/python" -m pip install \
+    --isolated --disable-pip-version-check --no-input "python-openstackclient==10.2.1"
+fi
+export PATH="$OPENSTACK_VENV/bin:$PATH"
+export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSWORD="$PASSWORD" \
+  OS_PROJECT_NAME=admin OS_REGION_NAME=RegionOne OS_USER_DOMAIN_NAME=Default \
+  OS_PROJECT_DOMAIN_NAME=Default OS_INTERFACE=public OS_IDENTITY_API_VERSION=3
+openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
+
+printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_OPENSTACK_VENV=%s\n' "$STATE_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
+printf 'OS_AUTH_URL=%s\nOS_USERNAME=admin\nOS_PROJECT_NAME=admin\nOS_REGION_NAME=RegionOne\nOS_PASSWORD=%s\n' \
+  "$OS_AUTH_URL" "$PASSWORD" >>"${GITHUB_ENV:-/dev/null}"
+write_result passed authenticated
+trap - EXIT
+echo "disposable TestLab bootstrap completed"
