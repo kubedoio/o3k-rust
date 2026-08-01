@@ -27,20 +27,42 @@ CLEANUP_SUBNET_STATUS=
 CLEANUP_FLAVOR_STATUS=
 CLEANUP_SERVER_STATUS=
 SERVER_NAME=o3k-testlab-server
+EXPECTED_FIXED_IP=192.0.2.2
+SERVER_ACTIVE=false
+SERVER_CONFIG_DRIVE=false
+SERVER_FIXED_IP=
+CONSOLE_BOOT_MARKER=false
 
 validate_server_json() {
     local kind="$1" path="$2" expected_id="$3"
-    python3 - "${kind}" "${path}" "${expected_id}" <<'PY'
+    python3 - "${kind}" "${path}" "${expected_id}" "${EXPECTED_FIXED_IP}" <<'PY'
 import json
 import sys
 
-kind, path, expected_id = sys.argv[1:]
+kind, path, expected_id, expected_fixed_ip = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     value = json.load(stream)
 
 if kind == "show":
     if not isinstance(value, dict) or str(value.get("id", "")) != expected_id:
         raise SystemExit("server show did not identify the created server")
+    if str(value.get("status", "")).upper() != "ACTIVE":
+        raise SystemExit("server show did not prove ACTIVE state")
+    if value.get("config_drive") not in {True, "True", "true", 1}:
+        raise SystemExit("server show did not prove config-drive attachment")
+    addresses = []
+    def collect(node):
+        if isinstance(node, dict):
+            if "addr" in node:
+                addresses.append(str(node["addr"]))
+            for child in node.values():
+                collect(child)
+        elif isinstance(node, list):
+            for child in node:
+                collect(child)
+    collect(value.get("addresses", {}))
+    if expected_fixed_ip not in addresses:
+        raise SystemExit("server show did not prove the expected fixed IP")
 elif kind == "list":
     if not isinstance(value, list) or not any(
         isinstance(row, dict) and str(row.get("id", "")) == expected_id
@@ -182,12 +204,14 @@ write_result() {
         "${CREATED_KEYPAIR_ID}" "${CREATED_FLAVOR_ID}" "${CREATED_SERVER_ID}" \
         "${CLEANUP_IMAGE_STATUS}" "${CLEANUP_KEYPAIR_STATUS}" "${CLEANUP_NETWORK_STATUS}" \
         "${CLEANUP_SUBNET_STATUS}" "${CLEANUP_FLAVOR_STATUS}" \
-        "${CLEANUP_SERVER_STATUS}" <<'PY'
+        "${CLEANUP_SERVER_STATUS}" "${SERVER_ACTIVE}" "${SERVER_CONFIG_DRIVE}" \
+        "${SERVER_FIXED_IP}" "${CONSOLE_BOOT_MARKER}" <<'PY'
 import json, sys, time
 (
     path, status, reason, cleanup_status, image_id, network_id, subnet_id,
     keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
-    flavor_status, server_status,
+    flavor_status, server_status, server_active, server_config_drive,
+    server_fixed_ip, console_boot_marker,
 ) = sys.argv[1:]
 result = {
     "artifact_type": "openstack-cli-e2e",
@@ -227,6 +251,12 @@ if status == "passed":
     result["lifecycle"] = {
         "create": True, "show": True, "list": True, "stop": True,
         "start": True, "reboot": True, "console": True, "delete": True,
+    }
+    result["acceptance"] = {
+        "status": "ACTIVE" if server_active == "true" else "unknown",
+        "fixed_ip": server_fixed_ip,
+        "config_drive": server_config_drive == "true",
+        "console_boot_marker": console_boot_marker == "true",
     }
 with open(path, "w", encoding="utf-8") as output:
     json.dump(result, output, indent=2)
@@ -312,11 +342,14 @@ CLEANUP_SUBNET_STATUS=pending
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_ID}" --network "${NETWORK_ID}" "${SERVER_NAME}" -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_ID}" --config-drive true --nic "net-id=${NETWORK_ID},subnet-id=${SUBNET_ID},fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
+SERVER_ACTIVE=true
+SERVER_CONFIG_DRIVE=true
+SERVER_FIXED_IP="${EXPECTED_FIXED_IP}"
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
@@ -327,6 +360,11 @@ for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     sleep "${O3K_TESTLAB_CONSOLE_INTERVAL_SECONDS:-1}"
 done
 [[ -s "${ARTIFACT_DIR}/console.log" ]]
+if ! grep -Eiq 'cirros|login:' "${ARTIFACT_DIR}/console.log"; then
+    echo "console output did not contain a CirrOS boot marker" >&2
+    exit 1
+fi
+CONSOLE_BOOT_MARKER=true
 tail -c 65536 "${ARTIFACT_DIR}/console.log" >"${ARTIFACT_DIR}/console.log.tmp"
 mv "${ARTIFACT_DIR}/console.log.tmp" "${ARTIFACT_DIR}/console.log"
 openstack server stop --wait "${SERVER_ID}"

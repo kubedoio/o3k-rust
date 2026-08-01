@@ -27,6 +27,7 @@ artifacts = {
         "resources": {name: f"{name}-id" for name in ("image_id", "keypair_id", "network_id", "subnet_id", "flavor_id", "server_id")},
         "cleanup": {**common["cleanup"], "resources": {name: "verified_absent" for name in ("image", "keypair", "network", "subnet", "flavor", "server")}},
         "lifecycle": {name: True for name in ("create", "show", "list", "stop", "start", "reboot", "console", "delete")},
+        "acceptance": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True},
     },
     "ubuntu.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "ubuntu", "install": {"status": "passed"}},
     "debian.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "debian", "install": {"status": "passed"}},
