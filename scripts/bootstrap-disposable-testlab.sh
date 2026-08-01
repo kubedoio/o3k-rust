@@ -32,15 +32,10 @@ FAIL_REASON=bootstrap_failed
 fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
 
 process_matches() {
-  local pid="$1" binary="$2" expected command_line executable
+  local pid="$1" binary="$2" expected executable
   expected="$STATE_ROOT/bin/$binary"
   executable="$(sudo -n readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
-  [[ "$executable" == "$expected" ]] && return 0
-  command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
-  case " $command_line " in
-    *" $expected "*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ "$executable" == "$expected" ]]
 }
 
 process_start_ticks() {

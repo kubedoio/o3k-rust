@@ -67,15 +67,10 @@ sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/
   && group_created=true
 
 process_matches() {
-  local pid="$1" binary="$2" expected executable command_line
+  local pid="$1" binary="$2" expected executable
   expected="$STATE_ROOT/bin/$binary"
   executable="$(sudo -n readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
-  [[ "$executable" == "$expected" ]] && return 0
-  command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
-  case " $command_line " in
-    *" $expected "*) return 0 ;;
-    *) return 1 ;;
-  esac
+  [[ "$executable" == "$expected" ]]
 }
 
 process_start_ticks() {
