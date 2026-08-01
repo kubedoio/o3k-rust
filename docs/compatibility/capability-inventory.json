@@ -1,0 +1,1123 @@
+{
+  "generator": "scripts/generate-capability-inventory.py",
+  "go_reference": {
+    "commit": "53fd2cb36ee79f42da49c8181d6ceed12b41b3aa",
+    "license": "Apache-2.0",
+    "repository": "https://github.com/kubedoio/o3k"
+  },
+  "inventory_version": "0.2.0-alpha.1",
+  "operation_count": 41,
+  "operations": [
+    {
+      "aliases": [],
+      "cli_command": "openstack flavor list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/flavors.go"
+      ],
+      "id": "compute.flavor_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200."
+      ],
+      "method": "GET",
+      "observed_method_status": {
+        "method": "GET",
+        "path": "/v2.1/bootstrap-project/flavors",
+        "run_id": "30717871057",
+        "status": 405
+      },
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#list-flavors"
+      ],
+      "operation": "flavor_list",
+      "path": "/v2.1/{project_id}/flavors",
+      "portable_contract": "verified",
+      "protected_runner": "failed",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:118",
+        "crates/o3k-api/tests/health.rs:479"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack flavor create",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/flavors.go"
+      ],
+      "id": "compute.flavor_collection_create",
+      "implementation_state": "missing",
+      "known_gaps": [
+        "The current fixed flavor catalog has no administrative create route."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#create-flavor"
+      ],
+      "operation": "flavor_create",
+      "path": "/v2.1/{project_id}/flavors",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack flavor list --long",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/flavors.go"
+      ],
+      "id": "compute.flavor_collection_detail",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#list-flavors-with-details"
+      ],
+      "operation": "flavor_list_detail",
+      "path": "/v2.1/{project_id}/flavors/detail",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:119",
+        "crates/o3k-api/tests/health.rs:490"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack flavor delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/flavors.go"
+      ],
+      "id": "compute.flavor_member_delete",
+      "implementation_state": "missing",
+      "known_gaps": [
+        "Flavor deletion and immutable resource ownership are planned in #293."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#delete-flavor"
+      ],
+      "operation": "flavor_delete",
+      "path": "/v2.1/{project_id}/flavors/{id}",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack flavor show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/flavors.go"
+      ],
+      "id": "compute.flavor_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#show-flavor-details"
+      ],
+      "operation": "flavor_show",
+      "path": "/v2.1/{project_id}/flavors/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:120",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack keypair list",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/nova/keypairs.go",
+        "internal/nova/handlers.go"
+      ],
+      "id": "compute.keypair_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Private-key generation is intentionally unsupported."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#list-keypairs"
+      ],
+      "operation": "keypair_list",
+      "path": "/v2.1/{project_id}/os-keypairs",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:121-124",
+        "crates/o3k-api/tests/health.rs:532"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack keypair create --public-key",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/nova/keypairs.go",
+        "internal/nova/handlers.go"
+      ],
+      "id": "compute.keypair_collection_import",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "The private key never crosses the API boundary."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#import-keypair"
+      ],
+      "operation": "keypair_import",
+      "path": "/v2.1/{project_id}/os-keypairs",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:122-124",
+        "crates/o3k-api/tests/health.rs:511"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack keypair delete",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/nova/keypairs.go",
+        "internal/nova/handlers.go"
+      ],
+      "id": "compute.keypair_member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Deletion is rejected while an owned server still references the keypair."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#delete-keypair"
+      ],
+      "operation": "keypair_delete",
+      "path": "/v2.1/{project_id}/os-keypairs/{name}",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:125-127",
+        "crates/o3k-api/tests/health.rs:615"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack keypair show",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/nova/keypairs.go",
+        "internal/nova/handlers.go"
+      ],
+      "id": "compute.keypair_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#show-keypair-details"
+      ],
+      "operation": "keypair_show",
+      "path": "/v2.1/{project_id}/os-keypairs/{name}",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:125-127",
+        "crates/o3k-api/tests/health.rs:557"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "The broader Nova filter and pagination surface is deferred."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#list-servers"
+      ],
+      "operation": "server_list",
+      "path": "/v2.1/{project_id}/servers",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:131",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server create",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_collection_create",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Real Placement and compute-agent dispatch remain pending."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#create-server"
+      ],
+      "operation": "server_create",
+      "path": "/v2.1/{project_id}/servers",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:129-132",
+        "crates/o3k-api/tests/health.rs:549"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server list --long",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_collection_detail",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#list-servers-with-details"
+      ],
+      "operation": "server_list_detail",
+      "path": "/v2.1/{project_id}/servers/detail",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:133",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Real provider resource cleanup is tracked by later infrastructure issues."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#delete-server"
+      ],
+      "operation": "server_delete",
+      "path": "/v2.1/{project_id}/servers/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:135-136",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#show-server-details"
+      ],
+      "operation": "server_show",
+      "path": "/v2.1/{project_id}/servers/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:135-136",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack server start|stop|reboot|console log",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/nova/handlers.go",
+        "internal/nova/console.go",
+        "internal/nova/server_lifecycle_test.go"
+      ],
+      "id": "compute.server_member_actions",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Console output is bounded API data; real guest serial output is tracked by #84."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/compute/#server-actions"
+      ],
+      "operation": "server_actions_start_stop_reboot_console",
+      "path": "/v2.1/{project_id}/servers/{id}/action",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:138-141",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "compute"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack token issue",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/keystone/handlers.go"
+      ],
+      "id": "identity.version_root",
+      "implementation_state": "partial",
+      "known_gaps": [
+        "Root version discovery is not covered by an independent compatibility test."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#version-discovery"
+      ],
+      "operation": "version_discovery_root",
+      "path": "/",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:103-105"
+      ],
+      "service": "identity"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack token issue",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/keystone/handlers.go"
+      ],
+      "id": "identity.version_v3",
+      "implementation_state": "partial",
+      "known_gaps": [
+        "The version response and discovery warning behavior need an explicit contract test."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#version-discovery"
+      ],
+      "operation": "version_discovery_v3",
+      "path": "/v3",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:103-105"
+      ],
+      "service": "identity"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack token issue",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/keystone/auth.go",
+        "internal/keystone/handlers.go"
+      ],
+      "id": "identity.token_password_scoped",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Federation and non-password authentication are outside the alpha profile."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token"
+      ],
+      "operation": "password_authentication_scoped_token",
+      "path": "/v3/auth/tokens",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:105",
+        "crates/o3k-identity/src/lib.rs"
+      ],
+      "service": "identity"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/glance/images.go"
+      ],
+      "id": "image.collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "The broad Glance filter and pagination surface is outside the alpha profile."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#list-images"
+      ],
+      "operation": "image_list",
+      "path": "/v2/images",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:106",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image create",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/glance/images.go"
+      ],
+      "id": "image.collection_create",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Local filesystem storage is the only alpha backend."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#create-image"
+      ],
+      "operation": "image_create",
+      "path": "/v2/images",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:106",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/glance/images.go"
+      ],
+      "id": "image.member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#delete-image"
+      ],
+      "operation": "image_delete",
+      "path": "/v2/images/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:107",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/glance/images.go"
+      ],
+      "id": "image.member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#show-image-details"
+      ],
+      "operation": "image_show",
+      "path": "/v2/images/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:107",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image save",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/glance/images.go"
+      ],
+      "id": "image.member_download",
+      "implementation_state": "missing",
+      "known_gaps": [
+        "No public authenticated image-content download route is currently registered."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#download-binary-image-data"
+      ],
+      "operation": "image_download_binary",
+      "path": "/v2/images/{id}/file",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs",
+        "crates/o3k-image/src/lib.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack image set --file",
+      "cli_verification": "verified",
+      "go_locations": [
+        "internal/glance/images.go",
+        "internal/glance/import.go"
+      ],
+      "id": "image.member_upload",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Import, multi-store, and signature workflows are outside the alpha profile."
+      ],
+      "method": "PUT",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/image/v2/index.html#upload-binary-image-data"
+      ],
+      "operation": "image_upload_binary",
+      "path": "/v2/images/{id}/file",
+      "portable_contract": "verified",
+      "protected_runner": "verified",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:108",
+        "crates/o3k-image/src/lib.rs"
+      ],
+      "service": "image"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack network list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/network.go"
+      ],
+      "id": "network.network_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Filtering and pagination are limited to the alpha profile."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#list-networks"
+      ],
+      "operation": "network_list",
+      "path": "/v2.0/networks",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:109-113",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack network create",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/network.go"
+      ],
+      "id": "network.network_collection_create",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Only the flat provider-network profile is in scope."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#create-network"
+      ],
+      "operation": "network_create",
+      "path": "/v2.0/networks",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:109-113",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack network delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/network.go"
+      ],
+      "id": "network.network_member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Routers, floating IPs, security groups, VXLAN, and DVR are out of scope."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#delete-network"
+      ],
+      "operation": "network_delete",
+      "path": "/v2.0/networks/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:112-113",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack network show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/network.go"
+      ],
+      "id": "network.network_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#show-network-details"
+      ],
+      "operation": "network_show",
+      "path": "/v2.0/networks/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:112-113",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack port list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/ports.go"
+      ],
+      "id": "network.port_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#list-ports"
+      ],
+      "operation": "port_list",
+      "path": "/v2.0/ports",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:116-117",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack port create",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/ports.go"
+      ],
+      "id": "network.port_collection_create",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "One deterministic fixed IPv4 allocation is targeted initially."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#create-port"
+      ],
+      "operation": "port_create",
+      "path": "/v2.0/ports",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:116-117",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack port delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/ports.go"
+      ],
+      "id": "network.port_member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Host TAP/bridge attachment is a later real-network slice."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#delete-port"
+      ],
+      "operation": "port_delete",
+      "path": "/v2.0/ports/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:117",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack port show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/ports.go"
+      ],
+      "id": "network.port_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#show-port-details"
+      ],
+      "operation": "port_show",
+      "path": "/v2.0/ports/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:117",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack subnet list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/subnet.go"
+      ],
+      "id": "network.subnet_collection_list",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#list-subnets"
+      ],
+      "operation": "subnet_list",
+      "path": "/v2.0/subnets",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:114-115",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack subnet create",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/subnet.go",
+        "internal/neutron/network.go"
+      ],
+      "id": "network.subnet_collection_create",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "One flat subnet/allocation profile is targeted initially."
+      ],
+      "method": "POST",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet"
+      ],
+      "operation": "subnet_create",
+      "path": "/v2.0/subnets",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:114-115",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack subnet delete",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/subnet.go"
+      ],
+      "id": "network.subnet_member_delete",
+      "implementation_state": "implemented",
+      "known_gaps": [
+        "Delete conflicts with dependent ports and networks must be tested against the public API."
+      ],
+      "method": "DELETE",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#delete-subnet"
+      ],
+      "operation": "subnet_delete",
+      "path": "/v2.0/subnets/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:115",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack subnet show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/neutron/subnet.go"
+      ],
+      "id": "network.subnet_member_show",
+      "implementation_state": "implemented",
+      "known_gaps": [],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/network/v2/index.html#show-subnet-details"
+      ],
+      "operation": "subnet_show",
+      "path": "/v2.0/subnets/{id}",
+      "portable_contract": "verified",
+      "protected_runner": "pending",
+      "release_relevance": "required",
+      "rust_locations": [
+        "crates/o3k-api/src/lib.rs:115",
+        "crates/o3k-api/tests/health.rs"
+      ],
+      "service": "network"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack resource provider allocation candidate list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/placement/placement.go"
+      ],
+      "id": "placement.allocation_candidates_list",
+      "implementation_state": "missing",
+      "known_gaps": [
+        "Allocation candidates and generation-aware scheduling are tracked by #82."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/placement/#allocation-candidates"
+      ],
+      "operation": "allocation_candidates_list",
+      "path": "/allocation_candidates",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "supporting",
+      "rust_locations": [
+        "crates/o3k-placement/src/lib.rs",
+        "crates/o3k-scheduler/src/lib.rs"
+      ],
+      "service": "placement"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack resource provider allocation set",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/placement/placement.go"
+      ],
+      "id": "placement.allocation_member_set",
+      "implementation_state": "missing",
+      "known_gaps": [
+        "Durable local allocation state is not a public Placement allocation API."
+      ],
+      "method": "PUT",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/placement/#set-allocations-for-a-consumer"
+      ],
+      "operation": "consumer_allocations_set",
+      "path": "/allocations/{consumer_uuid}",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "supporting",
+      "rust_locations": [
+        "crates/o3k-placement/src/lib.rs",
+        "crates/o3k-scheduler/src/lib.rs"
+      ],
+      "service": "placement"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack resource provider list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/placement/placement.go"
+      ],
+      "id": "placement.provider_collection_list",
+      "implementation_state": "partial",
+      "known_gaps": [
+        "Rust currently has a local durable ledger, not an HTTP Placement service."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/placement/#resource-providers"
+      ],
+      "operation": "resource_provider_list",
+      "path": "/resource_providers",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "supporting",
+      "rust_locations": [
+        "crates/o3k-placement/src/lib.rs"
+      ],
+      "service": "placement"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack resource provider show",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/placement/placement.go"
+      ],
+      "id": "placement.provider_member_show",
+      "implementation_state": "partial",
+      "known_gaps": [
+        "Provider generations and HTTP error semantics are not exposed yet."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/placement/#show-resource-provider-details"
+      ],
+      "operation": "resource_provider_show",
+      "path": "/resource_providers/{uuid}",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "supporting",
+      "rust_locations": [
+        "crates/o3k-placement/src/lib.rs"
+      ],
+      "service": "placement"
+    },
+    {
+      "aliases": [],
+      "cli_command": "openstack resource provider inventory list",
+      "cli_verification": "pending",
+      "go_locations": [
+        "internal/placement/placement.go"
+      ],
+      "id": "placement.inventory_member_show",
+      "implementation_state": "partial",
+      "known_gaps": [
+        "Capability projection exists locally; the public Placement inventory route is missing."
+      ],
+      "method": "GET",
+      "official_sources": [
+        "https://docs.openstack.org/api-ref/placement/#resource-provider-inventories"
+      ],
+      "operation": "resource_provider_inventory_list",
+      "path": "/resource_providers/{uuid}/inventories",
+      "portable_contract": "pending",
+      "protected_runner": "pending",
+      "release_relevance": "supporting",
+      "rust_locations": [
+        "crates/o3k-placement/src/lib.rs",
+        "crates/o3k-compute/src/lib.rs"
+      ],
+      "service": "placement"
+    }
+  ],
+  "profile": "testlab-alpha",
+  "required_services": [
+    "compute",
+    "identity",
+    "image",
+    "network",
+    "placement"
+  ],
+  "rust_reference": {
+    "commit": "ff0bb9a993555767e7fc3de2225d70fc9099f090",
+    "repository": "https://github.com/kubedoio/o3k-rust"
+  },
+  "schema_version": 1
+}

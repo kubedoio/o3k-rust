@@ -59,6 +59,8 @@ jobs:
         run: bash tests/human-review-package.sh
       - name: Test program tracker contract
         run: bash tests/program-tracker.sh
+      - name: Test capability inventory generation
+        run: bash tests/capability-inventory.sh
       - name: Test OpenStack CLI failure cleanup
         run: bash tests/openstack-cli-cleanup.sh
       - name: Test real-libvirt harness contract

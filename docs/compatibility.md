@@ -9,7 +9,9 @@ artifacts consumed by `packaging/release-gate.sh`.
 | Keystone token issuance and project scope | verified | pending |
 | Glance image create/upload/delete | verified | pending |
 | Neutron flat network/subnet/port lifecycle | verified | pending |
-| Placement inventory/allocation | verified | pending |
+| Placement local inventory/allocation ledger | verified | public HTTP API pending |
+| Nova flavor list/show | verified | failed: protected GET returned 405 |
+| Nova keypair import/list/show/delete | verified | verified |
 | Nova server create/show/list | verified | pending |
 | Start/stop/reboot/delete | verified | pending |
 | Config-drive generation | verified | pending |

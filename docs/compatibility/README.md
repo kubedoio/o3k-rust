@@ -47,3 +47,24 @@ matrix evidence.
 
 The initial matrix is intentionally marked `planned`; it describes the TestLab
 vertical slice from `SPEC-0001` and makes no claim of present OpenStack parity.
+
+## Capability inventory
+
+[`capability-inventory.json`](capability-inventory.json) and
+[`capability-inventory.md`](capability-inventory.md) are generated from
+[`capability-inventory-source.json`](capability-inventory-source.json) by
+[`scripts/generate-capability-inventory.py`](../../scripts/generate-capability-inventory.py).
+The inventory is a route and capability baseline, not a compatibility claim.
+It independently records official OpenStack operations, public Go reference
+locations, Rust locations, CLI commands, implementation state, and each
+evidence state. The Go snapshot and Rust snapshot are pinned in the source
+manifest; the Go repository remains non-normative under ADR-0151.
+
+Regenerate and verify it with:
+
+```bash
+bash tests/capability-inventory.sh
+```
+
+Do not promote a route from `implemented` to a verified evidence state without
+the corresponding executable contract, CLI, or protected-runner artifact.
