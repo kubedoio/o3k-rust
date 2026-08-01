@@ -286,7 +286,7 @@ for needle in ("workflow_dispatch:",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14"):
     assert needle in text, needle
-assert "if: github.ref == 'refs/heads/main'" in text
+assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in text
 assert "ref: ${{ github.sha }}" in text
 assert "persist-credentials: false" in text
 assert "Verify immutable source checkout" in text

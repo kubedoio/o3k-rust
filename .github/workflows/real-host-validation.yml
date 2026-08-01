@@ -18,7 +18,7 @@ concurrency:
 jobs:
   real-host:
     name: Protected TestLab real-host validation
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
