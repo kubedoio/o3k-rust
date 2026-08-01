@@ -99,13 +99,10 @@ impl ImageCache {
     ) -> Result<Self, ImageError> {
         let root = root.into();
         fs::create_dir_all(root.join("base")).map_err(ImageError::Storage)?;
-        fs::create_dir_all(root.join("overlays")).map_err(ImageError::Storage)?;
-        for entry in fs::read_dir(&root).map_err(ImageError::Storage)? {
-            let entry = entry.map_err(ImageError::Storage)?;
-            if entry.file_name().to_string_lossy().contains(".tmp-") && entry.path().is_file() {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
+        let overlays = root.join("overlays");
+        fs::create_dir_all(&overlays).map_err(ImageError::Storage)?;
+        remove_temporary_files(&root)?;
+        remove_temporary_files(&overlays)?;
         Ok(Self {
             root,
             max_bytes,
@@ -280,6 +277,20 @@ impl ImageCache {
         }
         Ok(())
     }
+}
+
+fn remove_temporary_files(directory: &Path) -> Result<(), ImageError> {
+    for entry in fs::read_dir(directory).map_err(ImageError::Storage)? {
+        let entry = entry.map_err(ImageError::Storage)?;
+        if !entry.file_name().to_string_lossy().contains(".tmp-") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path()).map_err(ImageError::Storage)?;
+        if metadata.file_type().is_file() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
 }
 
 fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), ImageError> {
@@ -723,6 +734,30 @@ mod tests {
         let _ = cache.create_overlay("test-instance", &base);
         assert!(!temporary.exists());
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn restart_cleans_overlay_temporaries_without_touching_published_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("overlay-restart");
+        let _ = fs::remove_dir_all(&path);
+        let cache = ImageCache::open(&path, 1024)?;
+        let stale = path
+            .join("overlays")
+            .join(format!(".instance.tmp-{}", std::process::id()));
+        let published = path.join("overlays").join("instance.qcow2");
+        let unrelated = path.join("overlays").join("keep.txt");
+        fs::write(&stale, b"stale")?;
+        fs::write(&published, b"published")?;
+        fs::write(&unrelated, b"keep")?;
+
+        let _reopened = ImageCache::open(&path, 1024)?;
+        assert!(!stale.exists());
+        assert_eq!(fs::read(&published)?, b"published");
+        assert_eq!(fs::read(&unrelated)?, b"keep");
+        fs::remove_dir_all(path)?;
+        drop(cache);
         Ok(())
     }
 
