@@ -25,7 +25,9 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Validate packaging scripts
-        run: for file in packaging/*.sh tests/*.sh; do bash -n "$file"; done
+        run: |
+          for file in packaging/*.sh tests/*.sh scripts/*.sh; do bash -n "$file"; done
+          python3 -m compileall -q scripts
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
       - name: Test CI workflow contracts
