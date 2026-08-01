@@ -43,6 +43,9 @@ assert "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a72
 assert "printf 'O3K_TESTLAB_IMAGE_PATH=\\n'" in real_host_text
 assert "--connect-timeout 15 --max-time 300" in real_host_text
 assert "timeout-minutes: 60" in real_host_text
+assert "Prepare protected TestLab dependencies" in real_host_text
+assert "O3K_OPENSTACK_VERSION: 10.2.1" in real_host_text
+assert "O3K_PASSWORD_FILE: ${{ vars.O3K_PASSWORD_FILE || '/etc/o3k/o3kd.env' }}" in real_host_text
 PY
 
 echo "CI workflow contract tests passed"

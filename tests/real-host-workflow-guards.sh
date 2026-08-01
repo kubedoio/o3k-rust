@@ -276,10 +276,13 @@ import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 workflow_step = text.split("      - name: Run public real-host lifecycle\n", 1)[1]
 workflow_step = workflow_step.split("        run: bash tests/testlab-libvirt.sh\n", 1)[0]
-assert workflow_step.count("          OS_PASSWORD:") == 1
+assert "          OS_PASSWORD:" not in workflow_step
 for needle in ("workflow_dispatch:",
                "runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
+               "Prepare protected TestLab dependencies",
+               "O3K_OPENSTACK_VERSION: 10.2.1",
+               "OS_PASSWORD: ${{ secrets.O3K_TESTLAB_OS_PASSWORD }}",
                "Probe runner capabilities", "runner-capabilities.json",
                "Download and verify CirrOS image",
                "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
@@ -287,7 +290,7 @@ for needle in ("workflow_dispatch:",
                "O3K_TESTLAB_IMAGE_PATH=",
                "continue-on-error: true", "timeout-minutes: 60",
                "contents: read",
-               "O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}",
+               "O3K_PASSWORD_FILE: ${{ vars.O3K_PASSWORD_FILE || '/etc/o3k/o3kd.env' }}",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14"):
     assert needle in text, needle
