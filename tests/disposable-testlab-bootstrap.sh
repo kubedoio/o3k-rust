@@ -19,7 +19,7 @@ assert 'OS_PASSWORD=%s\\n' in bootstrap
 assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
-assert 'sudo -n userdel o3k' in cleanup
+assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
 assert workflow.count('scripts/cleanup-disposable-testlab.sh') == 1
@@ -37,6 +37,9 @@ mkdir -p "$state" "$pid_root" "$venv"
 mkdir -p "$state/bin"
 cp /bin/sleep "$state/bin/o3kd"
 printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3k-run-owned"
+printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
+sudo chown -R o3k:o3k "$state"
+sudo chmod 0700 "$state"
 "$state/bin/o3kd" 60 & service_pid=$!
 printf '%s\n' "$service_pid" >"$pid_root/o3kd.pid"
 touch "$image"

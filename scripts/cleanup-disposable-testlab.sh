@@ -3,7 +3,14 @@ set -Eeuo pipefail
 
 RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 RUN_ID="${GITHUB_RUN_ID:-}"
+ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || { echo "cleanup: invalid workflow run id" >&2; exit 1; }
+[[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] \
+  || { echo "cleanup: runner temp path is unsafe" >&2; exit 1; }
+command -v realpath >/dev/null 2>&1 || { echo "cleanup: realpath is unavailable" >&2; exit 1; }
+RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
+sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
+  || { echo "cleanup: account lock directory is unavailable" >&2; exit 1; }
 EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-$EXPECTED_ROOT}"
 PID_ROOT="${O3K_TESTLAB_PID_ROOT:-${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}}"
@@ -12,6 +19,12 @@ IMAGE_PATH="${O3K_TESTLAB_IMAGE_PATH:-}"
 [[ "$STATE_ROOT" == "$EXPECTED_ROOT" ]] || { echo "cleanup: state root is not run-owned" >&2; exit 1; }
 [[ "$PID_ROOT" == "${RUNNER_TEMP%/}/o3k-testlab-pids/${RUN_ID}" ]] \
   || { echo "cleanup: pid root is not run-owned" >&2; exit 1; }
+for parent in "${RUNNER_TEMP}/o3k-testlab" "${RUNNER_TEMP}/o3k-testlab-pids"; do
+  if [[ -e "$parent" ]] && [[ ! -d "$parent" || -L "$parent" ]]; then
+    echo "cleanup: run state parent is not an owned directory" >&2
+    exit 1
+  fi
+done
 if [[ -n "$OPENSTACK_VENV" ]]; then
   [[ "$(dirname -- "$OPENSTACK_VENV")" == "${RUNNER_TEMP%/}" \
     && "$(basename -- "$OPENSTACK_VENV")" == o3k-openstack-venv.* \
@@ -37,25 +50,54 @@ sudo -n test -f "$STATE_ROOT/.o3k-run-owned" \
   || { echo "cleanup: ownership marker is missing" >&2; exit 1; }
 sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" \
   || { echo "cleanup: ownership marker is invalid" >&2; exit 1; }
+sudo -n grep -Fqx "run=$RUN_ID" "$STATE_ROOT/.o3k-run-owned" \
+  || { echo "cleanup: ownership marker belongs to another run" >&2; exit 1; }
+sudo -n grep -Fqx "o3k-owned-v1 path=$STATE_ROOT" "$STATE_ROOT/.o3k-owned" \
+  || { echo "cleanup: O3K ownership marker is invalid" >&2; exit 1; }
+state_metadata="$(sudo -n stat -c '%U:%G:%a' "$STATE_ROOT" 2>/dev/null)"
+case "$state_metadata" in
+  o3k:o3k:700|o3k:o3k:750) ;;
+  *) echo "cleanup: state ownership or permissions are not O3K-owned" >&2; exit 1 ;;
+esac
 account_created=false
 group_created=false
 sudo -n grep -Fqx 'o3k-disposable-account-v1' "$STATE_ROOT/.o3k-account-created" 2>/dev/null \
   && account_created=true
 sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/dev/null \
   && group_created=true
+
+process_matches() {
+  local pid="$1" binary="$2" expected executable command_line
+  expected="$STATE_ROOT/bin/$binary"
+  executable="$(sudo -n readlink "/proc/$pid/exe" 2>/dev/null)" || return 1
+  [[ "$executable" == "$expected" ]] && return 0
+  command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" || return 1
+  case " $command_line " in
+    *" $expected "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_owned_process() {
+  local pid="$1" binary="$2"
+  sudo -n kill -0 "$pid" 2>/dev/null || return 0
+  process_matches "$pid" "$binary" \
+    || { echo "cleanup: refusing to signal a foreign process" >&2; return 1; }
+  sudo -n kill "$pid" || return 1
+  for _ in $(seq 1 20); do
+    sudo -n kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  echo "cleanup: service did not stop" >&2
+  return 1
+}
 for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
   if [[ -f "$pid_file" ]]; then
     pid="$(<"$pid_file")"
     [[ "$pid" =~ ^[0-9]+$ ]] || { echo "cleanup: invalid pid" >&2; exit 1; }
     binary="${pid_file##*/}"
     binary="${binary%.pid}"
-    if sudo -n kill -0 "$pid" 2>/dev/null; then
-      command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" \
-        || { echo "cleanup: cannot inspect process identity" >&2; exit 1; }
-      [[ "$command_line" == *"$STATE_ROOT/bin/$binary"* ]] \
-        || { echo "cleanup: refusing to signal a foreign process" >&2; exit 1; }
-      sudo -n kill "$pid" 2>/dev/null || true
-    fi
+    stop_owned_process "$pid" "$binary" || exit 1
   fi
 done
 for _ in $(seq 1 20); do
@@ -66,9 +108,7 @@ for _ in $(seq 1 20); do
     if sudo -n kill -0 "$pid" 2>/dev/null; then
       binary="${pid_file##*/}"
       binary="${binary%.pid}"
-      command_line="$(sudo -n sh -c 'tr "\\0" " " < "/proc/$1/cmdline"' _ "$pid" 2>/dev/null)" \
-        || { echo "cleanup: cannot inspect process identity" >&2; exit 1; }
-      [[ "$command_line" == *"$STATE_ROOT/bin/$binary"* ]] \
+      process_matches "$pid" "$binary" \
         || { echo "cleanup: refusing to wait on a foreign process" >&2; exit 1; }
       alive=true
     fi
@@ -77,6 +117,15 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 [[ "$alive" == false ]] || { echo "cleanup: service did not stop" >&2; exit 1; }
+if [[ "$account_created" == true || "$group_created" == true ]]; then
+  sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+    set -euo pipefail
+    pgrep -u o3k >/dev/null 2>&1 && exit 42 || true
+    if [[ "$1" == true ]]; then userdel o3k; fi
+    if [[ "$2" == true ]]; then groupdel o3k; fi
+  ' _ "$account_created" "$group_created" \
+    || { echo "cleanup: run-created o3k identity is in use or could not be removed" >&2; exit 1; }
+fi
 sudo -n rm -rf -- "$STATE_ROOT"
 rm -rf -- "$PID_ROOT"
 if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
@@ -84,15 +133,5 @@ if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
 fi
 if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
   rm -f -- "$IMAGE_PATH"
-fi
-if [[ "$account_created" == true ]]; then
-  if sudo -n pgrep -u o3k >/dev/null 2>&1; then
-    echo "cleanup: refusing to remove run-created o3k account while it owns a live process" >&2
-    exit 1
-  fi
-  sudo -n userdel o3k
-  if [[ "$group_created" == true ]]; then
-    sudo -n groupdel o3k
-  fi
 fi
 echo "disposable TestLab cleanup completed"
