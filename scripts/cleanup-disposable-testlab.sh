@@ -37,6 +37,12 @@ sudo -n test -f "$STATE_ROOT/.o3k-run-owned" \
   || { echo "cleanup: ownership marker is missing" >&2; exit 1; }
 sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" \
   || { echo "cleanup: ownership marker is invalid" >&2; exit 1; }
+account_created=false
+group_created=false
+sudo -n grep -Fqx 'o3k-disposable-account-v1' "$STATE_ROOT/.o3k-account-created" 2>/dev/null \
+  && account_created=true
+sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/dev/null \
+  && group_created=true
 for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
   if [[ -f "$pid_file" ]]; then
     pid="$(<"$pid_file")"
@@ -78,5 +84,15 @@ if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
 fi
 if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
   rm -f -- "$IMAGE_PATH"
+fi
+if [[ "$account_created" == true ]]; then
+  if sudo -n pgrep -u o3k >/dev/null 2>&1; then
+    echo "cleanup: refusing to remove run-created o3k account while it owns a live process" >&2
+    exit 1
+  fi
+  sudo -n userdel o3k
+  if [[ "$group_created" == true ]]; then
+    sudo -n groupdel o3k
+  fi
 fi
 echo "disposable TestLab cleanup completed"

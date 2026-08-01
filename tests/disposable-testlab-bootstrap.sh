@@ -5,17 +5,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="$ROOT_DIR/scripts/bootstrap-disposable-testlab.sh"
 CLEANUP="$ROOT_DIR/scripts/cleanup-disposable-testlab.sh"
 
-python3 - "$BOOTSTRAP" "$ROOT_DIR/.github/workflows/real-host-validation.yml" <<'PY'
+python3 - "$BOOTSTRAP" "$CLEANUP" "$ROOT_DIR/.github/workflows/real-host-validation.yml" <<'PY'
 from pathlib import Path
 import sys
 
 bootstrap = Path(sys.argv[1]).read_text(encoding="utf-8")
-workflow = Path(sys.argv[2]).read_text(encoding="utf-8")
+cleanup = Path(sys.argv[2]).read_text(encoding="utf-8")
+workflow = Path(sys.argv[3]).read_text(encoding="utf-8")
 assert 'PASSWORD="$(openssl rand -hex 32)"' in bootstrap
 assert 'echo "::add-mask::${PASSWORD}"' in bootstrap
 assert bootstrap.index('echo "::add-mask::${PASSWORD}"') < bootstrap.index('O3K_BOOTSTRAP_PASSWORD=')
 assert 'OS_PASSWORD=%s\\n' in bootstrap
 assert 'OS_PROJECT_NAME=admin' in bootstrap
+assert '--no-create-home' in bootstrap
+assert 'o3k-disposable-account-v1' in bootstrap
+assert 'sudo -n userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
 assert workflow.count('scripts/cleanup-disposable-testlab.sh') == 1

@@ -18,6 +18,8 @@ COMPUTE_PID=
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
 O3KD_READY=false
 COMPUTE_READY=false
+ACCOUNT_CREATED=false
+GROUP_CREATED=false
 FAIL_REASON=bootstrap_failed
 
 fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
@@ -62,6 +64,14 @@ failure_cleanup() {
       sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
     fi
     rm -rf -- "$PID_ROOT" 2>/dev/null || true
+    if [[ "$ACCOUNT_CREATED" == true ]] && ! sudo -n pgrep -u "$SERVICE_ACCOUNT" >/dev/null 2>&1; then
+      sudo -n userdel "$SERVICE_ACCOUNT" 2>/dev/null || true
+      if [[ "$GROUP_CREATED" == true ]]; then
+        sudo -n groupdel "$SERVICE_ACCOUNT" 2>/dev/null || true
+      fi
+    elif [[ "$GROUP_CREATED" == true ]]; then
+      sudo -n groupdel "$SERVICE_ACCOUNT" 2>/dev/null || true
+    fi
   fi
   exit "$status"
 }
@@ -70,7 +80,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo; do command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"; done
+for command in cargo openssl python3 curl sudo getent id; do command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"; done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
 
@@ -110,10 +120,19 @@ if [[ -e "$STATE_ROOT" ]]; then
 fi
 
 if [[ "$REUSE" == false ]]; then
-id "$SERVICE_ACCOUNT" >/dev/null 2>&1 || fail "packaged o3k service account is unavailable"
+mkdir -p "${STATE_ROOT%/*}"
+if ! getent group "$SERVICE_ACCOUNT" >/dev/null 2>&1; then
+  sudo -n groupadd --system "$SERVICE_ACCOUNT" || fail "cannot provision packaged o3k service group"
+  GROUP_CREATED=true
+fi
+if ! id "$SERVICE_ACCOUNT" >/dev/null 2>&1; then
+  sudo -n useradd --system --no-create-home --gid "$SERVICE_ACCOUNT" --home-dir "$STATE_ROOT/home" \
+    --shell /usr/sbin/nologin "$SERVICE_ACCOUNT" \
+    || fail "cannot provision packaged o3k service account"
+  ACCOUNT_CREATED=true
+fi
 [[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
 
-mkdir -p "${STATE_ROOT%/*}"
 mkdir -p "${PID_ROOT%/*}"
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
@@ -123,6 +142,14 @@ printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_I
 chmod 0600 "$STATE_ROOT/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$STATE_ROOT" >"$STATE_ROOT/.o3k-owned"
 chmod 0640 "$STATE_ROOT/.o3k-owned"
+if [[ "$ACCOUNT_CREATED" == true ]]; then
+  printf 'o3k-disposable-account-v1\n' >"$STATE_ROOT/.o3k-account-created"
+  chmod 0600 "$STATE_ROOT/.o3k-account-created"
+fi
+if [[ "$GROUP_CREATED" == true ]]; then
+  printf 'o3k-disposable-group-v1\n' >"$STATE_ROOT/.o3k-group-created"
+  chmod 0600 "$STATE_ROOT/.o3k-group-created"
+fi
 command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable; provision the runner dependency"
 python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable; provision the runner dependency"
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable; provision the runner dependency"
