@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-human-review.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-python3 - "${WORK_DIR}/pending.json" "${WORK_DIR}/approved.json" "${WORK_DIR}/bad-reviewer.json" "${WORK_DIR}/bad-finding.json" "${WORK_DIR}/duplicate-finding.json" "${WORK_DIR}/missing-scope.json" <<'PY'
+python3 - "${WORK_DIR}/pending.json" "${WORK_DIR}/approved.json" "${WORK_DIR}/bad-reviewer.json" "${WORK_DIR}/bad-finding.json" "${WORK_DIR}/duplicate-finding.json" "${WORK_DIR}/missing-scope.json" "${WORK_DIR}/deferred-critical.json" <<'PY'
 import json
 import sys
 
@@ -32,7 +32,7 @@ base = {
     "approvals": {"release_blocking_findings": True, "destructive_cleanup": True},
     "unresolved_risks": ["Real-host evidence is still required."],
 }
-values = [dict(base), dict(base, status="approved"), dict(base), dict(base), dict(base), dict(base)]
+values = [dict(base), dict(base, status="approved"), dict(base), dict(base), dict(base), dict(base), dict(base)]
 values[2]["reviewer"] = dict(base["reviewer"], is_implementing_agent=True)
 values[3]["findings"] = [{"id": "SEC-001", "severity": "high"}]
 values[4]["findings"] = [
@@ -40,6 +40,7 @@ values[4]["findings"] = [
     {"id": "SEC-001", "severity": "medium", "disposition": "accepted"},
 ]
 values[5]["scope"] = ["Keystone and project isolation"]
+values[6]["findings"] = [{"id": "SEC-002", "severity": "critical", "disposition": "deferred"}]
 for path, value in zip(sys.argv[1:], values):
     with open(path, "w", encoding="utf-8") as stream:
         json.dump(value, stream)
@@ -62,6 +63,10 @@ if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/du
 fi
 if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/missing-scope.json"; then
   echo "accepted review with incomplete threat-model scope" >&2
+  exit 1
+fi
+if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/deferred-critical.json"; then
+  echo "accepted a deferred critical finding" >&2
   exit 1
 fi
 if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/pending.json" --require-approved; then

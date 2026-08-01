@@ -13,8 +13,9 @@ schema, and a fail-closed validator for future `human-review.json` artifacts.
 The validator checks identity declarations, reviewed commit binding, complete
 threat-model scope,
 finding severity/disposition, unresolved-risk disclosure, and explicit
-release/destructive-cleanup approvals. `--require-approved` is required for a
-release decision.
+release/destructive-cleanup approvals. Critical and high findings must be
+fixed or explicitly accepted; they cannot be deferred or marked not
+applicable. `--require-approved` is required for a release decision.
 
 No review artifact is committed, no reviewer is named, and no approval is
 claimed. Real-host evidence and independent human review remain external
