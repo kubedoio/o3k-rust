@@ -244,19 +244,12 @@ where
                     Err(error) => return Err(error.into()),
                 }
             }
-            let observed_state = if operation.kind == "lifecycle:delete" {
-                "DELETED"
-            } else if operation.kind == "create" {
-                "active"
-            } else {
-                resource.observed_state.as_str()
-            };
             self.store
                 .update_resource(
                     resource_id,
                     resource.generation,
                     &resource.desired_state,
-                    observed_state,
+                    &resource.observed_state,
                     resource.generation,
                     provider_id,
                 )
@@ -1132,7 +1125,7 @@ mod tests {
                 .get_resource(request.o3k_server_id)
                 .await?
                 .observed_state,
-            "active"
+            "requested"
         );
         assert_eq!(
             store
