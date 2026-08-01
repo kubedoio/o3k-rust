@@ -35,12 +35,22 @@ if [[ -n "$OPENSTACK_VENV" ]]; then
     && "$(basename -- "$OPENSTACK_VENV")" == o3k-openstack-venv.* \
     && "$OPENSTACK_VENV" != *..* && ! -L "$OPENSTACK_VENV" ]] \
     || { echo "cleanup: OpenStack virtualenv is not run-owned" >&2; exit 1; }
+  if [[ -e "$OPENSTACK_VENV" ]]; then
+    [[ -d "$OPENSTACK_VENV" && ! -L "$OPENSTACK_VENV" ]] \
+      || { echo "cleanup: OpenStack virtualenv is not a real directory" >&2; exit 1; }
+    grep -Fqx 'o3k-disposable-venv-v1' "$OPENSTACK_VENV/.o3k-venv-owned" \
+      || { echo "cleanup: virtualenv ownership marker is invalid" >&2; exit 1; }
+  fi
 fi
 if [[ -n "$IMAGE_PATH" ]]; then
   [[ "$(dirname -- "$IMAGE_PATH")" == "${RUNNER_TEMP%/}" \
     && "$(basename -- "$IMAGE_PATH")" == cirros-0.6.3-x86_64-disk.img.* \
     && "$IMAGE_PATH" != *..* && ! -L "$IMAGE_PATH" ]] \
     || { echo "cleanup: image path is not run-owned" >&2; exit 1; }
+  if [[ -e "$IMAGE_PATH" || -e "$IMAGE_PATH.o3k-owned" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+  fi
 fi
 if [[ ! -e "$STATE_ROOT" ]]; then
   if [[ -e "$INVENTORY_ROOT" ]]; then
@@ -51,7 +61,15 @@ if [[ ! -e "$STATE_ROOT" ]]; then
     rm -rf -- "$INVENTORY_ROOT"
   fi
   [[ -z "$OPENSTACK_VENV" || ! -e "$OPENSTACK_VENV" ]] || rm -rf -- "$OPENSTACK_VENV"
-  [[ -z "$IMAGE_PATH" || ! -e "$IMAGE_PATH" ]] || rm -f -- "$IMAGE_PATH"
+  if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+    rm -f -- "$IMAGE_PATH" "$IMAGE_PATH.o3k-owned"
+  elif [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH.o3k-owned" ]]; then
+    grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+      || { echo "cleanup: image ownership marker is invalid" >&2; exit 1; }
+    rm -f -- "$IMAGE_PATH.o3k-owned"
+  fi
   echo "disposable TestLab cleanup: no state to remove"
   exit 0
 fi
@@ -162,9 +180,14 @@ if [[ -e "$INVENTORY_ROOT" ]]; then
   rm -rf -- "$INVENTORY_ROOT"
 fi
 if [[ -n "$OPENSTACK_VENV" && -e "$OPENSTACK_VENV" ]]; then
+  grep -Fqx 'o3k-disposable-venv-v1' "$OPENSTACK_VENV/.o3k-venv-owned" \
+    || { echo "cleanup: refusing to remove an unowned virtualenv" >&2; exit 1; }
   rm -rf -- "$OPENSTACK_VENV"
 fi
 if [[ -n "$IMAGE_PATH" && -e "$IMAGE_PATH" ]]; then
+  grep -Fqx 'o3k-disposable-image-v1' "$IMAGE_PATH.o3k-owned" \
+    || { echo "cleanup: refusing to remove an unowned image" >&2; exit 1; }
   rm -f -- "$IMAGE_PATH"
+  rm -f -- "$IMAGE_PATH.o3k-owned"
 fi
 echo "disposable TestLab cleanup completed"
