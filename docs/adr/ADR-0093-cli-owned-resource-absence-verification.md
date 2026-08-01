@@ -22,6 +22,12 @@ resource that disappeared despite a timeout is not incorrectly reported as a
 leak. IDs are retained when absence is not proven, allowing the exit handler
 to retry the owned cleanup and report failure honestly.
 
+The same public CLI workflow requests config-drive and a deterministic fixed IP,
+and requires `server show` to prove `ACTIVE`, the fixed IP, and config-drive
+attachment. Console output must contain a bounded CirrOS/login boot marker.
+The redacted artifact records these checks as `acceptance`; a release gate
+cannot accept lifecycle booleans without them.
+
 ## Consequences
 
 - Image, keypair, network, subnet, flavor, and server cleanup now has observable
@@ -32,6 +38,8 @@ to retry the owned cleanup and report failure honestly.
 - A provider-specific not-found message not covered by the bounded matcher
   is treated as an unknown outcome and must be added with a regression test
   before acceptance.
+- Portable fakes exercise the acceptance shape, but do not claim real guest
+  boot, network, or config-drive consumption.
 
 ## Provenance
 

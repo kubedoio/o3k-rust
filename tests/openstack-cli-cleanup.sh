@@ -41,7 +41,7 @@ case "$*" in
     case "${mode}" in
       empty) echo '{}';;
       unrelated) echo '{"id":"unrelated-server"}';;
-      *) echo '{"id":"server-id","name":"o3k-testlab-server"}';;
+      *) echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}';;
     esac
     ;;
   server\ list*)
@@ -65,7 +65,7 @@ case "$*" in
   network\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/network-network-id";;
   subnet\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/subnet-subnet-id";;
   flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
-  console\ log\ show*) echo 'boot output';;
+  console\ log\ show*) echo 'CirrOS boot output\nlogin:';;
   *) exit 0;;
 esac
 SH
@@ -125,6 +125,7 @@ import json, sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
+assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True}
 assert result["resources"]["server_id"] == "server-id"
 assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "flavor", "server"}
 assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
@@ -134,6 +135,8 @@ grep -Fq "image create o3k-testlab-image --file" "${O3K_MOCK_LOG}"
 grep -Fq "server create --wait" "${O3K_MOCK_LOG}"
 grep -Fq "keypair create --public-key" "${O3K_MOCK_LOG}"
 grep -Fq -- "--key-name keypair-id" "${O3K_MOCK_LOG}"
+grep -Fq -- "--config-drive true" "${O3K_MOCK_LOG}"
+grep -Fq -- "--nic net-id=network-id,subnet-id=subnet-id,fixed-ip=192.0.2.2" "${O3K_MOCK_LOG}"
 grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"

@@ -24,10 +24,16 @@ The stateful CLI fake includes a regression mode in which dependent-resource
 delete commands return success without removing resources. The harness must
 reject that run and record failed cleanup.
 
+The harness also requests config-drive and an explicit fixed IP, then requires
+`server show` to prove `ACTIVE`, config-drive attachment, and that fixed IP.
+Console evidence must contain a bounded CirrOS/login boot marker. These
+assertions are emitted as redacted `acceptance` evidence and are required by
+the release gate; they still do not substitute for a protected real-host run.
+
 ## Explicit non-goals
 
 - no real OpenStack, libvirt, or CirrOS execution;
-- no claim that a guest reaches ACTIVE or receives config-drive data;
+- no claim that a real guest reaches ACTIVE or receives config-drive data;
 - no change to the public API or resource lifecycle semantics;
 - no replacement for protected runner leak inventory or host evidence.
 

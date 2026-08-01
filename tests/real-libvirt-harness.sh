@@ -54,7 +54,7 @@ case "$*" in
   server\ create*) : >"${state_file}"; echo server-id;;
   server\ show*)
     if [[ -e "${state_file}" ]]; then
-      echo '{"id":"server-id","name":"o3k-testlab-server"}'
+      echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}'
     else
       echo 'No server with a name or ID was found' >&2
       exit 1
@@ -68,7 +68,7 @@ case "$*" in
     fi
     ;;
   server\ delete*) rm -f -- "${state_file}";;
-  console\ log\ show*) echo 'boot output';;
+  console\ log\ show*) echo 'CirrOS boot output\nlogin:';;
   *) exit 0;;
 esac
 SH
@@ -93,6 +93,7 @@ assert result["artifact_type"] == "openstack-cli-e2e"
 assert result["status"] == "passed"
 assert result["public_api_only"] is True
 assert result["cleanup"]["status"] == "passed"
+assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True}
 assert set(result["lifecycle"]) == {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
 assert all(result["lifecycle"].values())
 PY

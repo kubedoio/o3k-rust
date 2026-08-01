@@ -214,6 +214,18 @@ for name, (path, artifact_type) in required.items():
         expected = {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
         if not isinstance(lifecycle, dict) or set(lifecycle) != expected or not all(lifecycle.values()):
             errors.append(f"{name}: lifecycle must prove create/show/list/stop/start/reboot/console/delete")
+        acceptance = value.get("acceptance")
+        if not isinstance(acceptance, dict):
+            errors.append(f"{name}: acceptance evidence is required")
+        else:
+            if acceptance.get("status") != "ACTIVE":
+                errors.append(f"{name}: acceptance.status must be 'ACTIVE'")
+            if not isinstance(acceptance.get("fixed_ip"), str) or not acceptance["fixed_ip"].strip():
+                errors.append(f"{name}: acceptance.fixed_ip must be a non-empty string")
+            if acceptance.get("config_drive") is not True:
+                errors.append(f"{name}: acceptance.config_drive must be true")
+            if acceptance.get("console_boot_marker") is not True:
+                errors.append(f"{name}: acceptance.console_boot_marker must be true")
         if value.get("public_api_only") is not True:
             errors.append(f"{name}: public_api_only must be true")
     if name == "failure_recovery":
