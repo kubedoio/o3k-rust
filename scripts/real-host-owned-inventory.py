@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,9 @@ from pathlib import Path
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 RESOURCES = ("server", "image", "network", "subnet", "flavor", "keypair")
+MAX_PROTECTED_FILE_BYTES = 64 * 1024 * 1024
+MAX_PROTECTED_ENTRIES = 10_000
+MAX_PROTECTED_TOTAL_BYTES = 256 * 1024 * 1024
 RESOURCE_COMMANDS = {
     "server": ("server", "list", "--name", "o3k-testlab-server", "-f", "value", "-c", "ID"),
     "image": ("image", "list", "--name", "o3k-testlab-image", "-f", "value", "-c", "ID"),
@@ -53,6 +57,66 @@ def command(args: tuple[str, ...], *, scrub_provider_config: bool = False) -> st
 def digest(values: list[str]) -> str:
     payload = "\n".join(sorted(values)).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def protected_paths_digest() -> str | None:
+    """Hash an explicit, redacted allowlist of host paths and their contents."""
+    raw_allowlist = os.environ.get("O3K_REAL_HOST_PROTECTED_PATHS")
+    if raw_allowlist is None:
+        return None
+    paths = []
+    for raw in raw_allowlist.splitlines():
+        value = raw.strip()
+        if not value or value.startswith("#"):
+            continue
+        path = Path(value)
+        if (not path.is_absolute() or "\x00" in value
+                or ".." in path.parts):
+            return None
+        paths.append(Path(os.path.abspath(path)))
+
+    records: list[str] = []
+    total_bytes = 0
+    for root in sorted(set(paths), key=str):
+        try:
+            candidates = [root]
+            if root.is_dir():
+                for candidate in root.rglob("*"):
+                    candidates.append(candidate)
+                    if len(candidates) > MAX_PROTECTED_ENTRIES:
+                        return None
+            for candidate in candidates:
+                stat = candidate.lstat()
+                kind = ("dir" if stat_module.S_ISDIR(stat.st_mode)
+                        else "file" if stat_module.S_ISREG(stat.st_mode)
+                        else "symlink" if stat_module.S_ISLNK(stat.st_mode) else "other")
+                content = ""
+                if kind == "file":
+                    if stat.st_size > MAX_PROTECTED_FILE_BYTES:
+                        return None
+                    total_bytes += stat.st_size
+                    if total_bytes > MAX_PROTECTED_TOTAL_BYTES:
+                        return None
+                    hasher = hashlib.sha256()
+                    with candidate.open("rb") as stream:
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                            hasher.update(chunk)
+                    content = hasher.hexdigest()
+                elif kind == "symlink":
+                    content = hashlib.sha256(os.readlink(candidate).encode("utf-8")).hexdigest()
+                relative = "." if candidate == root else str(candidate.relative_to(root))
+                records.append(json.dumps({
+                    "path_sha256": hashlib.sha256(str(root).encode("utf-8")).hexdigest(),
+                    "relative_path_sha256": hashlib.sha256(relative.encode("utf-8")).hexdigest(),
+                    "kind": kind,
+                    "mode": stat.st_mode,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "content_sha256": content,
+                }, sort_keys=True, separators=(",", ":")))
+        except (OSError, UnicodeError, ValueError):
+            return None
+    return digest(records)
 
 
 def foreign_link_lines(output: str) -> list[str]:
@@ -108,6 +172,10 @@ def snapshot() -> dict[str, object] | None:
     else:
         resources = {resource: [] for resource in RESOURCES}
 
+    protected_paths = protected_paths_digest()
+    if protected_paths is None:
+        return None
+
     return {
         "schema_version": 2,
         "status": "available",
@@ -119,6 +187,7 @@ def snapshot() -> dict[str, object] | None:
             "network_links_sha256": digest(
                 foreign_link_lines(link_output)
             ),
+            "protected_paths_sha256": protected_paths,
         },
     }
 

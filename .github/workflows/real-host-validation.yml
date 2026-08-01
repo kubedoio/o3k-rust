@@ -21,6 +21,8 @@ jobs:
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    env:
+      O3K_REAL_HOST_PROTECTED_PATHS: ${{ vars.O3K_REAL_HOST_PROTECTED_PATHS }}
     steps:
       - name: Check out the canonical repository
         uses: actions/checkout@v4

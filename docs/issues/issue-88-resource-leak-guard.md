@@ -16,13 +16,22 @@ The protected workflow inventory now:
 - records O3K-owned domain/provider identities, including public keypairs
   created by the CLI acceptance harness, while representing foreign
   domain and non-O3K link state only as redacted SHA-256 digests;
+- hashes the explicit newline-separated `O3K_REAL_HOST_PROTECTED_PATHS`
+  allowlist, including descendants and file contents, without publishing raw
+  paths or contents; missing, unreadable, or oversized entries fail closed;
 - fails the post-run guard when a foreign-state digest changes; and
 - writes `resource-leak-result.json`, with `status: passed` reserved for a
   clean owned-resource delta, unchanged foreign digests, and a passed
   lifecycle.
 
 Regression coverage uses stateful fake commands to exercise unstable
-collection, redaction, owned-resource leakage, and foreign link mutation.
+collection, redaction, owned-resource leakage, foreign link mutation, and
+protected-path mutation.
+
+The protected workflow supplies this required allowlist from the
+`O3K_REAL_HOST_PROTECTED_PATHS` environment variable (configured as an
+environment variable in the protected GitHub environment). An unset allowlist
+is rejected rather than treated as an empty clean baseline.
 
 ## Explicit boundary
 
