@@ -22,24 +22,30 @@ whose `reviewed_commit` differs from the supplied source commit. The resulting
 report records only the review artifact path, status, and reviewed commit; it
 does not synthesize approval or verify a person's identity or judgment.
 
-The release bundle includes the validator so the same fail-closed check is
-available when the gate is run from packaged files. The source commit remains
-an explicit operator input rather than an implicit working-tree lookup, which
-keeps detached bundles and reproducible release procedures unambiguous.
+The supplied source commit must also equal `git rev-parse HEAD` in the
+repository containing the gate. A valid-looking but unrelated SHA is rejected,
+and failure to inspect the checkout is a gate error. Release evidence is
+therefore evaluated from the exact clean checkout that produced the candidate;
+the gate does not trust an operator-provided provenance string by itself.
+
+The release bundle includes the validator and gate scripts, but release-gate
+execution remains tied to the source checkout so the source binding can be
+verified before packaging.
 
 ## Alternatives rejected
 
 - Treating the presence of a review file as approval would bypass the existing
   schema validator and allow pending or rejected decisions.
-- Deriving the commit from a local Git checkout would fail for detached release
-  bundles and could silently validate the wrong source.
+- Accepting an operator-provided commit without checking the checkout would
+  allow fabricated provenance and could silently validate the wrong source.
 - Generating a review artifact in the gate would fabricate human evidence.
 
 ## Verification
 
 `tests/release-gate.sh` covers a ready report with an approved review, missing
-review evidence, and a review bound to a different commit. The packaging
-bundle test verifies that the validator is shipped with the release gate.
+review evidence, a review bound to a different commit, and a valid but
+unrelated source commit. The packaging bundle test verifies that the validator
+is shipped with the release gate.
 
 ## Non-goals
 

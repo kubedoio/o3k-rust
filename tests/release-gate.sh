@@ -4,9 +4,11 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-release-gate.XXXXXX")"
 trap 'rm -rf -- "${ARTIFACT_DIR}"' EXIT
+SOURCE_COMMIT="$(git -C "${ROOT_DIR}" rev-parse HEAD)"
+export SOURCE_COMMIT
 
 python3 - "${ARTIFACT_DIR}" <<'PY'
-import hashlib, json, pathlib, sys, time
+import hashlib, json, os, pathlib, sys, time
 
 root = pathlib.Path(sys.argv[1])
 finished_at = int(time.time())
@@ -69,7 +71,7 @@ artifacts = {
         "schema_version": 1,
         "status": "approved",
         "reviewer": {"name": "Example Reviewer", "organization": "Example Security", "role": "Independent reviewer", "is_implementing_agent": False},
-        "reviewed_commit": "0123456789abcdef0123456789abcdef01234567",
+        "reviewed_commit": os.environ["SOURCE_COMMIT"],
         "review_record_url": "https://example.invalid/review/93",
         "scope": [
             "Keystone and project isolation", "Compute-agent mTLS",
@@ -91,7 +93,6 @@ for name, value in artifacts.items():
     (root / name).write_text(json.dumps(value), encoding="utf-8")
 PY
 
-SOURCE_COMMIT=0123456789abcdef0123456789abcdef01234567
 HUMAN_REVIEW="${ARTIFACT_DIR}/human-review.json"
 OUTPUT="${ARTIFACT_DIR}/valid-release.json"
 bash "${ROOT_DIR}/packaging/release-gate.sh" \
@@ -145,6 +146,15 @@ GATE_ARGS=(
     --source-commit "${SOURCE_COMMIT}"
 )
 
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --source-commit "fedcba9876543210fedcba9876543210fedcba98" \
+    --output "${ARTIFACT_DIR}/wrong-source-commit.json"; then
+    echo "release gate accepted a valid but unrelated source commit" >&2
+    exit 1
+fi
+grep -q 'source_commit: must match the repository checkout HEAD' \
+    "${ARTIFACT_DIR}/wrong-source-commit.json"
+
 cp "${ARTIFACT_DIR}/recovery.json" "${ARTIFACT_DIR}/recovery-missing-evidence.json"
 python3 - "${ARTIFACT_DIR}/recovery-missing-evidence.json" <<'PY'
 import json, sys
@@ -170,7 +180,7 @@ grep -q 'failure_recovery: scenarios.partial-cleanup.evidence must identify an a
     "${ARTIFACT_DIR}/missing-recovery-evidence.json"
 
 python3 - "${HUMAN_REVIEW}" <<'PY'
-import json, sys
+import json, os, sys
 path = sys.argv[1]
 value = json.loads(open(path, encoding="utf-8").read())
 value["reviewed_commit"] = "fedcba9876543210fedcba9876543210fedcba98"
@@ -183,10 +193,10 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
 fi
 grep -q 'human_review: reviewed_commit must match source_commit' "${ARTIFACT_DIR}/mismatched-review.json"
 python3 - "${HUMAN_REVIEW}" <<'PY'
-import json, sys
+import json, os, sys
 path = sys.argv[1]
 value = json.loads(open(path, encoding="utf-8").read())
-value["reviewed_commit"] = "0123456789abcdef0123456789abcdef01234567"
+value["reviewed_commit"] = os.environ["SOURCE_COMMIT"]
 open(path, "w", encoding="utf-8").write(json.dumps(value))
 PY
 
