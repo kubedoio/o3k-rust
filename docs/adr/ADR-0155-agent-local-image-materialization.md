@@ -30,4 +30,7 @@ service slices and are not claimed by this ADR.
 
 The image data boundary follows the public Glance v2 image-content contract
 (`PUT /v2/images/{image_id}/file`) and the repository contracts in
-`SPEC-0005-glance-local-images.md` and `SPEC-0015-compute-agent.md`.
+`SPEC-0005-glance-local-images.md` and `SPEC-0015-compute-agent.md`. The
+normative public reference is the OpenStack Image Service API v2 documentation:
+https://docs.openstack.org/api-ref/image/v2/index.html#image-data (accessed
+2026-08-02).
