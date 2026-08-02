@@ -65,6 +65,18 @@ The Keystone bootstrap token route is enabled only when both
 configured. Keep both values outside the TOML file when possible, for example
 in a protected environment or secret manager.
 
+## Password generation and Kolla-Ansible reuse
+
+Use `scripts/generate-passwords.sh` to create the protected environment file
+idempotently. It preserves existing O3K values, generates separate strong
+values for the bootstrap password and token signing key, and writes atomically
+with mode `0600`. If `O3K_BOOTSTRAP_PASSWORD` is absent, an existing Kolla-
+Ansible `keystone_admin_password` is reused from `/etc/kolla/passwords.yml`;
+the Kolla file itself is never modified. Override paths for a deployment with
+`--output` and `--kolla-password-file` or the corresponding `O3K_*` variables.
+The generator rejects symlinked paths and malformed existing signing keys and
+never prints secret values.
+
 The compute control plane is disabled when all compute TLS settings are unset.
 When enabled, all three certificate paths and at least one authorized-agent
 mapping are required. `compute_authorized_agents` is a comma-separated list of
