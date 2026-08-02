@@ -833,7 +833,12 @@ fn backend_read_console(
     })?;
     let mut output = Vec::with_capacity(max_bytes);
     let mut buffer = vec![0_u8; max_bytes.min(4096)];
-    for _ in 0..16 {
+    // A newly booted guest may not have written its first serial bytes when
+    // the stream is opened.  Nonblocking recv reports that state as an error;
+    // treat it as temporary for a bounded interval instead of returning an
+    // empty snapshot that makes a healthy guest look console-less.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
         match stream.recv(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -842,9 +847,7 @@ fn backend_read_console(
                     break;
                 }
             }
-            // A nonblocking stream reports no currently available bytes as an
-            // error. The bounded snapshot is still a valid observation.
-            Err(_) => break,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
     let _ = stream.abort();
