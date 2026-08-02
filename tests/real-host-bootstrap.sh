@@ -21,11 +21,11 @@ cat >"$WORK_DIR/venv/bin/openstack" <<'EOF'
 printf 'openstack 10.2.1\n'
 EOF
 chmod 0755 "$WORK_DIR/venv/bin/openstack"
-cat >"$WORK_DIR/bin/genisoimage" <<'EOF'
+cat >"$WORK_DIR/bin/xorriso" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod 0755 "$WORK_DIR/bin/genisoimage"
+chmod 0755 "$WORK_DIR/bin/xorriso"
 cat >"$WORK_DIR/bin/id" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == -un ]]; then printf 'o3k-testlab\n'; else /usr/bin/id "$@"; fi

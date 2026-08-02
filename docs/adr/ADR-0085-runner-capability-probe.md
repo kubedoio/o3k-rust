@@ -17,9 +17,9 @@ host capability into a false failure or exposing credentials in an artifact.
 Add `scripts/real-host-capability-probe.sh`. It performs only read-only checks
 and writes the redacted, machine-readable
 `runner-capabilities.json`. The required checks are `virsh`, `qemu-img`, `ip`,
-`dnsmasq`, `openstack`, at least one detectable config-drive tool
-(`cloud-localds`, `genisoimage`, `mkisofs`, or `xorriso`), a readable character
-device at exact path `/dev/kvm`, a successful `virsh -c qemu:///system uri`,
+`dnsmasq`, `openstack`, and `xorriso` for deterministic config-drive ISO
+materialization, a readable character device at exact path `/dev/kvm`, a
+successful `virsh -c qemu:///system uri`,
 minimum free disk space, non-root execution, a declared service account, the
 exact six runner labels, and a declared absolute regular image path.
 
