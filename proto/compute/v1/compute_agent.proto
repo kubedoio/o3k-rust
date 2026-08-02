@@ -188,6 +188,7 @@ message ResolvedCreateInputs {
   string config_drive_artifact_id = 7;
   string config_drive_sha256 = 8;
   repeated NetworkAttachment network_attachments = 9;
+  string project_id = 10;
 }
 
 message NetworkAttachment {
