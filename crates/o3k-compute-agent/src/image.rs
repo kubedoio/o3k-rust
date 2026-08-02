@@ -22,6 +22,7 @@ pub struct ImageMaterializationRequest {
     pub sha256: String,
     pub format: String,
     pub size_bytes: u64,
+    pub expires_at_unix_ms: i64,
     pub instance_id: String,
     pub disk_gib: u64,
 }
@@ -84,6 +85,7 @@ pub fn image_materialization_request(
         sha256: resolved.image_sha256.clone(),
         format: resolved.image_format.clone(),
         size_bytes: reference.size_bytes,
+        expires_at_unix_ms: reference.expires_at_unix_ms,
         instance_id: command.resource_id.clone(),
         disk_gib: resolved.disk_gib,
     })
@@ -290,6 +292,7 @@ fn validate_request(request: &ImageMaterializationRequest) -> Result<(), ImageMa
         || request.sha256.len() != 64
         || !request.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         || !matches!(request.format.as_str(), "raw" | "qcow2")
+        || request.expires_at_unix_ms <= crate::unix_ms()
         || request.size_bytes > 64 * 1024 * 1024
     {
         return Err(ImageMaterializerError::Ownership);
@@ -341,7 +344,7 @@ mod tests {
             format: "raw".to_owned(),
             chunk_size_bytes: 256,
             chunk_count: content.len().div_ceil(256) as u32,
-            ..Default::default()
+            expires_at_unix_ms: i64::MAX,
         };
         store.begin(&offer)?;
         for (index, chunk) in content.chunks(256).enumerate() {
@@ -374,6 +377,7 @@ mod tests {
             sha256: checksum,
             format: offer.format,
             size_bytes: offer.size_bytes,
+            expires_at_unix_ms: offer.expires_at_unix_ms,
             instance_id: "instance-1".to_owned(),
             disk_gib: 1,
         };
@@ -471,6 +475,27 @@ mod tests {
             )
         );
         assert_eq!(request.command_id, command_id);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_materialization_request_is_rejected_before_artifact_or_cache_access()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let content = vec![0_u8; 1024];
+        let (store, mut request) = request(&content)?;
+        request.expires_at_unix_ms = crate::unix_ms().saturating_sub(1);
+        let root =
+            std::env::temp_dir().join(format!("o3k-image-cache-expired-{}", uuid::Uuid::now_v7()));
+        let materializer = ImageMaterializer::open(store, &root, 2 * 1024 * 1024 * 1024)?;
+        assert!(matches!(
+            materializer.materialize(&request),
+            Err(ImageMaterializerError::Ownership)
+        ));
+        assert!(matches!(
+            materializer.delete(&request),
+            Err(ImageMaterializerError::Ownership)
+        ));
+        std::fs::remove_dir_all(root).ok();
         Ok(())
     }
 }

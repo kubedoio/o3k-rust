@@ -372,6 +372,7 @@ fn validate_offer(offer: &proto::ArtifactOffer, agent: &str) -> Result<(), Artif
         || !matches!(offer.format.as_str(), "raw" | "qcow2" | "iso")
         || (offer.kind == proto::ArtifactKind::ImageBase as i32 && offer.format == "iso")
         || (offer.kind == proto::ArtifactKind::ConfigDriveIso as i32 && offer.format != "iso")
+        || offer.expires_at_unix_ms <= crate::unix_ms()
     {
         return Err(ArtifactStoreError::InvalidOffer);
     }
@@ -601,6 +602,18 @@ mod tests {
             .path
             .unwrap();
         (store, offer, content, path)
+    }
+
+    #[test]
+    fn expired_offer_is_rejected_at_store_boundary() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-expired-{}", Uuid::now_v7()));
+        let (store, mut offer, _) = fixture(&root);
+        offer.expires_at_unix_ms = 1;
+        assert!(matches!(
+            store.begin(&offer),
+            Err(ArtifactStoreError::InvalidOffer)
+        ));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

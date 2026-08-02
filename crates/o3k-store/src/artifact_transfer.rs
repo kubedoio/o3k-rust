@@ -59,6 +59,7 @@ pub struct ArtifactTransferRecord {
     pub artifact_kind: String,
     pub sha256: String,
     pub size_bytes: u64,
+    pub expires_at_unix_ms: i64,
     pub format: String,
     pub chunk_size_bytes: u64,
     pub chunk_count: u64,
@@ -79,6 +80,11 @@ impl ArtifactTransferRecord {
         bounded_text("artifact_id", &self.artifact_id, 256)?;
         bounded_text("artifact_kind", &self.artifact_kind, 64)?;
         bounded_text("format", &self.format, 32)?;
+        if self.expires_at_unix_ms <= 0 {
+            return Err(StoreError::InvalidArtifactTransfer(
+                "artifact expiry must be positive".to_owned(),
+            ));
+        }
         if self.sha256.len() != 64 || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StoreError::InvalidArtifactTransfer(
                 "sha256 must be 64 hexadecimal characters".to_owned(),
@@ -200,7 +206,7 @@ pub(crate) async fn insert(
 ) -> Result<ArtifactTransferRecord, StoreError> {
     transfer.validate()?;
     let result = sqlx::query(
-        "INSERT INTO artifact_transfers (transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO artifact_transfers (transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&transfer.transfer_id)
     .bind(&transfer.command_id)
@@ -210,9 +216,10 @@ pub(crate) async fn insert(
     .bind(&transfer.agent_epoch)
     .bind(&transfer.artifact_id)
     .bind(&transfer.artifact_kind)
-    .bind(&transfer.sha256)
-    .bind(sqlite_sequence(transfer.size_bytes)?)
-    .bind(&transfer.format)
+        .bind(&transfer.sha256)
+        .bind(sqlite_sequence(transfer.size_bytes)?)
+        .bind(transfer.expires_at_unix_ms)
+        .bind(&transfer.format)
     .bind(sqlite_sequence(transfer.chunk_size_bytes)?)
     .bind(sqlite_sequence(transfer.chunk_count)?)
     .bind(transfer.state.as_str())
@@ -241,7 +248,7 @@ pub(crate) async fn get(
     pool: &SqlitePool,
     transfer_id: &str,
 ) -> Result<ArtifactTransferRecord, StoreError> {
-    let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
+    let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
         .bind(transfer_id)
         .fetch_optional(pool)
         .await
@@ -257,7 +264,7 @@ pub(crate) async fn update(
     update: ArtifactTransferUpdate,
 ) -> Result<ArtifactTransferRecord, StoreError> {
     let mut transaction = pool.begin().await.map_err(StoreError::Database)?;
-    let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
+    let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
         .bind(transfer_id)
         .fetch_optional(&mut *transaction)
         .await
@@ -331,7 +338,7 @@ pub(crate) async fn rebind_epoch(
 pub(crate) async fn list_recoverable(
     pool: &SqlitePool,
 ) -> Result<Vec<ArtifactTransferRecord>, StoreError> {
-    let rows = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE state IN ('offered', 'receiving') ORDER BY created_at ASC")
+    let rows = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE state IN ('offered', 'receiving') ORDER BY created_at ASC")
         .fetch_all(pool)
         .await
         .map_err(StoreError::Database)?;
@@ -349,6 +356,7 @@ fn same_identity(left: &ArtifactTransferRecord, right: &ArtifactTransferRecord) 
         && left.artifact_kind == right.artifact_kind
         && left.sha256 == right.sha256
         && left.size_bytes == right.size_bytes
+        && left.expires_at_unix_ms == right.expires_at_unix_ms
         && left.format == right.format
         && left.chunk_size_bytes == right.chunk_size_bytes
         && left.chunk_count == right.chunk_count
@@ -367,6 +375,9 @@ fn from_row(row: &SqliteRow) -> Result<ArtifactTransferRecord, StoreError> {
         sha256: row.get("sha256"),
         size_bytes: u64::try_from(row.get::<i64, _>("size_bytes"))
             .map_err(|_| StoreError::Corrupt("negative artifact size".to_owned()))?,
+        expires_at_unix_ms: row.get::<Option<i64>, _>("expires_at_unix_ms").ok_or(
+            StoreError::Corrupt("artifact transfer expiry is missing".to_owned()),
+        )?,
         format: row.get("format"),
         chunk_size_bytes: u64::try_from(row.get::<i64, _>("chunk_size_bytes"))
             .map_err(|_| StoreError::Corrupt("negative artifact chunk size".to_owned()))?,
@@ -418,6 +429,7 @@ mod tests {
             artifact_kind: "image_base".to_owned(),
             sha256: "a".repeat(64),
             size_bytes: 512 * 1024,
+            expires_at_unix_ms: i64::MAX,
             format: "qcow2".to_owned(),
             chunk_size_bytes: 256 * 1024,
             chunk_count: 2,
@@ -471,6 +483,12 @@ mod tests {
         conflicting.sha256 = "b".repeat(64);
         assert!(matches!(
             store.insert_artifact_transfer(&conflicting).await,
+            Err(StoreError::ArtifactTransferConflict(_))
+        ));
+        let mut expiry_conflict = record.clone();
+        expiry_conflict.expires_at_unix_ms -= 1;
+        assert!(matches!(
+            store.insert_artifact_transfer(&expiry_conflict).await,
             Err(StoreError::ArtifactTransferConflict(_))
         ));
 
