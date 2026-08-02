@@ -430,6 +430,10 @@ wait_for_o3kd_health() {
 }
 
 wait_for_o3kd_ready() {
+  for _ in $(seq 1 60); do
+    curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 && break
+    sleep 1
+  done
   curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 \
     || fail "o3kd did not become ready"
   O3KD_READY=true

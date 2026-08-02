@@ -28,6 +28,12 @@ assert 'gpasswd --delete o3k' in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
+ready_start = bootstrap.index('wait_for_o3kd_ready() {')
+ready_end = bootstrap.index('\n}', ready_start)
+ready_block = bootstrap[ready_start:ready_end]
+assert 'for _ in $(seq 1 60);' in ready_block
+assert 'sleep 1' in ready_block
+assert ready_block.count('/readyz"') == 2
 agent_start = bootstrap.index('if [[ "$O3K_PROVIDER" == agent ]]; then')
 provider_else = bootstrap.index('\nelse\n', agent_start)
 provider_end = bootstrap.index('\nfi\nelse\n', provider_else)
