@@ -922,6 +922,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 std::fs::create_dir_all(console_root).map_err(|_| {
                     AgentError::Protocol("console log root could not be created".to_owned())
                 })?;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&console_path)
+                    .map_err(|_| {
+                        AgentError::Protocol("console log could not be created".to_owned())
+                    })?;
                 if let Err(error) = self
                     .adapter
                     .define(o3k_libvirt::DomainDefinition {
