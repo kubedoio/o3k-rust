@@ -191,6 +191,7 @@ message ResolvedCreateInputs {
   // Authenticated transfer references, never host paths or credentials.
   ArtifactReference image_transfer = 10;
   ArtifactReference config_drive_transfer = 11;
+  string project_id = 12;
 }
 
 message ArtifactReference {

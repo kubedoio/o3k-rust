@@ -1192,6 +1192,7 @@ mod tests {
             network_ids: Vec::new(),
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "journal-test-key".to_owned(),
         }
     }

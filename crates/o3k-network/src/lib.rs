@@ -762,6 +762,11 @@ impl HostNetworkManager {
     /// intentionally not mutated.
     pub fn ensure_gateway(&self, gateway: GatewaySpec) -> Result<(), HostNetworkError> {
         validate_gateway(gateway)?;
+        if let Some(recorded) = self.recorded_gateway()?
+            && recorded != gateway
+        {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
         let bridge_created = self.ensure_bridge_with_ownership()?;
         if !bridge_created && !self.bridge_is_owned() {
             return Err(HostNetworkError::ForeignInterface);
@@ -878,6 +883,12 @@ impl HostNetworkManager {
     }
 
     pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        self.ensure_tap(spec).map(|(name, _)| name)
+    }
+
+    /// Ensures one owned TAP exists and reports whether this call created it.
+    /// Callers use the creation bit to make retries and rollback non-destructive.
+    pub fn ensure_tap(&self, spec: &TapSpec) -> Result<(String, bool), HostNetworkError> {
         validate_reference(&spec.instance_id)?;
         validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
@@ -892,7 +903,7 @@ impl HostNetworkManager {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.validate_recorded_tap(&name, spec)?;
-            return Ok(name);
+            return Ok((name, false));
         }
         let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
         if let Err(error) = created_tap {
@@ -921,7 +932,7 @@ impl HostNetworkManager {
         if let Err(error) = self.record_tap_ownership(&name, spec) {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
-        Ok(name)
+        Ok((name, true))
     }
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
@@ -1018,6 +1029,21 @@ impl HostNetworkManager {
         }
         self.validate_recorded_tap(&name, spec)?;
         Ok(name)
+    }
+
+    /// Removes the managed gateway and bridge only when no owned TAP remains.
+    /// A bridge without a durable O3K ownership record is never touched.
+    pub fn cleanup_if_unused(&self) -> Result<(), HostNetworkError> {
+        if !self.recorded_taps_empty()? {
+            return Ok(());
+        }
+        if let Some(gateway) = self.recorded_gateway()? {
+            self.remove_gateway(gateway)?;
+        }
+        if self.recorded_bridge()?.is_some() {
+            self.delete_bridge()?
+        }
+        Ok(())
     }
 
     pub fn ownership_path(&self) -> Option<PathBuf> {

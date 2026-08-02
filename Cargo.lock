@@ -1043,7 +1043,9 @@ dependencies = [
  "axum",
  "o3k-compute-agent",
  "o3k-console",
+ "o3k-dhcp",
  "o3k-libvirt",
+ "o3k-network",
  "o3k-provider",
  "o3k-provider-contract",
  "serde_json",
@@ -1164,6 +1166,7 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "uuid",
@@ -1220,12 +1223,14 @@ dependencies = [
 name = "o3kd"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "axum",
  "o3k-api",
  "o3k-cellhv",
  "o3k-compute",
  "o3k-compute-agent",
  "o3k-config",
+ "o3k-config-drive",
  "o3k-console",
  "o3k-identity",
  "o3k-image",

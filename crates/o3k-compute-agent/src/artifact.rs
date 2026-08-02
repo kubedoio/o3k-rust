@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
+pub const MAX_ARTIFACT_CHUNKS: u32 = 256;
 const MAGIC: &[u8] = b"O3KART1";
 
 #[derive(Debug, Error)]
@@ -29,6 +30,12 @@ pub enum ArtifactStoreError {
     CorruptManifest,
     #[error("artifact path is not owned")]
     UnownedPath,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCleanup {
+    AlreadyAbsent,
+    Removed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +67,17 @@ pub(crate) struct CommittedImageQuery {
     pub sha256: String,
     pub format: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedArtifactQuery {
+    pub command_id: String,
+    pub operation_id: String,
+    pub resource_id: String,
+    pub artifact_id: String,
+    pub kind: proto::ArtifactKind,
+    pub sha256: String,
+    pub format: String,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +340,194 @@ impl ArtifactStore {
         Ok(path)
     }
 
+    /// Reports the durable transfer manifests that can still be reconciled
+    /// after a reconnect.  The offer identity is read from the authenticated
+    /// manifest rather than reconstructed by the caller; only the current
+    /// stream epoch is supplied by the registration handshake.
+    pub fn artifact_statuses(
+        &self,
+        agent_epoch: &str,
+    ) -> Result<Vec<proto::ArtifactStatus>, ArtifactStoreError> {
+        if !valid_reference(agent_epoch) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut statuses = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            if statuses.len() >= 1024 {
+                return Err(ArtifactStoreError::Conflict);
+            }
+            let path = entry.path();
+            if fs::symlink_metadata(&path)
+                .map_err(ArtifactStoreError::Storage)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&path)?;
+            validate_offer(&manifest.offer, &self.agent_id)?;
+            let state = proto::ArtifactTransferState::try_from(manifest.state)
+                .map_err(|_| ArtifactStoreError::CorruptManifest)?;
+            if !matches!(
+                state,
+                proto::ArtifactTransferState::Offered
+                    | proto::ArtifactTransferState::Receiving
+                    | proto::ArtifactTransferState::Committed
+            ) {
+                return Err(ArtifactStoreError::CorruptManifest);
+            }
+            if state == proto::ArtifactTransferState::Committed {
+                verify_file(&self.final_path(&manifest.offer)?, &manifest.offer)?;
+            } else {
+                let part = self.part_path(&manifest.offer.transfer_id)?;
+                let metadata = fs::symlink_metadata(&part).map_err(ArtifactStoreError::Storage)?;
+                if !metadata.file_type().is_file() || metadata.len() != manifest.bytes {
+                    return Err(ArtifactStoreError::CorruptManifest);
+                }
+            }
+            statuses.push(proto::ArtifactStatus {
+                transfer_id: manifest.offer.transfer_id.clone(),
+                command_id: manifest.offer.command_id.clone(),
+                operation_id: manifest.offer.operation_id.clone(),
+                resource_id: manifest.offer.resource_id.clone(),
+                agent_id: self.agent_id.clone(),
+                agent_epoch: agent_epoch.to_owned(),
+                contiguous_bytes: manifest.bytes,
+                next_chunk_index: manifest.next_chunk,
+                state: state as i32,
+            });
+        }
+        statuses.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        Ok(statuses)
+    }
+
+    /// Resolves a committed artifact without reconstructing a transfer offer
+    /// from incomplete command data. The complete offer remains the
+    /// authority; this lookup only finds a single manifest whose authenticated
+    /// command/resource identity and declared artifact metadata match.
+    pub fn resolve_committed_artifact(
+        &self,
+        query: &CommittedArtifactQuery,
+    ) -> Result<PathBuf, ArtifactStoreError> {
+        if !valid_reference(&query.command_id)
+            || !valid_reference(&query.operation_id)
+            || !valid_reference(&query.resource_id)
+            || !valid_reference(&query.artifact_id)
+            || !valid_sha256(&query.sha256)
+            || !valid_reference(&query.format)
+        {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut match_path = None;
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            let manifest_path = entry.path();
+            if manifest_path.is_symlink() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            let offer = &manifest.offer;
+            if offer.command_id == query.command_id
+                && offer.operation_id == query.operation_id
+                && offer.resource_id == query.resource_id
+                && offer.agent_id == self.agent_id
+                && offer.artifact_id == query.artifact_id
+                && offer.kind == query.kind as i32
+                && offer.sha256 == query.sha256
+                && offer.format == query.format
+            {
+                if match_path.is_some() {
+                    return Err(ArtifactStoreError::Conflict);
+                }
+                match_path = Some(offer.clone());
+            }
+        }
+        let offer = match_path.ok_or(ArtifactStoreError::Conflict)?;
+        self.resolve(&offer)
+    }
+
+    /// Removes only config-drive transfer state owned by this agent and
+    /// resource. Shared final content remains until every owned manifest
+    /// referring to it has been removed.
+    pub fn cleanup_config_drive_for_resource(
+        &self,
+        resource_id: &str,
+    ) -> Result<ArtifactCleanup, ArtifactStoreError> {
+        if !valid_reference(resource_id) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut manifests = Vec::new();
+        let mut final_references = std::collections::HashMap::<PathBuf, usize>::new();
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            let manifest_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&manifest_path).map_err(ArtifactStoreError::Storage)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            validate_offer(&manifest.offer, &self.agent_id)?;
+            let state = proto::ArtifactTransferState::try_from(manifest.state)
+                .map_err(|_| ArtifactStoreError::CorruptManifest)?;
+            if !matches!(
+                state,
+                proto::ArtifactTransferState::Offered
+                    | proto::ArtifactTransferState::Receiving
+                    | proto::ArtifactTransferState::Committed
+            ) {
+                return Err(ArtifactStoreError::CorruptManifest);
+            }
+            if state == proto::ArtifactTransferState::Committed {
+                *final_references
+                    .entry(self.final_path(&manifest.offer)?)
+                    .or_default() += 1;
+            }
+            if manifest.offer.resource_id == resource_id
+                && manifest.offer.kind == proto::ArtifactKind::ConfigDriveIso as i32
+            {
+                manifests.push((manifest_path, manifest, state));
+            }
+        }
+        if manifests.is_empty() {
+            return Ok(ArtifactCleanup::AlreadyAbsent);
+        }
+        let mut removed = false;
+        for (manifest_path, manifest, state) in manifests {
+            let part = self.part_path(&manifest.offer.transfer_id)?;
+            remove_owned_file(&part)?;
+            if state == proto::ArtifactTransferState::Committed {
+                let final_path = self.final_path(&manifest.offer)?;
+                if final_references.get(&final_path) == Some(&1) {
+                    remove_owned_file(&final_path)?;
+                }
+            }
+            remove_owned_file(&manifest_path)?;
+            removed = true;
+        }
+        Ok(if removed {
+            ArtifactCleanup::Removed
+        } else {
+            ArtifactCleanup::AlreadyAbsent
+        })
+    }
+
     fn manifest_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
         valid_reference(id)
             .then(|| self.root.join(format!(".{id}.manifest")))
@@ -367,6 +573,7 @@ fn validate_offer(offer: &proto::ArtifactOffer, agent: &str) -> Result<(), Artif
         || offer.chunk_size_bytes == 0
         || offer.chunk_size_bytes as usize > MAX_ARTIFACT_CHUNK_BYTES
         || offer.chunk_count == 0
+        || offer.chunk_count > MAX_ARTIFACT_CHUNKS
         || u64::from(offer.chunk_count) != chunks
         || !matches!(offer.kind, 1 | 2)
         || !matches!(offer.format.as_str(), "raw" | "qcow2" | "iso")
@@ -411,6 +618,19 @@ fn verify_file(path: &Path, offer: &proto::ArtifactOffer) -> Result<(), Artifact
         return Err(ArtifactStoreError::DigestMismatch);
     }
     Ok(())
+}
+
+fn remove_owned_file(path: &Path) -> Result<(), ArtifactStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            fs::remove_file(path).map_err(ArtifactStoreError::Storage)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ArtifactStoreError::Storage(error)),
+    }
 }
 
 fn atomic_manifest(path: &Path, manifest: &Manifest) -> Result<(), ArtifactStoreError> {
@@ -648,6 +868,23 @@ mod tests {
         assert_eq!(fs::read(receipt.path.unwrap()).unwrap(), content);
         let reopened = ArtifactStore::open(&root, "agent-1").unwrap();
         assert!(reopened.resolve(&offer).is_ok());
+        assert_eq!(
+            fs::read(
+                reopened
+                    .resolve_committed_artifact(&CommittedArtifactQuery {
+                        command_id: offer.command_id.clone(),
+                        operation_id: offer.operation_id.clone(),
+                        resource_id: offer.resource_id.clone(),
+                        artifact_id: offer.artifact_id.clone(),
+                        kind: proto::ArtifactKind::ImageBase,
+                        sha256: offer.sha256.clone(),
+                        format: offer.format.clone(),
+                    },)
+                    .unwrap()
+            )
+            .unwrap(),
+            content
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -777,6 +1014,92 @@ mod tests {
         let path = resolve(&reopened, &query(&offer)).unwrap();
         assert_eq!(path, expected_path);
         assert_eq!(fs::read(path).unwrap(), content);
+    }
+
+    #[test]
+    fn reconnect_statuses_are_manifest_bound_and_deterministically_ordered() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, content) = fixture(&root);
+        store.begin(&offer).unwrap();
+        store
+            .accept_chunk(
+                &offer,
+                &proto::ArtifactChunk {
+                    transfer_id: offer.transfer_id.clone(),
+                    chunk_index: 0,
+                    offset_bytes: 0,
+                    data: content[..4].to_vec(),
+                    chunk_sha256: digest(&content[..4]),
+                },
+            )
+            .unwrap();
+
+        let statuses = store.artifact_statuses("epoch-2").unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].transfer_id, offer.transfer_id);
+        assert_eq!(statuses[0].command_id, offer.command_id);
+        assert_eq!(statuses[0].operation_id, offer.operation_id);
+        assert_eq!(statuses[0].resource_id, offer.resource_id);
+        assert_eq!(statuses[0].agent_id, offer.agent_id);
+        assert_eq!(statuses[0].agent_epoch, "epoch-2");
+        assert_eq!(
+            statuses[0].state,
+            proto::ArtifactTransferState::Receiving as i32
+        );
+        assert_eq!(statuses[0].contiguous_bytes, 4);
+        assert_eq!(statuses[0].next_chunk_index, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_drive_cleanup_is_owned_idempotent_and_preserves_foreign_resources() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-cleanup-{}", Uuid::now_v7()));
+        let (store, mut offer, content) = fixture(&root);
+        offer.kind = proto::ArtifactKind::ConfigDriveIso as i32;
+        offer.format = "iso".to_owned();
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-1")
+                .unwrap(),
+            ArtifactCleanup::Removed
+        );
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-1")
+                .unwrap(),
+            ArtifactCleanup::AlreadyAbsent
+        );
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-2")
+                .unwrap(),
+            ArtifactCleanup::AlreadyAbsent
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

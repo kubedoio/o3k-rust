@@ -492,11 +492,18 @@ impl LibvirtCapabilities {
             lifecycle_actions: self.supported_operations.clone(),
             console_log: true,
             max_console_log_bytes: 64 * 1024,
-            flags: vec![proto::CapabilityFlag {
-                name: "kvm".to_owned(),
-                supported: self.kvm_available,
-                bounded_value: String::new(),
-            }],
+            flags: vec![
+                proto::CapabilityFlag {
+                    name: "kvm".to_owned(),
+                    supported: self.kvm_available,
+                    bounded_value: String::new(),
+                },
+                proto::CapabilityFlag {
+                    name: "config_drive".to_owned(),
+                    supported: true,
+                    bounded_value: String::new(),
+                },
+            ],
             ..Default::default()
         }
     }
@@ -833,7 +840,12 @@ fn backend_read_console(
     })?;
     let mut output = Vec::with_capacity(max_bytes);
     let mut buffer = vec![0_u8; max_bytes.min(4096)];
-    for _ in 0..16 {
+    // A newly booted guest may not have written its first serial bytes when
+    // the stream is opened.  Nonblocking recv reports that state as an error;
+    // treat it as temporary for a bounded interval instead of returning an
+    // empty snapshot that makes a healthy guest look console-less.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
         match stream.recv(&mut buffer) {
             Ok(0) => break,
             Ok(count) => {
@@ -842,9 +854,7 @@ fn backend_read_console(
                     break;
                 }
             }
-            // A nonblocking stream reports no currently available bytes as an
-            // error. The bounded snapshot is still a valid observation.
-            Err(_) => break,
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
         }
     }
     let _ = stream.abort();
@@ -1138,6 +1148,12 @@ mod tests {
                 .flags
                 .iter()
                 .any(|flag| flag.name == "kvm" && flag.supported)
+        );
+        assert!(
+            capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "config_drive" && flag.supported)
         );
     }
 
@@ -1550,6 +1566,7 @@ mod tests {
             network_ids,
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "create".to_owned(),
         }
     }
