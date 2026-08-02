@@ -1,11 +1,17 @@
 //! Deterministic, filesystem-backed OpenStack config-drive content.
+//!
+//! ISO materialization uses the external `xorriso` executable. Protected
+//! real-host execution must provision and capability-check `xorriso`; unit
+//! tests inject a command runner and therefore do not require the executable.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
+    ffi::{OsStr, OsString},
     fs, io,
     path::{Path, PathBuf},
+    process::Command,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -16,6 +22,11 @@ pub const MAX_NETWORK_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_VENDOR_DATA_BYTES: usize = 64 * 1024;
 const MANIFEST_NAME: &str = "o3k-ownership.json";
 const MANAGED_BY: &str = "o3k-config-drive";
+const ISO_MANIFEST_SUFFIX: &str = ".o3k-iso-ownership.json";
+const ISO_MANAGED_BY: &str = "o3k-config-drive-iso";
+const ISO_VOLUME_ID: &str = "config-2";
+const ISO_DATE: &str = "2020010100000000";
+const ISO_PROGRAM: &str = "xorriso";
 
 #[derive(Debug, Error)]
 pub enum ConfigDriveError {
@@ -35,6 +46,10 @@ pub enum ConfigDriveError {
     Serialization(#[source] serde_json::Error),
     #[error("config-drive path is not owned by o3k")]
     UnownedPath,
+    #[error("config-drive ISO command failed")]
+    ToolFailed(#[source] io::Error),
+    #[error("config-drive ISO output is invalid or tampered")]
+    InvalidIsoOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +67,33 @@ pub struct ConfigDriveInput {
 pub struct ConfigDriveResult {
     pub directory: PathBuf,
     pub fingerprint_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDriveIsoResult {
+    pub path: PathBuf,
+    pub fingerprint_sha256: String,
+    pub source_fingerprint_sha256: String,
+}
+
+/// Injectable boundary for the external ISO builder.
+pub trait IsoCommandRunner {
+    fn run(&self, program: &OsStr, args: &[OsString]) -> Result<(), io::Error>;
+}
+
+struct SystemIsoCommandRunner;
+
+impl IsoCommandRunner for SystemIsoCommandRunner {
+    fn run(&self, program: &OsStr, args: &[OsString]) -> Result<(), io::Error> {
+        let status = Command::new(program).args(args).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "{ISO_PROGRAM} exited unsuccessfully"
+            )))
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -96,6 +138,14 @@ impl ConfigDriveStore {
             return Err(ConfigDriveError::InvalidInput);
         }
         cleanup(&self.root.join(instance_id))
+    }
+
+    pub fn materialize_iso(
+        &self,
+        source_directory: impl AsRef<Path>,
+        output_path: impl AsRef<Path>,
+    ) -> Result<ConfigDriveIsoResult, ConfigDriveError> {
+        materialize_iso_with_runner(source_directory, output_path, &SystemIsoCommandRunner)
     }
 }
 
@@ -203,6 +253,267 @@ pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
     validate_owned_directory(path, instance_id)?;
     fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
     Ok(())
+}
+
+/// Build a deterministic ISO from an O3K-owned config-drive directory.
+///
+/// The default runner invokes `xorriso`; callers running on the protected
+/// real host must install that executable. The output and its ownership
+/// manifest are published atomically, and an already verified matching pair
+/// is returned without invoking the tool again.
+pub fn materialize_iso(
+    source_directory: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<ConfigDriveIsoResult, ConfigDriveError> {
+    materialize_iso_with_runner(source_directory, output_path, &SystemIsoCommandRunner)
+}
+
+pub fn materialize_iso_with_runner(
+    source_directory: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    runner: &dyn IsoCommandRunner,
+) -> Result<ConfigDriveIsoResult, ConfigDriveError> {
+    let source_directory = source_directory.as_ref();
+    let output_path = output_path.as_ref();
+    let instance_id = source_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(ConfigDriveError::InvalidInput)?;
+    if !valid_instance_id(instance_id) || output_path.file_name().is_none() {
+        return Err(ConfigDriveError::InvalidInput);
+    }
+    validate_owned_directory(source_directory, instance_id)?;
+    let source_fingerprint = read_directory_fingerprint(source_directory)?;
+    validate_output_location(source_directory, output_path)?;
+
+    let manifest_path = iso_manifest_path(output_path)?;
+    let output_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(ConfigDriveError::InvalidInput)?;
+    let had_previous = output_path.exists() || output_path.is_symlink() || manifest_path.exists();
+    if output_path.exists() || output_path.is_symlink() || manifest_path.exists() {
+        if !output_path.exists() || manifest_path.is_symlink() {
+            return Err(ConfigDriveError::UnownedPath);
+        }
+        let (manifest, fingerprint_sha256) =
+            inspect_owned_iso(output_path, &manifest_path, instance_id, output_name)?;
+        if manifest.source_fingerprint_sha256 == source_fingerprint {
+            return Ok(ConfigDriveIsoResult {
+                path: output_path.to_owned(),
+                fingerprint_sha256,
+                source_fingerprint_sha256: source_fingerprint,
+            });
+        }
+    }
+
+    let parent = output_path.parent().ok_or(ConfigDriveError::InvalidInput)?;
+    let token = Uuid::now_v7();
+    let temporary = parent.join(format!(".{}.iso-tmp-{}", instance_id, token));
+    let temporary_manifest = parent.join(format!(".{}.iso-manifest-tmp-{}", instance_id, token));
+    let preparation = (|| {
+        let args = xorriso_args(&temporary, source_directory);
+        runner
+            .run(OsStr::new(ISO_PROGRAM), &args)
+            .map_err(ConfigDriveError::ToolFailed)?;
+        let artifact_fingerprint = verify_regular_file_digest(&temporary)?;
+        let manifest = IsoOwnershipManifest {
+            schema_version: 1,
+            managed_by: ISO_MANAGED_BY.to_owned(),
+            instance_id: instance_id.to_owned(),
+            source_fingerprint_sha256: source_fingerprint.clone(),
+            artifact_fingerprint_sha256: artifact_fingerprint.clone(),
+            output_name: output_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or(ConfigDriveError::InvalidInput)?
+                .to_owned(),
+        };
+        let bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?;
+        fs::write(&temporary_manifest, bytes).map_err(ConfigDriveError::Storage)?;
+        let verified = validate_owned_iso(
+            &temporary,
+            &temporary_manifest,
+            instance_id,
+            &source_fingerprint,
+            output_name,
+        )?;
+        if verified.fingerprint_sha256 != artifact_fingerprint {
+            return Err(ConfigDriveError::InvalidIsoOutput);
+        }
+        Ok(verified)
+    })();
+    if let Err(error) = preparation {
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&temporary_manifest);
+        return Err(error);
+    }
+
+    let backup_output = parent.join(format!(".{}.iso-old-{}", instance_id, token));
+    let backup_manifest = parent.join(format!(".{}.iso-manifest-old-{}", instance_id, token));
+    if had_previous {
+        if let Err(error) = fs::rename(output_path, &backup_output) {
+            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(&temporary_manifest);
+            return Err(ConfigDriveError::Storage(error));
+        }
+        if let Err(error) = fs::rename(&manifest_path, &backup_manifest) {
+            let _ = fs::rename(&backup_output, output_path);
+            let _ = fs::remove_file(&temporary);
+            let _ = fs::remove_file(&temporary_manifest);
+            return Err(ConfigDriveError::Storage(error));
+        }
+    }
+    if let Err(error) = fs::rename(&temporary, output_path) {
+        let _ = fs::remove_file(&temporary);
+        let _ = fs::remove_file(&temporary_manifest);
+        if had_previous {
+            let _ = fs::rename(&backup_output, output_path);
+            let _ = fs::rename(&backup_manifest, &manifest_path);
+        }
+        return Err(ConfigDriveError::Storage(error));
+    }
+    if let Err(error) = fs::rename(&temporary_manifest, &manifest_path) {
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(&temporary_manifest);
+        if had_previous {
+            let _ = fs::rename(&backup_output, output_path);
+            let _ = fs::rename(&backup_manifest, &manifest_path);
+        }
+        return Err(ConfigDriveError::Storage(error));
+    }
+    if had_previous {
+        fs::remove_file(&backup_output).map_err(ConfigDriveError::Storage)?;
+        fs::remove_file(&backup_manifest).map_err(ConfigDriveError::Storage)?;
+    }
+    validate_owned_iso(
+        output_path,
+        &manifest_path,
+        instance_id,
+        &source_fingerprint,
+        output_name,
+    )
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct IsoOwnershipManifest {
+    schema_version: u32,
+    managed_by: String,
+    instance_id: String,
+    source_fingerprint_sha256: String,
+    artifact_fingerprint_sha256: String,
+    output_name: String,
+}
+
+fn xorriso_args(output: &Path, source: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("-as"),
+        OsString::from("mkisofs"),
+        OsString::from("-o"),
+        output.as_os_str().to_owned(),
+        OsString::from("-V"),
+        OsString::from(ISO_VOLUME_ID),
+        OsString::from("-iso-level"),
+        OsString::from("3"),
+        OsString::from("-r"),
+        OsString::from("-J"),
+        OsString::from("-joliet-long"),
+        OsString::from("-volume_date"),
+        OsString::from(format!("all_file_dates={ISO_DATE}")),
+        OsString::from("-volume_date"),
+        OsString::from(format!("uuid={ISO_DATE}")),
+        source.as_os_str().to_owned(),
+    ]
+}
+
+fn validate_output_location(source: &Path, output: &Path) -> Result<(), ConfigDriveError> {
+    let source_parent = source.parent().ok_or(ConfigDriveError::InvalidInput)?;
+    let output_parent = output.parent().ok_or(ConfigDriveError::InvalidInput)?;
+    let source_root = fs::canonicalize(source_parent).map_err(|_| ConfigDriveError::UnownedPath)?;
+    let output_root = fs::canonicalize(output_parent).map_err(|_| ConfigDriveError::UnownedPath)?;
+    if source_root != output_root || output.is_symlink() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    Ok(())
+}
+
+fn iso_manifest_path(output: &Path) -> Result<PathBuf, ConfigDriveError> {
+    let name = output
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(ConfigDriveError::InvalidInput)?;
+    Ok(output.with_file_name(format!("{name}{ISO_MANIFEST_SUFFIX}")))
+}
+
+fn read_directory_fingerprint(path: &Path) -> Result<String, ConfigDriveError> {
+    let manifest: OwnershipManifest =
+        serde_json::from_slice(&read_owned_file(&path.join(MANIFEST_NAME))?)
+            .map_err(|_| ConfigDriveError::UnownedPath)?;
+    Ok(manifest.fingerprint_sha256)
+}
+
+fn verify_regular_file_digest(path: &Path) -> Result<String, ConfigDriveError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| ConfigDriveError::InvalidIsoOutput)?;
+    if !metadata.is_file() {
+        return Err(ConfigDriveError::InvalidIsoOutput);
+    }
+    let bytes = fs::read(path).map_err(|_| ConfigDriveError::InvalidIsoOutput)?;
+    Ok(digest_hex(&bytes))
+}
+
+fn digest_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut result = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(&mut result, "{byte:02x}");
+    }
+    result
+}
+
+fn validate_owned_iso(
+    output: &Path,
+    manifest_path: &Path,
+    instance_id: &str,
+    source_fingerprint: &str,
+    expected_output_name: &str,
+) -> Result<ConfigDriveIsoResult, ConfigDriveError> {
+    let (manifest, fingerprint_sha256) =
+        inspect_owned_iso(output, manifest_path, instance_id, expected_output_name)?;
+    if manifest.source_fingerprint_sha256 != source_fingerprint {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    Ok(ConfigDriveIsoResult {
+        path: output.to_owned(),
+        fingerprint_sha256,
+        source_fingerprint_sha256: source_fingerprint.to_owned(),
+    })
+}
+
+fn inspect_owned_iso(
+    output: &Path,
+    manifest_path: &Path,
+    instance_id: &str,
+    expected_output_name: &str,
+) -> Result<(IsoOwnershipManifest, String), ConfigDriveError> {
+    if output.is_symlink() || manifest_path.is_symlink() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let manifest: IsoOwnershipManifest = serde_json::from_slice(&read_owned_file(manifest_path)?)
+        .map_err(|_| ConfigDriveError::UnownedPath)?;
+    if manifest.schema_version != 1
+        || manifest.managed_by != ISO_MANAGED_BY
+        || manifest.instance_id != instance_id
+        || manifest.output_name != expected_output_name
+    {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let fingerprint_sha256 = verify_regular_file_digest(output)?;
+    if fingerprint_sha256 != manifest.artifact_fingerprint_sha256 {
+        return Err(ConfigDriveError::InvalidIsoOutput);
+    }
+    Ok((manifest, fingerprint_sha256))
 }
 
 fn validate_owned_directory(path: &Path, instance_id: &str) -> Result<(), ConfigDriveError> {
@@ -359,6 +670,65 @@ fn write(path: &Path, content: &[u8]) -> Result<(), ConfigDriveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct FakeRunner {
+        calls: Arc<Mutex<Vec<Vec<OsString>>>>,
+        output: Vec<u8>,
+        failure: bool,
+    }
+
+    impl FakeRunner {
+        fn successful(output: &[u8]) -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                output: output.to_vec(),
+                failure: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                output: Vec::new(),
+                failure: true,
+            }
+        }
+    }
+
+    impl IsoCommandRunner for FakeRunner {
+        fn run(&self, program: &OsStr, args: &[OsString]) -> Result<(), io::Error> {
+            assert_eq!(program, OsStr::new(ISO_PROGRAM));
+            self.calls
+                .lock()
+                .map_err(|_| io::Error::other("test mutex poisoned"))?
+                .push(args.to_vec());
+            if self.failure {
+                return Err(io::Error::other("synthetic xorriso failure"));
+            }
+            let output = args
+                .windows(2)
+                .find(|pair| pair[0] == OsStr::new("-o"))
+                .map(|pair| PathBuf::from(&pair[1]))
+                .ok_or_else(|| io::Error::other("missing output argument"))?;
+            fs::write(output, &self.output)
+        }
+    }
+
+    impl FakeRunner {
+        fn calls(&self) -> Vec<Vec<OsString>> {
+            self.calls
+                .lock()
+                .map(|calls| calls.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    fn test_root(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{prefix}-{}", Uuid::now_v7()))
+    }
+
     fn input() -> ConfigDriveInput {
         ConfigDriveInput {
             instance_id: "instance-1".to_owned(),
@@ -495,6 +865,93 @@ mod tests {
             Err(ConfigDriveError::UnownedPath)
         ));
         assert!(result.directory.exists());
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn iso_uses_fixed_arguments_and_is_restart_idempotent() -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-iso-args");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        let runner = FakeRunner::successful(b"deterministic-iso");
+        let first = materialize_iso_with_runner(&source, &output, &runner)?;
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], OsStr::new("-as"));
+        assert_eq!(calls[0][1], OsStr::new("mkisofs"));
+        assert_eq!(calls[0][2], OsStr::new("-o"));
+        assert_eq!(calls[0][4], OsStr::new("-V"));
+        assert_eq!(calls[0][5], OsStr::new(ISO_VOLUME_ID));
+        assert!(calls[0].windows(2).any(|pair| {
+            pair[0] == OsStr::new("-volume_date")
+                && pair[1] == OsString::from(format!("all_file_dates={ISO_DATE}"))
+        }));
+        assert!(calls[0].windows(2).any(|pair| {
+            pair[0] == OsStr::new("-volume_date")
+                && pair[1] == OsString::from(format!("uuid={ISO_DATE}"))
+        }));
+        drop(calls);
+
+        let reopened = ConfigDriveStore::open(&root)?;
+        let second = reopened.materialize_iso(&source, &output)?;
+        assert_eq!(first, second);
+        let third = materialize_iso_with_runner(&source, &output, &runner)?;
+        assert_eq!(first, third);
+        assert_eq!(runner.calls().len(), 1);
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn iso_tool_failure_removes_temporary_files() -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-iso-failure");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        let runner = FakeRunner::failing();
+        assert!(matches!(
+            materialize_iso_with_runner(&source, &output, &runner),
+            Err(ConfigDriveError::ToolFailed(_))
+        ));
+        let leftovers = fs::read_dir(&root)
+            .map_err(ConfigDriveError::Storage)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains("iso-tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
+        assert!(!output.exists());
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn iso_tampering_and_unowned_output_fail_closed() -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-iso-owner");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        let runner = FakeRunner::successful(b"deterministic-iso");
+        materialize_iso_with_runner(&source, &output, &runner)?;
+        fs::write(&output, b"tampered").map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            materialize_iso_with_runner(&source, &output, &runner),
+            Err(ConfigDriveError::InvalidIsoOutput)
+        ));
+        fs::write(&output, b"deterministic-iso").map_err(ConfigDriveError::Storage)?;
+        fs::remove_file(iso_manifest_path(&output)?).map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            materialize_iso_with_runner(&source, &output, &runner),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+
+        fs::remove_file(&output).map_err(ConfigDriveError::Storage)?;
+        fs::write(&output, b"foreign").map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            materialize_iso_with_runner(&source, &output, &runner),
+            Err(ConfigDriveError::UnownedPath)
+        ));
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }
