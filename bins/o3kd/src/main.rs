@@ -57,12 +57,18 @@ impl DaemonCreateResolver {
                 .network
                 .get_port(&request.project_id, port_id)
                 .map_err(|_| ProviderError::InvalidRequest)?;
+            let subnet = self
+                .network
+                .get_subnet(&request.project_id, port.subnet_id)
+                .map_err(|_| ProviderError::InvalidRequest)?;
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
             attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
                 port_id: port_id.clone(),
                 mac: port.mac_address.clone(),
                 fixed_ipv4: fixed_ip.clone(),
+                subnet_cidr: subnet.cidr,
+                gateway_ipv4: subnet.gateway_ip.to_string(),
             });
             network_data.insert(format!("{port_id}.mac"), port.mac_address);
             network_data.insert(format!("{port_id}.ipv4"), fixed_ip);
@@ -380,6 +386,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .is_err()
     {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(task) = inspect_probe_task {
         task.abort();
         let _ = task.await;
     }
