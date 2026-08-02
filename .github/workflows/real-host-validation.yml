@@ -122,5 +122,6 @@ jobs:
             target/real-host-workflow-artifacts/resource-leak-result.json
             target/real-host-workflow-artifacts/libvirt-result.json
             target/real-host-workflow-artifacts/openstack-cli-result.json
+            target/real-host-workflow-artifacts/server-show-evidence.json
           if-no-files-found: warn
           retention-days: 14
