@@ -555,6 +555,21 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
         .ok_or_else(|| std::io::Error::other("token missing"))?
         .to_str()?
         .to_owned();
+    let extensions = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.0/extensions")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(extensions.status(), StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &axum::body::to_bytes(extensions.into_body(), 4096).await?
+        )?,
+        serde_json::json!({"extensions": []})
+    );
     let body = serde_json::json!({"network":{"name":"flat"}});
     let response = o3k_api::router_with_state(state.clone())
         .oneshot(
