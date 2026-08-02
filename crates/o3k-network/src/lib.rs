@@ -903,6 +903,27 @@ impl HostNetworkManager {
         Ok(managed_tap_names(&output.stdout, &self.config.bridge_name))
     }
 
+    /// Resolves a live TAP only when the durable ownership manifest and the
+    /// current kernel interface both prove the requested instance/port/MAC
+    /// binding. A deterministic TAP name alone is not sufficient evidence.
+    pub fn resolve_owned_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        validate_reference(&spec.instance_id)?;
+        validate_reference(&spec.port_id)?;
+        validate_mac(&spec.mac)?;
+        if self.ownership.is_none() {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+        let name = Self::tap_name(&spec.port_id)?;
+        if !self.link_exists(&name) {
+            return Err(HostNetworkError::CommandFailed);
+        }
+        if !interface_is_owned_with(&*self.command, &name, &spec.mac, &self.config.bridge_name)? {
+            return Err(HostNetworkError::ForeignInterface);
+        }
+        self.validate_recorded_tap(&name, spec)?;
+        Ok(name)
+    }
+
     pub fn ownership_path(&self) -> Option<PathBuf> {
         self.ownership
             .as_ref()

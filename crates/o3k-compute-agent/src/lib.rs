@@ -48,7 +48,7 @@ use uuid::Uuid;
 
 mod artifact;
 pub use artifact::{
-    ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
+    ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery, MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_CHUNK_BYTES,
 };
 
