@@ -897,6 +897,7 @@ impl ComputeProvider for AgentComputeProvider {
         let command = build_create_command(CreateCommandSpec {
             agent_id: agent.agent_id.clone(),
             agent_epoch: agent.agent_epoch.clone(),
+            project_id: request.project_id.clone(),
             operation_id: request.operation_id.to_string(),
             resource_id: request.o3k_server_id.to_string(),
             idempotency_key: request.idempotency_key.clone(),

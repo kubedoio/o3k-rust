@@ -956,6 +956,7 @@ fn command_payload_fingerprint(command: &proto::Command) -> Result<String, Agent
 pub struct CreateCommandSpec {
     pub agent_id: String,
     pub agent_epoch: String,
+    pub project_id: String,
     pub operation_id: String,
     pub resource_id: String,
     pub idempotency_key: String,
@@ -986,6 +987,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
     let CreateCommandSpec {
         agent_id,
         agent_epoch,
+        project_id,
         operation_id,
         resource_id,
         idempotency_key,
@@ -1004,6 +1006,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
     } = spec;
     if agent_id.trim().is_empty()
         || agent_epoch.trim().is_empty()
+        || !valid_reference(&project_id)
         || operation_id.trim().is_empty()
         || resource_id.trim().is_empty()
         || idempotency_key.trim().is_empty()
@@ -1057,6 +1060,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
                     gateway_ipv4: attachment.gateway_ipv4,
                 })
                 .collect(),
+            project_id,
         }),
     };
     let canonical = proto::CanonicalCommandPayload {
@@ -3929,6 +3933,7 @@ mod tests {
         CreateCommandSpec {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
+            project_id: "project".to_owned(),
             operation_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"fake-operation").to_string(),
             resource_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"fake-resource").to_string(),
             idempotency_key: "fake-create".to_owned(),
@@ -4119,6 +4124,7 @@ mod tests {
         let first = build_create_command(CreateCommandSpec {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
+            project_id: "project".to_owned(),
             operation_id: "operation-1".to_owned(),
             resource_id: "resource-1".to_owned(),
             idempotency_key: "request-1".to_owned(),
@@ -4144,6 +4150,7 @@ mod tests {
         let second = build_create_command(CreateCommandSpec {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
+            project_id: "project".to_owned(),
             operation_id: "operation-1".to_owned(),
             resource_id: "resource-1".to_owned(),
             idempotency_key: "request-1".to_owned(),
@@ -4170,6 +4177,7 @@ mod tests {
         let changed = build_create_command(CreateCommandSpec {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
+            project_id: "project".to_owned(),
             operation_id: "operation-1".to_owned(),
             resource_id: "resource-1".to_owned(),
             idempotency_key: "request-1".to_owned(),
