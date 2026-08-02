@@ -21,6 +21,8 @@ struct HealthState {
 
 struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
+    artifact_root: PathBuf,
+    network: o3k_network::HostNetworkManager,
 }
 
 /// Host-local evidence required to turn a create request into a libvirt
@@ -200,6 +202,87 @@ fn resolve_create_domain_spec(
         })
 }
 
+fn resolve_committed_create_inputs(
+    command: &proto::Command,
+    artifact_root: &std::path::Path,
+    network: &o3k_network::HostNetworkManager,
+) -> Result<CommittedCreateInputs, AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol("create action is missing".to_owned()));
+    };
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(AgentError::Protocol(
+            "resolved create inputs are missing".to_owned(),
+        ));
+    };
+    let store = o3k_compute_agent::ArtifactStore::open(artifact_root, &command.agent_id)
+        .map_err(|_| AgentError::Protocol("agent artifact store is unavailable".to_owned()))?;
+    let image_path = store
+        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+            command_id: command.command_id.clone(),
+            operation_id: command.operation_id.clone(),
+            resource_id: command.resource_id.clone(),
+            artifact_id: resolved.image_artifact_id.clone(),
+            kind: proto::ArtifactKind::ImageBase,
+            sha256: resolved.image_sha256.clone(),
+            format: resolved.image_format.clone(),
+        })
+        .map_err(|_| AgentError::Protocol("committed image artifact is unavailable".to_owned()))?;
+    let config_path = store
+        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+            command_id: command.command_id.clone(),
+            operation_id: command.operation_id.clone(),
+            resource_id: command.resource_id.clone(),
+            artifact_id: resolved.config_drive_artifact_id.clone(),
+            kind: proto::ArtifactKind::ConfigDriveIso,
+            sha256: resolved.config_drive_sha256.clone(),
+            format: "iso".to_owned(),
+        })
+        .map_err(|_| {
+            AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
+        })?;
+    let mut owned_taps = Vec::with_capacity(resolved.network_attachments.len());
+    for attachment in &resolved.network_attachments {
+        let tap_name = network
+            .resolve_owned_tap(&o3k_network::TapSpec {
+                instance_id: command.resource_id.clone(),
+                port_id: attachment.port_id.clone(),
+                mac: attachment.mac.clone(),
+            })
+            .map_err(|_| AgentError::Protocol("owned TAP is unavailable".to_owned()))?;
+        owned_taps.push(OwnedTap {
+            port_id: attachment.port_id.clone(),
+            tap_name,
+            mac_address: attachment.mac.clone(),
+            ownership_token: "durable-network-manifest".to_owned(),
+        });
+    }
+    Ok(CommittedCreateInputs {
+        image: CommittedArtifact {
+            artifact_id: resolved.image_artifact_id.clone(),
+            kind: proto::ArtifactKind::ImageBase,
+            format: resolved.image_format.clone(),
+            sha256: resolved.image_sha256.clone(),
+            path: image_path,
+        },
+        config_drive: CommittedArtifact {
+            artifact_id: resolved.config_drive_artifact_id.clone(),
+            kind: proto::ArtifactKind::ConfigDriveIso,
+            format: "iso".to_owned(),
+            sha256: resolved.config_drive_sha256.clone(),
+            path: config_path,
+        },
+        owned_taps,
+        identity: CreateDomainIdentity {
+            server_id: command.resource_id.clone(),
+            project_id: resolved.project_id.clone(),
+            generation: 1,
+            operation_id: command.operation_id.clone(),
+            managed_by: "o3k-compute".to_owned(),
+        },
+    })
+}
+
 #[async_trait]
 impl CommandExecutor for LibvirtCommandExecutor {
     async fn execute(
@@ -311,12 +394,34 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
-                match resolve_create_domain_spec(command, None) {
-                    Ok(_) => Err(AgentError::Protocol(
-                        "create domain resolution produced no executable definition".to_owned(),
-                    )),
-                    Err(error) => Err(error),
+                let committed =
+                    resolve_committed_create_inputs(command, &self.artifact_root, &self.network)?;
+                let spec = resolve_create_domain_spec(command, Some(&committed))?;
+                let definition = o3k_libvirt::build_domain_xml(&spec)
+                    .map_err(|_| AgentError::Protocol("domain XML is invalid".to_owned()))?;
+                let definition_name = definition.name.clone();
+                if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
+                    verify_owned_domain(&existing, &command.resource_id)?;
+                    return success("domain already exists", resource_state(&existing));
                 }
+                self.adapter
+                    .define(o3k_libvirt::DomainDefinition {
+                        name: definition_name.clone(),
+                        xml: definition.xml,
+                    })
+                    .await
+                    .map_err(agent_error)?;
+                if let Err(error) = self.adapter.start(definition_name.clone()).await {
+                    let _ = self.adapter.undefine(definition_name.clone()).await;
+                    return Err(agent_error(error));
+                }
+                let inspection = self
+                    .adapter
+                    .inspect(definition_name)
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                success("domain created", resource_state(&inspection))
             }
             Some(proto::command::Action::ConsoleLog(request)) => {
                 if request.offset > 0 {
@@ -415,8 +520,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let agent = AgentClient::new(config.clone())?;
+    let artifact_root = agent.identity_file().with_extension("artifacts");
+    let network_root = agent
+        .identity_file()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("network");
+    let network = o3k_network::HostNetworkManager::with_ownership_root(
+        o3k_network::HostNetworkConfig {
+            bridge_name: env::var("O3K_COMPUTE_BRIDGE_NAME")
+                .unwrap_or_else(|_| "o3k-br0".to_owned()),
+            uplink: env::var("O3K_COMPUTE_UPLINK").ok(),
+        },
+        network_root,
+    )?;
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
+        artifact_root,
+        network,
     });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
@@ -582,6 +703,7 @@ mod tests {
                     disk_gib: 1,
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    project_id: "project-1".to_owned(),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
