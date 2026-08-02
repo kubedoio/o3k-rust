@@ -46,6 +46,22 @@ pub struct ArtifactStore {
     agent_id: String,
 }
 
+/// Complete durable identity required to resolve an agent-local image base.
+/// The type is crate-internal so the returned path cannot become a wire or
+/// OpenStack API value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommittedImageQuery {
+    pub transfer_id: String,
+    pub command_id: String,
+    pub operation_id: String,
+    pub resource_id: String,
+    pub agent_id: String,
+    pub artifact_id: String,
+    pub sha256: String,
+    pub format: String,
+    pub size_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 struct Manifest {
     offer: proto::ArtifactOffer,
@@ -252,6 +268,58 @@ impl ArtifactStore {
         }
         let path = self.final_path(offer)?;
         verify_file(&path, offer)?;
+        Ok(path)
+    }
+
+    pub(crate) fn resolve_committed_image_query(
+        &self,
+        query: &CommittedImageQuery,
+    ) -> Result<PathBuf, ArtifactStoreError> {
+        if query.agent_id != self.agent_id
+            || !valid_reference(&query.transfer_id)
+            || !valid_reference(&query.command_id)
+            || !valid_reference(&query.operation_id)
+            || !valid_reference(&query.resource_id)
+            || !valid_reference(&query.agent_id)
+            || !valid_reference(&query.artifact_id)
+            || !valid_sha256(&query.sha256)
+            || !matches!(query.format.as_str(), "raw" | "qcow2")
+            || query.size_bytes == 0
+            || query.size_bytes > MAX_ARTIFACT_BYTES
+        {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+
+        let manifest_path = self.manifest_path(&query.transfer_id)?;
+        let manifest_meta = match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ArtifactStoreError::Conflict);
+            }
+            Err(error) => return Err(ArtifactStoreError::Storage(error)),
+        };
+        if !manifest_meta.file_type().is_file() {
+            return Err(ArtifactStoreError::UnownedPath);
+        }
+        let manifest = read_manifest(&manifest_path)?;
+        validate_offer(&manifest.offer, &self.agent_id)?;
+        if manifest.state != proto::ArtifactTransferState::Committed as i32
+            || manifest.offer.kind != proto::ArtifactKind::ImageBase as i32
+            || manifest.offer.transfer_id != query.transfer_id
+            || manifest.offer.command_id != query.command_id
+            || manifest.offer.operation_id != query.operation_id
+            || manifest.offer.resource_id != query.resource_id
+            || manifest.offer.agent_id != query.agent_id
+            || manifest.offer.artifact_id != query.artifact_id
+            || manifest.offer.sha256 != query.sha256
+            || manifest.offer.format != query.format
+            || manifest.offer.size_bytes != query.size_bytes
+        {
+            return Err(ArtifactStoreError::Conflict);
+        }
+
+        let path = self.final_path(&manifest.offer)?;
+        verify_file(&path, &manifest.offer)?;
         Ok(path)
     }
 
@@ -462,7 +530,7 @@ mod tests {
     fn fixture(root: &Path) -> (ArtifactStore, proto::ArtifactOffer, Vec<u8>) {
         let content = b"abcdefgh".to_vec();
         let offer = proto::ArtifactOffer {
-            transfer_id: Uuid::now_v7().to_string(),
+            transfer_id: Uuid::new_v5(&Uuid::NAMESPACE_URL, b"command-1:0:image-1").to_string(),
             command_id: "command-1".into(),
             operation_id: "operation-1".into(),
             resource_id: "resource-1".into(),
@@ -481,6 +549,59 @@ mod tests {
             offer,
             content,
         )
+    }
+
+    fn query(offer: &proto::ArtifactOffer) -> CommittedImageQuery {
+        CommittedImageQuery {
+            transfer_id: offer.transfer_id.clone(),
+            command_id: offer.command_id.clone(),
+            operation_id: offer.operation_id.clone(),
+            resource_id: offer.resource_id.clone(),
+            agent_id: offer.agent_id.clone(),
+            artifact_id: offer.artifact_id.clone(),
+            sha256: offer.sha256.clone(),
+            format: offer.format.clone(),
+            size_bytes: offer.size_bytes,
+        }
+    }
+
+    fn resolve(
+        store: &ArtifactStore,
+        query: &CommittedImageQuery,
+    ) -> Result<PathBuf, ArtifactStoreError> {
+        store.resolve_committed_image_query(query)
+    }
+
+    fn committed_fixture(root: &Path) -> (ArtifactStore, proto::ArtifactOffer, Vec<u8>, PathBuf) {
+        let (store, offer, content) = fixture(root);
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        let path = store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap()
+            .path
+            .unwrap();
+        (store, offer, content, path)
     }
 
     #[test]
@@ -539,6 +660,111 @@ mod tests {
             store.accept_chunk(&offer, &conflict),
             Err(ArtifactStoreError::Conflict)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_committed_image_by_exact_identity() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, content, expected_path) = committed_fixture(&root);
+        let path = resolve(&store, &query(&offer)).unwrap();
+        assert_eq!(path, expected_path);
+        assert_eq!(fs::read(path).unwrap(), content);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_image_lookup_rejects_identity_mismatch() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, _content, _path) = committed_fixture(&root);
+        for mutate in [
+            |value: &mut CommittedImageQuery| value.transfer_id = "other-transfer".into(),
+            |value: &mut CommittedImageQuery| value.command_id = "command-2".into(),
+            |value: &mut CommittedImageQuery| value.operation_id = "operation-2".into(),
+            |value: &mut CommittedImageQuery| value.resource_id = "resource-2".into(),
+            |value: &mut CommittedImageQuery| value.artifact_id = "other-image".into(),
+            |value: &mut CommittedImageQuery| value.sha256 = "0".repeat(64),
+            |value: &mut CommittedImageQuery| value.format = "qcow2".into(),
+            |value: &mut CommittedImageQuery| value.size_bytes += 1,
+        ] {
+            let mut value = query(&offer);
+            mutate(&mut value);
+            assert!(matches!(
+                resolve(&store, &value),
+                Err(ArtifactStoreError::Conflict)
+            ));
+        }
+        let mut wrong_agent = query(&offer);
+        wrong_agent.agent_id = "other-agent".into();
+        assert!(matches!(
+            resolve(&store, &wrong_agent),
+            Err(ArtifactStoreError::InvalidOffer)
+        ));
+        assert!(matches!(
+            resolve(
+                &store,
+                &CommittedImageQuery {
+                    size_bytes: offer.size_bytes + 1,
+                    ..query(&offer)
+                }
+            ),
+            Err(ArtifactStoreError::Conflict)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_image_lookup_rejects_tampering() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, _content, path) = committed_fixture(&root);
+        fs::write(&path, b"tampered").unwrap();
+        assert!(matches!(
+            resolve(&store, &query(&offer)),
+            Err(ArtifactStoreError::DigestMismatch)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn committed_image_lookup_rejects_symlinked_and_foreign_state() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, content, path) = committed_fixture(&root);
+        let outside = root.with_extension("outside");
+        fs::write(&outside, content).unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+        assert!(matches!(
+            resolve(&store, &query(&offer)),
+            Err(ArtifactStoreError::DigestMismatch)
+        ));
+        fs::remove_file(&path).unwrap();
+
+        let manifest = store.manifest_path(&offer.transfer_id).unwrap();
+        let foreign = root.join("foreign.manifest");
+        fs::copy(&manifest, &foreign).unwrap();
+        fs::remove_file(&manifest).unwrap();
+        symlink(&foreign, &manifest).unwrap();
+        assert!(matches!(
+            resolve(&store, &query(&offer)),
+            Err(ArtifactStoreError::UnownedPath)
+        ));
+        fs::remove_file(&manifest).unwrap();
+        fs::remove_file(&foreign).unwrap();
+        fs::remove_file(&outside).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn committed_image_lookup_survives_store_restart() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (_store, offer, content, expected_path) = committed_fixture(&root);
+        let reopened = ArtifactStore::open(&root, "agent-1").unwrap();
+        let path = resolve(&reopened, &query(&offer)).unwrap();
+        assert_eq!(path, expected_path);
+        assert_eq!(fs::read(path).unwrap(), content);
         fs::remove_dir_all(root).unwrap();
     }
 }
