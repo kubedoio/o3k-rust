@@ -54,6 +54,7 @@ pub use artifact::{
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
+    image_materialization_request,
 };
 
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {

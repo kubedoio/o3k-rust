@@ -4,6 +4,7 @@ use std::{
 };
 
 use o3k_image::{ImageCache, ImageError};
+use o3k_provider_contract::compute_proto as proto;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,6 +47,46 @@ pub enum ImageMaterializerError {
     Storage(#[source] std::io::Error),
     #[error("image ownership manifest is corrupt")]
     CorruptManifest(#[source] serde_json::Error),
+}
+
+/// Converts the authenticated create payload into the exact image lookup
+/// identity used by the agent-local materializer. This performs no host I/O;
+/// callers may therefore validate the command before touching the cache.
+pub fn image_materialization_request(
+    command: &proto::Command,
+) -> Result<ImageMaterializationRequest, ImageMaterializerError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(ImageMaterializerError::Ownership);
+    };
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(ImageMaterializerError::Ownership);
+    };
+    let Some(reference) = resolved.image_transfer.as_ref() else {
+        return Err(ImageMaterializerError::Ownership);
+    };
+    let expected_transfer = crate::deterministic_artifact_transfer_id(
+        &command.command_id,
+        proto::ArtifactKind::ImageBase,
+        &resolved.image_artifact_id,
+    );
+    if reference.transfer_id != expected_transfer
+        || reference.expires_at_unix_ms <= crate::unix_ms()
+    {
+        return Err(ImageMaterializerError::Ownership);
+    }
+    Ok(ImageMaterializationRequest {
+        transfer_id: reference.transfer_id.clone(),
+        command_id: command.command_id.clone(),
+        operation_id: command.operation_id.clone(),
+        resource_id: command.resource_id.clone(),
+        agent_id: command.agent_id.clone(),
+        artifact_id: resolved.image_artifact_id.clone(),
+        sha256: resolved.image_sha256.clone(),
+        format: resolved.image_format.clone(),
+        size_bytes: reference.size_bytes,
+        instance_id: command.resource_id.clone(),
+        disk_gib: resolved.disk_gib,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,6 +396,52 @@ mod tests {
         assert!(!first.overlay_path.exists());
         assert!(materializer.delete(&request).is_err());
         std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn image_request_requires_command_bound_transfer_identity() -> Result<(), ImageMaterializerError>
+    {
+        let command_id = "command-1";
+        let artifact_id = "image-1";
+        let command = proto::Command {
+            command_id: command_id.to_owned(),
+            operation_id: "operation-1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                image_id: "image-1".to_owned(),
+                flavor_id: "flavor-1".to_owned(),
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: artifact_id.to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "raw".to_owned(),
+                    disk_gib: 1,
+                    image_transfer: Some(proto::ArtifactReference {
+                        transfer_id: crate::deterministic_artifact_transfer_id(
+                            command_id,
+                            proto::ArtifactKind::ImageBase,
+                            artifact_id,
+                        ),
+                        expires_at_unix_ms: crate::unix_ms().saturating_add(10_000),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let request = image_materialization_request(&command)?;
+        assert_eq!(
+            request.transfer_id,
+            crate::deterministic_artifact_transfer_id(
+                command_id,
+                proto::ArtifactKind::ImageBase,
+                artifact_id,
+            )
+        );
+        assert_eq!(request.command_id, command_id);
         Ok(())
     }
 }
