@@ -20,7 +20,12 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FIXTURE_PATH = ROOT / "docs/compatibility/contract-fixtures.json"
+FIXTURE_PATH = pathlib.Path(
+    os.environ.get(
+        "O3K_COMPATIBILITY_FIXTURES",
+        str(ROOT / "docs/compatibility/contract-fixtures.json"),
+    )
+)
 INVENTORY_PATH = ROOT / "docs/compatibility/capability-inventory.json"
 BASELINE_PATH = ROOT / "docs/specs/testlab-api-baseline.json"
 
@@ -36,6 +41,11 @@ def load_fixtures() -> dict[str, Any]:
     inventory_ids = {entry["id"] for entry in inventory["operations"]}
     baseline_operations = {
         entry["id"]: entry for entry in baseline.get("operations", [])
+    }
+    required_ids = {
+        operation_id
+        for operation_id, operation in baseline_operations.items()
+        if operation.get("status") == "required"
     }
     fixtures = source.get("fixtures")
     if not isinstance(fixtures, list) or not fixtures:
@@ -58,6 +68,12 @@ def load_fixtures() -> dict[str, Any]:
             not url.startswith("https://docs.openstack.org/") for url in fixture["official_sources"]
         ):
             raise ValueError(f"fixture {fixture_id} lacks an official OpenStack source")
+    missing = sorted(required_ids - seen)
+    if missing:
+        raise ValueError(
+            "contract fixtures do not cover every required baseline operation: "
+            + ", ".join(missing)
+        )
     return source
 
 
@@ -263,17 +279,61 @@ class SelfTestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"flavors": [{"id": "self-test-flavor"}]})
         elif self.path.endswith("/os-keypairs"):
             self.send_json(200, {"keypairs": []})
+        elif "/os-keypairs/" in self.path:
+            self.send_json(200, {"keypair": {"name": "contract-harness-key"}})
+        elif self.path == "/v2/images":
+            self.send_json(200, {"images": []})
+        elif self.path.endswith("/file") and self.path.startswith("/v2/images/"):
+            self.send_bytes(200, b"contract-image")
+        elif self.path.startswith("/v2.0/networks/"):
+            self.send_json(200, {"network": {"id": "network-id"}})
+        elif self.path.startswith("/v2.0/subnets/"):
+            self.send_json(200, {"subnet": {"id": "subnet-id"}})
+        elif self.path.startswith("/v2.0/ports/"):
+            self.send_json(200, {"port": {"id": "port-id"}})
+        elif "/flavors/" in self.path:
+            self.send_json(200, {"flavor": {"id": "flavor-id"}})
+        elif self.path.endswith("/servers"):
+            self.send_json(200, {"servers": []})
+        elif "/servers/" in self.path and self.path.endswith("/action"):
+            self.send_json(200, {})
+        elif "/servers/" in self.path:
+            self.send_json(200, {"server": {"id": "server-id"}})
         else:
             self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         if self.path.endswith("/os-keypairs"):
             self.send_json(200, {"keypair": {"name": "contract-harness-key"}})
+        elif self.path == "/v3/auth/tokens":
+            self.send_json(201, {"token": {"expires_at": "2099-01-01T00:00:00Z"}})
+        elif self.path == "/v2/images":
+            self.send_json(201, {"id": "image-id"})
+        elif self.path == "/v2.0/networks":
+            self.send_json(201, {"network": {"id": "network-id"}})
+        elif self.path == "/v2.0/subnets":
+            self.send_json(201, {"subnet": {"id": "subnet-id"}})
+        elif self.path == "/v2.0/ports":
+            self.send_json(201, {"port": {"id": "port-id"}})
+        elif self.path.endswith("/action"):
+            self.send_response(202)
+            self.end_headers()
+        elif self.path.endswith("/flavors"):
+            self.send_json(201, {"flavor": {"id": "flavor-id"}})
+        elif self.path.endswith("/servers"):
+            self.send_json(202, {"server": {"id": "server-id"}})
         else:
             self.send_error(405)
 
+    def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path.startswith("/v2/images/") and self.path.endswith("/file"):
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self.send_error(404)
+
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
-        if "/os-keypairs/" in self.path:
+        if "/os-keypairs/" in self.path or "/flavors/" in self.path or "/servers/" in self.path or self.path.startswith("/v2.0/") or self.path.startswith("/v2/images/"):
             self.send_response(204)
             self.end_headers()
         else:
@@ -283,6 +343,13 @@ class SelfTestHandler(http.server.BaseHTTPRequestHandler):
         payload = json.dumps(value).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_bytes(self, status: int, payload: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
