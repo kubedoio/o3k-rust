@@ -347,7 +347,10 @@ rm -f -- "$generated_env"
 cat >>"$o3kd_env_tmp" <<EOF
 O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
-O3K_PROVIDER=fake
+# The protected TestLab must exercise the real process boundary.  The fake
+# provider remains available for portable contract tests, but using it here
+# would make OpenStack lifecycle evidence bypass o3k-compute and libvirt.
+O3K_PROVIDER=agent
 O3K_LOG_FORMAT=json
 O3K_LOG_FILTER=warn
 O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")

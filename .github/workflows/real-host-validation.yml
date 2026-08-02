@@ -95,7 +95,7 @@ jobs:
           O3K_REAL_HOST_OPENSTACK_INVENTORY: true
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
-          O3K_TESTLAB_CONFIG_DRIVE: false
+          O3K_TESTLAB_CONFIG_DRIVE: true
         run: bash tests/testlab-libvirt.sh
 
       - name: Run compute-agent mTLS command evidence
