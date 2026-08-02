@@ -166,9 +166,10 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     let provider = AgentComputeProvider::new(registry, Arc::new(TestResolver))
         .with_artifact_resolver(Arc::new(TestArtifactResolver));
     let operation_id = Uuid::now_v7();
+    let server_id = Uuid::now_v7();
     let request = CreateInstanceRequest {
         operation_id,
-        o3k_server_id: Uuid::now_v7(),
+        o3k_server_id: server_id,
         project_id: "project-a".to_owned(),
         name: "mtls-server".to_owned(),
         vcpus: 1,
@@ -197,6 +198,19 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     }
     let provider_resource_id = observed.ok_or("agent completion was not observed")?;
     assert_eq!(executor.resource_count(), 1);
+    let inspected = provider
+        .inspect_instance(
+            &server_id.to_string(),
+            &provider_resource_id,
+            Uuid::now_v7(),
+            "inspect-request",
+        )
+        .await?;
+    assert_eq!(inspected.state, OperationState::Succeeded);
+    assert_eq!(
+        inspected.provider_resource_id.as_deref(),
+        Some(provider_resource_id.as_str())
+    );
     println!(
         "O3K_AGENT_MTLS_EVIDENCE={}",
         serde_json::json!({

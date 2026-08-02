@@ -17,6 +17,9 @@ Implemented on the repository branch:
 - the protected real-host workflow records its selected provider mode and
   refuses lifecycle evidence unless `O3K_PROVIDER=agent`; the former
   fake-provider path is explicitly non-evidence.
+- the compute boundary now exposes a read-only inspect operation that validates
+  an existing Placement allocation without reserving capacity again and lets
+  the agent provider dispatch a fenced Inspect command over mTLS.
 
 ## Explicit boundary
 
@@ -27,4 +30,6 @@ cannot bypass that boundary. Host capability evidence and a passing protected
 real-run artifact remain required for issue closure. The protected workflow is
 now configured for `agent`; until the agent create/artifact path is implemented,
 it must fail closed rather than report a fake-provider lifecycle as real
-compute evidence.
+compute evidence. The protected probe still needs to be migrated to a seeded
+service-mediated server record before it can be promoted to acceptance
+evidence.

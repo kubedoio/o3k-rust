@@ -1099,6 +1099,51 @@ impl ComputeProvider for AgentComputeProvider {
             .ok_or(ProviderError::NotFound)
     }
 
+    async fn inspect_instance(
+        &self,
+        resource_id: &str,
+        _provider_instance_id: &str,
+        operation_id: Uuid,
+        _idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        let binding = self
+            .state
+            .read()
+            .await
+            .bindings
+            .get(resource_id)
+            .cloned()
+            .ok_or(ProviderError::NotFound)?;
+        let agent = self.selected_agent(&binding.agent_id).await?;
+        if agent.agent_epoch != binding.agent_epoch {
+            return Err(ProviderError::StaleState);
+        }
+        let command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            resource_id,
+        )
+        .map_err(map_agent_error)?;
+        let observation = self
+            .registry
+            .dispatch_command_and_wait(command, self.command_timeout)
+            .await
+            .map_err(map_agent_error)?;
+        Ok(Operation {
+            provider_operation_id: operation_id,
+            o3k_operation_id: operation_id,
+            state: operation_state_from_proto(observation.operation_state)
+                .ok_or(ProviderError::InvalidRequest)?,
+            // Observation carries the durable operation/resource state but
+            // deliberately does not duplicate the operation error category.
+            error_category: None,
+            provider_resource_id: (!observation.provider_resource_id.is_empty())
+                .then_some(observation.provider_resource_id),
+        })
+    }
+
     async fn delete_instance(
         &self,
         request: DeleteInstanceRequest,
@@ -1232,6 +1277,17 @@ impl ComputeProvider for ProviderBackend {
     }
     async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
         self.0.get_instance(id).await
+    }
+    async fn inspect_instance(
+        &self,
+        resource_id: &str,
+        id: &str,
+        operation_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        self.0
+            .inspect_instance(resource_id, id, operation_id, idempotency_key)
+            .await
     }
     async fn delete_instance(
         &self,
@@ -1903,6 +1959,64 @@ impl ComputeService {
         }
         server.key_name = self.store.get_server_keypair_name(server.id).await?;
         Ok(server)
+    }
+
+    /// Revalidates and inspects an already-created server through the
+    /// provider boundary. This is deliberately read-only: an existing
+    /// Placement allocation is checked, never recreated, before the provider
+    /// receives an inspect request.
+    pub async fn inspect_server(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<Operation, ComputeError> {
+        let resource = self
+            .store
+            .get_resource(id)
+            .await
+            .map_err(|error| match error {
+                StoreError::ResourceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        if resource.project_id != project_id {
+            return Err(ComputeError::NotFound);
+        }
+        let intent: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        let provider_id = intent
+            .placement_provider_id
+            .as_deref()
+            .ok_or(ComputeError::Conflict)?;
+        let allocation_id = intent
+            .placement_allocation_id
+            .as_deref()
+            .ok_or(ComputeError::Conflict)?;
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.validate_allocation(provider_id, allocation_id, &id.to_string())?;
+        } else {
+            return Err(ComputeError::Conflict);
+        }
+        let _reference = self
+            .store
+            .get_provider_reference(id, "agent")
+            .await
+            .map_err(|error| match error {
+                StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect:{project_id}:{id}").as_bytes(),
+        );
+        Ok(self
+            .provider
+            .inspect_instance(
+                &id.to_string(),
+                &_reference.provider_resource_id,
+                operation_id,
+                &format!("inspect:{id}:{operation_id}"),
+            )
+            .await?)
     }
 
     pub async fn create_keypair(
