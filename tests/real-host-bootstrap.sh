@@ -62,4 +62,19 @@ grep -Fqx 'O3K_TESTLAB_PASSWORD_SOURCE=kolla-passwords-yml' "$GITHUB_ENV"
 grep -Fqx '::add-mask::kolla# sharedA-password' "$WORK_DIR/kolla-stdout"
 ! grep -Fq 'kolla# sharedA-password' "$WORK_DIR/kolla-stderr"
 
+GITHUB_ENV="$WORK_DIR/github-generated.env"
+GITHUB_PATH="$WORK_DIR/github-generated.path"
+O3K_REAL_HOST_PROTECTED_STATE="$WORK_DIR/generated-protected-state"
+unset OS_PASSWORD
+O3K_KOLLA_PASSWORD_FILE="$WORK_DIR/missing-passwords.yml"
+export GITHUB_ENV GITHUB_PATH O3K_REAL_HOST_PROTECTED_STATE O3K_KOLLA_PASSWORD_FILE
+if ! bash "$ROOT_DIR/scripts/real-host-bootstrap.sh" >"$WORK_DIR/generated-stdout" 2>"$WORK_DIR/generated-stderr"; then
+  cat "$WORK_DIR/generated-stderr" >&2
+  exit 1
+fi
+grep -Fqx 'O3K_TESTLAB_PASSWORD_SOURCE=generated-passwords' "$GITHUB_ENV"
+generated_password="$(sed -n 's/^OS_PASSWORD=//p' "$GITHUB_ENV")"
+[[ "$generated_password" =~ ^[0-9a-f]{64}$ ]]
+! grep -Fq "$generated_password" "$WORK_DIR/generated-stdout" "$WORK_DIR/generated-stderr"
+
 echo "real-host bootstrap tests passed"

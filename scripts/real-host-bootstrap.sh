@@ -53,9 +53,17 @@ password_source="environment"
 read_password_file() {
   local path="$1" expression="$2" value=""
   if [[ -r "$path" ]]; then
-    value="$(awk "$expression" "$path")"
+    if [[ "$expression" == '-F= '* ]]; then
+      value="$(awk -F= "${expression#-F= }" "$path")"
+    else
+      value="$(awk "$expression" "$path")"
+    fi
   elif sudo -n test -r "$path" 2>/dev/null; then
-    value="$(sudo -n awk "$expression" "$path")"
+    if [[ "$expression" == '-F= '* ]]; then
+      value="$(sudo -n awk -F= "${expression#-F= }" "$path")"
+    else
+      value="$(sudo -n awk "$expression" "$path")"
+    fi
   fi
   printf '%s' "$value"
 }
