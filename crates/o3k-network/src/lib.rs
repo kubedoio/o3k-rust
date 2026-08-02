@@ -669,27 +669,25 @@ fn managed_tap_names(output: &str, bridge_name: &str) -> Vec<String> {
     let mut current_name = None;
     let mut current_output = String::new();
     let finish = |name: &mut Option<String>, block: &mut String, names: &mut Vec<String>| {
-        if let Some(name) = name.take() {
-            if name.starts_with("o3ktap-")
-                && interface_output_is_tap(block)
-                && interface_is_attached_to(block, bridge_name)
-            {
-                names.push(name);
-            }
+        if let Some(name) = name.take()
+            && name.starts_with("o3ktap-")
+            && interface_output_is_tap(block)
+            && interface_is_attached_to(block, bridge_name)
+        {
+            names.push(name);
         }
         block.clear();
     };
     for line in output.lines() {
-        if let Some((_, rest)) = line.split_once(": ") {
-            if line
+        if let Some((_, rest)) = line.split_once(": ")
+            && line
                 .chars()
                 .next()
                 .is_some_and(|character| character.is_ascii_digit())
-                && rest.split(':').next().is_some_and(|name| !name.is_empty())
-            {
-                finish(&mut current_name, &mut current_output, &mut names);
-                current_name = rest.split(':').next().map(str::to_owned);
-            }
+            && rest.split(':').next().is_some_and(|name| !name.is_empty())
+        {
+            finish(&mut current_name, &mut current_output, &mut names);
+            current_name = rest.split(':').next().map(str::to_owned);
         }
         if current_name.is_some() {
             current_output.push_str(line);
@@ -804,13 +802,13 @@ impl NetworkService {
                 port.mac_address = deterministic_port_mac(port.id);
                 migrated = true;
             }
-            if port.subnet_id.is_nil() {
-                if let Some(subnet) = data.subnets.iter().find(|subnet| {
+            if port.subnet_id.is_nil()
+                && let Some(subnet) = data.subnets.iter().find(|subnet| {
                     subnet.network_id == port.network_id && subnet.project_id == port.project_id
-                }) {
-                    port.subnet_id = subnet.id;
-                    migrated = true;
-                }
+                })
+            {
+                port.subnet_id = subnet.id;
+                migrated = true;
             }
         }
         let mut macs = HashSet::new();

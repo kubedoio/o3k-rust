@@ -1,5 +1,12 @@
 # OpenStack compatibility matrix
 
+The static release and toolchain target is frozen in
+[`SPEC-0016`](../specs/SPEC-0016-static-compatibility-target.md) and its
+ machine-readable target manifest. It selects OpenStack `2026.1` (Gazpacho) as
+ primary, retains `2025.2` (Flamingo) as the backward-compatibility profile,
+ and pins Rust `1.97.1`; it does not claim that every operation in either
+ release is implemented.
+
 The compatibility matrix is the authoritative inventory of the OpenStack-facing
 behavior O3K intends to support. It records intent and evidence separately:
 `planned` means that the operation is in the roadmap, not that O3K currently

@@ -66,7 +66,7 @@ artifacts = {
             )
         },
     },
-    "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.85.0"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}, "release_eligible": True},
+    "benchmark-raw.json": {**common, "artifact_type": "benchmark", "status": "measured", "environment": {"uname": "Linux test-host 6.1", "rustc": "rustc 1.97.1"}, "samples": 5, "control_plane": {"startup_readiness_ms": 100, "token_p95_seconds": 0.01, "idle_rss_kib": 1024}, "guest_and_libvirt": {"status": "measured"}, "targets": {"startup_readiness_ms": 2000, "idle_rss_mib": 150, "token_p95_ms": 100}, "release_eligible": True},
     "human-review.json": {
         "artifact_type": "human-architecture-security-review",
         "schema_version": 1,
@@ -400,7 +400,7 @@ python3 - "${ARTIFACT_DIR}/benchmark-raw.json" <<'PY'
 import json, sys
 path = sys.argv[1]
 value = json.loads(open(path, encoding="utf-8").read())
-value["environment"]["rustc"] = "rustc 1.85.0"
+value["environment"]["rustc"] = "rustc 1.97.1"
 value["samples"] = 6
 open(path, "w", encoding="utf-8").write(json.dumps(value))
 PY

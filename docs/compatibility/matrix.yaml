@@ -1,7 +1,12 @@
-schema_version: 1
+schema_version: 2
 matrix_version: 0.1.0-alpha.0
 source_accessed: 2026-07-30
 profile: testlab-alpha
+target_manifest: ../../compatibility/openstack-targets.yaml
+openstack_release:
+  primary: {series: "2026.1", codename: Gazpacho}
+  backward_compatibility: [{series: "2025.2", codename: Flamingo}]
+  selection: static
 entries:
   - service: identity
     operation: token_issue_password_scoped

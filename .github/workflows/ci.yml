@@ -15,10 +15,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          toolchain: 1.85.0
-          components: rustfmt, clippy
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config
@@ -51,6 +48,8 @@ jobs:
         run: bash tests/real-host-workflow-guards.sh
       - name: Test CI workflow contracts
         run: bash tests/ci-workflow.sh
+      - name: Test static compatibility target
+        run: bash tests/compatibility-target.sh
       - name: Test real-host capability probe
         run: bash tests/real-host-capability-probe.sh
       - name: Test release evidence gate

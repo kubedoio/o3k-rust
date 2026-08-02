@@ -1,6 +1,7 @@
 # TestLab API compatibility baseline
 
-Status: Normative. Release: `v0.2.0-testlab`.
+Status: Normative. Release: `v0.2.0-testlab`. OpenStack primary target:
+`2026.1 Gazpacho`; backward-compatibility profile: `2025.2 Flamingo`.
 
 This document freezes the OpenStack-facing contract for the TestLab vertical
 slice. The machine-readable source is
@@ -34,7 +35,8 @@ contract is covered by the public HTTP harness and includes cleanup.
 
 Project-scoped paths must use the authenticated project. Cross-project paths
 are concealed with `404`; missing project context is `400`. Clients omit the
-Nova microversion header and target Nova microversion `2.1`. A requested
+Nova microversion header and target Nova microversion `2.1`. Placement
+allocation writes use exactly microversion `1.28`. A requested Nova
 microversion above the baseline is rejected with `406`. Only explicitly listed
 extensions are supported; unknown extensions return `404`.
 

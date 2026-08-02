@@ -53,8 +53,9 @@ channel implementation.
 
 - The dependency review records the reason for the tonic upgrade and no
   longer needs the old `rustls-pemfile` advisory exception.
-- The workspace remains on the Rust 1.85-compatible tonic 0.13 line; tonic
-  0.14 is not usable here because it currently requires Rust 1.88.
+- The workspace is statically pinned to Rust 1.97.1. The tonic 0.13 line is
+  retained for this compatibility boundary; future tonic upgrades still
+  require the mTLS regression and dependency/advisory review.
 - Future tonic upgrades must rerun the mTLS regression and review the
   dependency/advisory graph.
 

@@ -165,11 +165,11 @@ impl ImageCache {
             let _ = fs::remove_file(&temporary);
             return Err(ImageError::Storage(error));
         }
-        if format == "qcow2" {
-            if let Err(error) = verify_image_format(&self.qemu_img, &temporary, format) {
-                let _ = fs::remove_file(&temporary);
-                return Err(error);
-            }
+        if format == "qcow2"
+            && let Err(error) = verify_image_format(&self.qemu_img, &temporary, format)
+        {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
         }
         fs::rename(&temporary, &path).map_err(|error| {
             let _ = fs::remove_file(&temporary);

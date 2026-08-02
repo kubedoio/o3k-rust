@@ -347,6 +347,9 @@ fn image_response(image: ImageRecord) -> ImageResponse {
     }
 }
 
+// Axum handlers consume the concrete response directly; boxing this error would
+// add conversions across every OpenStack adapter without changing behavior.
+#[allow(clippy::result_large_err)]
 fn require_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -792,6 +795,7 @@ fn network_error(error: NetworkError) -> axum::response::Response {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn network_service(state: &AppState) -> Result<&Arc<NetworkService>, axum::response::Response> {
     state.network.as_ref().ok_or_else(|| {
         keystone_error(
@@ -1370,6 +1374,7 @@ fn should_query_live_console(offset: u64) -> bool {
     offset == 0
 }
 
+#[allow(clippy::result_large_err)]
 fn project_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -1386,6 +1391,7 @@ fn project_token(
     Ok(token)
 }
 
+#[allow(clippy::result_large_err)]
 fn compute_service(state: &AppState) -> Result<&Arc<ComputeService>, axum::response::Response> {
     state.compute.as_ref().ok_or_else(|| {
         keystone_error(
@@ -1846,15 +1852,15 @@ async fn delete_server(
     };
     match service.delete_server(&token.project_id, id).await {
         Ok(()) => {
-            if let Some(console) = state.console.as_ref() {
-                if let Err(error) = console.cleanup(id) {
-                    tracing::warn!(%error, server_id = %id, "deleted server console cleanup failed");
-                    return keystone_error(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Internal Server Error",
-                        "server console cleanup failed",
-                    );
-                }
+            if let Some(console) = state.console.as_ref()
+                && let Err(error) = console.cleanup(id)
+            {
+                tracing::warn!(%error, server_id = %id, "deleted server console cleanup failed");
+                return keystone_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    "server console cleanup failed",
+                );
             }
             StatusCode::NO_CONTENT.into_response()
         }
@@ -1934,75 +1940,74 @@ async fn server_action(
             if length == 0 {
                 return (StatusCode::OK, Json(serde_json::json!({"output": ""}))).into_response();
             }
-            if should_query_live_console(offset) {
-                if let Some(registry) = state.agent_registry.as_ref() {
-                    match service.placement_provider_id(&token.project_id, id).await {
-                        Ok(Some(agent_id)) => {
-                            let Some(node) = registry.snapshot(&agent_id).await else {
-                                return keystone_error(
-                                    StatusCode::SERVICE_UNAVAILABLE,
-                                    "Service Unavailable",
-                                    "compute agent is not registered",
-                                );
-                            };
-                            let operation_id = uuid::Uuid::now_v7().to_string();
-                            let command = match o3k_compute_agent::build_console_log_command(
-                                &agent_id,
-                                &node.agent_epoch,
-                                &operation_id,
-                                &id.to_string(),
-                                offset,
-                                length.min(o3k_console::MAX_CONSOLE_BYTES) as u32,
-                            ) {
-                                Ok(command) => command,
-                                Err(_) => {
-                                    return keystone_error(
-                                        StatusCode::BAD_REQUEST,
-                                        "Bad Request",
-                                        "console output bounds are invalid",
-                                    );
-                                }
-                            };
-                            let observation = match registry
-                                .dispatch_command_and_wait(command, Duration::from_secs(5))
-                                .await
-                            {
-                                Ok(observation) => observation,
-                                Err(error) => {
-                                    tracing::warn!(%error, server_id = %id, "agent console query failed");
-                                    if let Some(response) =
-                                        cached_console_response(console, id, offset, length)
-                                    {
-                                        return response;
-                                    }
-                                    return keystone_error(
-                                        StatusCode::SERVICE_UNAVAILABLE,
-                                        "Service Unavailable",
-                                        "compute agent console output is unavailable",
-                                    );
-                                }
-                            };
-                            if let Err(error) = console.write_chunk(
-                                id,
-                                observation.console_log_offset,
-                                &observation.console_log_bytes,
-                            ) {
-                                tracing::warn!(%error, server_id = %id, "agent console observation persistence failed");
-                            }
-                            if let Some(response) =
-                                cached_console_response(console, id, offset, length)
-                            {
-                                return response;
-                            }
+            if should_query_live_console(offset)
+                && let Some(registry) = state.agent_registry.as_ref()
+            {
+                match service.placement_provider_id(&token.project_id, id).await {
+                    Ok(Some(agent_id)) => {
+                        let Some(node) = registry.snapshot(&agent_id).await else {
                             return keystone_error(
                                 StatusCode::SERVICE_UNAVAILABLE,
                                 "Service Unavailable",
-                                "compute agent console output could not be persisted",
+                                "compute agent is not registered",
                             );
+                        };
+                        let operation_id = uuid::Uuid::now_v7().to_string();
+                        let command = match o3k_compute_agent::build_console_log_command(
+                            &agent_id,
+                            &node.agent_epoch,
+                            &operation_id,
+                            &id.to_string(),
+                            offset,
+                            length.min(o3k_console::MAX_CONSOLE_BYTES) as u32,
+                        ) {
+                            Ok(command) => command,
+                            Err(_) => {
+                                return keystone_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "Bad Request",
+                                    "console output bounds are invalid",
+                                );
+                            }
+                        };
+                        let observation = match registry
+                            .dispatch_command_and_wait(command, Duration::from_secs(5))
+                            .await
+                        {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                tracing::warn!(%error, server_id = %id, "agent console query failed");
+                                if let Some(response) =
+                                    cached_console_response(console, id, offset, length)
+                                {
+                                    return response;
+                                }
+                                return keystone_error(
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "Service Unavailable",
+                                    "compute agent console output is unavailable",
+                                );
+                            }
+                        };
+                        if let Err(error) = console.write_chunk(
+                            id,
+                            observation.console_log_offset,
+                            &observation.console_log_bytes,
+                        ) {
+                            tracing::warn!(%error, server_id = %id, "agent console observation persistence failed");
                         }
-                        Ok(None) => {}
-                        Err(error) => return compute_error(error),
+                        if let Some(response) = cached_console_response(console, id, offset, length)
+                        {
+                            return response;
+                        }
+                        return keystone_error(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "Service Unavailable",
+                            "compute agent console output could not be persisted",
+                        );
                     }
+                    Ok(None) => {}
+                    Err(error) => return compute_error(error),
                 }
             }
             return match console.read_from(id, offset, length) {

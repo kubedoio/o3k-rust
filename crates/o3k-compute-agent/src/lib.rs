@@ -661,7 +661,7 @@ impl NodeRegistry {
         &self,
         request: &proto::RegisterRequest,
     ) -> Result<proto::RegisterResponse, Status> {
-        validate_register(request)?;
+        validate_register(request).map_err(|status| *status)?;
         let now = SystemTime::now();
         let mut nodes = self.nodes.write().await;
         let desired = nodes
@@ -933,6 +933,16 @@ fn canonical_action(action: &proto::command::Action) -> proto::canonical_command
     }
 }
 
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[usize::from(byte >> 4)] as char);
+        output.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    output
+}
+
 fn command_payload_fingerprint(command: &proto::Command) -> Result<String, AgentError> {
     let action = command
         .action
@@ -944,12 +954,7 @@ fn command_payload_fingerprint(command: &proto::Command) -> Result<String, Agent
         action: Some(canonical_action(action)),
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
-    let mut fingerprint = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut fingerprint, "{byte:02x}").expect("writing to an in-memory string cannot fail");
-    }
-    Ok(fingerprint)
+    Ok(hex_digest(&digest))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1063,12 +1068,7 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         )),
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
-    let mut payload_fingerprint_sha256 = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
-            .expect("writing to an in-memory string cannot fail");
-    }
+    let payload_fingerprint_sha256 = hex_digest(&digest);
     let command_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!("o3k:command:{agent_id}:{operation_id}").as_bytes(),
@@ -1151,12 +1151,7 @@ pub fn build_lifecycle_command(
         action: Some(canonical_action.clone()),
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
-    let mut payload_fingerprint_sha256 = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
-            .expect("writing to an in-memory string cannot fail");
-    }
+    let payload_fingerprint_sha256 = hex_digest(&digest);
     let action = match canonical_action {
         proto::canonical_command_payload::Action::Inspect(value) => {
             proto::command::Action::Inspect(value)
@@ -1229,12 +1224,7 @@ pub fn build_console_log_command(
         action: Some(action),
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
-    let mut payload_fingerprint_sha256 = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
-            .expect("writing to an in-memory string cannot fail");
-    }
+    let payload_fingerprint_sha256 = hex_digest(&digest);
     let idempotency_key = format!("console:{resource_id}:{offset}:{max_bytes}");
     Ok(proto::Command {
         command_id: Uuid::new_v5(
@@ -1396,22 +1386,24 @@ fn validate_artifact_dispatch(
     Ok(())
 }
 
-fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
+fn validate_register(request: &proto::RegisterRequest) -> Result<(), Box<Status>> {
     if request.agent_id.trim().is_empty()
         || request.agent_id.len() > MAX_AGENT_ID
         || request.agent_epoch.trim().is_empty()
         || request.host_label.len() > MAX_HOST_LABEL
         || request.capabilities.is_none()
     {
-        return Err(Status::invalid_argument("registration is incomplete"));
+        return Err(Box::new(Status::invalid_argument(
+            "registration is incomplete",
+        )));
     }
     let versions = &request.supported_versions;
     if !versions.iter().any(|v| {
         v.major == PROTOCOL_VERSION.major && v.wire_revision == PROTOCOL_VERSION.wire_revision
     }) {
-        return Err(Status::failed_precondition(
+        return Err(Box::new(Status::failed_precondition(
             "no compatible compute-agent protocol version",
-        ));
+        )));
     }
     Ok(())
 }
@@ -2994,13 +2986,13 @@ async fn handle_artifact_response(
                 reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
                 return Err(error);
             }
-            if let Some(existing) = offers.get(&offer.transfer_id) {
-                if existing != &offer {
-                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
-                    return Err(AgentError::Protocol(
-                        "artifact offer conflicts with this connection".to_owned(),
-                    ));
-                }
+            if let Some(existing) = offers.get(&offer.transfer_id)
+                && existing != &offer
+            {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(AgentError::Protocol(
+                    "artifact offer conflicts with this connection".to_owned(),
+                ));
             }
             let receipt = match store.begin(&offer) {
                 Ok(receipt) => receipt,

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "decision": "static",
+  "rust": {
+    "toolchain": "1.97.1",
+    "cargo_rust_version": "1.97.1",
+    "policy": "The workspace and CI must use this exact stable toolchain."
+  },
+  "openstack": {
+    "primary_profile": "gazpacho-2026.1",
+    "backward_compatibility_profiles": ["flamingo-2025.2"],
+    "forbidden_labels": ["2026.1 Flamingo"],
+    "api_manifest": "compatibility/openstack-targets.yaml",
+    "api_baseline": "docs/specs/testlab-api-baseline.json"
+  },
+  "sources": [
+    "https://releases.openstack.org/",
+    "https://releases.openstack.org/gazpacho/index.html",
+    "https://releases.openstack.org/flamingo/index.html",
+    "https://docs.openstack.org/api-ref/compute/",
+    "https://docs.openstack.org/api-guide/compute/microversions.html",
+    "https://docs.openstack.org/placement/2025.2/placement-api-microversion-history.html",
+    "https://blog.rust-lang.org/2026/07/16/Rust-1.97.1/"
+  ]
+}

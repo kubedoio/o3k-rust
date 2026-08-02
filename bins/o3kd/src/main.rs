@@ -184,14 +184,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
-    if let Some(mut task) = control_task {
-        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+    if let Some(mut task) = control_task
+        && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
             .await
             .is_err()
-        {
-            task.abort();
-            let _ = task.await;
-        }
+    {
+        task.abort();
+        let _ = task.await;
     }
     if let Some(task) = inspect_probe_task {
         task.abort();

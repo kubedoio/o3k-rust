@@ -11,8 +11,17 @@ inventory = json.loads((root / "docs/compatibility/capability-inventory.json").r
 
 assert baseline["status"] == "normative"
 assert baseline["release"] == "v0.2.0-testlab"
+assert baseline["openstack_compatibility"] == {
+    "series": "2026.1",
+    "codename": "Gazpacho",
+    "selection": "static",
+    "specification": "compatibility/openstack-targets.yaml",
+    "backward_compatibility": {"series": "2025.2", "codename": "Flamingo"},
+}
 assert baseline["policies"]["project_paths"]["mismatch_status"] == 404
 assert baseline["policies"]["microversions"]["requested_above_baseline"] == 406
+assert baseline["policies"]["microversions"]["placement_allocation"] == "1.28"
+assert baseline["policies"]["microversions"]["placement_allocation_exact"] is True
 assert baseline["policies"]["errors"]["envelope"]["required_fields"] == ["code", "title", "message"]
 
 operations = {operation["id"]: operation for operation in baseline["operations"]}

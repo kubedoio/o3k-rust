@@ -47,6 +47,11 @@ non-normative secondary reference for route and extension inventory,
 requirements discovery, request/response field discovery, failure and cleanup
 scenarios, operational lessons, and black-box behavioral comparison.
 
+The static engineering target is Rust `1.97.1`, with OpenStack `2026.1
+Gazpacho` as the primary profile and `2025.2 Flamingo` as the backward-
+compatibility profile. The service-specific manifest and negotiation rules are
+in [SPEC-0016](docs/specs/SPEC-0016-static-compatibility-target.md).
+
 The Go repository must not be mechanically translated into Rust, used to
 override an official OpenStack contract, or used to reproduce its monolithic
 architecture. Any copied or adapted code, test, or fixture requires a pinned

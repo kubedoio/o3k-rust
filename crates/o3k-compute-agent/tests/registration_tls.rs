@@ -122,12 +122,11 @@ async fn mutual_tls_registration_and_heartbeat_are_black_box_observable()
         .set_desired_state("node-test", proto::AdministrativeState::Disabled)
         .await?;
     for _ in 0..40 {
-        if let Some(node) = registry.snapshot("node-test").await {
-            if node.applied_state == proto::AdministrativeState::Disabled as i32
-                && node.transition_sequence == transition
-            {
-                break;
-            }
+        if let Some(node) = registry.snapshot("node-test").await
+            && node.applied_state == proto::AdministrativeState::Disabled as i32
+            && node.transition_sequence == transition
+        {
+            break;
         }
         time::sleep(Duration::from_millis(25)).await;
     }
