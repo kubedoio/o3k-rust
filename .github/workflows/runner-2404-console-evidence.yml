@@ -23,6 +23,13 @@ jobs:
           sudo -n virsh -c qemu:///system domblklist "$domain" >"$artifact/domain-blklist.txt"
           sudo -n virsh -c qemu:///system ttyconsole "$domain" >"$artifact/ttyconsole.txt" || true
           sudo -n virsh -c qemu:///system qemu-monitor-command "$domain" --hmp 'info status' >"$artifact/qemu-status.txt" || true
+          sudo -n virsh -c qemu:///system qemu-monitor-command "$domain" --hmp 'info block' >"$artifact/qemu-block.txt" || true
+          sudo -n virsh -c qemu:///system qemu-monitor-command "$domain" --hmp 'info cpus' >"$artifact/qemu-cpus.txt" || true
+          pty="$(cat "$artifact/ttyconsole.txt" 2>/dev/null || true)"
+          if [[ "$pty" == /dev/pts/[0-9]* ]]; then
+            sudo -n timeout 5 cat "$pty" >"$artifact/serial-pty.txt" || true
+          fi
+          sudo -n find /var/log/libvirt/qemu -maxdepth 1 -type f -name '*o3k*' -exec sh -c 'for f; do echo "--- $f"; tail -c 65536 "$f"; done' _ {} + >"$artifact/qemu-logs.txt" 2>/dev/null || true
           ip -details link show >"$artifact/ip-link.txt"
           bridge link show >"$artifact/bridge-link.txt"
           sudo -n find /var/lib/o3k-testlab/30770439657 -maxdepth 6 -type f -printf '%p %s bytes\n' \
