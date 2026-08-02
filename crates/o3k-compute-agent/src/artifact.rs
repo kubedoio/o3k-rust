@@ -46,6 +46,17 @@ pub struct ArtifactStore {
     agent_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommittedArtifactQuery {
+    pub command_id: String,
+    pub operation_id: String,
+    pub resource_id: String,
+    pub artifact_id: String,
+    pub kind: proto::ArtifactKind,
+    pub sha256: String,
+    pub format: String,
+}
+
 #[derive(Debug, Clone)]
 struct Manifest {
     offer: proto::ArtifactOffer,
@@ -253,6 +264,56 @@ impl ArtifactStore {
         let path = self.final_path(offer)?;
         verify_file(&path, offer)?;
         Ok(path)
+    }
+
+    /// Resolves a committed artifact without reconstructing a transfer offer
+    /// from incomplete command data. The complete offer remains the
+    /// authority; this lookup only finds a single manifest whose authenticated
+    /// command/resource identity and declared artifact metadata match.
+    pub fn resolve_committed_artifact(
+        &self,
+        query: &CommittedArtifactQuery,
+    ) -> Result<PathBuf, ArtifactStoreError> {
+        if !valid_reference(&query.command_id)
+            || !valid_reference(&query.operation_id)
+            || !valid_reference(&query.resource_id)
+            || !valid_reference(&query.artifact_id)
+            || !valid_sha256(&query.sha256)
+            || !valid_reference(&query.format)
+        {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut match_path = None;
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            let manifest_path = entry.path();
+            if manifest_path.is_symlink() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            let offer = &manifest.offer;
+            if offer.command_id == query.command_id
+                && offer.operation_id == query.operation_id
+                && offer.resource_id == query.resource_id
+                && offer.agent_id == self.agent_id
+                && offer.artifact_id == query.artifact_id
+                && offer.kind == query.kind as i32
+                && offer.sha256 == query.sha256
+                && offer.format == query.format
+            {
+                if match_path.is_some() {
+                    return Err(ArtifactStoreError::Conflict);
+                }
+                match_path = Some(offer.clone());
+            }
+        }
+        let offer = match_path.ok_or(ArtifactStoreError::Conflict)?;
+        self.resolve(&offer)
     }
 
     fn manifest_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
@@ -515,6 +576,23 @@ mod tests {
         assert_eq!(fs::read(receipt.path.unwrap()).unwrap(), content);
         let reopened = ArtifactStore::open(&root, "agent-1").unwrap();
         assert!(reopened.resolve(&offer).is_ok());
+        assert_eq!(
+            fs::read(
+                reopened
+                    .resolve_committed_artifact(&CommittedArtifactQuery {
+                        command_id: offer.command_id.clone(),
+                        operation_id: offer.operation_id.clone(),
+                        resource_id: offer.resource_id.clone(),
+                        artifact_id: offer.artifact_id.clone(),
+                        kind: proto::ArtifactKind::ImageBase,
+                        sha256: offer.sha256.clone(),
+                        format: offer.format.clone(),
+                    },)
+                    .unwrap()
+            )
+            .unwrap(),
+            content
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
