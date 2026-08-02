@@ -1142,6 +1142,11 @@ impl ComputeProvider for AgentComputeProvider {
             );
             error
         })?;
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            agent_id = %agent.agent_id,
+            "agent create agent selected"
+        );
         if request.config_drive.is_some()
             && !agent
                 .capabilities
@@ -1174,6 +1179,10 @@ impl ComputeProvider for AgentComputeProvider {
                 );
                 error
             })?;
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            "agent create inputs resolved"
+        );
         let image_id = request.image_id.as_deref().ok_or_else(|| {
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
@@ -1210,6 +1219,10 @@ impl ComputeProvider for AgentComputeProvider {
             );
             map_agent_error(error)
         })?;
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            "agent create command built"
+        );
         if let Some(existing) = self
             .persist_pending_command(&command, request.operation_id)
             .await
@@ -1228,6 +1241,10 @@ impl ComputeProvider for AgentComputeProvider {
         {
             return self.accepted_operation(request.operation_id).await;
         }
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            "agent create pending command persisted"
+        );
         let artifacts = self
             .artifact_resolver
             .resolve_artifacts(&request, &agent, &artifact_inputs)
