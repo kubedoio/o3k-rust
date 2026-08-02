@@ -15,13 +15,15 @@ jobs:
         run: |
           set -euo pipefail
           domain='o3k-e84d69cce2c47ce8be64'
-          xml="$(sudo -n virsh -c qemu:///system dumpxml "$domain")"
-          grep -Fq '<o3k:domain' <<<"$xml"
-          grep -Fq 'managed_by="o3k-compute"' <<<"$xml"
-          if sudo -n virsh -c qemu:///system domstate "$domain" 2>/dev/null | grep -Fqi running; then
-            sudo -n virsh -c qemu:///system destroy "$domain"
+          if sudo -n virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then
+            xml="$(sudo -n virsh -c qemu:///system dumpxml "$domain")"
+            grep -Fq '<o3k:domain' <<<"$xml"
+            grep -Fq 'managed_by="o3k-compute"' <<<"$xml"
+            if sudo -n virsh -c qemu:///system domstate "$domain" 2>/dev/null | grep -Fqi running; then
+              sudo -n virsh -c qemu:///system destroy "$domain"
+            fi
+            sudo -n virsh -c qemu:///system undefine "$domain"
           fi
-          sudo -n virsh -c qemu:///system undefine "$domain"
           if ip link show dev o3k-br0 >/dev/null 2>&1; then
             while IFS= read -r line; do
               name="${line#*: }"
