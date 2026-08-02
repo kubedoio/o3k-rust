@@ -134,9 +134,9 @@ jobs:
             printf 'artifact_type=protected-create-diagnostics\n'
             printf 'source_commit=%s\n' "${GITHUB_SHA}"
             if sudo -n test -d "${state_root}/log"; then
-              sudo -n grep -hE \
-                'server create reconciliation|artifact transfer (insert|commit)|create reconciliation' \
-                "${state_root}"/log/*.log 2>/dev/null || true
+              sudo -n sh -c \
+                'grep -hE "server create reconciliation|artifact transfer (insert|commit)|create reconciliation" "$1"/log/*.log 2>/dev/null || true' \
+                _ "${state_root}"
             else
               printf 'state_logs=unavailable\n'
             fi
