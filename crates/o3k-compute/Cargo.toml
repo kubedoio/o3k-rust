@@ -18,6 +18,7 @@ o3k-placement = { path = "../o3k-placement" }
 o3k-scheduler = { path = "../o3k-scheduler" }
 o3k-reconciler = { path = "../o3k-reconciler" }
 o3k-store = { path = "../o3k-store" }
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

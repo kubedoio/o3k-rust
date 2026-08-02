@@ -22,6 +22,7 @@ pub enum LogFormat {
 pub enum Provider {
     Fake,
     CellHv,
+    Agent,
     Libvirt,
 }
 
@@ -180,7 +181,7 @@ pub enum ConfigError {
     EmptyLogFilter,
     #[error("log format must be `json` or `pretty`")]
     InvalidLogFormat,
-    #[error("provider must be `fake`, `cellhv`, or `libvirt`")]
+    #[error("provider must be `fake`, `cellhv`, `agent`, or `libvirt`")]
     InvalidProvider,
     #[error(
         "the `libvirt` provider is unavailable in o3kd: no agent-backed provider path exists; use `fake` for local tests or `cellhv` with its configured endpoint, and do not start the real-libvirt profile until compute-agent wiring is available"
@@ -188,6 +189,8 @@ pub enum ConfigError {
     DirectLibvirtProviderUnavailable,
     #[error("CellHV provider requires endpoint and expected version")]
     MissingCellHvConfiguration,
+    #[error("agent provider requires complete compute TLS configuration")]
+    MissingAgentConfiguration,
     #[error("bootstrap secret must not contain a newline")]
     InvalidSecret,
     #[error("bootstrap password must not contain a newline")]
@@ -471,6 +474,7 @@ impl PartialConfig {
         {
             "fake" => Provider::Fake,
             "cellhv" => Provider::CellHv,
+            "agent" => Provider::Agent,
             "libvirt" => Provider::Libvirt,
             _ => return Err(ConfigError::InvalidProvider),
         };
@@ -485,6 +489,17 @@ impl PartialConfig {
                     .is_none_or(|value| value.trim().is_empty()))
         {
             return Err(ConfigError::MissingCellHvConfiguration);
+        }
+        if provider == Provider::Agent
+            && (self.compute_server_certificate.is_none()
+                || self.compute_server_private_key.is_none()
+                || self.compute_client_ca.is_none()
+                || self
+                    .compute_authorized_agents
+                    .as_deref()
+                    .is_none_or(|value| value.trim().is_empty()))
+        {
+            return Err(ConfigError::MissingAgentConfiguration);
         }
         if provider == Provider::Libvirt {
             return Err(ConfigError::DirectLibvirtProviderUnavailable);
@@ -700,5 +715,17 @@ mod tests {
             Vec::new(),
         );
         assert!(matches!(result, Err(ConfigError::IncompleteComputeTls)));
+    }
+
+    #[test]
+    fn agent_provider_requires_authorized_compute_tls() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned(), "--provider=agent".to_owned()],
+            Vec::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::MissingAgentConfiguration)
+        ));
     }
 }

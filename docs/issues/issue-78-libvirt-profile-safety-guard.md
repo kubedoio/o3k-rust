@@ -17,8 +17,8 @@ Implemented on the repository branch:
 
 ## Explicit boundary
 
-This slice does not implement durable command replay, command-id storage,
-agent dispatch, compute-agent lifecycle execution, host capability evidence,
-or a new libvirt provider path. The reserved/package `libvirt` profile remains
-blocked until separately scoped work supplies and tests the agent-backed
-wiring.
+The repository now implements durable command replay, command-id storage,
+agent dispatch, and compute-agent lifecycle execution through the `agent`
+provider. The reserved/package `libvirt` profile remains rejected so the daemon
+cannot bypass that boundary. Host capability evidence and a passing protected
+real-run artifact remain required for issue closure.

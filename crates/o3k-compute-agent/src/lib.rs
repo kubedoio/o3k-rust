@@ -6,7 +6,8 @@
 
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
@@ -56,6 +57,13 @@ const MAX_AGENT_ID: usize = 128;
 const MAX_HOST_LABEL: usize = 255;
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 const ADMINISTRATIVE_STATE_FILE_EXTENSION: &str = "state";
+const COMMAND_JOURNAL_FILE_EXTENSION: &str = "commands";
+const COMMAND_JOURNAL_TEMP_EXTENSION: &str = "commands.tmp";
+const COMMAND_JOURNAL_MAGIC: &[u8] = b"O3KCMDJ1";
+const COMMAND_JOURNAL_VERSION: u8 = 1;
+const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
+const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REDACTED_RESULT_BYTES: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -605,12 +613,19 @@ fn valid_admin_state(state: i32) -> bool {
 }
 
 fn validate_command(command: &proto::Command) -> Result<(), AgentError> {
-    if command.command_id.trim().is_empty()
-        || command.operation_id.trim().is_empty()
-        || command.idempotency_key.trim().is_empty()
-        || command.agent_id.trim().is_empty()
-        || command.agent_epoch.trim().is_empty()
-        || command.resource_id.trim().is_empty()
+    validate_command_with_deadline(command, true)
+}
+
+fn validate_command_with_deadline(
+    command: &proto::Command,
+    require_live_deadline: bool,
+) -> Result<(), AgentError> {
+    if !valid_reference(&command.command_id)
+        || !valid_reference(&command.operation_id)
+        || !valid_reference(&command.idempotency_key)
+        || !valid_reference(&command.agent_id)
+        || !valid_reference(&command.agent_epoch)
+        || !valid_reference(&command.resource_id)
         || command.action.is_none()
     {
         return Err(AgentError::Protocol(
@@ -627,12 +642,99 @@ fn validate_command(command: &proto::Command) -> Result<(), AgentError> {
             "command protocol version is unsupported".to_owned(),
         ));
     }
-    if command.deadline_unix_ms <= unix_ms() {
+    if require_live_deadline && command.deadline_unix_ms <= unix_ms() {
         return Err(AgentError::Protocol(
             "command deadline has expired".to_owned(),
         ));
     }
+    validate_command_action(command)?;
+    let expected = command_payload_fingerprint(command)?;
+    if command.payload_fingerprint_sha256 != expected {
+        return Err(AgentError::Protocol(
+            "command payload fingerprint does not match canonical payload".to_owned(),
+        ));
+    }
     Ok(())
+}
+
+fn validate_command_action(command: &proto::Command) -> Result<(), AgentError> {
+    match command.action.as_ref() {
+        Some(proto::command::Action::Create(create)) => validate_proto_create(create),
+        Some(proto::command::Action::ConsoleLog(console))
+            if console.max_bytes > 0 && console.max_bytes as usize <= o3k_console_limit() =>
+        {
+            Ok(())
+        }
+        Some(proto::command::Action::ConsoleLog(_)) => Err(AgentError::Protocol(
+            "console command bounds are invalid".to_owned(),
+        )),
+        Some(proto::command::Action::Reboot(reboot))
+            if matches!(
+                proto::reboot_command::RebootType::try_from(reboot.r#type),
+                Ok(proto::reboot_command::RebootType::Soft)
+                    | Ok(proto::reboot_command::RebootType::Hard)
+            ) =>
+        {
+            Ok(())
+        }
+        Some(proto::command::Action::Reboot(_)) => {
+            Err(AgentError::Protocol("reboot type is invalid".to_owned()))
+        }
+        Some(
+            proto::command::Action::Inspect(_)
+            | proto::command::Action::Start(_)
+            | proto::command::Action::Stop(_)
+            | proto::command::Action::Delete(_),
+        ) => Ok(()),
+        None => Err(AgentError::Protocol(
+            "command action is required".to_owned(),
+        )),
+    }
+}
+
+fn canonical_action(action: &proto::command::Action) -> proto::canonical_command_payload::Action {
+    match action {
+        proto::command::Action::Create(value) => {
+            proto::canonical_command_payload::Action::Create(value.clone())
+        }
+        proto::command::Action::Inspect(value) => {
+            proto::canonical_command_payload::Action::Inspect(*value)
+        }
+        proto::command::Action::Start(value) => {
+            proto::canonical_command_payload::Action::Start(*value)
+        }
+        proto::command::Action::Stop(value) => {
+            proto::canonical_command_payload::Action::Stop(*value)
+        }
+        proto::command::Action::Reboot(value) => {
+            proto::canonical_command_payload::Action::Reboot(*value)
+        }
+        proto::command::Action::Delete(value) => {
+            proto::canonical_command_payload::Action::Delete(*value)
+        }
+        proto::command::Action::ConsoleLog(value) => {
+            proto::canonical_command_payload::Action::ConsoleLog(*value)
+        }
+    }
+}
+
+fn command_payload_fingerprint(command: &proto::Command) -> Result<String, AgentError> {
+    let action = command
+        .action
+        .as_ref()
+        .ok_or_else(|| AgentError::Protocol("command action is required".to_owned()))?;
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: command.operation_id.clone(),
+        resource_id: command.resource_id.clone(),
+        action: Some(canonical_action(action)),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let mut fingerprint = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut fingerprint, "{byte:02x}").expect("writing to an in-memory string cannot fail");
+    }
+    Ok(fingerprint)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -768,6 +870,117 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
         protocol_version: Some(PROTOCOL_VERSION),
         payload_fingerprint_sha256,
         action: Some(proto::command::Action::Create(create)),
+    })
+}
+
+/// The lifecycle mutations that can be dispatched after a provider resource
+/// has been resolved.  Keeping this list typed prevents callers from turning
+/// an arbitrary string into a host command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleCommand {
+    Inspect,
+    Start,
+    Stop,
+    HardReboot,
+    Delete,
+}
+
+/// Builds a deterministic, fenced lifecycle command for the selected agent.
+/// The command identity is stable for the operation and resource, so a
+/// reconnect or retry cannot silently become a second mutation.
+pub fn build_lifecycle_command(
+    action: LifecycleCommand,
+    agent_id: &str,
+    agent_epoch: &str,
+    operation_id: &str,
+    resource_id: &str,
+) -> Result<proto::Command, AgentError> {
+    if !valid_reference(agent_id)
+        || !valid_reference(agent_epoch)
+        || !valid_reference(operation_id)
+        || !valid_reference(resource_id)
+    {
+        return Err(AgentError::Protocol(
+            "lifecycle command identity is invalid".to_owned(),
+        ));
+    }
+    let action_name = match action {
+        LifecycleCommand::Inspect => "inspect",
+        LifecycleCommand::Start => "start",
+        LifecycleCommand::Stop => "stop",
+        LifecycleCommand::HardReboot => "hard-reboot",
+        LifecycleCommand::Delete => "delete",
+    };
+    let canonical_action = match action {
+        LifecycleCommand::Inspect => {
+            proto::canonical_command_payload::Action::Inspect(proto::InspectCommand {})
+        }
+        LifecycleCommand::Start => {
+            proto::canonical_command_payload::Action::Start(proto::StartCommand {})
+        }
+        LifecycleCommand::Stop => {
+            proto::canonical_command_payload::Action::Stop(proto::StopCommand {})
+        }
+        LifecycleCommand::HardReboot => {
+            proto::canonical_command_payload::Action::Reboot(proto::RebootCommand {
+                r#type: proto::reboot_command::RebootType::Hard as i32,
+            })
+        }
+        LifecycleCommand::Delete => {
+            proto::canonical_command_payload::Action::Delete(proto::DeleteCommand {})
+        }
+    };
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: operation_id.to_owned(),
+        resource_id: resource_id.to_owned(),
+        action: Some(canonical_action.clone()),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let mut payload_fingerprint_sha256 = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut payload_fingerprint_sha256, "{byte:02x}")
+            .expect("writing to an in-memory string cannot fail");
+    }
+    let action = match canonical_action {
+        proto::canonical_command_payload::Action::Inspect(value) => {
+            proto::command::Action::Inspect(value)
+        }
+        proto::canonical_command_payload::Action::Start(value) => {
+            proto::command::Action::Start(value)
+        }
+        proto::canonical_command_payload::Action::Stop(value) => {
+            proto::command::Action::Stop(value)
+        }
+        proto::canonical_command_payload::Action::Reboot(value) => {
+            proto::command::Action::Reboot(value)
+        }
+        proto::canonical_command_payload::Action::Delete(value) => {
+            proto::command::Action::Delete(value)
+        }
+        proto::canonical_command_payload::Action::Create(_)
+        | proto::canonical_command_payload::Action::ConsoleLog(_) => {
+            return Err(AgentError::Protocol(
+                "unsupported lifecycle command action".to_owned(),
+            ));
+        }
+    };
+    let idempotency_key = format!("{action_name}:{resource_id}:{operation_id}");
+    Ok(proto::Command {
+        command_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:lifecycle-command:{agent_id}:{operation_id}").as_bytes(),
+        )
+        .to_string(),
+        operation_id: operation_id.to_owned(),
+        idempotency_key,
+        agent_id: agent_id.to_owned(),
+        agent_epoch: agent_epoch.to_owned(),
+        resource_id: resource_id.to_owned(),
+        deadline_unix_ms: unix_ms().saturating_add(10_000),
+        protocol_version: Some(PROTOCOL_VERSION),
+        payload_fingerprint_sha256,
+        action: Some(action),
     })
 }
 
@@ -1214,6 +1427,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         }
                     }
                     Some(proto::control_request::Body::Operation(operation)) => {
+                        if !matches_stream_identity(
+                            &operation.agent_id,
+                            &operation.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         if !registry
                             .connection_is_current(&agent_id, &agent_epoch)
                             .await
@@ -1245,6 +1471,19 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         registry.publish_event(AgentEvent::Observation(observation));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
+                        if !matches_stream_identity(
+                            &accepted.agent_id,
+                            &accepted.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
                         if !registry
                             .connection_is_current(&agent_id, &agent_epoch)
                             .await
@@ -1395,6 +1634,569 @@ pub struct ConsoleLogResult {
     pub offset: u64,
     pub complete: bool,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalState {
+    Accepted = 1,
+    Running = 2,
+    Terminal = 3,
+    Unknown = 4,
+}
+
+impl JournalState {
+    fn decode(value: u8) -> Result<Self, AgentError> {
+        match value {
+            1 => Ok(Self::Accepted),
+            2 => Ok(Self::Running),
+            3 => Ok(Self::Terminal),
+            4 => Ok(Self::Unknown),
+            _ => Err(AgentError::Protocol(
+                "command journal contains an invalid state".to_owned(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct JournalEntry {
+    command: proto::Command,
+    state: JournalState,
+    accepted_sequence: u64,
+    last_sequence: u64,
+    result: Option<CommandExecutionResult>,
+}
+
+#[derive(Debug, Clone)]
+enum JournalDecision {
+    New { key: String, accepted_sequence: u64 },
+    Existing(Box<JournalEntry>),
+}
+
+/// A small, bounded, single-writer command journal.
+///
+/// The journal is a complete snapshot, rewritten to a temporary file and
+/// atomically renamed after every state transition. This intentionally keeps
+/// recovery independent of SQLite or a second agent-local service while
+/// ensuring a torn write can expose only the previous or the next valid
+/// snapshot. Records contain the encoded typed command and a bounded terminal
+/// result; they never contain host paths, credentials, or arbitrary shell text.
+struct CommandJournal {
+    path: PathBuf,
+    agent_id: String,
+    entries: HashMap<String, JournalEntry>,
+    next_sequence: u64,
+}
+
+impl CommandJournal {
+    fn open(identity_path: &Path, agent_id: &str) -> Result<Self, AgentError> {
+        let path = command_journal_file(identity_path);
+        let (entries, next_sequence) = match fs::read(&path) {
+            Ok(bytes) => decode_journal(&bytes, agent_id)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (HashMap::new(), 1),
+            Err(error) => return Err(AgentError::IdentityStore(error)),
+        };
+        let mut journal = Self {
+            path,
+            agent_id: agent_id.to_owned(),
+            entries,
+            next_sequence,
+        };
+        let in_flight: Vec<String> = journal
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                matches!(entry.state, JournalState::Accepted | JournalState::Running)
+                    .then_some(key.clone())
+            })
+            .collect();
+        for key in &in_flight {
+            let entry = journal.entries.get_mut(key).ok_or_else(|| {
+                AgentError::Protocol("command journal entry disappeared".to_owned())
+            })?;
+            entry.state = JournalState::Unknown;
+            entry.result = None;
+            entry.last_sequence = journal.next_sequence;
+            journal.next_sequence = journal.next_sequence.saturating_add(1);
+        }
+        if !journal.entries.is_empty() && !in_flight.is_empty() {
+            journal.persist()?;
+        }
+        Ok(journal)
+    }
+
+    fn accept(&mut self, command: &proto::Command) -> Result<JournalDecision, AgentError> {
+        validate_command_with_deadline(command, false)?;
+        let key = journal_key(&command.agent_id, &command.operation_id);
+        for entry in self.entries.values() {
+            let same_command_id = entry.command.command_id == command.command_id;
+            let same_operation = entry.command.operation_id == command.operation_id;
+            let same_idempotency = entry.command.idempotency_key == command.idempotency_key;
+            if !(same_command_id || same_operation || same_idempotency) {
+                continue;
+            }
+            let equivalent = entry.command.agent_id == command.agent_id
+                && entry.command.operation_id == command.operation_id
+                && entry.command.resource_id == command.resource_id
+                && entry.command.idempotency_key == command.idempotency_key
+                && entry.command.payload_fingerprint_sha256 == command.payload_fingerprint_sha256;
+            if !equivalent {
+                return Err(AgentError::Protocol(
+                    "command identity or fingerprint conflicts with durable record".to_owned(),
+                ));
+            }
+            return Ok(JournalDecision::Existing(Box::new(entry.clone())));
+        }
+        if command.agent_id != self.agent_id {
+            return Err(AgentError::Protocol(
+                "command agent identity does not match this journal".to_owned(),
+            ));
+        }
+        if command.deadline_unix_ms <= unix_ms() {
+            return Err(AgentError::Protocol(
+                "command deadline has expired".to_owned(),
+            ));
+        }
+        if self.entries.len() >= MAX_COMMAND_JOURNAL_ENTRIES {
+            return Err(AgentError::Protocol(
+                "command journal entry limit has been reached".to_owned(),
+            ));
+        }
+        let accepted_sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.entries.insert(
+            key.clone(),
+            JournalEntry {
+                command: command.clone(),
+                state: JournalState::Accepted,
+                accepted_sequence,
+                last_sequence: accepted_sequence,
+                result: None,
+            },
+        );
+        if let Err(error) = self.persist() {
+            self.entries.remove(&key);
+            self.next_sequence = accepted_sequence;
+            return Err(error);
+        }
+        Ok(JournalDecision::New {
+            key,
+            accepted_sequence,
+        })
+    }
+
+    fn mark_running(&mut self, key: &str) -> Result<(), AgentError> {
+        let entry = self
+            .entries
+            .get_mut(key)
+            .ok_or_else(|| AgentError::Protocol("command journal entry is missing".to_owned()))?;
+        if entry.state == JournalState::Accepted {
+            entry.state = JournalState::Running;
+            self.persist()?;
+        }
+        Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        key: &str,
+        result: CommandExecutionResult,
+    ) -> Result<JournalEntry, AgentError> {
+        validate_execution_result(&result)?;
+        let next_sequence = self.next_sequence;
+        let entry = self
+            .entries
+            .get_mut(key)
+            .ok_or_else(|| AgentError::Protocol("command journal entry is missing".to_owned()))?;
+        if entry.state == JournalState::Terminal {
+            return Ok(entry.clone());
+        }
+        entry.state = JournalState::Terminal;
+        entry.last_sequence = next_sequence;
+        entry.result = Some(result);
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        let completed = entry.clone();
+        if let Err(error) = self.persist() {
+            self.next_sequence = next_sequence;
+            return Err(error);
+        }
+        Ok(completed)
+    }
+
+    fn replay_entries(&self) -> Vec<JournalEntry> {
+        let mut entries: Vec<_> = self.entries.values().cloned().collect();
+        entries.sort_by_key(|entry| entry.accepted_sequence);
+        entries
+    }
+
+    fn persist(&self) -> Result<(), AgentError> {
+        let bytes = encode_journal(&self.entries)?;
+        atomic_write_command_journal(&self.path, &bytes)
+    }
+}
+
+fn command_journal_file(identity_path: &Path) -> PathBuf {
+    identity_path.with_extension(COMMAND_JOURNAL_FILE_EXTENSION)
+}
+
+fn journal_key(agent_id: &str, operation_id: &str) -> String {
+    format!("{agent_id}\0{operation_id}")
+}
+
+fn validate_execution_result(result: &CommandExecutionResult) -> Result<(), AgentError> {
+    if !matches!(
+        proto::OperationState::try_from(result.state),
+        Ok(proto::OperationState::Succeeded)
+            | Ok(proto::OperationState::Failed)
+            | Ok(proto::OperationState::UnknownOutcome)
+    ) || !matches!(
+        proto::ResourceState::try_from(result.resource_state),
+        Ok(proto::ResourceState::Running)
+            | Ok(proto::ResourceState::Stopped)
+            | Ok(proto::ResourceState::Deleted)
+            | Ok(proto::ResourceState::Error)
+    ) || result.redacted_message.len() > MAX_REDACTED_RESULT_BYTES
+        || result.provider_resource_id.len() > 128
+        || result.console_log.as_ref().is_some_and(|console| {
+            console.bytes.len() > o3k_console_limit()
+                || console.offset > u64::MAX.saturating_sub(console.bytes.len() as u64)
+        })
+    {
+        return Err(AgentError::Protocol(
+            "command execution result exceeds journal bounds".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn encode_journal(entries: &HashMap<String, JournalEntry>) -> Result<Vec<u8>, AgentError> {
+    if entries.len() > MAX_COMMAND_JOURNAL_ENTRIES {
+        return Err(AgentError::Protocol(
+            "command journal contains too many entries".to_owned(),
+        ));
+    }
+    let mut sorted: Vec<_> = entries.values().collect();
+    sorted.sort_by_key(|entry| entry.accepted_sequence);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(COMMAND_JOURNAL_MAGIC);
+    bytes.push(COMMAND_JOURNAL_VERSION);
+    push_u32(&mut bytes, sorted.len())?;
+    for entry in sorted {
+        let record = encode_journal_entry(entry)?;
+        if record.len() > MAX_MESSAGE_SIZE + 128 * 1024 {
+            return Err(AgentError::Protocol(
+                "command journal record is too large".to_owned(),
+            ));
+        }
+        push_u32(&mut bytes, record.len())?;
+        bytes.extend_from_slice(&record);
+        if bytes.len() > MAX_COMMAND_JOURNAL_BYTES {
+            return Err(AgentError::Protocol(
+                "command journal exceeds its size limit".to_owned(),
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_journal_entry(entry: &JournalEntry) -> Result<Vec<u8>, AgentError> {
+    let command = entry.command.encode_to_vec();
+    if command.is_empty() || command.len() > MAX_MESSAGE_SIZE {
+        return Err(AgentError::Protocol(
+            "command journal command is too large".to_owned(),
+        ));
+    }
+    if entry.accepted_sequence == 0 || entry.last_sequence < entry.accepted_sequence {
+        return Err(AgentError::Protocol(
+            "command journal sequence is invalid".to_owned(),
+        ));
+    }
+    if entry.state == JournalState::Terminal && entry.result.is_none() {
+        return Err(AgentError::Protocol(
+            "terminal command journal record has no result".to_owned(),
+        ));
+    }
+    if entry.state != JournalState::Terminal && entry.result.is_some() {
+        return Err(AgentError::Protocol(
+            "non-terminal command journal record has a result".to_owned(),
+        ));
+    }
+    let mut record = Vec::new();
+    record.push(entry.state as u8);
+    push_u64(&mut record, entry.accepted_sequence)?;
+    push_u64(&mut record, entry.last_sequence)?;
+    push_bytes(&mut record, &command)?;
+    match &entry.result {
+        Some(result) => {
+            record.push(1);
+            encode_execution_result(&mut record, result)?;
+        }
+        None => record.push(0),
+    }
+    Ok(record)
+}
+
+fn encode_execution_result(
+    bytes: &mut Vec<u8>,
+    result: &CommandExecutionResult,
+) -> Result<(), AgentError> {
+    validate_execution_result(result)?;
+    push_i32(bytes, result.state)?;
+    push_i32(bytes, result.error_category)?;
+    push_i32(bytes, result.resource_state)?;
+    push_bytes(bytes, result.provider_resource_id.as_bytes())?;
+    push_bytes(bytes, result.redacted_message.as_bytes())?;
+    match &result.console_log {
+        Some(console) => {
+            bytes.push(1);
+            push_u64(bytes, console.offset)?;
+            bytes.push(u8::from(console.complete));
+            bytes.push(u8::from(console.truncated));
+            push_bytes(bytes, &console.bytes)?;
+        }
+        None => bytes.push(0),
+    }
+    Ok(())
+}
+
+fn push_u32(bytes: &mut Vec<u8>, value: usize) -> Result<(), AgentError> {
+    let value = u32::try_from(value).map_err(|_| {
+        AgentError::Protocol("command journal length exceeds encoding limit".to_owned())
+    })?;
+    bytes.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn push_u64(bytes: &mut Vec<u8>, value: u64) -> Result<(), AgentError> {
+    bytes.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn push_i32(bytes: &mut Vec<u8>, value: i32) -> Result<(), AgentError> {
+    bytes.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn push_bytes(bytes: &mut Vec<u8>, value: &[u8]) -> Result<(), AgentError> {
+    push_u32(bytes, value.len())?;
+    bytes.extend_from_slice(value);
+    Ok(())
+}
+
+struct JournalReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> JournalReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], AgentError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| AgentError::Protocol("command journal offset overflow".to_owned()))?;
+        let value = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| AgentError::Protocol("command journal is truncated".to_owned()))?;
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> Result<u8, AgentError> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32, AgentError> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().map_err(
+            |_| AgentError::Protocol("command journal integer is truncated".to_owned()),
+        )?))
+    }
+
+    fn u64(&mut self) -> Result<u64, AgentError> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().map_err(
+            |_| AgentError::Protocol("command journal integer is truncated".to_owned()),
+        )?))
+    }
+
+    fn i32(&mut self) -> Result<i32, AgentError> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().map_err(
+            |_| AgentError::Protocol("command journal integer is truncated".to_owned()),
+        )?))
+    }
+
+    fn bytes(&mut self, maximum: usize) -> Result<Vec<u8>, AgentError> {
+        let length = usize::try_from(self.u32()?)
+            .map_err(|_| AgentError::Protocol("command journal length is invalid".to_owned()))?;
+        if length > maximum {
+            return Err(AgentError::Protocol(
+                "command journal field exceeds its bound".to_owned(),
+            ));
+        }
+        Ok(self.take(length)?.to_vec())
+    }
+
+    fn finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
+fn decode_journal(
+    bytes: &[u8],
+    agent_id: &str,
+) -> Result<(HashMap<String, JournalEntry>, u64), AgentError> {
+    if bytes.len() > MAX_COMMAND_JOURNAL_BYTES || bytes.len() < COMMAND_JOURNAL_MAGIC.len() + 1 + 4
+    {
+        return Err(AgentError::Protocol(
+            "command journal is missing or exceeds its bound".to_owned(),
+        ));
+    }
+    let mut reader = JournalReader::new(bytes);
+    if reader.take(COMMAND_JOURNAL_MAGIC.len())? != COMMAND_JOURNAL_MAGIC
+        || reader.u8()? != COMMAND_JOURNAL_VERSION
+    {
+        return Err(AgentError::Protocol(
+            "command journal header is invalid".to_owned(),
+        ));
+    }
+    let count = usize::try_from(reader.u32()?)
+        .map_err(|_| AgentError::Protocol("command journal entry count is invalid".to_owned()))?;
+    if count > MAX_COMMAND_JOURNAL_ENTRIES {
+        return Err(AgentError::Protocol(
+            "command journal contains too many entries".to_owned(),
+        ));
+    }
+    let mut entries = HashMap::with_capacity(count);
+    let mut next_sequence = 1_u64;
+    for _ in 0..count {
+        let length = usize::try_from(reader.u32()?).map_err(|_| {
+            AgentError::Protocol("command journal record length is invalid".to_owned())
+        })?;
+        if length > MAX_MESSAGE_SIZE + 128 * 1024 {
+            return Err(AgentError::Protocol(
+                "command journal record exceeds its bound".to_owned(),
+            ));
+        }
+        let record = reader.take(length)?;
+        let mut record_reader = JournalReader::new(record);
+        let state = JournalState::decode(record_reader.u8()?)?;
+        let accepted_sequence = record_reader.u64()?;
+        let last_sequence = record_reader.u64()?;
+        let command_bytes = record_reader.bytes(MAX_MESSAGE_SIZE)?;
+        let command = proto::Command::decode(command_bytes.as_slice()).map_err(|_| {
+            AgentError::Protocol("command journal contains an invalid command".to_owned())
+        })?;
+        validate_command_with_deadline(&command, false)?;
+        if command.agent_id != agent_id
+            || accepted_sequence == 0
+            || last_sequence < accepted_sequence
+        {
+            return Err(AgentError::Protocol(
+                "command journal identity or sequence is invalid".to_owned(),
+            ));
+        }
+        let result = if record_reader.u8()? == 1 {
+            Some(decode_execution_result(&mut record_reader)?)
+        } else {
+            None
+        };
+        if !record_reader.finished()
+            || (state == JournalState::Terminal) != result.is_some()
+            || (state != JournalState::Terminal && result.is_some())
+        {
+            return Err(AgentError::Protocol(
+                "command journal result state is invalid".to_owned(),
+            ));
+        }
+        let key = journal_key(&command.agent_id, &command.operation_id);
+        if entries
+            .insert(
+                key,
+                JournalEntry {
+                    command,
+                    state,
+                    accepted_sequence,
+                    last_sequence,
+                    result,
+                },
+            )
+            .is_some()
+        {
+            return Err(AgentError::Protocol(
+                "command journal contains duplicate operations".to_owned(),
+            ));
+        }
+        next_sequence = next_sequence.max(last_sequence.saturating_add(1));
+    }
+    if !reader.finished() {
+        return Err(AgentError::Protocol(
+            "command journal has trailing bytes".to_owned(),
+        ));
+    }
+    Ok((entries, next_sequence))
+}
+
+fn decode_execution_result(
+    reader: &mut JournalReader<'_>,
+) -> Result<CommandExecutionResult, AgentError> {
+    let result = CommandExecutionResult {
+        state: reader.i32()?,
+        error_category: reader.i32()?,
+        resource_state: reader.i32()?,
+        provider_resource_id: String::from_utf8(reader.bytes(128)?).map_err(|_| {
+            AgentError::Protocol("command journal provider identity is invalid".to_owned())
+        })?,
+        redacted_message: String::from_utf8(reader.bytes(MAX_REDACTED_RESULT_BYTES)?).map_err(
+            |_| AgentError::Protocol("command journal result message is invalid".to_owned()),
+        )?,
+        console_log: if reader.u8()? == 1 {
+            let offset = reader.u64()?;
+            let complete = reader.u8()? != 0;
+            let truncated = reader.u8()? != 0;
+            Some(ConsoleLogResult {
+                bytes: reader.bytes(o3k_console_limit())?,
+                offset,
+                complete,
+                truncated,
+            })
+        } else {
+            None
+        },
+    };
+    validate_execution_result(&result)?;
+    Ok(result)
+}
+
+fn atomic_write_command_journal(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
+    if bytes.len() > MAX_COMMAND_JOURNAL_BYTES {
+        return Err(AgentError::Protocol(
+            "command journal exceeds its size limit".to_owned(),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(AgentError::IdentityStore)?;
+    }
+    let temporary = path.with_extension(COMMAND_JOURNAL_TEMP_EXTENSION);
+    let mut file = fs::OpenOptions::new();
+    file.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        file.mode(0o600);
+    }
+    let mut file = file.open(&temporary).map_err(AgentError::IdentityStore)?;
+    file.write_all(bytes).map_err(AgentError::IdentityStore)?;
+    file.sync_all().map_err(AgentError::IdentityStore)?;
+    fs::rename(&temporary, path).map_err(AgentError::IdentityStore)?;
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(AgentError::IdentityStore)?;
+    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -1678,6 +2480,120 @@ impl CommandExecutor for RejectingCommandExecutor {
     }
 }
 
+async fn send_command_accepted(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    command: &proto::Command,
+    agent_id: &str,
+    agent_epoch: &str,
+    operation_sequence: u64,
+) -> Result<(), AgentError> {
+    tx.send(proto::ControlRequest {
+        body: Some(proto::control_request::Body::CommandAccepted(
+            proto::CommandAccepted {
+                command_id: command.command_id.clone(),
+                operation_id: command.operation_id.clone(),
+                state: proto::OperationState::Accepted as i32,
+                operation_sequence,
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+            },
+        )),
+    })
+    .await
+    .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))
+}
+
+async fn replay_journal_entries(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    journal: &CommandJournal,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    for entry in journal.replay_entries() {
+        replay_journal_entry(tx, &entry, &entry.command, agent_id, agent_epoch).await?;
+    }
+    Ok(())
+}
+
+async fn replay_journal_entry(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    entry: &JournalEntry,
+    command: &proto::Command,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    let (state, error_category, provider_resource_id, redacted_message) = match entry.state {
+        JournalState::Unknown => (
+            proto::OperationState::UnknownOutcome,
+            proto::ErrorCategory::UnknownOutcome,
+            String::new(),
+            "command outcome is unknown after agent restart".to_owned(),
+        ),
+        JournalState::Terminal => {
+            let result = entry.result.as_ref().ok_or_else(|| {
+                AgentError::Protocol("terminal command journal result is missing".to_owned())
+            })?;
+            (
+                proto::OperationState::try_from(result.state).map_err(|_| {
+                    AgentError::Protocol("journal operation state is invalid".to_owned())
+                })?,
+                proto::ErrorCategory::try_from(result.error_category).map_err(|_| {
+                    AgentError::Protocol("journal error category is invalid".to_owned())
+                })?,
+                result.provider_resource_id.clone(),
+                result.redacted_message.clone(),
+            )
+        }
+        JournalState::Accepted | JournalState::Running => return Ok(()),
+    };
+    if let Some(result) = entry.result.as_ref() {
+        tx.send(proto::ControlRequest {
+            body: Some(proto::control_request::Body::Observation(
+                observation_from_result(
+                    agent_id,
+                    agent_epoch,
+                    command,
+                    result,
+                    entry.last_sequence,
+                ),
+            )),
+        })
+        .await
+        .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+    }
+    tx.send(proto::ControlRequest {
+        body: Some(proto::control_request::Body::Operation(
+            proto::OperationUpdate {
+                operation_id: command.operation_id.clone(),
+                resource_id: command.resource_id.clone(),
+                state: state as i32,
+                error_category: error_category as i32,
+                redacted_message,
+                operation_sequence: entry.last_sequence,
+                provider_resource_id,
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+            },
+        )),
+    })
+    .await
+    .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))
+}
+
+fn protocol_error_for_command(
+    command: &proto::Command,
+    error: &AgentError,
+) -> proto::ProtocolError {
+    proto::ProtocolError {
+        category: proto::ErrorCategory::InvalidRequest as i32,
+        code: "invalid_command".to_owned(),
+        redacted_message: error.to_string(),
+        operation_id: command.operation_id.clone(),
+        retryable: false,
+        command_id: command.command_id.clone(),
+    }
+}
+
 impl AgentClient {
     pub fn new(config: AgentConfig) -> Result<Self, AgentError> {
         config.validate()?;
@@ -1710,12 +2626,13 @@ impl AgentClient {
     {
         tokio::pin!(shutdown);
         let agent_id = load_or_create_identity(&self.config.identity_file)?;
+        let mut journal = CommandJournal::open(&self.config.identity_file, &agent_id)?;
         let mut delay = Duration::from_millis(250);
         loop {
             self.ready
                 .store(false, std::sync::atomic::Ordering::Release);
             let result = self
-                .connect_once(&agent_id, shutdown.as_mut(), executor.clone())
+                .connect_once(&agent_id, shutdown.as_mut(), executor.clone(), &mut journal)
                 .await;
             match result {
                 Ok(()) => return Ok(()),
@@ -1733,6 +2650,7 @@ impl AgentClient {
         agent_id: &str,
         mut shutdown: Pin<&mut F>,
         executor: Arc<dyn CommandExecutor>,
+        journal: &mut CommandJournal,
     ) -> Result<(), AgentError>
     where
         F: std::future::Future<Output = ()> + Send,
@@ -1842,7 +2760,7 @@ impl AgentClient {
             state as i32
         };
         let mut state_ack_pending = true;
-        let mut operation_sequence = 0_u64;
+        replay_journal_entries(&tx, journal, agent_id, &epoch).await?;
         let mut interval = time::interval(self.config.heartbeat_interval);
         loop {
             tokio::select! {
@@ -1886,62 +2804,62 @@ impl AgentClient {
                                     "command identity does not match registration".to_owned(),
                                 ));
                             }
-                            operation_sequence = operation_sequence.saturating_add(1);
-                            tx.send(proto::ControlRequest {
-                                body: Some(proto::control_request::Body::CommandAccepted(
-                                    proto::CommandAccepted {
-                                        command_id: command.command_id.clone(),
-                                        operation_id: command.operation_id.clone(),
-                                        state: proto::OperationState::Accepted as i32,
-                                        operation_sequence,
-                                    },
-                                )),
-                            })
-                            .await
-                            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
-                            let result = executor.execute(&command).await;
-                            if let Ok(result) = &result {
-                                tx.send(proto::ControlRequest {
-                                    body: Some(proto::control_request::Body::Observation(
-                                        observation_from_result(
-                                            agent_id,
-                                            &epoch,
-                                            &command,
-                                            result,
-                                            operation_sequence,
-                                        ),
-                                    )),
-                                })
-                                .await
-                                .map_err(|_| {
-                                    AgentError::Protocol("control stream closed".to_owned())
-                                })?;
-                            }
-                            let update = match result {
-                                Ok(result) => proto::OperationUpdate {
-                                    operation_id: command.operation_id,
-                                    resource_id: command.resource_id,
-                                    state: result.state,
-                                    error_category: result.error_category,
-                                    redacted_message: result.redacted_message,
-                                    operation_sequence,
-                                    provider_resource_id: result.provider_resource_id,
-                                },
-                                Err(_) => proto::OperationUpdate {
-                                    operation_id: command.operation_id,
-                                    resource_id: command.resource_id,
-                                    state: proto::OperationState::Failed as i32,
-                                    error_category: proto::ErrorCategory::Terminal as i32,
-                                    redacted_message: "command execution failed".to_owned(),
-                                    operation_sequence,
-                                    provider_resource_id: String::new(),
-                                },
+                            let decision = match journal.accept(&command) {
+                                Ok(decision) => decision,
+                                Err(error @ AgentError::Protocol(_)) => {
+                                    tx.send(proto::ControlRequest {
+                                        body: Some(proto::control_request::Body::Error(
+                                            protocol_error_for_command(&command, &error),
+                                        )),
+                                    })
+                                    .await
+                                    .map_err(|_| {
+                                        AgentError::Protocol("control stream closed".to_owned())
+                                    })?;
+                                    continue;
+                                }
+                                Err(error) => return Err(error),
                             };
-                            tx.send(proto::ControlRequest {
-                                body: Some(proto::control_request::Body::Operation(update)),
-                            })
-                            .await
-                            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+                            match decision {
+                                JournalDecision::Existing(entry) => {
+                                    replay_journal_entry(&tx, &entry, &command, agent_id, &epoch)
+                                        .await?;
+                                }
+                                JournalDecision::New {
+                                    key,
+                                    accepted_sequence,
+                                } => {
+                                    send_command_accepted(
+                                        &tx,
+                                        &command,
+                                        agent_id,
+                                        &epoch,
+                                        accepted_sequence,
+                                    )
+                                    .await?;
+                                    journal.mark_running(&key)?;
+                                    let result = match executor.execute(&command).await {
+                                        Ok(result) => result,
+                                        Err(_) => CommandExecutionResult {
+                                            state: proto::OperationState::UnknownOutcome as i32,
+                                            error_category: proto::ErrorCategory::UnknownOutcome as i32,
+                                            resource_state: proto::ResourceState::Error as i32,
+                                            redacted_message: "command outcome is unknown".to_owned(),
+                                            provider_resource_id: String::new(),
+                                            console_log: None,
+                                        },
+                                    };
+                                    let entry = journal.complete(&key, result)?;
+                                    replay_journal_entry(
+                                        &tx,
+                                        &entry,
+                                        &command,
+                                        agent_id,
+                                        &epoch,
+                                    )
+                                    .await?;
+                                }
+                            }
                         }
                         Some(proto::control_response::Body::DesiredState(desired)) => {
                             let state = administrative_state_from_i32(desired.state)?;
@@ -2260,18 +3178,15 @@ mod tests {
         registry.register(&register("node", "epoch")).await?;
         let (sender, mut receiver) = mpsc::channel(1);
         registry.attach_connection("node", "epoch", sender).await?;
-        let command = proto::Command {
-            command_id: "command-1".to_owned(),
-            operation_id: "operation-1".to_owned(),
-            idempotency_key: "request-1".to_owned(),
-            agent_id: "node".to_owned(),
-            agent_epoch: "epoch".to_owned(),
-            resource_id: "resource-1".to_owned(),
-            deadline_unix_ms: unix_ms().saturating_add(10_000),
-            protocol_version: Some(PROTOCOL_VERSION),
-            payload_fingerprint_sha256: "fingerprint".to_owned(),
-            action: Some(proto::command::Action::Inspect(proto::InspectCommand {})),
-        };
+        let mut command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            "node",
+            "epoch",
+            "operation-1",
+            "resource-1",
+        )?;
+        command.command_id = "command-1".to_owned();
+        command.idempotency_key = "request-1".to_owned();
         registry.dispatch_command(command.clone()).await?;
         let response = receiver.recv().await.ok_or("command response")??;
         assert!(matches!(
@@ -2546,6 +3461,79 @@ mod tests {
         assert_ne!(
             first.payload_fingerprint_sha256,
             changed.payload_fingerprint_sha256
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_journal_deduplicates_and_marks_inflight_unknown() -> Result<(), AgentError> {
+        let identity = PathBuf::from(format!("/tmp/o3k-command-journal-{}", std::process::id()));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let command = fake_create_command()?;
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        let decision = journal.accept(&command)?;
+        let key = match decision {
+            JournalDecision::New { key, .. } => key,
+            JournalDecision::Existing(_) => {
+                return Err(AgentError::Protocol(
+                    "journal unexpectedly deduplicated".to_owned(),
+                ));
+            }
+        };
+        journal.mark_running(&key)?;
+        assert!(matches!(
+            journal.accept(&command)?,
+            JournalDecision::Existing(_)
+        ));
+        let mut conflicting = command.clone();
+        conflicting.payload_fingerprint_sha256 = "f".repeat(64);
+        assert!(journal.accept(&conflicting).is_err());
+        drop(journal);
+
+        let reopened = CommandJournal::open(&identity, "node")?;
+        assert!(matches!(
+            reopened.entries.values().next().map(|entry| entry.state),
+            Some(JournalState::Unknown)
+        ));
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_commands_are_fenced_and_deterministic() -> Result<(), AgentError> {
+        let first = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "agent-1",
+            "epoch-1",
+            "operation-1",
+            "resource-1",
+        )?;
+        let second = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "agent-1",
+            "epoch-1",
+            "operation-1",
+            "resource-1",
+        )?;
+        assert_eq!(first, second);
+        assert!(first.deadline_unix_ms > unix_ms());
+        assert!(first.idempotency_key.starts_with("hard-reboot:resource-1:"));
+        assert!(matches!(
+            first.action,
+            Some(proto::command::Action::Reboot(proto::RebootCommand {
+                r#type: value
+            })) if value == proto::reboot_command::RebootType::Hard as i32
+        ));
+        assert!(
+            build_lifecycle_command(
+                LifecycleCommand::Delete,
+                "agent/invalid",
+                "epoch-1",
+                "operation-1",
+                "resource-1",
+            )
+            .is_err()
         );
         Ok(())
     }

@@ -17,12 +17,14 @@ advance a terminal operation backward.
 The reconciler validates the accepted operation identity, persists its state as
 `running`, and emits the existing provider-started journal event. Repeated
 acceptances are idempotent; terminal durable operations remain terminal. The
-live stream remains responsible for connection fencing, while durable command
-replay, command-id storage, and full agent-backed lifecycle dispatch remain
-separate follow-up work.
+live stream remains responsible for connection fencing. Durable command
+replay, command-id storage, and agent-backed lifecycle dispatch are now part of
+the repository implementation; protected real-host execution remains a
+separate evidence requirement.
 
 ## Consequences
 
 The API/control-plane operation view reflects authenticated command acceptance
-before execution completes. This slice does not claim restart replay or
-real-agent lifecycle acceptance.
+before execution completes. Repository tests cover restart replay and real-agent
+protocol lifecycle behavior; this ADR does not claim a passing protected
+real-host run.
