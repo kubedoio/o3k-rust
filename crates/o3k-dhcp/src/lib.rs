@@ -205,6 +205,11 @@ impl DhcpService {
         self.state.bindings.values()
     }
 
+    /// Returns the durable binding for one port, if present.
+    pub fn binding(&self, port_id: &str) -> Option<&Binding> {
+        self.state.bindings.get(port_id)
+    }
+
     /// Returns the persisted network configuration for restart reconciliation.
     pub fn configuration(&self) -> Option<&DhcpConfig> {
         self.state.config.as_ref()
