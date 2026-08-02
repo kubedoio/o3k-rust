@@ -1246,6 +1246,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: String::new(),
+                        gateway_ipv4: String::new(),
                     }],
                 }),
             })),
@@ -1356,6 +1358,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: String::new(),
+                        gateway_ipv4: String::new(),
                     }],
                     ..Default::default()
                 }),

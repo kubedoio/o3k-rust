@@ -339,8 +339,10 @@ impl AgentComputeProvider {
             bindings.insert(
                 provider_id,
                 AgentBinding {
+                    resource_id: resource.id.to_string(),
                     agent_id: agent.agent_id,
                     agent_epoch: agent.agent_epoch,
+                    provider_resource_id: resource.provider_id,
                 },
             );
         }
@@ -3845,8 +3847,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
-            flavor_id: Some(Uuid::from_u128(1)),
-            disk_gib: Some(10),
+            flavor_id: "flavor-1".to_owned(),
+            disk_gib: 10,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -3968,8 +3970,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
-            flavor_id: None,
-            disk_gib: None,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -4123,6 +4125,7 @@ mod tests {
                 artifact_kind: "image_base".to_owned(),
                 sha256: sha256.to_owned(),
                 size_bytes: 8,
+                expires_at_unix_ms: i64::MAX,
                 format: "raw".to_owned(),
                 chunk_size_bytes: 4,
                 chunk_count: 2,

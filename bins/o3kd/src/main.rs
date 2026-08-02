@@ -132,11 +132,12 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         let image = self.resolve_image(request)?;
         let (network_attachments, network_data) = self.resolve_network(request)?;
         let (iso, _) = self.materialize_config_drive(request, network_data)?;
-        let flavor_id = request
-            .flavor_id
-            .map(|id| id.to_string())
+        let flavor_id = (!request.flavor_id.trim().is_empty())
+            .then(|| request.flavor_id.clone())
             .ok_or(ProviderError::InvalidRequest)?;
-        let disk_gib = request.disk_gib.ok_or(ProviderError::InvalidRequest)?;
+        let disk_gib = (request.disk_gib > 0)
+            .then_some(request.disk_gib)
+            .ok_or(ProviderError::InvalidRequest)?;
         let config_artifact_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
