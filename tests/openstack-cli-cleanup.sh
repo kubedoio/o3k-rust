@@ -21,6 +21,7 @@ case "$*" in
   keypair\ create*) : >"${state_dir}/keypair-keypair-id"; echo keypair-id;;
   network\ create*) : >"${state_dir}/network-network-id"; echo network-id;;
   subnet\ create*) : >"${state_dir}/subnet-subnet-id"; echo subnet-id;;
+  port\ create*) : >"${state_dir}/port-port-id"; echo port-id;;
   flavor\ create*) : >"${state_dir}/flavor-flavor-id"; echo flavor-id;;
   image\ show*)
     if [[ -e "${state_dir}/image-image-id" ]]; then echo '{}'; else echo 'No image with a name or ID was found' >&2; exit 1; fi;;
@@ -30,6 +31,8 @@ case "$*" in
     if [[ -e "${state_dir}/network-network-id" ]]; then echo '{}'; else echo 'No network with a name or ID was found' >&2; exit 1; fi;;
   subnet\ show*)
     if [[ -e "${state_dir}/subnet-subnet-id" ]]; then echo '{}'; else echo 'No subnet with a name or ID was found' >&2; exit 1; fi;;
+  port\ show*)
+    if [[ -e "${state_dir}/port-port-id" ]]; then echo '{}'; else echo 'No port with a name or ID was found' >&2; exit 1; fi;;
   flavor\ show*)
     if [[ -e "${state_dir}/flavor-flavor-id" ]]; then echo '{}'; else echo 'No flavor with a name or ID was found' >&2; exit 1; fi;;
   server\ create*) : >"${state_file}"; echo server-id;;
@@ -67,6 +70,7 @@ case "$*" in
   keypair\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/keypair-keypair-id";;
   network\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/network-network-id";;
   subnet\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/subnet-subnet-id";;
+  port\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/port-port-id";;
   flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
   console\ log\ show*) echo 'CirrOS boot output\nlogin:';;
   *) exit 0;;
@@ -119,7 +123,7 @@ import sys
 assert not (pathlib.Path(sys.argv[2]) / "console-error.log").exists()
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
-                "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
+                "port delete port-id" "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
                 "network delete network-id" "image delete image-id"; do
   grep -Fq "${resource}" "${O3K_MOCK_LOG}"
 done
@@ -132,7 +136,7 @@ assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
 assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}}
 assert result["resources"]["server_id"] == "server-id"
-assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "flavor", "server"}
+assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "port", "flavor", "server"}
 assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
 PY
 grep -Fq "server list --name o3k-testlab-server -f json" "${O3K_MOCK_LOG}"
@@ -141,7 +145,7 @@ grep -Fq "server create --wait" "${O3K_MOCK_LOG}"
 grep -Fq "keypair create --public-key" "${O3K_MOCK_LOG}"
 grep -Fq -- "--key-name o3k-testlab-keypair" "${O3K_MOCK_LOG}"
 grep -Fq -- "--config-drive true" "${O3K_MOCK_LOG}"
-grep -Fq -- "--nic net-id=network-id,v4-fixed-ip=192.0.2.2" "${O3K_MOCK_LOG}"
+grep -Fq -- "--nic port-id=port-id" "${O3K_MOCK_LOG}"
 grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"

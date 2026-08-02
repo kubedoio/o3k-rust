@@ -1168,7 +1168,9 @@ impl IdReference {
 #[derive(serde::Deserialize)]
 struct NetworkReference {
     uuid: Option<String>,
+    port: Option<String>,
 }
+
 #[derive(Serialize)]
 struct ServerEnvelope {
     server: ServerResponse,
@@ -1694,7 +1696,7 @@ async fn create_server(
     }
     let network_ids = networks
         .iter()
-        .filter_map(|network| network.uuid.as_deref())
+        .filter_map(|network| network.port.as_deref().or(network.uuid.as_deref()))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if let Some(network_service) = state.network.as_ref() {
@@ -2033,7 +2035,7 @@ mod tests {
             "name": "server",
             "imageRef": "image-id",
             "flavorRef": "550e8400-e29b-41d4-a716-446655440000",
-            "networks": [{"uuid": "network"}]
+            "networks": [{"port": "550e8400-e29b-41d4-a716-446655440001"}]
         });
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
         assert_eq!(
@@ -2043,6 +2045,13 @@ mod tests {
         assert_eq!(
             parsed.flavor.map(super::IdReference::into_id).as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            parsed
+                .networks
+                .as_ref()
+                .and_then(|networks| networks[0].port.as_deref()),
+            Some("550e8400-e29b-41d4-a716-446655440001")
         );
         Ok(())
     }

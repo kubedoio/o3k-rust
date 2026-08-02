@@ -38,8 +38,9 @@ case "$*" in
   keypair\ create*) echo keypair-id; : >"${resource_state}/keypair-id";;
   network\ create*) echo network-id; : >"${resource_state}/network-id";;
   subnet\ create*) echo subnet-id; : >"${resource_state}/subnet-id";;
+  port\ create*) echo port-id; : >"${resource_state}/port-id";;
   flavor\ create*) echo flavor-id; : >"${resource_state}/flavor-id";;
-  image\ show*|keypair\ show*|network\ show*|subnet\ show*|flavor\ show*)
+  image\ show*|keypair\ show*|network\ show*|subnet\ show*|port\ show*|flavor\ show*)
     resource="${1}"; id="${3}"
     if [[ -e "${resource_state}/${id}" ]]; then
       printf '{"id":"%s"}\n' "${id}"
@@ -48,7 +49,7 @@ case "$*" in
       exit 1
     fi
     ;;
-  image\ delete*|keypair\ delete*|network\ delete*|subnet\ delete*|flavor\ delete*)
+  image\ delete*|keypair\ delete*|network\ delete*|subnet\ delete*|port\ delete*|flavor\ delete*)
     rm -f -- "${resource_state}/${3}"
     ;;
   server\ create*) : >"${state_file}"; echo server-id;;
