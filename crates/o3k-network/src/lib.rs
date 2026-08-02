@@ -496,6 +496,51 @@ mod host_network_tests {
         Ok(())
     }
 
+    #[test]
+    fn manifest_accepts_multiple_taps_for_one_instance() -> Result<(), HostNetworkError> {
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                gateway: None,
+            }),
+            taps: [
+                (
+                    "o3ktap-a".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-a".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-a".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+                (
+                    "o3ktap-b".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-b".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-b".to_owned(),
+                        mac: "02:00:00:00:00:02".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        validate_manifest(
+            &HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            &manifest,
+        )
+    }
+
     #[derive(Clone)]
     struct FakeNetworkCommand {
         responses: Arc<Mutex<VecDeque<Response>>>,
@@ -895,6 +940,57 @@ impl HostNetworkManager {
         self.clear_tap_ownership(&name, spec)?;
         Ok(())
     }
+
+    /// Removes every TAP recorded as owned by one instance. Foreign or
+    /// malformed ownership records are never selected for deletion.
+    pub fn delete_taps_for_instance(&self, instance_id: &str) -> Result<(), HostNetworkError> {
+        validate_reference(instance_id)?;
+        let specs = self
+            .ownership_snapshot(|manifest| {
+                manifest
+                    .taps
+                    .values()
+                    .filter(|record| record.created_by_o3k && record.instance_id == instance_id)
+                    .map(|record| TapSpec {
+                        instance_id: record.instance_id.clone(),
+                        port_id: record.port_id.clone(),
+                        mac: record.mac.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })?
+            .unwrap_or_default();
+        let mut first_error = None;
+        for spec in specs {
+            if let Err(error) = self.delete_tap(&spec) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Returns durable port identities owned by an instance before its TAP
+    /// records are removed. Coupled host services use these identities for
+    /// fixed-lease cleanup.
+    pub fn owned_port_ids_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<String>, HostNetworkError> {
+        validate_reference(instance_id)?;
+        let Some(ownership) = &self.ownership else {
+            return Ok(Vec::new());
+        };
+        let store = ownership.lock().map_err(|_| {
+            HostNetworkError::OwnershipStorage(io::Error::other("ownership lock poisoned"))
+        })?;
+        Ok(store
+            .manifest
+            .taps
+            .values()
+            .filter(|record| record.instance_id == instance_id)
+            .map(|record| record.port_id.clone())
+            .collect())
+    }
+
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
         let output = self.command_output(["-d", "link", "show"])?;
         if !output.success {
@@ -1237,7 +1333,6 @@ fn validate_manifest(
         }
     }
     let mut ports = HashSet::new();
-    let mut instances = HashSet::new();
     for (interface, tap) in &manifest.taps {
         validate_ifname(interface)?;
         validate_ifname(&tap.interface)?;
@@ -1248,7 +1343,6 @@ fn validate_manifest(
             || tap.bridge != config.bridge_name
             || !tap.created_by_o3k
             || !ports.insert(tap.port_id.clone())
-            || !instances.insert(tap.instance_id.clone())
         {
             return Err(HostNetworkError::OwnershipConflict);
         }
