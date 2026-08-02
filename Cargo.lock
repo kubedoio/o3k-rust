@@ -1044,6 +1044,7 @@ dependencies = [
  "o3k-compute-agent",
  "o3k-console",
  "o3k-libvirt",
+ "o3k-network",
  "o3k-provider",
  "o3k-provider-contract",
  "serde_json",
