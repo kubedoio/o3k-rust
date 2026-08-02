@@ -1,7 +1,7 @@
 schema_version: 1
-source_commit: cc95aaa66d56d96959f7c6c188a4069053753da6
+source_commit: 74cf5f6e83c92a1430815d23c796e099a0f1a198
 release: v0.2.0-alpha.1
-updated_at: 2026-08-02T17:02:31Z
+updated_at: 2026-08-02T17:28:00Z
 last_protected_run:
   id: 30756669479
   commit: 3fb5612d3fc79c2b18541c84a0174278a6361600
@@ -10,10 +10,11 @@ last_protected_run:
 current_blocker:
   layer: agent
   summary: >-
-    The protected agent-provider bootstrap starts o3k-compute, but o3kd still
-    does not reach ready after bounded polling; the workflow therefore blocks
-    lifecycle execution. Cleanup also reports state ownership or permission
-    failure.
+    The vertical agent-backed realization integration is merged, but its
+    readiness and real guest lifecycle are not yet protected-verified. The
+    previous run failed because o3kd stayed not ready after bounded polling;
+    the merged integration changes that bootstrap boundary. Cleanup also
+    requires a fresh protected verification.
   evidence: >-
     Protected workflow 30756669479 disposable-testlab-bootstrap.json and
     real-host-workflow-result.json.
@@ -36,7 +37,7 @@ pending:
 open_prs: []
 
 next_actions:
-  - Rebase the existing agent-backed realization stack onto this main tip and submit it as the single integration PR for #351.
-  - Verify the readiness fix on the protected runner, then diagnose the next real guest boundary from uploaded evidence.
+  - Dispatch the protected workflow from main 74cf5f6 and inspect its first failing phase.
+  - Verify authenticated registration/libvirt readiness, then diagnose the next real guest boundary from uploaded evidence.
   - Resolve the cleanup ownership or permission failure without weakening the guard.
   - Connect image, config-drive, network, Placement, libvirt, observation, console, and cleanup phases in order.
