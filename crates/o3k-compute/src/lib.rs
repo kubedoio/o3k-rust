@@ -964,23 +964,11 @@ async fn apply_agent_provider_event(
                 operation.error_category = error_category_from_proto(error.category);
             }
         }
-        o3k_compute_agent::AgentEvent::ArtifactAck(ack) => {
-            if let Some(store) = store {
-                let status = agent_proto::ArtifactStatus {
-                    transfer_id: ack.transfer_id,
-                    command_id: ack.command_id,
-                    operation_id: ack.operation_id,
-                    resource_id: ack.resource_id,
-                    agent_id: ack.agent_id,
-                    agent_epoch: ack.agent_epoch,
-                    contiguous_bytes: ack.contiguous_bytes,
-                    next_chunk_index: ack.next_chunk_index,
-                    state: ack.state,
-                };
-                if let Err(error) = apply_artifact_status(store, &status).await {
-                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact acknowledgement rejected");
-                }
-            }
+        o3k_compute_agent::AgentEvent::ArtifactAck(_ack) => {
+            // The foreground create path owns the durable commit after its
+            // waiter receives this acknowledgement. Persisting the same
+            // transition here races that writer on SQLite. ArtifactStatus
+            // events remain the asynchronous recovery projection.
         }
         o3k_compute_agent::AgentEvent::ArtifactStatus(status) => {
             if let Some(store) = store

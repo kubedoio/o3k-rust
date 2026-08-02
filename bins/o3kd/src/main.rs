@@ -18,10 +18,19 @@ struct DaemonCreateResolver {
     image: o3k_image::ImageService,
     network: o3k_network::NetworkService,
     config_drive: o3k_config_drive::ConfigDriveStore,
-    iso_root: PathBuf,
 }
 
 impl DaemonCreateResolver {
+    fn config_drive_iso_path(
+        generated_directory: &std::path::Path,
+        server_id: Uuid,
+    ) -> Result<PathBuf, ProviderError> {
+        let output_root = generated_directory
+            .parent()
+            .ok_or(ProviderError::InvalidRequest)?;
+        Ok(output_root.join(format!("{server_id}.iso")))
+    }
+
     fn resolve_image(
         &self,
         request: &CreateInstanceRequest,
@@ -109,7 +118,11 @@ impl DaemonCreateResolver {
             .config_drive
             .generate(&input)
             .map_err(|_| ProviderError::InvalidRequest)?;
-        let output = self.iso_root.join(format!("{}.iso", request.o3k_server_id));
+        // ConfigDriveStore authenticates the ISO against its managed root and
+        // expects the published ISO beside the instance directory. Derive the
+        // output location from the generated directory so the resolver cannot
+        // accidentally place it in an unrelated root.
+        let output = Self::config_drive_iso_path(&generated.directory, request.o3k_server_id)?;
         let iso = self
             .config_drive
             .materialize_iso(&generated.directory, output)
@@ -215,8 +228,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
-    let config_drive_iso_root = config.data_dir.join("config-drive-iso");
-    std::fs::create_dir_all(&config_drive_iso_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
     let registry = o3k_compute_agent::NodeRegistry::default();
     let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
@@ -230,7 +241,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             image: image_service.clone(),
             network: network_service.clone(),
             config_drive: config_drive_store.clone(),
-            iso_root: config_drive_iso_root,
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -622,4 +632,24 @@ async fn shutdown_signal(state: o3k_api::AppState) {
         },
     }
     state.set_ready(false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DaemonCreateResolver;
+    use std::path::Path;
+    use uuid::Uuid;
+
+    #[test]
+    fn config_drive_iso_is_published_beside_owned_instance_directory() -> Result<(), String> {
+        let server_id = Uuid::now_v7();
+        let directory = Path::new("/var/lib/o3k-testlab/config-drive").join(server_id.to_string());
+        let output = DaemonCreateResolver::config_drive_iso_path(&directory, server_id)
+            .map_err(|error| error.to_string())?;
+        let parent = directory
+            .parent()
+            .ok_or_else(|| "instance directory should have a parent".to_owned())?;
+        assert_eq!(output, parent.join(format!("{server_id}.iso")));
+        Ok(())
+    }
 }
