@@ -1,5 +1,7 @@
 # ADR-0066 — Select the configured CellHV provider
 
+Status: Accepted
+
 ## Context
 
 The daemon accepted `provider = "cellhv"` but constructed the fake provider

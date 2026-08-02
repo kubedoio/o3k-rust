@@ -1,5 +1,7 @@
 # ADR-0081 — Bind release benchmark summaries to raw evidence
 
+Status: Accepted
+
 ## Context
 
 The release gate accepted a measured benchmark summary without requiring the

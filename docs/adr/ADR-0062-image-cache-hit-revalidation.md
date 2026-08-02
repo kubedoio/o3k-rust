@@ -1,5 +1,7 @@
 # ADR-0062 — Revalidate content-addressed image-cache hits
 
+Status: Accepted
+
 ## Context
 
 `ImageCache::cache_base` names cached files by checksum, but a file can be

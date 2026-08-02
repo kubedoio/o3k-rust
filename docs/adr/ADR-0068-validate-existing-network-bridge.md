@@ -1,5 +1,7 @@
 # ADR-0068 — Validate existing bridge and uplink ownership
 
+Status: Accepted
+
 ## Context
 
 The host network manager returned success whenever the configured bridge name

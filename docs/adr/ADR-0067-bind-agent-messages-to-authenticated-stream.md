@@ -1,5 +1,7 @@
 # ADR-0067 — Bind agent messages to the authenticated stream
 
+Status: Accepted
+
 ## Context
 
 The compute-agent control stream authenticates the certificate and registration

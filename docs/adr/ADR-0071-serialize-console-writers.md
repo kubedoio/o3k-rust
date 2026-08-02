@@ -1,5 +1,7 @@
 # ADR-0071 — Serialize per-instance console mutations
 
+Status: Accepted
+
 ## Context
 
 Console writes use atomic replacement, but append and sequential observation

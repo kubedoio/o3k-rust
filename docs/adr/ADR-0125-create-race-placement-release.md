@@ -1,5 +1,7 @@
 # ADR-0125 — Release only the losing placement decision in a create race
 
+Status: Accepted
+
 ## Context
 
 Placement is reserved before the durable create intent is inserted. Two

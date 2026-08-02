@@ -1,5 +1,7 @@
 # ADR-0129 — Make the portable real-libvirt harness model cleanup state
 
+Status: Accepted
+
 ## Context
 
 The portable `real-libvirt-harness.sh` test used a fake OpenStack CLI that

@@ -1,5 +1,7 @@
 # ADR-0070 — Bound config-drive network and vendor data
 
+Status: Accepted
+
 ## Context
 
 Config-drive generation bounded user-data and metadata but accepted network
