@@ -844,13 +844,71 @@ where
         match self.provider.create_instance(request).await {
             Ok(provider_operation) => {
                 validate_provider_operation_owner(operation_id, &provider_operation)?;
-                self.finish_create(
-                    operation_id,
-                    resource,
-                    provider_operation.provider_operation_id.to_string(),
-                    provider_operation.provider_resource_id,
-                )
-                .await
+                let provider_operation_id = provider_operation.provider_operation_id.to_string();
+                match provider_operation.state {
+                    ProviderOperationState::Succeeded => {
+                        self.finish_create(
+                            operation_id,
+                            resource,
+                            provider_operation_id,
+                            provider_operation.provider_resource_id,
+                        )
+                        .await
+                    }
+                    ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                        if let Some(provider_resource_id) = provider_operation.provider_resource_id
+                        {
+                            return self
+                                .finish_create(
+                                    operation_id,
+                                    resource,
+                                    provider_operation_id,
+                                    Some(provider_resource_id),
+                                )
+                                .await;
+                        }
+                        self.store
+                            .update_operation(
+                                operation_id,
+                                OperationState::Running,
+                                Some(&provider_operation_id),
+                                None,
+                                None,
+                            )
+                            .await?;
+                        Ok(OperationState::Running)
+                    }
+                    ProviderOperationState::UnknownOutcome => {
+                        self.store
+                            .update_operation(
+                                operation_id,
+                                OperationState::UnknownOutcome,
+                                Some(&provider_operation_id),
+                                Some("unknown_outcome"),
+                                None,
+                            )
+                            .await?;
+                        self.event(operation_id, resource.id, JournalEventKind::RetryScheduled);
+                        Ok(OperationState::UnknownOutcome)
+                    }
+                    ProviderOperationState::Retryable => {
+                        self.retry_or_fail(operation_id, resource.id, ProviderError::Retryable)
+                            .await
+                    }
+                    ProviderOperationState::Failed => {
+                        self.store
+                            .update_operation(
+                                operation_id,
+                                OperationState::Failed,
+                                Some(&provider_operation_id),
+                                Some("terminal"),
+                                Some("provider operation failed"),
+                            )
+                            .await?;
+                        self.event(operation_id, resource.id, JournalEventKind::Failed);
+                        Ok(OperationState::Failed)
+                    }
+                }
             }
             Err(ProviderError::UnknownOutcome {
                 operation_id: provider_operation_id,
