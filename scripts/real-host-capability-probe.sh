@@ -20,7 +20,7 @@ rm -f -- "${OUTPUT_PATH}"
 
 python3 - "${OUTPUT_PATH}" "${DISK_PATH}" "${KVM_PATH}" "${MIN_FREE_BYTES}" "${EXPECTED_LABELS}" \
     "${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}" "${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}" \
-    "${GITHUB_SHA:-}" <<'PY'
+    "${GITHUB_SHA:-}" "${O3K_REAL_HOST_RUNNER_NAME:-}" "${O3K_REAL_HOST_RUNNER_ID:-}" <<'PY'
 import json
 import os
 import pwd
@@ -40,6 +40,8 @@ import time
     workflow_run_id,
     workflow_run_attempt,
     source_commit,
+    runner_name,
+    runner_id,
 ) = sys.argv[1:]
 errors = []
 skips = []
@@ -135,7 +137,8 @@ checks = {
                "service_account_exists": service_account_exists,
                "service_account_matches_user": service_account_matches,
                "labels_declared": labels_declared, "labels_exact": labels_exact,
-               "expected_labels": expected},
+               "expected_labels": expected,
+               "name": runner_name or None, "id": runner_id or None},
     "disk": {"path_is_directory": disk_path_valid, "minimum_free_bytes": minimum_free_bytes,
              "free_bytes": disk_free_bytes,
              "enough_free_space": disk_free_bytes is not None and disk_free_bytes >= minimum_free_bytes},
@@ -184,6 +187,8 @@ if workflow_run_attempt:
     result["workflow_run_attempt"] = workflow_run_attempt
 if source_commit:
     result["source_commit"] = source_commit
+if runner_name or runner_id:
+    result["runner"] = {"name": runner_name or None, "id": runner_id or None}
 
 directory = os.path.dirname(output_path) or "."
 descriptor, temporary = tempfile.mkstemp(prefix=".runner-capabilities.", dir=directory,
