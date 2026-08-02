@@ -51,7 +51,7 @@ mod config_drive;
 mod image;
 pub use artifact::{
     ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery, MAX_ARTIFACT_BYTES,
-    MAX_ARTIFACT_CHUNK_BYTES,
+    MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNKS,
 };
 pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
@@ -457,16 +457,25 @@ impl NodeRegistry {
         bytes: impl AsRef<[u8]>,
     ) -> Result<(), AgentError> {
         let _transfer_slot = self.acquire_artifact_transfer_slot(&offer.agent_id).await?;
-        self.dispatch_artifact_sequence(offer, bytes).await
+        self.dispatch_artifact_from(offer, bytes, 0).await
     }
 
-    async fn dispatch_artifact_sequence(
+    /// Resumes an artifact transfer at a previously acknowledged contiguous
+    /// chunk. The offer and transfer ID remain unchanged; a caller must only
+    /// pass a start index obtained from authenticated durable status.
+    pub async fn dispatch_artifact_from(
         &self,
         offer: proto::ArtifactOffer,
         bytes: impl AsRef<[u8]>,
+        start_chunk_index: u32,
     ) -> Result<(), AgentError> {
         let bytes = bytes.as_ref();
         validate_artifact_dispatch(&offer, bytes)?;
+        if start_chunk_index > offer.chunk_count {
+            return Err(AgentError::Protocol(
+                "artifact resume offset exceeds chunk count".to_owned(),
+            ));
+        }
         let node = self
             .snapshot(&offer.agent_id)
             .await
@@ -515,7 +524,13 @@ impl NodeRegistry {
         // in-flight chunk budget explicit for future pipelining without
         // allowing an implementation change to exceed the contract.
         let chunk_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER));
-        for (chunk_index, chunk) in bytes.chunks(chunk_size).enumerate() {
+        for (chunk_index, chunk) in bytes
+            .chunks(chunk_size)
+            .enumerate()
+            .skip(usize::try_from(start_chunk_index).map_err(|_| {
+                AgentError::Protocol("artifact resume offset is invalid".to_owned())
+            })?)
+        {
             let _chunk_slot = chunk_slots
                 .acquire()
                 .await
@@ -563,6 +578,19 @@ impl NodeRegistry {
         bytes: impl AsRef<[u8]>,
         timeout: Duration,
     ) -> Result<proto::ArtifactAck, AgentError> {
+        self.dispatch_artifact_and_wait_from(offer, bytes, 0, timeout)
+            .await
+    }
+
+    /// Resumes an artifact transfer and waits for its authenticated commit
+    /// acknowledgement without changing the transfer identity.
+    pub async fn dispatch_artifact_and_wait_from(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+        start_chunk_index: u32,
+        timeout: Duration,
+    ) -> Result<proto::ArtifactAck, AgentError> {
         let mut events = self.subscribe_events();
         let transfer_id = offer.transfer_id.clone();
         let command_id = offer.command_id.clone();
@@ -578,7 +606,8 @@ impl NodeRegistry {
         // transfer remains in flight after ArtifactEnd until its outcome is
         // known, including when the outcome later becomes unknown on timeout.
         let _transfer_slot = self.acquire_artifact_transfer_slot(&agent_id).await?;
-        self.dispatch_artifact_sequence(offer, bytes).await?;
+        self.dispatch_artifact_from(offer, bytes, start_chunk_index)
+            .await?;
         time::timeout(timeout, async move {
             loop {
                 let event = events.recv().await.map_err(|error| match error {
@@ -1460,6 +1489,7 @@ fn validate_artifact_dispatch(
         || chunk_size == 0
         || chunk_size > MAX_ARTIFACT_CHUNK_BYTES
         || offer.chunk_count == 0
+        || offer.chunk_count > MAX_ARTIFACT_CHUNKS
         || u64::from(offer.chunk_count) != expected_chunks
         || expected_chunks > u64::from(u32::MAX)
         || !matches!(offer.kind, 1 | 2)
@@ -3310,6 +3340,16 @@ impl AgentClient {
         let artifact_store =
             ArtifactStore::open(artifact_store_root(&self.config.identity_file), agent_id)
                 .map_err(|_| artifact_store_error())?;
+        for status in artifact_store
+            .artifact_statuses(&epoch)
+            .map_err(|_| artifact_store_error())?
+        {
+            tx.send(proto::ControlRequest {
+                body: Some(proto::control_request::Body::ArtifactStatus(status)),
+            })
+            .await
+            .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
+        }
         let mut artifact_offers = HashMap::new();
         let state = administrative_state_from_i32(register.desired_state)?;
         persist_administrative_state(
@@ -3911,6 +3951,41 @@ mod tests {
         }
         first_task.await??;
         second_task.await??;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_resume_skips_authenticated_prefix()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(8);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (mut offer, _) = test_artifact_offer("node");
+        let data = b"abcdefgh".to_vec();
+        offer.size_bytes = data.len() as u64;
+        offer.chunk_size_bytes = 4;
+        offer.chunk_count = 2;
+        offer.sha256 = sha256_hex(&data);
+
+        registry
+            .dispatch_artifact_from(offer.clone(), data, 1)
+            .await?;
+        let _ = receiver.recv().await.ok_or("artifact offer")??;
+        let chunk = receiver.recv().await.ok_or("resumed artifact chunk")??;
+        assert!(matches!(
+            chunk.body,
+            Some(proto::control_response::Body::ArtifactChunk(received))
+                if received.chunk_index == 1
+                    && received.offset_bytes == 4
+                    && received.data == b"efgh"
+        ));
+        let end = receiver.recv().await.ok_or("artifact end")??;
+        assert!(matches!(
+            end.body,
+            Some(proto::control_response::Body::ArtifactEnd(_))
+        ));
         Ok(())
     }
 
