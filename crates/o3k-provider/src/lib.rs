@@ -152,6 +152,26 @@ pub trait ComputeProvider: Send + Sync {
         request: CreateInstanceRequest,
     ) -> Result<Operation, ProviderError>;
     async fn get_instance(&self, provider_instance_id: &str) -> Result<Instance, ProviderError>;
+    /// Performs a read-only provider inspection. Providers that do not have
+    /// an asynchronous host command may satisfy this from their projection;
+    /// agent-backed providers override it to dispatch an Inspect command.
+    async fn inspect_instance(
+        &self,
+        _provider_id: &str,
+        _resource_id: &str,
+        provider_instance_id: &str,
+        operation_id: Uuid,
+        _idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        let instance = self.get_instance(provider_instance_id).await?;
+        Ok(Operation {
+            provider_operation_id: operation_id,
+            o3k_operation_id: operation_id,
+            state: OperationState::Succeeded,
+            error_category: None,
+            provider_resource_id: Some(instance.provider_instance_id),
+        })
+    }
     async fn delete_instance(
         &self,
         request: DeleteInstanceRequest,

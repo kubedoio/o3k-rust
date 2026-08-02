@@ -187,8 +187,10 @@ impl ResolvedCreateResolver for UnconfiguredResolvedCreateResolver {
 
 #[derive(Debug, Clone)]
 struct AgentBinding {
+    resource_id: String,
     agent_id: String,
     agent_epoch: String,
+    provider_resource_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -356,7 +358,7 @@ impl AgentComputeProvider {
                 existing.state,
                 AgentCommandState::Succeeded | AgentCommandState::Failed
             ) {
-                return self.accepted_operation(operation_id).await;
+                return self.get_operation(operation_id).await;
             }
         }
         let operation = self.accepted_operation(operation_id).await?;
@@ -596,6 +598,35 @@ fn error_category_from_proto(category: i32) -> Option<o3k_provider::ErrorCategor
     }
 }
 
+fn provider_error_category_from_name(name: &str) -> Option<o3k_provider::ErrorCategory> {
+    match name {
+        "invalid_request" => Some(o3k_provider::ErrorCategory::InvalidRequest),
+        "conflict" => Some(o3k_provider::ErrorCategory::Conflict),
+        "capacity" => Some(o3k_provider::ErrorCategory::Capacity),
+        "not_found" => Some(o3k_provider::ErrorCategory::NotFound),
+        "retryable" => Some(o3k_provider::ErrorCategory::Retryable),
+        "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
+        "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
+        _ => None,
+    }
+}
+
+fn durable_inspect_error(error: &ProviderError) -> (o3k_store::OperationState, &'static str) {
+    match error {
+        ProviderError::Retryable | ProviderError::Storage => {
+            (o3k_store::OperationState::Retryable, "retryable")
+        }
+        ProviderError::UnknownOutcome { .. } | ProviderError::StaleState => {
+            (o3k_store::OperationState::UnknownOutcome, "unknown_outcome")
+        }
+        ProviderError::InvalidRequest => (o3k_store::OperationState::Failed, "invalid_request"),
+        ProviderError::NotFound => (o3k_store::OperationState::Failed, "not_found"),
+        ProviderError::Conflict => (o3k_store::OperationState::Failed, "conflict"),
+        ProviderError::Capacity => (o3k_store::OperationState::Failed, "capacity"),
+        ProviderError::Terminal => (o3k_store::OperationState::Failed, "terminal"),
+    }
+}
+
 fn instance_state_from_proto(state: i32) -> Option<o3k_provider::InstanceState> {
     use o3k_provider_contract::compute_proto::ResourceState as WireState;
     match state {
@@ -702,8 +733,10 @@ async fn apply_agent_provider_event(
                 state.bindings.insert(
                     provider_id.clone(),
                     AgentBinding {
+                        resource_id: observation.resource_id.clone(),
                         agent_id: observation.agent_id.clone(),
                         agent_epoch: observation.agent_epoch.clone(),
+                        provider_resource_id: Some(provider_id.clone()),
                     },
                 );
                 state.instances.insert(
@@ -1082,8 +1115,10 @@ impl ComputeProvider for AgentComputeProvider {
         self.state.write().await.bindings.insert(
             request.o3k_server_id.to_string(),
             AgentBinding {
+                resource_id: request.o3k_server_id.to_string(),
                 agent_id: agent.agent_id,
                 agent_epoch: agent.agent_epoch,
+                provider_resource_id: None,
             },
         );
         Ok(operation)
@@ -1097,6 +1132,51 @@ impl ComputeProvider for AgentComputeProvider {
             .get(id)
             .cloned()
             .ok_or(ProviderError::NotFound)
+    }
+
+    async fn inspect_instance(
+        &self,
+        provider_id: &str,
+        resource_id: &str,
+        provider_instance_id: &str,
+        operation_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let binding = {
+            let state = self.state.read().await;
+            state.bindings.get(resource_id).cloned().or_else(|| {
+                state
+                    .bindings
+                    .values()
+                    .find(|binding| binding.resource_id == resource_id)
+                    .cloned()
+            })
+        };
+        if let Some(binding) = binding.as_ref()
+            && let Some(expected) = binding.provider_resource_id.as_deref()
+            && expected != provider_instance_id
+        {
+            return Err(ProviderError::Conflict);
+        }
+        let agent = self.selected_agent(provider_id).await?;
+        if let Some(binding) = binding.as_ref()
+            && (binding.agent_id != provider_id || binding.agent_epoch != agent.agent_epoch)
+        {
+            return Err(ProviderError::StaleState);
+        }
+        let mut command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            resource_id,
+        )
+        .map_err(map_agent_error)?;
+        command.idempotency_key = idempotency_key.to_owned();
+        self.dispatch_recorded(command, operation_id).await
     }
 
     async fn delete_instance(
@@ -1167,11 +1247,17 @@ impl ComputeProvider for AgentComputeProvider {
         {
             let provider_resource_id =
                 if let Ok(command) = store.get_agent_command_by_operation(id).await {
-                    store
-                        .get_provider_reference(command.resource_id, "agent")
+                    let reference = match store
+                        .get_provider_reference(command.resource_id, "compute")
                         .await
-                        .ok()
-                        .map(|reference| reference.provider_resource_id)
+                    {
+                        Ok(reference) => Some(reference),
+                        Err(_) => store
+                            .get_provider_reference(command.resource_id, "agent")
+                            .await
+                            .ok(),
+                    };
+                    reference.map(|reference| reference.provider_resource_id)
                 } else {
                     None
                 };
@@ -1232,6 +1318,18 @@ impl ComputeProvider for ProviderBackend {
     }
     async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
         self.0.get_instance(id).await
+    }
+    async fn inspect_instance(
+        &self,
+        provider_id: &str,
+        resource_id: &str,
+        id: &str,
+        operation_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        self.0
+            .inspect_instance(provider_id, resource_id, id, operation_id, idempotency_key)
+            .await
     }
     async fn delete_instance(
         &self,
@@ -1905,6 +2003,144 @@ impl ComputeService {
         Ok(server)
     }
 
+    /// Revalidates and inspects an already-created server through the
+    /// provider boundary. This is deliberately read-only: an existing
+    /// Placement allocation is checked, never recreated, before the provider
+    /// receives an inspect request.
+    pub async fn inspect_server(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ComputeError> {
+        let resource = self
+            .store
+            .get_resource(id)
+            .await
+            .map_err(|error| match error {
+                StoreError::ResourceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        if resource.project_id != project_id {
+            return Err(ComputeError::NotFound);
+        }
+        let intent: CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
+        let provider_id = intent
+            .placement_provider_id
+            .as_deref()
+            .ok_or(ComputeError::Conflict)?;
+        let allocation_id = intent
+            .placement_allocation_id
+            .as_deref()
+            .ok_or(ComputeError::Conflict)?;
+        if let Some(scheduler) = &self.scheduler {
+            scheduler.validate_allocation(provider_id, allocation_id, &id.to_string())?;
+        } else {
+            return Err(ComputeError::Conflict);
+        }
+        let _reference = self
+            .store
+            .get_provider_reference(id, "compute")
+            .await
+            .map_err(|error| match error {
+                StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })?;
+        if idempotency_key.trim().is_empty() {
+            return Err(ComputeError::InvalidRequest);
+        }
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect:{project_id}:{id}:{idempotency_key}").as_bytes(),
+        );
+        let existing = self.store.get_operation(operation_id).await.ok();
+        if let Some(record) = existing.as_ref()
+            && matches!(
+                record.state,
+                o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            )
+        {
+            let state = match record.state {
+                o3k_store::OperationState::Succeeded => o3k_provider::OperationState::Succeeded,
+                o3k_store::OperationState::Failed => o3k_provider::OperationState::Failed,
+                _ => unreachable!("terminal state checked above"),
+            };
+            return Ok(Operation {
+                provider_operation_id: record
+                    .provider_operation_id
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .unwrap_or(operation_id),
+                o3k_operation_id: operation_id,
+                state,
+                error_category: record
+                    .error_category
+                    .as_deref()
+                    .and_then(provider_error_category_from_name),
+                provider_resource_id: Some(_reference.provider_resource_id.clone()),
+            });
+        }
+        if existing.is_none() {
+            self.store
+                .insert_operation(&o3k_store::OperationRecord {
+                    id: operation_id,
+                    resource_id: id,
+                    kind: "inspect".to_owned(),
+                    state: o3k_store::OperationState::Pending,
+                    provider_operation_id: None,
+                    error_category: None,
+                    error_message: None,
+                })
+                .await?;
+        }
+        let result = self
+            .provider
+            .inspect_instance(
+                provider_id,
+                &id.to_string(),
+                &_reference.provider_resource_id,
+                operation_id,
+                idempotency_key,
+            )
+            .await;
+        match result {
+            Ok(operation) => {
+                let durable_state = match operation.state {
+                    o3k_provider::OperationState::Succeeded => o3k_store::OperationState::Succeeded,
+                    o3k_provider::OperationState::Failed => o3k_store::OperationState::Failed,
+                    o3k_provider::OperationState::UnknownOutcome => {
+                        o3k_store::OperationState::UnknownOutcome
+                    }
+                    _ => o3k_store::OperationState::Running,
+                };
+                self.store
+                    .update_operation(
+                        operation_id,
+                        durable_state,
+                        Some(&operation.provider_operation_id.to_string()),
+                        None,
+                        None,
+                    )
+                    .await?;
+                Ok(operation)
+            }
+            Err(error) => {
+                let (durable_state, category) = durable_inspect_error(&error);
+                self.store
+                    .update_operation(
+                        operation_id,
+                        durable_state,
+                        None,
+                        Some(category),
+                        Some(&error.to_string()),
+                    )
+                    .await?;
+                Err(error.into())
+            }
+        }
+    }
+
     pub async fn create_keypair(
         &self,
         user_id: &str,
@@ -2205,6 +2441,91 @@ mod tests {
             Arc::new(SqliteStore::connect_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
+    }
+
+    #[tokio::test]
+    async fn inspect_server_validates_existing_placement_without_reallocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-inspect-service-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-inspect-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let placement = o3k_placement::PlacementLedger::open(&placement_path)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement.register_provider(
+            "node-a",
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4096,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )?;
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let server = service
+            .create_server(
+                "project-a",
+                "inspectable".to_owned(),
+                "image-1".to_owned(),
+                Uuid::from_u128(1),
+                vec!["port-1".to_owned()],
+                "inspectable-request".to_owned(),
+            )
+            .await?;
+        let before = placement.provider("node-a")?;
+        let inspected = service
+            .inspect_server("project-a", server.id, "inspectable-request")
+            .await?;
+        assert_eq!(inspected.state, o3k_provider::OperationState::Succeeded);
+        let repeated = service
+            .inspect_server("project-a", server.id, "inspectable-request")
+            .await?;
+        assert_eq!(repeated.o3k_operation_id, inspected.o3k_operation_id);
+        let second_request = service
+            .inspect_server("project-a", server.id, "inspectable-request-2")
+            .await?;
+        assert_ne!(second_request.o3k_operation_id, inspected.o3k_operation_id);
+        assert_eq!(before, placement.provider("node-a")?);
+        assert!(matches!(
+            service
+                .inspect_server("project-b", server.id, "inspectable-request")
+                .await,
+            Err(ComputeError::NotFound)
+        ));
+        std::fs::remove_file(database_path)?;
+        std::fs::remove_dir_all(placement_path)?;
+        Ok(())
     }
 
     #[tokio::test]

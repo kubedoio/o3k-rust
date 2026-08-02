@@ -60,7 +60,7 @@ if document.get("artifact_type") != "compute-agent-process-mtls":
     raise SystemExit("unexpected probe artifact type")
 if document.get("status") != "passed" or document.get("redacted") is not True:
     raise SystemExit("probe did not pass in the real process boundary")
-if document.get("scope") != "o3kd-to-o3k-compute-to-libvirt":
+if document.get("scope") != "o3kd-compute-service-to-scheduler-to-agent-to-libvirt":
     raise SystemExit("probe scope is not the real process boundary")
 if evidence.get("transport") != "mutual_tls":
     raise SystemExit("probe did not prove mutual TLS")

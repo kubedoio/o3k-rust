@@ -234,7 +234,7 @@ json.dump({
     "artifact_type": "compute-agent-process-mtls",
     "status": "passed",
     "redacted": True,
-    "scope": "o3kd-to-o3k-compute-to-libvirt",
+    "scope": "o3kd-compute-service-to-scheduler-to-agent-to-libvirt",
     "evidence": {
         "command": "inspect",
         "command_state": "accepted",
@@ -343,6 +343,7 @@ for needle in ("workflow_dispatch:",
                "Bootstrap disposable TestLab",
                "scripts/bootstrap-disposable-testlab.sh",
                "O3K_PROVIDER: agent",
+               "O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:",
                "scripts/cleanup-disposable-testlab.sh",
                "disposable-testlab-bootstrap.json",
                "Probe runner capabilities", "runner-capabilities.json",
@@ -369,5 +370,10 @@ assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-in
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard
 assert "compute_agent_process_probe_failed" in post_guard
+o3kd = pathlib.Path(sys.argv[1]).parents[2].joinpath("bins/o3kd/src/main.rs").read_text(encoding="utf-8")
+probe = o3kd.split("async fn run_agent_inspect_probe(", 1)[1]
+assert ".inspect_server(" in probe
+assert "registry.dispatch_command" not in probe
+assert "o3kd-compute-service-to-scheduler-to-agent-to-libvirt" in probe
 PY
 echo "real-host workflow guard tests passed"

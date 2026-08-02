@@ -366,10 +366,22 @@ O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
 O3K_COMPUTE_MAX_DISK_GB=10
 EOF
 if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
-  [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] \
-    || fail "agent inspect probe resource id is invalid"
-  printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_ID=%s\nO3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' \
-    "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID" "$STATE_ROOT" >>"$o3kd_env_tmp"
+  if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
+    probe_resource_file="${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+    [[ "$probe_resource_file" == /* && "$probe_resource_file" != *..* ]] \
+      || fail "agent inspect probe resource file is invalid"
+    mkdir -p "$(dirname "$probe_resource_file")"
+    touch "$probe_resource_file"
+    chmod 0644 "$probe_resource_file"
+    printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE=%s\n' \
+      "$(printf '%q' "$probe_resource_file")" >>"$o3kd_env_tmp"
+  else
+    [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] \
+      || fail "agent inspect probe resource id is invalid"
+    printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_ID=%s\n' \
+      "$(printf '%q' "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID")" >>"$o3kd_env_tmp"
+  fi
+  printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"$o3kd_env_tmp"
 fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"

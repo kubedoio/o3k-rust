@@ -26,6 +26,8 @@ pub enum SchedulerError {
     NoValidHost,
     #[error("placement allocation conflict")]
     Conflict,
+    #[error("placement allocation is not owned by the requested server")]
+    AllocationMismatch,
     #[error("invalid flavor")]
     InvalidFlavor,
     #[error("placement failure")]
@@ -170,6 +172,29 @@ impl Scheduler {
         self.placement
             .release(&decision.provider_id, &decision.allocation_id)
             .map_err(SchedulerError::Placement)
+    }
+
+    /// Validates an existing durable allocation without changing Placement.
+    /// Read-only lifecycle and recovery queries must use this path instead of
+    /// scheduling again, which could reserve capacity a second time.
+    pub fn validate_allocation(
+        &self,
+        provider_id: &str,
+        allocation_id: &str,
+        consumer_id: &str,
+    ) -> Result<Allocation, SchedulerError> {
+        let provider = self.placement.provider(provider_id)?;
+        if provider.state == ProviderState::Deleted {
+            return Err(SchedulerError::NoValidHost);
+        }
+        let allocation = provider
+            .allocations
+            .get(allocation_id)
+            .ok_or(SchedulerError::AllocationMismatch)?;
+        if allocation.provider_id != provider_id || allocation.consumer_id != consumer_id {
+            return Err(SchedulerError::AllocationMismatch);
+        }
+        Ok(allocation.clone())
     }
     pub fn retain_unknown(&self, _: &ScheduleDecision) {}
 }
@@ -325,6 +350,37 @@ mod tests {
                 }
             ),
             Err(SchedulerError::NoValidHost)
+        ));
+        std::fs::remove_dir_all(root)
+            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[test]
+    fn existing_allocation_validation_is_read_only_and_fenced() -> Result<(), SchedulerError> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-scheduler-validate-{}", std::process::id()));
+        let placement = PlacementLedger::open(&root)?;
+        placement.register_provider("agent-a", inv(4))?;
+        let scheduler = Scheduler::new(placement.clone());
+        let decision = scheduler.schedule(
+            "server-1",
+            Flavor {
+                vcpus: 1,
+                memory_mb: 512,
+                disk_gb: 1,
+            },
+        )?;
+        let before = placement.provider("agent-a")?;
+        assert_eq!(
+            scheduler.validate_allocation("agent-a", &decision.allocation_id, "server-1")?,
+            decision.allocation
+        );
+        let after = placement.provider("agent-a")?;
+        assert_eq!(before, after);
+        assert!(matches!(
+            scheduler.validate_allocation("agent-a", &decision.allocation_id, "server-2"),
+            Err(SchedulerError::AllocationMismatch)
         ));
         std::fs::remove_dir_all(root)
             .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;

@@ -168,9 +168,10 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     let provider = AgentComputeProvider::new(registry, Arc::new(TestResolver))
         .with_artifact_resolver(Arc::new(TestArtifactResolver));
     let operation_id = Uuid::now_v7();
+    let server_id = Uuid::now_v7();
     let request = CreateInstanceRequest {
         operation_id,
-        o3k_server_id: Uuid::now_v7(),
+        o3k_server_id: server_id,
         project_id: "project-a".to_owned(),
         name: "mtls-server".to_owned(),
         vcpus: 1,
@@ -199,6 +200,31 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     }
     let provider_resource_id = observed.ok_or("agent completion was not observed")?;
     assert_eq!(executor.resource_count(), 1);
+    let inspect_operation_id = Uuid::now_v7();
+    let accepted_inspect = provider
+        .inspect_instance(
+            "node-test",
+            &server_id.to_string(),
+            &provider_resource_id,
+            inspect_operation_id,
+            "inspect-request",
+        )
+        .await?;
+    assert_eq!(accepted_inspect.state, OperationState::Accepted);
+    let mut inspected = None;
+    for _ in 0..80 {
+        let operation = provider.get_operation(inspect_operation_id).await?;
+        if operation.state == OperationState::Succeeded {
+            inspected = Some(operation);
+            break;
+        }
+        time::sleep(Duration::from_millis(25)).await;
+    }
+    let inspected = inspected.ok_or("agent inspect completion was not observed")?;
+    assert_eq!(
+        inspected.provider_resource_id.as_deref(),
+        Some(provider_resource_id.as_str())
+    );
     println!(
         "O3K_AGENT_MTLS_EVIDENCE={}",
         serde_json::json!({
