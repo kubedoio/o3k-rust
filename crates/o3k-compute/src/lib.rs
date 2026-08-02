@@ -1122,10 +1122,13 @@ impl ComputeProvider for AgentComputeProvider {
         &self,
         request: CreateInstanceRequest,
     ) -> Result<Operation, ProviderError> {
-        let provider_id = request
-            .placement_provider_id
-            .as_deref()
-            .ok_or(ProviderError::InvalidRequest)?;
+        let provider_id = request.placement_provider_id.as_deref().ok_or_else(|| {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                "create request has no placement provider identity"
+            );
+            ProviderError::InvalidRequest
+        })?;
         let agent = self.selected_agent(provider_id).await?;
         if request.config_drive.is_some()
             && !agent
@@ -1159,10 +1162,13 @@ impl ComputeProvider for AgentComputeProvider {
                 );
                 error
             })?;
-        let image_id = request
-            .image_id
-            .as_deref()
-            .ok_or(ProviderError::InvalidRequest)?;
+        let image_id = request.image_id.as_deref().ok_or_else(|| {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                "create request has no image identity"
+            );
+            ProviderError::InvalidRequest
+        })?;
         let artifact_inputs = resolved.clone();
         let command = build_create_command(CreateCommandSpec {
             agent_id: agent.agent_id.clone(),
@@ -1252,6 +1258,11 @@ impl ComputeProvider for AgentComputeProvider {
                     ProviderError::InvalidRequest
                 })?;
             if seen[expected_index] {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    artifact_kind = artifact_kind_name(artifact.kind),
+                    "create artifact was duplicated"
+                );
                 return Err(ProviderError::InvalidRequest);
             }
             seen[expected_index] = true;
@@ -1280,8 +1291,14 @@ impl ComputeProvider for AgentComputeProvider {
                 return Err(ProviderError::InvalidRequest);
             }
             let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
-            let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
-                .map_err(|_| ProviderError::InvalidRequest)?;
+            let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size)).map_err(|_| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    artifact_kind = artifact_kind_name(artifact.kind),
+                    "create artifact chunk count is invalid"
+                );
+                ProviderError::InvalidRequest
+            })?;
             let transfer_id = o3k_compute_agent::deterministic_artifact_transfer_id(
                 &command.command_id,
                 artifact.kind,
@@ -1415,6 +1432,12 @@ impl ComputeProvider for AgentComputeProvider {
             }
         }
         if seen != [true, true] {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                image_seen = seen[0],
+                config_drive_seen = seen[1],
+                "create artifacts did not include every required artifact"
+            );
             return Err(ProviderError::InvalidRequest);
         }
         let operation = self
