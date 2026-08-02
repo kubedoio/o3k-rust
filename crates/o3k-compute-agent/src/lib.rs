@@ -461,6 +461,69 @@ impl NodeRegistry {
             .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))
     }
 
+    /// Delivers an artifact and waits for the agent's authenticated commit
+    /// acknowledgement. A timeout is deliberately reported as unknown: the
+    /// agent may have durably committed the artifact after the stream stopped
+    /// carrying responses.
+    pub async fn dispatch_artifact_and_wait(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+        timeout: Duration,
+    ) -> Result<proto::ArtifactAck, AgentError> {
+        let mut events = self.subscribe_events();
+        let transfer_id = offer.transfer_id.clone();
+        let command_id = offer.command_id.clone();
+        let operation_id = offer.operation_id.clone();
+        let resource_id = offer.resource_id.clone();
+        let agent_id = offer.agent_id.clone();
+        let agent_epoch = self
+            .snapshot(&agent_id)
+            .await
+            .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?
+            .agent_epoch;
+        self.dispatch_artifact(offer, bytes).await?;
+        time::timeout(timeout, async move {
+            loop {
+                let event = events.recv().await.map_err(|error| match error {
+                    broadcast::error::RecvError::Lagged(count) => AgentError::Protocol(format!(
+                        "artifact acknowledgement stream lagged by {count} events"
+                    )),
+                    broadcast::error::RecvError::Closed => {
+                        AgentError::Protocol("artifact acknowledgement stream closed".to_owned())
+                    }
+                })?;
+                let ack = match event {
+                    AgentEvent::ArtifactAck(ack)
+                        if ack.transfer_id == transfer_id
+                            && ack.command_id == command_id
+                            && ack.operation_id == operation_id
+                            && ack.resource_id == resource_id
+                            && ack.agent_id == agent_id
+                            && ack.agent_epoch == agent_epoch =>
+                    {
+                        ack
+                    }
+                    _ => continue,
+                };
+                match proto::ArtifactTransferState::try_from(ack.state) {
+                    Ok(proto::ArtifactTransferState::Committed) => return Ok(ack),
+                    Ok(proto::ArtifactTransferState::Rejected)
+                    | Ok(proto::ArtifactTransferState::Expired) => {
+                        return Err(AgentError::Protocol(if ack.redacted_message.is_empty() {
+                            "agent rejected artifact transfer".to_owned()
+                        } else {
+                            ack.redacted_message
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| AgentError::Protocol("artifact transfer outcome is unknown".to_owned()))?
+    }
+
     /// Dispatches a fenced command and waits for its matching observation.
     /// The subscription is installed before dispatch so a fast agent response
     /// cannot be missed.
@@ -3633,6 +3696,41 @@ mod tests {
                     && received.sha256 == offer.sha256
                     && received.size_bytes == offer.size_bytes
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_waits_for_matching_commit_ack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(8);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (offer, data) = test_artifact_offer("node");
+        let publisher = registry.clone();
+        let expected = offer.clone();
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                receiver.recv().await;
+            }
+            publisher.publish_event(AgentEvent::ArtifactAck(proto::ArtifactAck {
+                transfer_id: expected.transfer_id,
+                command_id: expected.command_id,
+                operation_id: expected.operation_id,
+                resource_id: expected.resource_id,
+                agent_id: expected.agent_id,
+                agent_epoch: "epoch".to_owned(),
+                contiguous_bytes: expected.size_bytes,
+                next_chunk_index: expected.chunk_count,
+                state: proto::ArtifactTransferState::Committed as i32,
+                redacted_message: String::new(),
+            }));
+        });
+
+        let ack = registry
+            .dispatch_artifact_and_wait(offer, data, Duration::from_secs(1))
+            .await?;
+        assert_eq!(ack.state, proto::ArtifactTransferState::Committed as i32);
         Ok(())
     }
 
