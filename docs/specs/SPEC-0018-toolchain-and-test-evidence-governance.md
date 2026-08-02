@@ -12,6 +12,35 @@ An absent artifact is `missing`; a skipped or unavailable run is not `passed`.
 The compatibility manifest and its tests are deliberately outside this
 specification's change scope.
 
+## Bounded deep-evidence workflow
+
+The manually dispatchable and scheduled
+[`deep-evidence.yml`](../../.github/workflows/deep-evidence.yml) workflow is a
+portable, non-claiming evidence producer for issue #332. It has two independent
+jobs, each bounded by a job timeout and each retaining its metadata and logs for
+14 days:
+
+- coverage installs the exact `cargo-llvm-cov 0.6.16` release with `--locked`
+  and produces an LCOV artifact for the workspace with all features;
+- Miri installs the exact `nightly-2026-07-20` toolchain with the `miri`
+  component and runs only the bounded `o3k-domain` library target.
+
+Both jobs record the checked-out commit, `GITHUB_SHA`, complete compiler/Cargo
+versions, toolchain and lockfile digests, exact command, tool version, and
+redaction declaration. A successful producer records `result: passed` with
+`evidence_state: partial`, scoped strictly to artifact generation or bounded
+execution. It makes no API, compatibility, release, protected-runner, or human
+approval claim. A failed or unavailable producer records `result: failed` (or
+remains `not-run`) and `evidence_state: missing`; its final fail-closed step
+fails the job after artifact upload. No workflow step may promote such a result
+to a passing evidence state.
+An unsuccessful deep-evidence lane therefore remains a failed or missing
+producer result even when its diagnostic artifact was uploaded successfully.
+
+The workflow is intentionally not a required release gate and does not alter
+the protected-host evidence state. Its static contract is checked by
+`tests/deep-evidence-workflow.sh`.
+
 ## Toolchain policy
 
 - `rust-toolchain.toml` is the single source of the selected Rust channel and

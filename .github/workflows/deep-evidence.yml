@@ -1,0 +1,212 @@
+name: Deep portable evidence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 6'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-deep-evidence
+  cancel-in-progress: false
+
+env:
+  CARGO_LLVM_COV_VERSION: '0.6.16'
+  MIRI_TOOLCHAIN: nightly-2026-07-20
+
+jobs:
+  coverage:
+    name: Coverage artifact (non-claiming)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
+      - name: Install coverage prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libvirt-dev pkg-config python3
+      - name: Initialize source-bound metadata
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          mkdir -p target/deep-evidence/coverage
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          root = pathlib.Path.cwd()
+          def command(*args):
+              return subprocess.check_output(args, text=True).strip()
+          def digest(path):
+              return hashlib.sha256((root / path).read_bytes()).hexdigest()
+          record = {
+              "schema": "o3k.deep-evidence.v1",
+              "issue": "#332",
+              "lane": "coverage",
+              "claim_scope": "cargo-llvm-cov artifact generation only; no API, compatibility, release, or protected-host claim",
+              "evidence_state": "missing",
+              "result": "not-run",
+              "source_commit": command("git", "rev-parse", "HEAD"),
+              "github_sha": os.environ["GITHUB_SHA"],
+              "rustc": command("rustc", "--version", "--verbose"),
+              "cargo": command("cargo", "--version", "--verbose"),
+              "toolchain_file_sha256": digest("rust-toolchain.toml"),
+              "lockfile_sha256": digest("Cargo.lock"),
+              "cargo_llvm_cov_version": os.environ["CARGO_LLVM_COV_VERSION"],
+              "command": "cargo llvm-cov --workspace --all-features --lcov --output-path target/deep-evidence/coverage/lcov.info",
+              "redaction": "logs contain no credentials or provider payloads",
+          }
+          pathlib.Path("target/deep-evidence/coverage/metadata.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Install pinned cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --version "${CARGO_LLVM_COV_VERSION}" --locked
+      - name: Generate bounded coverage artifact
+        id: coverage
+        continue-on-error: true
+        run: |
+          set +e
+          cargo llvm-cov --workspace --all-features --lcov \
+            --output-path target/deep-evidence/coverage/lcov.info \
+            2>&1 | tee target/deep-evidence/coverage/coverage.log
+          status=${PIPESTATUS[0]}
+          python3 - "${status}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path("target/deep-evidence/coverage/metadata.json")
+          record = json.loads(path.read_text(encoding="utf-8"))
+          status = int(sys.argv[1])
+          record["result"] = "passed" if status == 0 else "failed"
+          record["evidence_state"] = "partial" if status == 0 else "missing"
+          record["exit_code"] = status
+          path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          exit "${status}"
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deep-evidence-coverage-${{ github.sha }}
+          path: target/deep-evidence/coverage/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Fail closed; never promote coverage failure
+        if: always()
+        env:
+          COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
+        run: |
+          test "${COVERAGE_OUTCOME}" = success
+          test -s target/deep-evidence/coverage/lcov.info
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          record = json.loads(pathlib.Path("target/deep-evidence/coverage/metadata.json").read_text())
+          assert record["result"] == "passed"
+          assert record["evidence_state"] == "partial"
+          assert record["exit_code"] == 0
+          PY
+
+  miri:
+    name: Miri lane (non-claiming)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Initialize source-bound metadata
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          mkdir -p target/deep-evidence/miri
+          rustup toolchain install "${MIRI_TOOLCHAIN}" --profile minimal --component miri
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          root = pathlib.Path.cwd()
+          def command(*args):
+              return subprocess.check_output(args, text=True).strip()
+          def digest(path):
+              return hashlib.sha256((root / path).read_bytes()).hexdigest()
+          record = {
+              "schema": "o3k.deep-evidence.v1",
+              "issue": "#332",
+              "lane": "miri",
+              "claim_scope": "bounded Miri execution of o3k-domain only; no API, compatibility, release, or protected-host claim",
+              "evidence_state": "missing",
+              "result": "not-run",
+              "source_commit": command("git", "rev-parse", "HEAD"),
+              "github_sha": os.environ["GITHUB_SHA"],
+              "miri_toolchain": os.environ["MIRI_TOOLCHAIN"],
+              "miri_rustc": command("rustup", "run", os.environ["MIRI_TOOLCHAIN"], "rustc", "--version", "--verbose"),
+              "cargo": command("cargo", "--version", "--verbose"),
+              "toolchain_file_sha256": digest("rust-toolchain.toml"),
+              "lockfile_sha256": digest("Cargo.lock"),
+              "command": "cargo +nightly-2026-07-20 miri test -p o3k-domain --lib",
+              "redaction": "logs contain no credentials or provider payloads",
+          }
+          pathlib.Path("target/deep-evidence/miri/metadata.json").write_text(
+              json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+      - name: Run bounded Miri target
+        id: miri
+        continue-on-error: true
+        run: |
+          set +e
+          cargo +"${MIRI_TOOLCHAIN}" miri test -p o3k-domain --lib \
+            2>&1 | tee target/deep-evidence/miri/miri.log
+          status=${PIPESTATUS[0]}
+          python3 - "${status}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path("target/deep-evidence/miri/metadata.json")
+          record = json.loads(path.read_text(encoding="utf-8"))
+          status = int(sys.argv[1])
+          record["result"] = "passed" if status == 0 else "failed"
+          record["evidence_state"] = "partial" if status == 0 else "missing"
+          record["exit_code"] = status
+          path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          exit "${status}"
+      - name: Upload Miri evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: deep-evidence-miri-${{ github.sha }}
+          path: target/deep-evidence/miri/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Fail closed; never promote Miri failure
+        if: always()
+        env:
+          MIRI_OUTCOME: ${{ steps.miri.outcome }}
+        run: |
+          test "${MIRI_OUTCOME}" = success
+          python3 - <<'PY'
+          import json
+          import pathlib
+
+          record = json.loads(pathlib.Path("target/deep-evidence/miri/metadata.json").read_text())
+          assert record["result"] == "passed"
+          assert record["evidence_state"] == "partial"
+          assert record["exit_code"] == 0
+          PY

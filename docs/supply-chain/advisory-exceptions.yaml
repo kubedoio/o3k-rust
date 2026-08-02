@@ -1,0 +1,14 @@
+schema_version: 1
+advisory_database:
+  repository: https://github.com/RustSec/advisory-db.git
+  commit: 84dd82689f285460d9b815c8e3271b33780f411e
+  fetch_mode: pinned
+exceptions:
+  - id: RUSTSEC-2023-0071
+    package: rsa
+    affected_version: 0.9.10
+    owner: O3K maintainers
+    rationale: >-
+      Retained only in the lockfile through SQLx's optional MySQL support;
+      this workspace enables SQLite only and cargo tree has no active RSA path.
+    review_trigger: Reconsider if another SQLx database feature is enabled.
