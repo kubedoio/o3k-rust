@@ -1184,12 +1184,15 @@ mod tests {
             name: "journal-test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
+            flavor_id: None,
+            disk_gib: None,
             image_id: None,
             key_name: None,
             keypair_id: None,
             network_ids: Vec::new(),
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "journal-test-key".to_owned(),
         }
     }

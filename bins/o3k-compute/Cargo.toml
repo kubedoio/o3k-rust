@@ -18,7 +18,9 @@ async-trait.workspace = true
 axum.workspace = true
 o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
 o3k-console = { path = "../../crates/o3k-console" }
+o3k-dhcp = { path = "../../crates/o3k-dhcp" }
 o3k-libvirt = { path = "../../crates/o3k-libvirt" }
+o3k-network = { path = "../../crates/o3k-network" }
 o3k-provider = { path = "../../crates/o3k-provider" }
 o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
 serde_json.workspace = true

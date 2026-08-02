@@ -358,6 +358,23 @@ impl SqliteStore {
         Self::connect(&url).await
     }
 
+    /// Lists all resources of one kind across projects for restart
+    /// reconciliation. Callers must apply their own authorization checks
+    /// before exposing the returned project-scoped records.
+    pub async fn list_resources_by_kind(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<ResourceRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE kind = ? ORDER BY id",
+        )
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(resource_from_row).collect()
+    }
+
     async fn verify_integrity(&self) -> Result<(), StoreError> {
         let result: String = sqlx::query_scalar("PRAGMA integrity_check")
             .fetch_one(&self.pool)

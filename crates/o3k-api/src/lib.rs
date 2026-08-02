@@ -20,7 +20,7 @@ use o3k_console::{ConsoleError, ConsoleService};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
-use o3k_provider::InstanceAction;
+use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
@@ -1161,8 +1161,10 @@ struct CreateServerRequest {
     #[serde(alias = "flavorRef")]
     flavor: Option<IdReference>,
     networks: Option<Vec<NetworkReference>>,
-    /// Recognized so an unsupported request cannot be silently dropped.
     config_drive: Option<bool>,
+    user_data: Option<String>,
+    vendor_data: Option<String>,
+    ssh_public_key: Option<String>,
     key_name: Option<String>,
 }
 #[derive(serde::Deserialize)]
@@ -1184,7 +1186,6 @@ struct NetworkReference {
     uuid: Option<String>,
     port: Option<String>,
 }
-
 #[derive(Serialize)]
 struct ServerEnvelope {
     server: ServerResponse,
@@ -1669,13 +1670,27 @@ async fn create_server(
             "invalid server request",
         );
     };
-    if body.server.config_drive == Some(true) {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "config-drive attachment is not supported by this profile",
-        );
-    }
+    let config_drive = if body.server.config_drive == Some(true) {
+        let Some(ssh_public_key) = body.server.ssh_public_key.clone() else {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "ssh_public_key is required when config_drive is enabled",
+            );
+        };
+        Some(ConfigDriveRequest {
+            user_data: body
+                .server
+                .user_data
+                .clone()
+                .unwrap_or_default()
+                .into_bytes(),
+            vendor_data: body.server.vendor_data.clone().map(String::into_bytes),
+            ssh_public_key,
+        })
+    } else {
+        None
+    };
     let Some(image) = body
         .server
         .image
@@ -1688,7 +1703,7 @@ async fn create_server(
         .server
         .flavor
         .map(IdReference::into_id)
-        .and_then(|reference| reference.parse::<uuid::Uuid>().ok())
+        .and_then(|reference| reference.parse().ok())
     else {
         return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "flavor is required");
     };
@@ -1769,6 +1784,7 @@ async fn create_server(
             flavor_id: flavor,
             network_ids,
             key_name: body.server.key_name,
+            config_drive,
             idempotency_key: idempotency,
         })
         .await
@@ -2080,19 +2096,18 @@ mod tests {
             "networks": [{"port": "550e8400-e29b-41d4-a716-446655440001"}]
         });
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
-        assert_eq!(
-            parsed.image.map(super::IdReference::into_id).as_deref(),
-            Some("image-id")
+        assert_eq!(parsed.config_drive, None);
+        assert!(
+            matches!(parsed.image, Some(super::IdReference::String(value)) if value == "image-id")
         );
-        assert_eq!(
-            parsed.flavor.map(super::IdReference::into_id).as_deref(),
-            Some("550e8400-e29b-41d4-a716-446655440000")
+        assert!(
+            matches!(parsed.flavor, Some(super::IdReference::String(value)) if value == "550e8400-e29b-41d4-a716-446655440000")
         );
         assert_eq!(
             parsed
                 .networks
                 .as_ref()
-                .and_then(|networks| networks[0].port.as_deref()),
+                .and_then(|items| items[0].port.as_deref()),
             Some("550e8400-e29b-41d4-a716-446655440001")
         );
         Ok(())

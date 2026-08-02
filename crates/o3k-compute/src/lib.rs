@@ -8,8 +8,8 @@ use o3k_compute_agent::{
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
-    InstanceAction, Operation, ProviderError,
+    Capabilities, ComputeProvider, ConfigDriveRequest, CreateInstanceRequest,
+    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
@@ -70,6 +70,7 @@ pub struct ServerCreateInput {
     pub flavor_id: Uuid,
     pub network_ids: Vec<String>,
     pub key_name: Option<String>,
+    pub config_drive: Option<ConfigDriveRequest>,
     pub idempotency_key: String,
 }
 
@@ -283,6 +284,76 @@ impl AgentComputeProvider {
         self
     }
 
+    /// Rebuilds the provider's volatile instance/binding projection from the
+    /// durable resource ledger after a daemon restart or agent reconnect.
+    /// Provider references and the currently authenticated agent epoch are
+    /// both required; stale or conflicting ownership evidence is rejected.
+    pub async fn rehydrate(&self) -> Result<(), ProviderError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let resources = store
+            .list_resources_by_kind("compute_instance")
+            .await
+            .map_err(|_| ProviderError::Retryable)?;
+        let mut instances = HashMap::new();
+        let mut bindings = HashMap::new();
+        for resource in resources {
+            if resource.observed_state.eq_ignore_ascii_case("DELETED") {
+                continue;
+            }
+            let Some(provider_id) = resource.provider_id.clone() else {
+                continue;
+            };
+            let reference = store
+                .get_provider_reference(resource.id, "agent")
+                .await
+                .map_err(|_| ProviderError::Conflict)?;
+            if reference.provider_resource_id != provider_id {
+                return Err(ProviderError::Conflict);
+            }
+            let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ProviderError::Conflict)?;
+            let Some(agent_id) = request.placement_provider_id.as_deref() else {
+                return Err(ProviderError::Conflict);
+            };
+            let Some(agent) = self.registry.snapshot(agent_id).await else {
+                continue;
+            };
+            if agent.agent_epoch.trim().is_empty() {
+                return Err(ProviderError::Conflict);
+            }
+            let state = instance_state_from_observed(&resource.observed_state)
+                .ok_or(ProviderError::Conflict)?;
+            instances.insert(
+                provider_id.clone(),
+                Instance {
+                    provider_instance_id: provider_id.clone(),
+                    o3k_server_id: resource.id,
+                    state,
+                    observed_message: None,
+                },
+            );
+            bindings.insert(
+                provider_id,
+                AgentBinding {
+                    agent_id: agent.agent_id,
+                    agent_epoch: agent.agent_epoch,
+                },
+            );
+        }
+        let mut state = self.state.write().await;
+        state
+            .instances
+            .retain(|provider_id, _| instances.contains_key(provider_id));
+        state
+            .bindings
+            .retain(|provider_id, _| bindings.contains_key(provider_id));
+        state.instances.extend(instances);
+        state.bindings.extend(bindings);
+        Ok(())
+    }
+
     async fn selected_agent(&self, provider_id: &str) -> Result<NodeSnapshot, ProviderError> {
         let snapshot = self
             .registry
@@ -417,13 +488,28 @@ async fn recover_artifact_transfers(
         let Some(agent) = registry.snapshot(&transfer.agent_id).await else {
             continue;
         };
-        if agent.agent_epoch != transfer.agent_epoch {
-            tracing::warn!(
-                transfer_id = %transfer.transfer_id,
-                "artifact transfer recovery skipped across an agent epoch change"
-            );
-            continue;
-        }
+        let transfer = if agent.agent_epoch != transfer.agent_epoch {
+            match store
+                .rebind_artifact_transfer_epoch(
+                    &transfer.transfer_id,
+                    &transfer.agent_epoch,
+                    &agent.agent_epoch,
+                )
+                .await
+            {
+                Ok(transfer) => transfer,
+                Err(error) => {
+                    tracing::warn!(
+                        transfer_id = %transfer.transfer_id,
+                        %error,
+                        "artifact transfer recovery could not rebind agent epoch"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            transfer
+        };
         let resource = match store.get_resource(transfer.resource_id).await {
             Ok(resource) => resource,
             Err(error) => {
@@ -484,8 +570,12 @@ async fn recover_artifact_transfers(
             chunk_count: transfer.chunk_count as u32,
             expires_at_unix_ms: unix_ms_after(timeout),
         };
+        let Ok(start_chunk_index) = u32::try_from(transfer.next_chunk_index) else {
+            tracing::warn!(transfer_id = %transfer.transfer_id, "artifact transfer resume index is invalid");
+            continue;
+        };
         match registry
-            .dispatch_artifact_and_wait(offer, artifact.bytes, timeout)
+            .dispatch_artifact_and_wait_from(offer, artifact.bytes, start_chunk_index, timeout)
             .await
         {
             Ok(_) => {
@@ -607,6 +697,82 @@ fn instance_state_from_proto(state: i32) -> Option<o3k_provider::InstanceState> 
         value if value == WireState::Error as i32 => Some(o3k_provider::InstanceState::Error),
         _ => None,
     }
+}
+
+fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceState> {
+    match value.to_ascii_uppercase().as_str() {
+        "ACTIVE" | "RUNNING" => Some(o3k_provider::InstanceState::Running),
+        "SHUTOFF" | "STOPPED" => Some(o3k_provider::InstanceState::Stopped),
+        "BUILD" | "CREATING" | "REQUESTED" => Some(o3k_provider::InstanceState::Creating),
+        "DELETING" => Some(o3k_provider::InstanceState::Deleting),
+        "DELETED" => Some(o3k_provider::InstanceState::Deleted),
+        "ERROR" => Some(o3k_provider::InstanceState::Error),
+        _ => None,
+    }
+}
+
+async fn apply_artifact_status(
+    store: &SqliteStore,
+    status: &agent_proto::ArtifactStatus,
+) -> Result<(), StoreError> {
+    let transfer = store.get_artifact_transfer(&status.transfer_id).await?;
+    let operation_id = Uuid::parse_str(&status.operation_id).map_err(|_| {
+        StoreError::ArtifactTransferConflict("invalid operation identity".to_owned())
+    })?;
+    let resource_id = Uuid::parse_str(&status.resource_id).map_err(|_| {
+        StoreError::ArtifactTransferConflict("invalid resource identity".to_owned())
+    })?;
+    if transfer.command_id != status.command_id
+        || transfer.operation_id != operation_id
+        || transfer.resource_id != resource_id
+        || transfer.agent_id != status.agent_id
+    {
+        return Err(StoreError::ArtifactTransferConflict(
+            "artifact status identity conflicts with durable state".to_owned(),
+        ));
+    }
+    let state = match agent_proto::ArtifactTransferState::try_from(status.state) {
+        Ok(agent_proto::ArtifactTransferState::Offered) => ArtifactTransferState::Offered,
+        Ok(agent_proto::ArtifactTransferState::Receiving) => ArtifactTransferState::Receiving,
+        Ok(agent_proto::ArtifactTransferState::Committed) => ArtifactTransferState::Committed,
+        Ok(agent_proto::ArtifactTransferState::Rejected) => ArtifactTransferState::Rejected,
+        Ok(agent_proto::ArtifactTransferState::Expired) => ArtifactTransferState::Expired,
+        _ => {
+            return Err(StoreError::ArtifactTransferConflict(
+                "artifact status state is not recoverable".to_owned(),
+            ));
+        }
+    };
+    if transfer.agent_epoch != status.agent_epoch {
+        if matches!(
+            transfer.state,
+            ArtifactTransferState::Committed
+                | ArtifactTransferState::Rejected
+                | ArtifactTransferState::Expired
+        ) {
+            return Err(StoreError::ArtifactTransferEpochConflict);
+        }
+        store
+            .rebind_artifact_transfer_epoch(
+                &transfer.transfer_id,
+                &transfer.agent_epoch,
+                &status.agent_epoch,
+            )
+            .await?;
+    }
+    store
+        .update_artifact_transfer(
+            &status.transfer_id,
+            &status.agent_epoch,
+            ArtifactTransferUpdate {
+                state,
+                contiguous_bytes: status.contiguous_bytes,
+                next_chunk_index: u64::from(status.next_chunk_index),
+                retry_count: transfer.retry_count,
+            },
+        )
+        .await
+        .map(|_| ())
 }
 
 async fn apply_agent_provider_event(
@@ -748,8 +914,31 @@ async fn apply_agent_provider_event(
                 }
             }
         }
-        o3k_compute_agent::AgentEvent::ArtifactAck(_)
-        | o3k_compute_agent::AgentEvent::ArtifactStatus(_) => {}
+        o3k_compute_agent::AgentEvent::ArtifactAck(ack) => {
+            if let Some(store) = store {
+                let status = agent_proto::ArtifactStatus {
+                    transfer_id: ack.transfer_id,
+                    command_id: ack.command_id,
+                    operation_id: ack.operation_id,
+                    resource_id: ack.resource_id,
+                    agent_id: ack.agent_id,
+                    agent_epoch: ack.agent_epoch,
+                    contiguous_bytes: ack.contiguous_bytes,
+                    next_chunk_index: ack.next_chunk_index,
+                    state: ack.state,
+                };
+                if let Err(error) = apply_artifact_status(store, &status).await {
+                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact acknowledgement rejected");
+                }
+            }
+        }
+        o3k_compute_agent::AgentEvent::ArtifactStatus(status) => {
+            if let Some(store) = store {
+                if let Err(error) = apply_artifact_status(store, &status).await {
+                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
+                }
+            }
+        }
     }
 }
 
@@ -888,6 +1077,15 @@ impl ComputeProvider for AgentComputeProvider {
             .as_deref()
             .ok_or(ProviderError::InvalidRequest)?;
         let agent = self.selected_agent(provider_id).await?;
+        if request.config_drive.is_some()
+            && !agent
+                .capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "config_drive" && flag.supported)
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
         let resolved = self.resolver.resolve(&request, &agent).await?;
         let image_id = request
             .image_id
@@ -897,6 +1095,7 @@ impl ComputeProvider for AgentComputeProvider {
         let command = build_create_command(CreateCommandSpec {
             agent_id: agent.agent_id.clone(),
             agent_epoch: agent.agent_epoch.clone(),
+            project_id: request.project_id.clone(),
             operation_id: request.operation_id.to_string(),
             resource_id: request.o3k_server_id.to_string(),
             idempotency_key: request.idempotency_key.clone(),
@@ -1098,6 +1297,7 @@ impl ComputeProvider for AgentComputeProvider {
     }
 
     async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
+        self.rehydrate().await?;
         self.state
             .read()
             .await
@@ -1111,6 +1311,7 @@ impl ComputeProvider for AgentComputeProvider {
         &self,
         request: DeleteInstanceRequest,
     ) -> Result<Operation, ProviderError> {
+        self.rehydrate().await?;
         let binding = self
             .state
             .read()
@@ -1141,6 +1342,7 @@ impl ComputeProvider for AgentComputeProvider {
         operation_id: Uuid,
         _idempotency_key: &str,
     ) -> Result<Operation, ProviderError> {
+        self.rehydrate().await?;
         let binding = self
             .state
             .read()
@@ -1556,6 +1758,7 @@ impl ComputeService {
             flavor_id,
             network_ids,
             key_name: None,
+            config_drive: None,
             idempotency_key,
         })
         .await
@@ -1573,6 +1776,7 @@ impl ComputeService {
             flavor_id,
             network_ids,
             key_name,
+            config_drive,
             idempotency_key,
         } = input;
         if name.trim().is_empty()
@@ -1611,12 +1815,15 @@ impl ComputeService {
             name: name.clone(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: Some(flavor.id),
+            disk_gib: Some(flavor.disk_gib),
             image_id: Some(image_id.clone()),
             key_name: key_name.clone(),
             keypair_id: keypair.as_ref().map(|value| value.id),
             network_ids: network_ids.clone(),
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: config_drive.clone(),
             idempotency_key: idempotency_key.clone(),
         };
         match self.store.get_resource(server_id).await {
@@ -2143,10 +2350,13 @@ fn server_from_resource(
 ) -> Result<Server, ()> {
     let request: CreateInstanceRequest =
         serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
-    let flavor = flavors
-        .iter()
-        .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
-        .ok_or(())?;
+    let flavor = match request.flavor_id {
+        Some(id) => flavors.iter().find(|flavor| flavor.id == id).ok_or(())?,
+        None => flavors
+            .iter()
+            .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
+            .ok_or(())?,
+    };
     Ok(Server {
         id: resource.id,
         name: request.name,
@@ -2254,6 +2464,10 @@ mod tests {
                 .flavor_id,
             flavor.id
         );
+        let intent = reopened.store.get_resource(server.id).await?;
+        let intent: CreateInstanceRequest = serde_json::from_str(&intent.desired_state)?;
+        assert_eq!(intent.flavor_id, Some(flavor.id));
+        assert_eq!(intent.disk_gib, Some(flavor.disk_gib));
         assert!(matches!(
             reopened.delete_flavor("project-a", flavor.id).await,
             Err(ComputeError::Conflict)
@@ -2439,6 +2653,7 @@ mod tests {
                     flavor_id: service.flavors()[0].id,
                     network_ids: vec!["network".to_owned()],
                     key_name: Some("missing".to_owned()),
+                    config_drive: None,
                     idempotency_key: "request".to_owned(),
                 })
                 .await,
@@ -2453,6 +2668,7 @@ mod tests {
                 flavor_id: service.flavors()[0].id,
                 network_ids: vec!["network".to_owned()],
                 key_name: Some("test-key".to_owned()),
+                config_drive: None,
                 idempotency_key: "request-2".to_owned(),
             })
             .await?;
@@ -2475,6 +2691,7 @@ mod tests {
                     flavor_id: service.flavors()[0].id,
                     network_ids: vec!["network".to_owned()],
                     key_name: None,
+                    config_drive: None,
                     idempotency_key: "request-2".to_owned(),
                 })
                 .await,
@@ -2503,12 +2720,15 @@ mod tests {
             name: "agent-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "agent-forwarding".to_owned(),
         };
         service
@@ -2555,12 +2775,15 @@ mod tests {
             name: "observed-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "agent-observation-forwarding".to_owned(),
         };
         service
@@ -2926,12 +3149,15 @@ mod tests {
             name: "existing-name".to_owned(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: Some(flavor.id),
+            disk_gib: Some(flavor.disk_gib),
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: idempotency_key.to_owned(),
         };
         service
@@ -3259,6 +3485,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_provider_rehydrates_instance_binding_from_durable_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&registered_agent("node-a")).await?;
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let server_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: server_id,
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: Some(Uuid::from_u128(1)),
+            disk_gib: Some(10),
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request)?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("domain-a".to_owned()),
+            })
+            .await?;
+        store
+            .attach_provider_reference(&o3k_store::ProviderReference {
+                resource_id: server_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-a".to_owned(),
+            })
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry,
+            Arc::new(UnconfiguredResolvedCreateResolver),
+            Some(store),
+        );
+        let instance = provider.get_instance("domain-a").await?;
+        assert_eq!(instance.o3k_server_id, server_id);
+        assert_eq!(instance.state, o3k_provider::InstanceState::Running);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn agent_provider_requires_placement_and_never_invents_resolved_inputs()
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
@@ -3272,12 +3554,15 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
             network_ids: vec!["port-a".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "request-a".to_owned(),
         };
         assert_eq!(
@@ -3301,12 +3586,55 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
             network_ids: vec!["port-a".to_owned()],
             placement_provider_id: Some("node-a".to_owned()),
             placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        assert_eq!(
+            provider.create_instance(request).await,
+            Err(ProviderError::InvalidRequest)
+        );
+        assert_eq!(
+            provider.get_operation(operation_id).await,
+            Err(ProviderError::NotFound)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_provider_rejects_config_drive_without_backend_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&registered_agent("node-a")).await?;
+        let provider = AgentComputeProvider::new(registry, Arc::new(TestResolvedCreateResolver));
+        let operation_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: Some(ConfigDriveRequest {
+                user_data: b"#cloud-config\n".to_vec(),
+                vendor_data: None,
+                ssh_public_key: "ssh-ed25519 AAAA".to_owned(),
+            }),
             idempotency_key: "request-a".to_owned(),
         };
         assert_eq!(
@@ -3404,6 +3732,103 @@ mod tests {
             provider.get_operation(operation_id).await?.state,
             o3k_provider::OperationState::Retryable
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_status_rebinds_epoch_and_rejects_identity_conflicts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "BUILD".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "compute_create".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        store
+            .insert_artifact_transfer(&ArtifactTransferRecord {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id,
+                resource_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                artifact_id: "artifact-1".to_owned(),
+                artifact_kind: "image_base".to_owned(),
+                sha256: sha256.to_owned(),
+                size_bytes: 8,
+                format: "raw".to_owned(),
+                chunk_size_bytes: 4,
+                chunk_count: 2,
+                state: ArtifactTransferState::Offered,
+                contiguous_bytes: 0,
+                next_chunk_index: 0,
+                retry_count: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .await?;
+        let state = Arc::new(RwLock::new(AgentProviderState::default()));
+        apply_agent_provider_event(
+            &state,
+            Some(&store),
+            o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id: operation_id.to_string(),
+                resource_id: resource_id.to_string(),
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                contiguous_bytes: 4,
+                next_chunk_index: 1,
+                state: agent_proto::ArtifactTransferState::Receiving as i32,
+            }),
+        )
+        .await;
+        let transfer = store.get_artifact_transfer("transfer-1").await?;
+        assert_eq!(transfer.agent_epoch, "epoch-2");
+        assert_eq!(transfer.state, ArtifactTransferState::Receiving);
+        assert_eq!(transfer.contiguous_bytes, 4);
+
+        apply_agent_provider_event(
+            &state,
+            Some(&store),
+            o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "different-command".to_owned(),
+                operation_id: operation_id.to_string(),
+                resource_id: resource_id.to_string(),
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                contiguous_bytes: 8,
+                next_chunk_index: 2,
+                state: agent_proto::ArtifactTransferState::Committed as i32,
+            }),
+        )
+        .await;
+        let unchanged = store.get_artifact_transfer("transfer-1").await?;
+        assert_eq!(unchanged.state, ArtifactTransferState::Receiving);
+        assert_eq!(unchanged.contiguous_bytes, 4);
         Ok(())
     }
 }

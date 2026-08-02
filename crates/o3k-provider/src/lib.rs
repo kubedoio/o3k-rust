@@ -15,6 +15,18 @@ pub struct Capabilities {
     pub capabilities: Vec<String>,
 }
 
+/// Optional, caller-provided inputs for generating a config-drive image.
+///
+/// This is part of the durable create intent, but API acceptance and
+/// config-drive materialization remain outside this contract for now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigDriveRequest {
+    pub user_data: Vec<u8>,
+    #[serde(default)]
+    pub vendor_data: Option<Vec<u8>>,
+    pub ssh_public_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateInstanceRequest {
     pub operation_id: Uuid,
@@ -24,6 +36,12 @@ pub struct CreateInstanceRequest {
     pub name: String,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// The selected flavor is optional for compatibility with pre-flavor-intent records.
+    #[serde(default)]
+    pub flavor_id: Option<Uuid>,
+    /// Disk size from the selected flavor, retained with the create intent.
+    #[serde(default)]
+    pub disk_gib: Option<u64>,
     pub image_id: Option<String>,
     #[serde(default)]
     pub key_name: Option<String>,
@@ -35,6 +53,8 @@ pub struct CreateInstanceRequest {
     pub placement_provider_id: Option<String>,
     #[serde(default)]
     pub placement_allocation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_drive: Option<ConfigDriveRequest>,
     pub idempotency_key: String,
 }
 
@@ -274,7 +294,7 @@ impl FakeComputeProvider {
 
     fn create_fingerprint(request: &CreateInstanceRequest) -> String {
         format!(
-            "{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}",
+            "{}:{}:{}:{}:{}:{:?}:{:?}:{:?}:{:?}:{:?}",
             request.o3k_server_id,
             request.project_id,
             request.name,
@@ -283,7 +303,8 @@ impl FakeComputeProvider {
             request.image_id,
             request.network_ids,
             request.placement_provider_id,
-            request.placement_allocation_id
+            request.placement_allocation_id,
+            request.config_drive
         )
     }
 
@@ -547,12 +568,15 @@ pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(
         name: "conformance".to_owned(),
         vcpus: 1,
         memory_mib: 128,
+        flavor_id: None,
+        disk_gib: None,
         image_id: None,
         key_name: None,
         keypair_id: None,
         network_ids: Vec::new(),
         placement_provider_id: None,
         placement_allocation_id: None,
+        config_drive: None,
         idempotency_key: format!("conformance-{}", Uuid::now_v7()),
     };
     let operation = provider.create_instance(request.clone()).await?;
@@ -581,12 +605,15 @@ mod tests {
             name: "test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
+            flavor_id: None,
+            disk_gib: None,
             image_id: None,
             key_name: None,
             keypair_id: None,
             network_ids: Vec::new(),
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: key.to_owned(),
         }
     }
@@ -608,6 +635,37 @@ mod tests {
             })
             .await?;
         assert_eq!(deleted.state, OperationState::Succeeded);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_drive_changes_idempotency_fingerprint() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let create = request("config-drive");
+        provider.create_instance(create.clone()).await?;
+        let mut changed = create;
+        changed.config_drive = Some(ConfigDriveRequest {
+            user_data: b"#cloud-config\n".to_vec(),
+            vendor_data: None,
+            ssh_public_key: "ssh-ed25519 AAAA test".to_owned(),
+        });
+        assert_eq!(
+            provider.create_instance(changed).await,
+            Err(ProviderError::Conflict)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn disabled_config_drive_is_omitted_and_legacy_json_defaults_to_none()
+    -> Result<(), serde_json::Error> {
+        let request = request("serde-config-drive");
+        let encoded = serde_json::to_value(&request)?;
+        assert!(encoded.get("config_drive").is_none());
+        let decoded: CreateInstanceRequest = serde_json::from_value(encoded)?;
+        assert_eq!(decoded.config_drive, None);
+        assert_eq!(decoded.flavor_id, None);
+        assert_eq!(decoded.disk_gib, None);
         Ok(())
     }
 
