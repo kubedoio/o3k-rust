@@ -132,21 +132,34 @@ impl Scheduler {
             (DISK_GB.to_owned(), flavor.disk_gb),
         ]);
         for candidate in candidates {
-            match self.placement.allocate(
+            let intent = match self.placement.begin_allocation_intent(
                 &candidate.id,
                 &format!("allocation-{server_id}"),
                 server_id,
                 resources.clone(),
-                candidate.generation,
             ) {
+                Ok(intent) => intent,
+                Err(error) => return Err(SchedulerError::Placement(error)),
+            };
+            match self
+                .placement
+                .commit_allocation_intent(&intent, candidate.generation)
+            {
                 Ok(allocation) => {
                     return Ok(ScheduleDecision {
                         provider_id: candidate.id,
-                        allocation_id: format!("allocation-{server_id}"),
+                        allocation_id: intent.allocation_id,
                         allocation,
                     });
                 }
-                Err(PlacementError::StaleGeneration | PlacementError::OverCapacity) => continue,
+                Err(
+                    PlacementError::StaleGeneration
+                    | PlacementError::OverCapacity
+                    | PlacementError::NotSchedulable,
+                ) => {
+                    self.placement.abandon_allocation_intent(&intent)?;
+                    continue;
+                }
                 Err(error) => return Err(SchedulerError::Placement(error)),
             }
         }
@@ -212,6 +225,7 @@ mod tests {
             },
         )?;
         assert_eq!(decision.provider_id, "node-a");
+        assert_eq!(placement.allocation_intent(&decision.allocation_id)?, None);
         scheduler.release_terminal(&decision)?;
         assert_eq!(placement.provider("node-a")?.allocations.len(), 0);
         std::fs::remove_dir_all(root)

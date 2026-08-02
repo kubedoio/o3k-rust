@@ -229,6 +229,22 @@ impl PlacementLedger {
         Ok(())
     }
 
+    /// Abandons one exact pending intent after a candidate reservation could
+    /// not be committed. The identity check prevents a retry from deleting a
+    /// newer request that reused the same allocation key.
+    pub fn abandon_allocation_intent(
+        &self,
+        intent: &AllocationIntent,
+    ) -> Result<(), PlacementError> {
+        if let Some(stored) = self.allocation_intent(&intent.allocation_id)? {
+            if stored != *intent {
+                return Err(PlacementError::InvalidAllocation);
+            }
+            self.clear_allocation_intent(&intent.allocation_id)?;
+        }
+        Ok(())
+    }
+
     /// Release allocations and pending intents whose consumers are absent
     /// from the durable control-plane resource set supplied by the caller.
     /// The result is deterministic and the changes are persisted before the
