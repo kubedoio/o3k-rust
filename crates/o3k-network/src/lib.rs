@@ -762,10 +762,10 @@ impl HostNetworkManager {
     /// intentionally not mutated.
     pub fn ensure_gateway(&self, gateway: GatewaySpec) -> Result<(), HostNetworkError> {
         validate_gateway(gateway)?;
-        if let Some(recorded) = self.recorded_gateway()? {
-            if recorded != gateway {
-                return Err(HostNetworkError::OwnershipConflict);
-            }
+        if let Some(recorded) = self.recorded_gateway()?
+            && recorded != gateway
+        {
+            return Err(HostNetworkError::OwnershipConflict);
         }
         let bridge_created = self.ensure_bridge_with_ownership()?;
         if !bridge_created && !self.bridge_is_owned() {

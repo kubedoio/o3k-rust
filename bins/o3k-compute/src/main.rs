@@ -91,24 +91,24 @@ impl DhcpRuntime {
             interface: self.interface.clone(),
             lease_seconds: 3600,
         };
-        if let Some(existing) = self.service.configuration() {
-            if existing != &expected {
-                return Err(AgentError::Protocol(
-                    "the managed bridge already has a different DHCP subnet".to_owned(),
-                ));
-            }
+        if let Some(existing) = self.service.configuration()
+            && existing != &expected
+        {
+            return Err(AgentError::Protocol(
+                "the managed bridge already has a different DHCP subnet".to_owned(),
+            ));
         }
         for attachment in attachments {
             let address: Ipv4Addr = attachment
                 .fixed_ipv4
                 .parse()
                 .map_err(|_| AgentError::Protocol("DHCP fixed address is invalid".to_owned()))?;
-            if let Some(existing) = self.service.binding(&attachment.port_id) {
-                if existing.mac != attachment.mac || existing.address != address {
-                    return Err(AgentError::Protocol(
-                        "DHCP port binding conflicts with durable state".to_owned(),
-                    ));
-                }
+            if let Some(existing) = self.service.binding(&attachment.port_id)
+                && (existing.mac != attachment.mac || existing.address != address)
+            {
+                return Err(AgentError::Protocol(
+                    "DHCP port binding conflicts with durable state".to_owned(),
+                ));
             }
         }
         Ok(())

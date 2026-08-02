@@ -983,10 +983,10 @@ async fn apply_agent_provider_event(
             }
         }
         o3k_compute_agent::AgentEvent::ArtifactStatus(status) => {
-            if let Some(store) = store {
-                if let Err(error) = apply_artifact_status(store, &status).await {
-                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
-                }
+            if let Some(store) = store
+                && let Err(error) = apply_artifact_status(store, &status).await
+            {
+                tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
             }
         }
     }
