@@ -8,8 +8,8 @@ use o3k_compute_agent::{
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
-    InstanceAction, Operation, ProviderError,
+    Capabilities, ComputeProvider, ConfigDriveRequest, CreateInstanceRequest,
+    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
@@ -70,6 +70,7 @@ pub struct ServerCreateInput {
     pub flavor_id: Uuid,
     pub network_ids: Vec<String>,
     pub key_name: Option<String>,
+    pub config_drive: Option<ConfigDriveRequest>,
     pub idempotency_key: String,
 }
 
@@ -1400,6 +1401,7 @@ impl ComputeService {
             flavor_id,
             network_ids,
             key_name: None,
+            config_drive: None,
             idempotency_key,
         })
         .await
@@ -1417,6 +1419,7 @@ impl ComputeService {
             flavor_id,
             network_ids,
             key_name,
+            config_drive,
             idempotency_key,
         } = input;
         if name.trim().is_empty()
@@ -1461,6 +1464,7 @@ impl ComputeService {
             network_ids: network_ids.clone(),
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: config_drive.clone(),
             idempotency_key: idempotency_key.clone(),
         };
         match self.store.get_resource(server_id).await {
@@ -2283,6 +2287,7 @@ mod tests {
                     flavor_id: service.flavors()[0].id,
                     network_ids: vec!["network".to_owned()],
                     key_name: Some("missing".to_owned()),
+                    config_drive: None,
                     idempotency_key: "request".to_owned(),
                 })
                 .await,
@@ -2297,6 +2302,7 @@ mod tests {
                 flavor_id: service.flavors()[0].id,
                 network_ids: vec!["network".to_owned()],
                 key_name: Some("test-key".to_owned()),
+                config_drive: None,
                 idempotency_key: "request-2".to_owned(),
             })
             .await?;
@@ -2319,6 +2325,7 @@ mod tests {
                     flavor_id: service.flavors()[0].id,
                     network_ids: vec!["network".to_owned()],
                     key_name: None,
+                    config_drive: None,
                     idempotency_key: "request-2".to_owned(),
                 })
                 .await,
@@ -2353,6 +2360,7 @@ mod tests {
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "agent-forwarding".to_owned(),
         };
         service
@@ -2405,6 +2413,7 @@ mod tests {
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "agent-observation-forwarding".to_owned(),
         };
         service
@@ -2776,6 +2785,7 @@ mod tests {
             network_ids: vec!["network-1".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: idempotency_key.to_owned(),
         };
         service
@@ -3120,6 +3130,7 @@ mod tests {
             network_ids: vec!["port-a".to_owned()],
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: "request-a".to_owned(),
         };
         assert_eq!(
@@ -3149,6 +3160,7 @@ mod tests {
             network_ids: vec!["port-a".to_owned()],
             placement_provider_id: Some("node-a".to_owned()),
             placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
             idempotency_key: "request-a".to_owned(),
         };
         assert_eq!(

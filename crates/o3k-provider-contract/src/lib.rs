@@ -52,6 +52,7 @@ pub mod mapping {
             network_ids: request.network_ids,
             placement_provider_id: None,
             placement_allocation_id: None,
+            config_drive: None,
             idempotency_key: request.idempotency_key,
         })
     }
