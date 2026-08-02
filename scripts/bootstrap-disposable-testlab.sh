@@ -34,6 +34,7 @@ O3KD_READY=false
 COMPUTE_READY=false
 ACCOUNT_CREATED=false
 GROUP_CREATED=false
+SUPPLEMENTARY_GROUPS_ADDED=false
 FAIL_REASON=bootstrap_failed
 
 fail() { FAIL_REASON="$1"; echo "disposable TestLab bootstrap failed: $1" >&2; exit 1; }
@@ -89,6 +90,23 @@ remove_created_identity() {
   ' _ "$ACCOUNT_CREATED" "$GROUP_CREATED"
 }
 
+remove_added_supplementary_groups() {
+  [[ "$SUPPLEMENTARY_GROUPS_ADDED" == true ]] || return 0
+  sudo -n test -f "$STATE_ROOT/.o3k-supplementary-groups-added" || return 0
+  sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+    set -euo pipefail
+    while IFS= read -r group; do
+      [[ -n "$group" ]] || continue
+      getent group "$group" >/dev/null 2>&1 || continue
+      id o3k >/dev/null 2>&1 || continue
+      if id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
+        gpasswd --delete o3k "$group" >/dev/null
+      fi
+    done <"$1"
+  ' _ "$STATE_ROOT/.o3k-supplementary-groups-added"
+  SUPPLEMENTARY_GROUPS_ADDED=false
+}
+
 write_result() {
   local status="$1" reason="$2"
   mkdir -p "$ARTIFACT_DIR"
@@ -119,6 +137,7 @@ failure_cleanup() {
     [[ -z "$COMPUTE_PID" ]] || stop_owned_process "$COMPUTE_PID" o3k-compute || cleanup_failed=true
     [[ -z "$O3KD_PID" ]] || stop_owned_process "$O3KD_PID" o3kd || cleanup_failed=true
     if [[ "$cleanup_failed" == false ]]; then
+      remove_added_supplementary_groups 2>/dev/null || true
       if [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
         && -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
         && sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" 2>/dev/null; then
@@ -141,7 +160,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -266,6 +285,28 @@ if [[ "$GROUP_CREATED" == true ]]; then
   printf 'o3k-disposable-group-v1\n' >"$STATE_ROOT/.o3k-group-created"
   chmod 0600 "$STATE_ROOT/.o3k-group-created"
 fi
+SUPPLEMENTARY_GROUPS_ADDED=true
+sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+  set -euo pipefail
+  for group in libvirt kvm; do
+    getent group "$group" >/dev/null 2>&1 \
+      || { echo "required libvirt access group is unavailable: $group" >&2; exit 1; }
+  done
+  : >"$1"
+  chmod 0600 "$1"
+  for group in libvirt kvm; do
+    if ! id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
+      usermod --append --groups "$group" o3k
+      printf "%s\n" "$group" >>"$1"
+    fi
+  done
+' _ "$STATE_ROOT/.o3k-supplementary-groups-added" \
+  || fail "cannot grant o3k access to libvirt and KVM"
+if sudo -n test -s "$STATE_ROOT/.o3k-supplementary-groups-added"; then
+  SUPPLEMENTARY_GROUPS_ADDED=true
+else
+  sudo -n rm -f -- "$STATE_ROOT/.o3k-supplementary-groups-added"
+fi
 command -v genisoimage >/dev/null 2>&1 || fail "genisoimage is unavailable after dependency setup"
 command -v ssh-keygen >/dev/null 2>&1 || fail "ssh-keygen is unavailable after dependency setup"
 python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable after dependency setup"
@@ -375,6 +416,8 @@ for _ in $(seq 1 30); do
 done
 curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 \
   || fail "o3k-compute health endpoint did not become ready"
+curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" >/dev/null 2>&1 \
+  || fail "o3k-compute libvirt/control-plane readiness did not become ready"
 COMPUTE_READY=true
 else
   echo "reusing authenticated disposable TestLab for run ${RUN_ID}"

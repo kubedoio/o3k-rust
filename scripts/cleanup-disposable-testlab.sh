@@ -8,6 +8,7 @@ ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 [[ "$RUNNER_TEMP" == /* && "$RUNNER_TEMP" != *..* && -d "$RUNNER_TEMP" && ! -L "$RUNNER_TEMP" ]] \
   || { echo "cleanup: runner temp path is unsafe" >&2; exit 1; }
 command -v realpath >/dev/null 2>&1 || { echo "cleanup: realpath is unavailable" >&2; exit 1; }
+command -v gpasswd >/dev/null 2>&1 || { echo "cleanup: gpasswd is unavailable" >&2; exit 1; }
 RUNNER_TEMP="$(realpath -e -- "$RUNNER_TEMP")"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
   || { echo "cleanup: account lock directory is unavailable" >&2; exit 1; }
@@ -95,10 +96,30 @@ case "$state_metadata" in
 esac
 account_created=false
 group_created=false
+supplementary_groups_added=false
 sudo -n grep -Fqx 'o3k-disposable-account-v1' "$STATE_ROOT/.o3k-account-created" 2>/dev/null \
   && account_created=true
 sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/dev/null \
   && group_created=true
+sudo -n test -s "$STATE_ROOT/.o3k-supplementary-groups-added" \
+  && supplementary_groups_added=true
+
+remove_added_supplementary_groups() {
+  [[ "$supplementary_groups_added" == true ]] || return 0
+  sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
+    set -euo pipefail
+    while IFS= read -r group; do
+      [[ -n "$group" ]] || continue
+      getent group "$group" >/dev/null 2>&1 || continue
+      id o3k >/dev/null 2>&1 || continue
+      if id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
+        gpasswd --delete o3k "$group" >/dev/null
+      fi
+    done <"$1"
+  ' _ "$STATE_ROOT/.o3k-supplementary-groups-added" \
+    || { echo "cleanup: cannot restore o3k supplementary groups" >&2; return 1; }
+  supplementary_groups_added=false
+}
 
 process_matches() {
   local pid="$1" binary="$2" expected executable
@@ -165,6 +186,7 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 [[ "$alive" == false ]] || { echo "cleanup: service did not stop" >&2; exit 1; }
+remove_added_supplementary_groups || exit 1
 if [[ "$account_created" == true || "$group_created" == true ]]; then
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     set -euo pipefail
