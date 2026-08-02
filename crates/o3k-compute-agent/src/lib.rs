@@ -50,7 +50,7 @@ mod artifact;
 mod config_drive;
 mod image;
 pub use artifact::{
-    ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
+    ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery, MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_CHUNK_BYTES,
 };
 pub use config_drive::{
