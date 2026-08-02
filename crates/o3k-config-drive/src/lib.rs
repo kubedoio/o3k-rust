@@ -1,8 +1,8 @@
 //! Deterministic, filesystem-backed OpenStack config-drive content.
 //!
-//! ISO materialization uses the external `xorriso` executable. Protected
-//! real-host execution must provision and capability-check `xorriso`; unit
-//! tests inject a command runner and therefore do not require the executable.
+//! ISO materialization uses an external ISO builder. The runtime prefers
+//! `xorriso` and falls back to the mkisofs-compatible `genisoimage` or
+//! `mkisofs` executables available on the host.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,7 @@ const ISO_MANAGED_BY: &str = "o3k-config-drive-iso";
 const ISO_VOLUME_ID: &str = "config-2";
 const ISO_DATE: &str = "2020010100000000";
 const ISO_PROGRAM: &str = "xorriso";
+const ISO_FALLBACK_PROGRAMS: &[&str] = &["genisoimage", "mkisofs"];
 
 #[derive(Debug, Error)]
 pub enum ConfigDriveError {
@@ -93,22 +94,46 @@ pub struct ConfigDriveArtifact {
 
 /// Injectable boundary for the external ISO builder.
 pub trait IsoCommandRunner {
+    fn program(&self) -> OsString {
+        OsString::from(ISO_PROGRAM)
+    }
+
     fn run(&self, program: &OsStr, args: &[OsString]) -> Result<(), io::Error>;
 }
 
 struct SystemIsoCommandRunner;
 
 impl IsoCommandRunner for SystemIsoCommandRunner {
+    fn program(&self) -> OsString {
+        iso_program()
+    }
+
     fn run(&self, program: &OsStr, args: &[OsString]) -> Result<(), io::Error> {
         let status = Command::new(program).args(args).status()?;
         if status.success() {
             Ok(())
         } else {
             Err(io::Error::other(format!(
-                "{ISO_PROGRAM} exited unsuccessfully"
+                "{} exited unsuccessfully",
+                program.to_string_lossy()
             )))
         }
     }
+}
+
+fn iso_program() -> OsString {
+    let candidates = std::iter::once(ISO_PROGRAM).chain(ISO_FALLBACK_PROGRAMS.iter().copied());
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .flat_map(|directory| {
+            candidates
+                .clone()
+                .map(move |candidate| directory.join(candidate))
+        })
+        .find(|path| path.is_file())
+        .and_then(|path| path.file_name().map(OsStr::to_owned))
+        .unwrap_or_else(|| OsString::from(ISO_PROGRAM))
 }
 
 #[derive(Serialize)]
@@ -363,10 +388,9 @@ pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
 
 /// Build a deterministic ISO from an O3K-owned config-drive directory.
 ///
-/// The default runner invokes `xorriso`; callers running on the protected
-/// real host must install that executable. The output and its ownership
-/// manifest are published atomically, and an already verified matching pair
-/// is returned without invoking the tool again.
+/// The default runner selects an available ISO builder. The output and its
+/// ownership manifest are published atomically, and an already verified
+/// matching pair is returned without invoking the tool again.
 pub fn materialize_iso(
     source_directory: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
@@ -418,9 +442,10 @@ pub fn materialize_iso_with_runner(
     let temporary = parent.join(format!(".{}.iso-tmp-{}", instance_id, token));
     let temporary_manifest = parent.join(format!(".{}.iso-manifest-tmp-{}", instance_id, token));
     let preparation = (|| {
-        let args = xorriso_args(&temporary, source_directory);
+        let program = runner.program();
+        let args = iso_args(&program, &temporary, source_directory);
         runner
-            .run(OsStr::new(ISO_PROGRAM), &args)
+            .run(&program, &args)
             .map_err(ConfigDriveError::ToolFailed)?;
         let artifact_fingerprint = verify_regular_file_digest(&temporary)?;
         let manifest = IsoOwnershipManifest {
@@ -512,10 +537,8 @@ struct IsoOwnershipManifest {
     output_name: String,
 }
 
-fn xorriso_args(output: &Path, source: &Path) -> Vec<OsString> {
-    vec![
-        OsString::from("-as"),
-        OsString::from("mkisofs"),
+fn iso_args(program: &OsStr, output: &Path, source: &Path) -> Vec<OsString> {
+    let mut args = vec![
         OsString::from("-o"),
         output.as_os_str().to_owned(),
         OsString::from("-V"),
@@ -525,14 +548,19 @@ fn xorriso_args(output: &Path, source: &Path) -> Vec<OsString> {
         OsString::from("-r"),
         OsString::from("-J"),
         OsString::from("-joliet-long"),
-        // xorriso's mkisofs emulation accepts the documented mkisofs date
-        // options. The native `-volume_date` form is rejected by the
-        // installed xorriso versions when combined with `-as mkisofs`.
-        OsString::from(format!("--modification-date={ISO_DATE}")),
-        OsString::from("--set_all_file_dates"),
-        OsString::from(ISO_DATE),
-        source.as_os_str().to_owned(),
-    ]
+    ];
+    if program == OsStr::new(ISO_PROGRAM) {
+        args.splice(0..0, [OsString::from("-as"), OsString::from("mkisofs")]);
+        // xorriso's mkisofs emulation accepts these deterministic date
+        // options. Native `-volume_date` is rejected in this mode.
+        args.extend([
+            OsString::from(format!("--modification-date={ISO_DATE}")),
+            OsString::from("--set_all_file_dates"),
+            OsString::from(ISO_DATE),
+        ]);
+    }
+    args.push(source.as_os_str().to_owned());
+    args
 }
 
 fn validate_output_location(source: &Path, output: &Path) -> Result<(), ConfigDriveError> {
