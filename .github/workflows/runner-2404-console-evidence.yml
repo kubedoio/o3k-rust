@@ -1,0 +1,37 @@
+name: Runner 2404 console evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/runner-2404-console-evidence'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Capture exact owned guest evidence
+        run: |
+          set -euo pipefail
+          artifact=target/console-evidence
+          mkdir -p "$artifact"
+          domain=o3k-e84d69cce2c47ce8be64
+          sudo -n virsh -c qemu:///system dumpxml "$domain" >"$artifact/domain.xml"
+          sudo -n virsh -c qemu:///system domstate "$domain" >"$artifact/domain-state.txt"
+          sudo -n virsh -c qemu:///system domiflist "$domain" >"$artifact/domain-iflist.txt"
+          sudo -n virsh -c qemu:///system domblklist "$domain" >"$artifact/domain-blklist.txt"
+          sudo -n virsh -c qemu:///system ttyconsole "$domain" >"$artifact/ttyconsole.txt" || true
+          sudo -n virsh -c qemu:///system qemu-monitor-command "$domain" --hmp 'info status' >"$artifact/qemu-status.txt" || true
+          ip -details link show >"$artifact/ip-link.txt"
+          bridge link show >"$artifact/bridge-link.txt"
+          sudo -n find /var/lib/o3k-testlab/30770439657 -maxdepth 6 -type f -printf '%p %s bytes\n' \
+            | sort >"$artifact/state-files.txt"
+          sudo -n ps -eo pid,user,stat,args --sort=pid \
+            | grep -E 'qemu-system|o3k-compute|o3kd' | grep -v grep >"$artifact/processes.txt" || true
+      - name: Upload evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runner-2404-console-evidence
+          path: target/console-evidence
+          retention-days: 2
