@@ -91,7 +91,7 @@ sudo -n grep -Fqx "o3k-owned-v1 path=$STATE_ROOT" "$STATE_ROOT/.o3k-owned" \
   || { echo "cleanup: O3K ownership marker is invalid" >&2; exit 1; }
 state_metadata="$(sudo -n stat -c '%U:%G:%a' "$STATE_ROOT" 2>/dev/null)"
 case "$state_metadata" in
-  o3k:o3k:700|o3k:o3k:750) ;;
+  o3k:o3k:700|o3k:o3k:750|o3k:kvm:710) ;;
   *) echo "cleanup: state ownership or permissions are not O3K-owned" >&2; exit 1 ;;
 esac
 account_created=false

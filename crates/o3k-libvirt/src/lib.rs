@@ -169,7 +169,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         use std::fmt::Write as _;
         let _ = write!(
             network_interfaces,
-            "<interface type=\"ethernet\"><mac address=\"{}\" /><target dev=\"{}\" /><model type=\"virtio\" /></interface>",
+            "<interface type=\"ethernet\"><mac address=\"{}\" /><target dev=\"{}\" managed=\"no\" /><model type=\"virtio\" /></interface>",
             xml_escape(&interface.mac_address),
             xml_escape(&interface.tap_name)
         );

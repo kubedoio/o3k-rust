@@ -218,6 +218,9 @@ impl DhcpService {
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
+        let (network, broadcast) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
+        let dhcp_start = Ipv4Addr::from(u32::from(network) + 1);
+        let dhcp_end = Ipv4Addr::from(u32::from(broadcast) - 1);
         let mut lines = vec![
             "# Managed by o3k-dhcp; do not edit.".to_owned(),
             format!("interface={}", config.interface),
@@ -227,8 +230,8 @@ impl DhcpService {
                 self.root.join("dnsmasq.leases").display()
             ),
             format!(
-                "dhcp-range={},static,{}",
-                config.subnet, config.lease_seconds
+                "dhcp-range={},{},static,{}",
+                dhcp_start, dhcp_end, config.lease_seconds
             ),
             format!("dhcp-option=3,{}", config.gateway),
         ];
@@ -381,6 +384,7 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
+        assert!(rendered.contains("dhcp-range=192.0.2.1,192.0.2.254,static,3600"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(
             service
