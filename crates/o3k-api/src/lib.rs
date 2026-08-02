@@ -1220,6 +1220,7 @@ struct ServerResponse {
     flavor: IdResponse,
     addresses: serde_json::Value,
     key_name: Option<String>,
+    config_drive: bool,
 }
 #[derive(Serialize)]
 struct IdResponse {
@@ -1262,6 +1263,7 @@ fn server_response(server: Server, network_service: Option<&NetworkService>) -> 
         },
         addresses: serde_json::Value::Object(addresses),
         key_name: server.key_name,
+        config_drive: server.config_drive,
     }
 }
 
@@ -2093,7 +2095,8 @@ async fn server_action(
 
 #[cfg(test)]
 mod tests {
-    use super::should_query_live_console;
+    use super::{Server, server_response, should_query_live_console};
+    use uuid::Uuid;
 
     #[test]
     fn live_console_queries_are_limited_to_the_snapshot_offset() {
@@ -2155,5 +2158,27 @@ mod tests {
             Ok("ssh-ed25519 AAAA generated-by-keypair")
         );
         assert!(super::config_drive_ssh_public_key(None, None).is_err());
+    }
+
+    #[test]
+    fn server_response_reports_requested_config_drive_without_exposing_payload()
+    -> Result<(), serde_json::Error> {
+        let server = Server {
+            id: Uuid::nil(),
+            name: "server".to_owned(),
+            project_id: "project".to_owned(),
+            flavor_id: Uuid::nil(),
+            image_id: "image".to_owned(),
+            status: "ACTIVE".to_owned(),
+            key_name: Some("key".to_owned()),
+            config_drive: true,
+            network_ids: Vec::new(),
+        };
+        let response = server_response(server, None);
+        let value = serde_json::to_value(response)?;
+        assert_eq!(value.get("config_drive"), Some(&serde_json::json!(true)));
+        assert!(value.get("user_data").is_none());
+        assert!(value.get("ssh_public_key").is_none());
+        Ok(())
     }
 }
