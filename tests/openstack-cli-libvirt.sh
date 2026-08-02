@@ -387,6 +387,24 @@ SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FL
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
+python3 - "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-show-evidence.json" <<'PY'
+import json
+import sys
+
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as stream:
+    value = json.load(stream)
+evidence = {
+    "id": value.get("id"),
+    "status": value.get("status"),
+    "config_drive": value.get("config_drive"),
+    "addresses": value.get("addresses", {}),
+    "redacted": True,
+}
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(evidence, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
 validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
 SERVER_ACTIVE=true
 SERVER_CONFIG_DRIVE="${CONFIG_DRIVE_ENABLED}"
