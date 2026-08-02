@@ -283,6 +283,44 @@ fn resolve_committed_create_inputs(
     })
 }
 
+fn prepare_owned_taps(
+    command: &proto::Command,
+    network: &o3k_network::HostNetworkManager,
+) -> Result<Vec<o3k_network::TapSpec>, AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol("create action is missing".to_owned()));
+    };
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(AgentError::Protocol(
+            "resolved create inputs are missing".to_owned(),
+        ));
+    };
+    let mut created = Vec::with_capacity(resolved.network_attachments.len());
+    for attachment in &resolved.network_attachments {
+        let spec = o3k_network::TapSpec {
+            instance_id: command.resource_id.clone(),
+            port_id: attachment.port_id.clone(),
+            mac: attachment.mac.clone(),
+        };
+        if let Err(error) = network.create_tap(&spec) {
+            for previous in &created {
+                let _ = network.delete_tap(previous);
+            }
+            return Err(AgentError::Protocol(format!(
+                "host TAP preparation failed: {error}"
+            )));
+        }
+        created.push(spec);
+    }
+    Ok(created)
+}
+
+fn rollback_owned_taps(network: &o3k_network::HostNetworkManager, taps: &[o3k_network::TapSpec]) {
+    for tap in taps.iter().rev() {
+        let _ = network.delete_tap(tap);
+    }
+}
+
 #[async_trait]
 impl CommandExecutor for LibvirtCommandExecutor {
     async fn execute(
@@ -394,11 +432,32 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
-                let committed =
-                    resolve_committed_create_inputs(command, &self.artifact_root, &self.network)?;
-                let spec = resolve_create_domain_spec(command, Some(&committed))?;
-                let definition = o3k_libvirt::build_domain_xml(&spec)
-                    .map_err(|_| AgentError::Protocol("domain XML is invalid".to_owned()))?;
+                let taps = prepare_owned_taps(command, &self.network)?;
+                let committed = match resolve_committed_create_inputs(
+                    command,
+                    &self.artifact_root,
+                    &self.network,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(error);
+                    }
+                };
+                let spec = match resolve_create_domain_spec(command, Some(&committed)) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(error);
+                    }
+                };
+                let definition = match o3k_libvirt::build_domain_xml(&spec) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(AgentError::Protocol("domain XML is invalid".to_owned()));
+                    }
+                };
                 let definition_name = definition.name.clone();
                 if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
                     verify_owned_domain(&existing, &command.resource_id)?;
@@ -413,6 +472,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(agent_error)?;
                 if let Err(error) = self.adapter.start(definition_name.clone()).await {
                     let _ = self.adapter.undefine(definition_name.clone()).await;
+                    rollback_owned_taps(&self.network, &taps);
                     return Err(agent_error(error));
                 }
                 let inspection = self
