@@ -157,6 +157,7 @@ pub trait ComputeProvider: Send + Sync {
     /// agent-backed providers override it to dispatch an Inspect command.
     async fn inspect_instance(
         &self,
+        _provider_id: &str,
         _resource_id: &str,
         provider_instance_id: &str,
         operation_id: Uuid,
