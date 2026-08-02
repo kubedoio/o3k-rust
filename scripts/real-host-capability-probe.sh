@@ -59,9 +59,8 @@ def command_succeeds(args):
 tools = {name: command_available(name) for name in (
     "virsh", "qemu-img", "ip", "dnsmasq", "openstack"
 )}
-config_drive_candidates = ("cloud-localds", "genisoimage", "mkisofs", "xorriso")
-config_drive_tools = {name: command_available(name) for name in config_drive_candidates}
-config_drive_available = any(config_drive_tools.values())
+config_drive_tools = {"xorriso": command_available("xorriso")}
+config_drive_available = config_drive_tools["xorriso"]
 
 kvm_present = os.path.exists(kvm_path)
 kvm_readable = os.access(kvm_path, os.R_OK)
