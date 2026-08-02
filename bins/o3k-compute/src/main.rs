@@ -23,6 +23,50 @@ struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
 }
 
+/// Resolve the host-local inputs for a create command before touching
+/// libvirt.
+///
+/// The control-plane command deliberately carries artifact references, not
+/// host paths.  The agent-side artifact store also requires the complete
+/// authenticated `ArtifactOffer` (including its transfer identity and
+/// expiry) to resolve a committed file.  Those fields are not part of
+/// `CreateCommand.resolved`, so deriving a path from a digest or rebuilding an
+/// offer here would weaken the transfer identity fence.  Network attachments
+/// likewise contain only port/MAC/IP data; a libvirt interface requires a TAP
+/// name that has been proven to be owned by the host network subsystem.
+///
+/// Keep this boundary explicit and fail closed until both authenticated
+/// lookup metadata and a durable network-ownership lookup are present in the
+/// command/executor contract.
+fn resolve_create_domain_spec(
+    command: &proto::Command,
+) -> Result<o3k_libvirt::DomainSpec, AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol(
+            "create command action is missing or has the wrong type".to_owned(),
+        ));
+    };
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(AgentError::Protocol(
+            "create command resolved inputs are missing".to_owned(),
+        ));
+    };
+    if resolved.image_artifact_id.trim().is_empty()
+        || resolved.image_sha256.trim().is_empty()
+        || resolved.image_format.trim().is_empty()
+        || resolved.config_drive_artifact_id.trim().is_empty()
+        || resolved.config_drive_sha256.trim().is_empty()
+    {
+        return Err(AgentError::Protocol(
+            "create command artifact references are incomplete".to_owned(),
+        ));
+    }
+
+    Err(AgentError::Protocol(
+        "create is fail-closed: authenticated artifact transfer metadata (transfer_id and expiry) and owned TAP names are not present in the create command".to_owned(),
+    ))
+}
+
 #[async_trait]
 impl CommandExecutor for LibvirtCommandExecutor {
     async fn execute(
@@ -133,9 +177,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(agent_error)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
-            Some(proto::command::Action::Create(_)) => Err(AgentError::Protocol(
-                "create command requires a resolved domain definition".to_owned(),
-            )),
+            Some(proto::command::Action::Create(_)) => match resolve_create_domain_spec(command) {
+                Ok(_) => Err(AgentError::Protocol(
+                    "create domain resolution produced no executable definition".to_owned(),
+                )),
+                Err(error) => Err(error),
+            },
             Some(proto::command::Action::ConsoleLog(request)) => {
                 if request.offset > 0 {
                     return Err(AgentError::Protocol(
@@ -381,6 +428,58 @@ mod tests {
                 "server-console"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn create_fails_closed_when_transfer_and_tap_ownership_are_not_resolvable() {
+        let command = proto::Command {
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                image_id: "image".to_owned(),
+                flavor_id: "flavor".to_owned(),
+                network_port_ids: vec!["port-1".to_owned()],
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: "image-artifact".to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "qcow2".to_owned(),
+                    vcpus: 1,
+                    memory_mib: 512,
+                    disk_gib: 1,
+                    config_drive_artifact_id: "config-artifact".to_owned(),
+                    config_drive_sha256: "b".repeat(64),
+                    network_attachments: vec![proto::NetworkAttachment {
+                        port_id: "port-1".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        fixed_ipv4: "192.0.2.10".to_owned(),
+                    }],
+                }),
+            })),
+            ..Default::default()
+        };
+
+        let error = resolve_create_domain_spec(&command).expect_err("must fail closed");
+        assert!(error.to_string().contains("transfer_id and expiry"));
+        assert!(error.to_string().contains("owned TAP names"));
+    }
+
+    #[test]
+    fn create_rejects_missing_resolved_artifacts_before_any_host_lookup() {
+        let command = proto::Command {
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: String::new(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        let error = resolve_create_domain_spec(&command).expect_err("must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("artifact references are incomplete")
         );
     }
 }
