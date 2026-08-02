@@ -3,7 +3,7 @@
 The static release and toolchain target is frozen in
 [`SPEC-0016`](../specs/SPEC-0016-static-compatibility-target.md) and its
 machine-readable target manifest. It selects OpenStack `2026.1` (Gazpacho) as
- primary, retains `2025.2` (Flamingo) as the backward-compatibility profile,
+primary, retains `2025.2` (Flamingo) as the backward-compatibility profile,
  and pins Rust `1.97.1`; it does not claim that every operation in either
  release is implemented.
 
