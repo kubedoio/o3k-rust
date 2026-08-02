@@ -57,7 +57,7 @@ def command_succeeds(args):
         return False
 
 tools = {name: command_available(name) for name in (
-    "virsh", "qemu-img", "ip", "dnsmasq", "openstack"
+    "virsh", "qemu-img", "ip", "dnsmasq", "openstack", "setpriv"
 )}
 config_drive_candidates = ("cloud-localds", "genisoimage", "mkisofs", "xorriso")
 config_drive_tools = {name: command_available(name) for name in config_drive_candidates}
@@ -126,6 +126,15 @@ if not image_path:
 elif not image_path_absolute or not image_path_regular:
     errors.append("image_path_invalid")
 
+compute_binary = os.environ.get("O3K_REAL_HOST_COMPUTE_BINARY", "")
+network_capability = os.environ.get("O3K_REAL_HOST_NETWORK_CAPABILITY", "")
+if not compute_binary:
+    skips.append("compute_binary_not_declared")
+if not network_capability:
+    skips.append("network_capability_not_declared")
+elif network_capability != "ambient-net-admin":
+    errors.append("unsupported_network_capability")
+
 checks = {
     "tools": tools,
     "config_drive": {"available": config_drive_available, "tools": config_drive_tools},
@@ -144,6 +153,9 @@ checks = {
              "enough_free_space": disk_free_bytes is not None and disk_free_bytes >= minimum_free_bytes},
     "config": {"image_path_declared": bool(image_path), "image_path_absolute": image_path_absolute,
                "image_path_regular_file": image_path_regular},
+    "compute": {"binary_declared": bool(compute_binary),
+                "network_capability": network_capability or None,
+                "ambient_net_admin_declared": network_capability == "ambient-net-admin"},
 }
 
 required_missing = []

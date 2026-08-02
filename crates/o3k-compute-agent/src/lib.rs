@@ -3449,14 +3449,17 @@ impl AgentClient {
                                     journal.mark_running(&key)?;
                                     let result = match executor.execute(&command).await {
                                         Ok(result) => result,
-                                        Err(_) => CommandExecutionResult {
+                                        Err(error) => {
+                                            tracing::warn!(%error, "command execution failed");
+                                            CommandExecutionResult {
                                             state: proto::OperationState::UnknownOutcome as i32,
                                             error_category: proto::ErrorCategory::UnknownOutcome as i32,
                                             resource_state: proto::ResourceState::Error as i32,
                                             redacted_message: "command outcome is unknown".to_owned(),
                                             provider_resource_id: String::new(),
                                             console_log: None,
-                                        },
+                                            }
+                                        }
                                     };
                                     let entry = journal.complete(&key, result)?;
                                     replay_journal_entry(

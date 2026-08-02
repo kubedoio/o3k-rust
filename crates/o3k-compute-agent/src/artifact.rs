@@ -272,6 +272,7 @@ impl ArtifactStore {
         } else {
             fs::rename(&part, &final_path).map_err(ArtifactStoreError::Storage)?;
         }
+        make_runtime_artifact_readable(&final_path)?;
         manifest.state = proto::ArtifactTransferState::Committed as i32;
         atomic_manifest(&manifest_path, &manifest)?;
         Ok(receipt(&manifest, Some(final_path)))
@@ -726,6 +727,16 @@ fn digest_hasher<D: AsRef<[u8]>>(value: D) -> String {
         let _ = write!(&mut result, "{byte:02x}");
     }
     result
+}
+
+fn make_runtime_artifact_readable(path: &Path) -> Result<(), ArtifactStoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o640))
+            .map_err(ArtifactStoreError::Storage)?;
+    }
+    Ok(())
 }
 
 trait PrivateOpenOptions {

@@ -166,7 +166,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd setpriv; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -347,7 +347,7 @@ O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
 O3K_PROVIDER=$(printf '%q' "$O3K_PROVIDER")
 O3K_LOG_FORMAT=json
-O3K_LOG_FILTER=warn
+O3K_LOG_FILTER=$(printf '%q' "${O3K_LOG_FILTER:-warn}")
 O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
 O3K_TOKEN_SIGNING_KEY=$(printf '%q' "$SIGNING_KEY")
 O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
@@ -387,14 +387,43 @@ chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
 mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
 sudo -n chown -R "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT"
+# libvirt's qemu process runs under the KVM group. Keep the run root and data
+# directory non-world-traversable, but grant that group traversal to the
+# artifact store and read access only to committed image/ISO files.
+sudo -n chgrp kvm "$STATE_ROOT" "$STATE_ROOT/data"
+sudo -n chmod 0710 "$STATE_ROOT" "$STATE_ROOT/data"
+sudo -n install -d -o "$SERVICE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/data/agent-id.artifacts"
+# Host-network realization (TAP, bridge, gateway, and DHCP setup) is owned by
+# the dedicated compute service. Validate the ambient-capability launch path
+# before starting it, using a run-unique temporary link and deleting only that
+# link afterwards.
+network_probe_name="o3k-cp-${RUN_ID:0:8}"
+sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
+  --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
+  --inh-caps=+net_admin --ambient-caps=+net_admin -- \
+  ip link add name "$network_probe_name" type dummy \
+  || fail "o3k-compute ambient CAP_NET_ADMIN capability is unavailable"
+sudo -n ip link delete "$network_probe_name" \
+  || fail "ambient CAP_NET_ADMIN probe link cleanup failed"
 sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
   || fail "o3k service account cannot traverse the run state root"
 
 start_service() {
   local name="$1" env_file="$2" binary="$3" log_file="$4" pid_file="$5"
   local supervisor child candidate
-  sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
-    "$env_file" "$binary" "$log_file" &
+  if [[ "$name" == o3k-compute ]]; then
+    # CAP_NET_ADMIN must be ambient so helper processes such as ip(8) and
+    # dnsmasq retain it across exec. setpriv applies it before dropping to the
+    # dedicated service account; no daemon runs as root.
+    sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
+      --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
+      --inh-caps=+net_admin --ambient-caps=+net_admin -- \
+      bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+      "$env_file" "$binary" "$log_file" &
+  else
+    sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+      "$env_file" "$binary" "$log_file" &
+  fi
   supervisor=$!
   child=
   for _ in $(seq 1 50); do
@@ -503,6 +532,8 @@ export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSW
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_COMPUTE_BINARY=%s\n' "$STATE_ROOT/bin/o3k-compute" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin\n' >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \

@@ -20,6 +20,12 @@ assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
+assert 'O3K_REAL_HOST_COMPUTE_BINARY' in bootstrap
+assert 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin' in bootstrap
+assert 'chgrp kvm' in bootstrap
+assert 'agent-id.artifacts' in bootstrap
+assert '--ambient-caps=+net_admin' in bootstrap
+assert '--init-groups' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
 assert 'SupplementaryGroups' not in bootstrap
 assert '.o3k-supplementary-groups-added' in bootstrap
