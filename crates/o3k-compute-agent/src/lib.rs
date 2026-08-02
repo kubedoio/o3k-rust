@@ -50,8 +50,8 @@ mod artifact;
 mod config_drive;
 mod image;
 pub use artifact::{
-    ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery, MAX_ARTIFACT_BYTES,
-    MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNKS,
+    ArtifactCleanup, ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery,
+    MAX_ARTIFACT_BYTES, MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNKS,
 };
 pub use config_drive::{
     ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
