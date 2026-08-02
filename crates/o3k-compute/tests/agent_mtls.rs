@@ -30,12 +30,12 @@ impl ResolvedCreateResolver for TestResolver {
         Ok(ResolvedCreateInputs {
             flavor_id: "flavor.test".to_owned(),
             image_artifact_id: "artifact.test".to_owned(),
-            image_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            image_sha256: "af6909578b3b4fc1d8a75a4c975636adc669b7d6ccbabdcc841a3520dafe6b05"
                 .to_owned(),
             image_format: "qcow2".to_owned(),
             disk_gib: 10,
             config_drive_artifact_id: "config-drive.test".to_owned(),
-            config_drive_sha256: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+            config_drive_sha256: "300ff2a3635c8ab1608e2ea2d00859be4535efd5949e3b149437b66de80bbef4"
                 .to_owned(),
             network_attachments: vec![NetworkAttachmentSpec {
                 port_id: "port.test".to_owned(),
@@ -43,6 +43,36 @@ impl ResolvedCreateResolver for TestResolver {
                 fixed_ipv4: "192.0.2.10".to_owned(),
             }],
         })
+    }
+}
+
+#[derive(Debug, Default)]
+struct TestArtifactResolver;
+
+#[async_trait]
+impl o3k_compute::CreateArtifactResolver for TestArtifactResolver {
+    async fn resolve_artifacts(
+        &self,
+        _request: &CreateInstanceRequest,
+        _agent: &o3k_compute_agent::NodeSnapshot,
+        inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<o3k_compute::ResolvedCreateArtifact>, ProviderError> {
+        Ok(vec![
+            o3k_compute::ResolvedCreateArtifact {
+                artifact_id: inputs.image_artifact_id.clone(),
+                kind: proto::ArtifactKind::ImageBase,
+                sha256: inputs.image_sha256.clone(),
+                format: inputs.image_format.clone(),
+                bytes: b"image-artifact".to_vec(),
+            },
+            o3k_compute::ResolvedCreateArtifact {
+                artifact_id: inputs.config_drive_artifact_id.clone(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                sha256: inputs.config_drive_sha256.clone(),
+                format: "iso".to_owned(),
+                bytes: b"config-drive-artifact".to_vec(),
+            },
+        ])
     }
 }
 
@@ -96,6 +126,11 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
             max_vcpus: 4,
             max_memory_mib: 4096,
             max_disk_gb: 20,
+            flags: vec![proto::CapabilityFlag {
+                name: "artifact_transfer".to_owned(),
+                supported: true,
+                bounded_value: String::new(),
+            }],
             ..Default::default()
         },
     })?;
@@ -128,7 +163,8 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
     }
     assert!(registry.snapshot("node-test").await.is_some());
 
-    let provider = AgentComputeProvider::new(registry, Arc::new(TestResolver));
+    let provider = AgentComputeProvider::new(registry, Arc::new(TestResolver))
+        .with_artifact_resolver(Arc::new(TestArtifactResolver));
     let operation_id = Uuid::now_v7();
     let request = CreateInstanceRequest {
         operation_id,

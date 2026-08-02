@@ -30,7 +30,7 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, broadcast, mpsc},
+    sync::{RwLock, Semaphore, broadcast, mpsc},
     time,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -46,6 +46,12 @@ use tower::service_fn;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+mod artifact;
+pub use artifact::{
+    ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
+    MAX_ARTIFACT_CHUNK_BYTES,
+};
+
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {
     major: 1,
     minor: 0,
@@ -56,6 +62,8 @@ pub const DEFAULT_LEASE: Duration = Duration::from_secs(15);
 const MAX_AGENT_ID: usize = 128;
 const MAX_HOST_LABEL: usize = 255;
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+pub const MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT: usize = 2;
+pub const MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER: usize = 4;
 const ADMINISTRATIVE_STATE_FILE_EXTENSION: &str = "state";
 const COMMAND_JOURNAL_FILE_EXTENSION: &str = "commands";
 const COMMAND_JOURNAL_TEMP_EXTENSION: &str = "commands.tmp";
@@ -64,6 +72,8 @@ const COMMAND_JOURNAL_VERSION: u8 = 1;
 const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
 const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
+const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
+const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -253,6 +263,8 @@ pub enum AgentEvent {
     CommandAccepted(proto::CommandAccepted),
     Operation(proto::OperationUpdate),
     Observation(proto::Observation),
+    ArtifactAck(proto::ArtifactAck),
+    ArtifactStatus(proto::ArtifactStatus),
     Error(proto::ProtocolError),
 }
 
@@ -267,6 +279,7 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
+    artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     events: broadcast::Sender<AgentEvent>,
 }
 
@@ -277,6 +290,7 @@ impl Default for NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             authorized_agents: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
+            artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
         }
     }
@@ -339,6 +353,33 @@ impl NodeRegistry {
             .is_some_and(|connection| connection.epoch == agent_epoch)
     }
 
+    async fn acquire_artifact_transfer_slot(
+        &self,
+        agent_id: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, AgentError> {
+        let semaphore = if let Some(semaphore) = self
+            .artifact_transfer_slots
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+        {
+            semaphore
+        } else {
+            let mut slots = self.artifact_transfer_slots.write().await;
+            slots
+                .entry(agent_id.to_owned())
+                .or_insert_with(|| {
+                    Arc::new(Semaphore::new(MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT))
+                })
+                .clone()
+        };
+        semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| AgentError::Protocol("artifact transfer limit is closed".to_owned()))
+    }
+
     pub async fn dispatch_command(&self, command: proto::Command) -> Result<(), AgentError> {
         validate_command(&command)?;
         let node = self
@@ -371,6 +412,180 @@ impl NodeRegistry {
             }))
             .await
             .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))
+    }
+
+    /// Sends one validated artifact over the currently fenced agent stream.
+    ///
+    /// This is intentionally a transport primitive: it does not persist
+    /// transfer state or wait for acknowledgements. The caller owns those
+    /// coordination concerns.
+    pub async fn dispatch_artifact(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+    ) -> Result<(), AgentError> {
+        let _transfer_slot = self.acquire_artifact_transfer_slot(&offer.agent_id).await?;
+        self.dispatch_artifact_sequence(offer, bytes).await
+    }
+
+    async fn dispatch_artifact_sequence(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+    ) -> Result<(), AgentError> {
+        let bytes = bytes.as_ref();
+        validate_artifact_dispatch(&offer, bytes)?;
+        let node = self
+            .snapshot(&offer.agent_id)
+            .await
+            .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?;
+        if !node
+            .capabilities
+            .flags
+            .iter()
+            .any(|flag| flag.name == ARTIFACT_TRANSFER_CAPABILITY && flag.supported)
+        {
+            return Err(AgentError::Protocol(
+                "agent has not negotiated artifact transfer capability".to_owned(),
+            ));
+        }
+        if node.agent_epoch.is_empty() {
+            return Err(AgentError::Protocol("agent epoch is missing".to_owned()));
+        }
+        if node.availability != Availability::Available
+            || node.desired_state != proto::AdministrativeState::Enabled as i32
+        {
+            return Err(AgentError::Protocol(
+                "agent is unavailable or not enabled".to_owned(),
+            ));
+        }
+
+        // Keep the connection guard for the complete sequence. A reconnect
+        // cannot replace the fenced sender between the offer and its chunks.
+        let connections = self.connections.read().await;
+        let connection = connections
+            .get(&offer.agent_id)
+            .filter(|connection| connection.epoch == node.agent_epoch)
+            .ok_or_else(|| {
+                AgentError::Protocol("agent control stream is unavailable".to_owned())
+            })?;
+        connection
+            .sender
+            .send(Ok(proto::ControlResponse {
+                body: Some(proto::control_response::Body::ArtifactOffer(offer.clone())),
+            }))
+            .await
+            .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))?;
+
+        let chunk_size = offer.chunk_size_bytes as usize;
+        // Chunks are deliberately emitted in index order because the agent
+        // commits only contiguous data. The semaphore makes the maximum
+        // in-flight chunk budget explicit for future pipelining without
+        // allowing an implementation change to exceed the contract.
+        let chunk_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER));
+        for (chunk_index, chunk) in bytes.chunks(chunk_size).enumerate() {
+            let _chunk_slot = chunk_slots
+                .acquire()
+                .await
+                .map_err(|_| AgentError::Protocol("artifact chunk limit is closed".to_owned()))?;
+            let chunk_index = u32::try_from(chunk_index)
+                .map_err(|_| AgentError::Protocol("artifact chunk index overflow".to_owned()))?;
+            connection
+                .sender
+                .send(Ok(proto::ControlResponse {
+                    body: Some(proto::control_response::Body::ArtifactChunk(
+                        proto::ArtifactChunk {
+                            transfer_id: offer.transfer_id.clone(),
+                            chunk_index,
+                            offset_bytes: chunk_index as u64 * offer.chunk_size_bytes as u64,
+                            data: chunk.to_vec(),
+                            chunk_sha256: sha256_hex(chunk),
+                        },
+                    )),
+                }))
+                .await
+                .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))?;
+        }
+        connection
+            .sender
+            .send(Ok(proto::ControlResponse {
+                body: Some(proto::control_response::Body::ArtifactEnd(
+                    proto::ArtifactEnd {
+                        transfer_id: offer.transfer_id,
+                        sha256: offer.sha256,
+                        size_bytes: offer.size_bytes,
+                    },
+                )),
+            }))
+            .await
+            .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))
+    }
+
+    /// Delivers an artifact and waits for the agent's authenticated commit
+    /// acknowledgement. A timeout is deliberately reported as unknown: the
+    /// agent may have durably committed the artifact after the stream stopped
+    /// carrying responses.
+    pub async fn dispatch_artifact_and_wait(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+        timeout: Duration,
+    ) -> Result<proto::ArtifactAck, AgentError> {
+        let mut events = self.subscribe_events();
+        let transfer_id = offer.transfer_id.clone();
+        let command_id = offer.command_id.clone();
+        let operation_id = offer.operation_id.clone();
+        let resource_id = offer.resource_id.clone();
+        let agent_id = offer.agent_id.clone();
+        let agent_epoch = self
+            .snapshot(&agent_id)
+            .await
+            .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?
+            .agent_epoch;
+        // Keep the transfer slot until the authenticated terminal ack. A
+        // transfer remains in flight after ArtifactEnd until its outcome is
+        // known, including when the outcome later becomes unknown on timeout.
+        let _transfer_slot = self.acquire_artifact_transfer_slot(&agent_id).await?;
+        self.dispatch_artifact_sequence(offer, bytes).await?;
+        time::timeout(timeout, async move {
+            loop {
+                let event = events.recv().await.map_err(|error| match error {
+                    broadcast::error::RecvError::Lagged(count) => AgentError::Protocol(format!(
+                        "artifact acknowledgement stream lagged by {count} events"
+                    )),
+                    broadcast::error::RecvError::Closed => {
+                        AgentError::Protocol("artifact acknowledgement stream closed".to_owned())
+                    }
+                })?;
+                let ack = match event {
+                    AgentEvent::ArtifactAck(ack)
+                        if ack.transfer_id == transfer_id
+                            && ack.command_id == command_id
+                            && ack.operation_id == operation_id
+                            && ack.resource_id == resource_id
+                            && ack.agent_id == agent_id
+                            && ack.agent_epoch == agent_epoch =>
+                    {
+                        ack
+                    }
+                    _ => continue,
+                };
+                match proto::ArtifactTransferState::try_from(ack.state) {
+                    Ok(proto::ArtifactTransferState::Committed) => return Ok(ack),
+                    Ok(proto::ArtifactTransferState::Rejected)
+                    | Ok(proto::ArtifactTransferState::Expired) => {
+                        return Err(AgentError::Protocol(if ack.redacted_message.is_empty() {
+                            "agent rejected artifact transfer".to_owned()
+                        } else {
+                            ack.redacted_message
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| AgentError::Protocol("artifact transfer outcome is unknown".to_owned()))?
     }
 
     /// Dispatches a fenced command and waits for its matching observation.
@@ -1134,6 +1349,53 @@ fn matches_stream_identity(
     message_agent_id == stream_agent_id && message_agent_epoch == stream_agent_epoch
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut digest = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(&mut digest, "{byte:02x}");
+    }
+    digest
+}
+
+fn validate_artifact_dispatch(
+    offer: &proto::ArtifactOffer,
+    bytes: &[u8],
+) -> Result<(), AgentError> {
+    let chunk_size = usize::try_from(offer.chunk_size_bytes)
+        .map_err(|_| AgentError::Protocol("artifact chunk size is invalid".to_owned()))?;
+    let expected_chunks = offer
+        .size_bytes
+        .div_ceil(u64::from(offer.chunk_size_bytes.max(1)));
+    if !valid_reference(&offer.transfer_id)
+        || !valid_reference(&offer.command_id)
+        || !valid_reference(&offer.operation_id)
+        || !valid_reference(&offer.resource_id)
+        || !valid_reference(&offer.agent_id)
+        || !valid_reference(&offer.artifact_id)
+        || !valid_sha256(&offer.sha256)
+        || offer.size_bytes == 0
+        || offer.size_bytes > MAX_ARTIFACT_BYTES
+        || bytes.len() as u64 != offer.size_bytes
+        || chunk_size == 0
+        || chunk_size > MAX_ARTIFACT_CHUNK_BYTES
+        || offer.chunk_count == 0
+        || u64::from(offer.chunk_count) != expected_chunks
+        || expected_chunks > u64::from(u32::MAX)
+        || !matches!(offer.kind, 1 | 2)
+        || !matches!(offer.format.as_str(), "raw" | "qcow2" | "iso")
+        || (offer.kind == proto::ArtifactKind::ImageBase as i32 && offer.format == "iso")
+        || (offer.kind == proto::ArtifactKind::ConfigDriveIso as i32 && offer.format != "iso")
+        || offer.expires_at_unix_ms <= unix_ms()
+        || sha256_hex(bytes) != offer.sha256
+    {
+        return Err(AgentError::Protocol(
+            "artifact offer or payload is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_register(request: &proto::RegisterRequest) -> Result<(), Status> {
     if request.agent_id.trim().is_empty()
         || request.agent_id.len() > MAX_AGENT_ID
@@ -1491,6 +1753,50 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                             break;
                         }
                         registry.publish_event(AgentEvent::CommandAccepted(accepted));
+                    }
+                    Some(proto::control_request::Body::ArtifactAck(ack)) => {
+                        if !matches_stream_identity(
+                            &ack.agent_id,
+                            &ack.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
+                        registry.publish_event(AgentEvent::ArtifactAck(ack));
+                    }
+                    Some(proto::control_request::Body::ArtifactStatus(status)) => {
+                        if !matches_stream_identity(
+                            &status.agent_id,
+                            &status.agent_epoch,
+                            &agent_id,
+                            &agent_epoch,
+                        ) {
+                            let _ = tx
+                                .send(Err(Status::permission_denied(
+                                    "message identity does not match the registered stream",
+                                )))
+                                .await;
+                            break;
+                        }
+                        if !registry
+                            .connection_is_current(&agent_id, &agent_epoch)
+                            .await
+                        {
+                            break;
+                        }
+                        registry.publish_event(AgentEvent::ArtifactStatus(status));
                     }
                     Some(proto::control_request::Body::ResyncSnapshot(_)) | None => {}
                     Some(proto::control_request::Body::Error(error)) => {
@@ -2594,6 +2900,182 @@ fn protocol_error_for_command(
     }
 }
 
+fn artifact_store_root(identity_path: &Path) -> PathBuf {
+    identity_path.with_extension(ARTIFACT_STORE_FILE_EXTENSION)
+}
+
+fn artifact_store_error() -> AgentError {
+    AgentError::Protocol("artifact transfer failed closed".to_owned())
+}
+
+fn artifact_offer_is_current(
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+) -> Result<(), AgentError> {
+    if offer.agent_id != agent_id {
+        return Err(AgentError::Protocol(
+            "artifact offer identity does not match registration".to_owned(),
+        ));
+    }
+    if offer.expires_at_unix_ms <= unix_ms() {
+        return Err(AgentError::Protocol(
+            "artifact offer has expired".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn send_artifact_ack(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+    agent_epoch: &str,
+    receipt: &ArtifactReceipt,
+    redacted_message: impl Into<String>,
+) -> Result<(), AgentError> {
+    tx.send(proto::ControlRequest {
+        body: Some(proto::control_request::Body::ArtifactAck(
+            proto::ArtifactAck {
+                transfer_id: offer.transfer_id.clone(),
+                command_id: offer.command_id.clone(),
+                operation_id: offer.operation_id.clone(),
+                resource_id: offer.resource_id.clone(),
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+                contiguous_bytes: receipt.contiguous_bytes,
+                next_chunk_index: receipt.next_chunk_index,
+                state: receipt.state as i32,
+                redacted_message: redacted_message.into(),
+            },
+        )),
+    })
+    .await
+    .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))
+}
+
+async fn reject_artifact(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    if offer.agent_id != agent_id {
+        return Ok(());
+    }
+    let receipt = ArtifactReceipt {
+        transfer_id: offer.transfer_id.clone(),
+        next_chunk_index: 0,
+        contiguous_bytes: 0,
+        state: proto::ArtifactTransferState::Rejected,
+        path: None,
+    };
+    send_artifact_ack(
+        tx,
+        offer,
+        agent_id,
+        agent_epoch,
+        &receipt,
+        "artifact transfer rejected",
+    )
+    .await
+}
+
+async fn handle_artifact_response(
+    body: proto::control_response::Body,
+    store: &ArtifactStore,
+    offers: &mut HashMap<String, proto::ArtifactOffer>,
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    match body {
+        proto::control_response::Body::ArtifactOffer(offer) => {
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            if let Some(existing) = offers.get(&offer.transfer_id) {
+                if existing != &offer {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(AgentError::Protocol(
+                        "artifact offer conflicts with this connection".to_owned(),
+                    ));
+                }
+            }
+            let receipt = match store.begin(&offer) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            offers.insert(offer.transfer_id.clone(), offer.clone());
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact offer accepted",
+            )
+            .await
+        }
+        proto::control_response::Body::ArtifactChunk(chunk) => {
+            let offer = offers.get(&chunk.transfer_id).cloned().ok_or_else(|| {
+                AgentError::Protocol("artifact chunk has no active offer".to_owned())
+            })?;
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            let receipt = match store.accept_chunk(&offer, &chunk) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact chunk accepted",
+            )
+            .await
+        }
+        proto::control_response::Body::ArtifactEnd(end) => {
+            let offer = offers.get(&end.transfer_id).cloned().ok_or_else(|| {
+                AgentError::Protocol("artifact end has no active offer".to_owned())
+            })?;
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            let receipt = match store.finish(&offer, &end) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact committed",
+            )
+            .await
+        }
+        _ => Err(AgentError::Protocol(
+            "unexpected artifact response".to_owned(),
+        )),
+    }
+}
+
 impl AgentClient {
     pub fn new(config: AgentConfig) -> Result<Self, AgentError> {
         config.validate()?;
@@ -2743,6 +3225,10 @@ impl AgentClient {
             }
         };
         validate_register_response(&register, agent_id, &epoch)?;
+        let artifact_store =
+            ArtifactStore::open(artifact_store_root(&self.config.identity_file), agent_id)
+                .map_err(|_| artifact_store_error())?;
+        let mut artifact_offers = HashMap::new();
         let state = administrative_state_from_i32(register.desired_state)?;
         persist_administrative_state(
             &administrative_state_file(&self.config.identity_file),
@@ -2883,10 +3369,47 @@ impl AgentClient {
                             .await
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                         }
+                        Some(proto::control_response::Body::ArtifactOffer(offer)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactOffer(offer),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
+                        Some(proto::control_response::Body::ArtifactChunk(chunk)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactChunk(chunk),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
+                        Some(proto::control_response::Body::ArtifactEnd(end)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactEnd(end),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
                         | Some(proto::control_response::Body::ObservationAck(_))
                         | Some(proto::control_response::Body::Resync(_))
-                        | Some(proto::control_response::Body::Error(_))
-                        | None => {}
+                        | Some(proto::control_response::Body::Error(_)) => {
+                            return Err(AgentError::Protocol(
+                                "unsupported control response".to_owned(),
+                            ));
+                        }
+                        None => {}
                     },
                     None => return Err(AgentError::Protocol("control stream ended".to_owned())),
                 }
@@ -3002,6 +3525,11 @@ mod tests {
             architecture: "x86_64".to_owned(),
             agent_provider_name: "o3k-compute".to_owned(),
             agent_provider_version: "test".to_owned(),
+            flags: vec![proto::CapabilityFlag {
+                name: ARTIFACT_TRANSFER_CAPABILITY.to_owned(),
+                supported: true,
+                bounded_value: String::new(),
+            }],
             ..Default::default()
         }
     }
@@ -3197,6 +3725,182 @@ mod tests {
         let mut fenced = command;
         fenced.agent_epoch = "old-epoch".to_owned();
         assert!(registry.dispatch_command(fenced).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_sends_bounded_sequential_messages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(8);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (offer, data) = test_artifact_offer("node");
+
+        registry
+            .dispatch_artifact(offer.clone(), data.clone())
+            .await?;
+
+        let offered = receiver.recv().await.ok_or("artifact offer")??;
+        assert!(matches!(
+            offered.body,
+            Some(proto::control_response::Body::ArtifactOffer(received))
+                if received == offer
+        ));
+        let chunk = receiver.recv().await.ok_or("artifact chunk")??;
+        assert!(matches!(
+            chunk.body,
+            Some(proto::control_response::Body::ArtifactChunk(received))
+                if received.transfer_id == offer.transfer_id
+                    && received.chunk_index == 0
+                    && received.offset_bytes == 0
+                    && received.data == data
+                    && received.chunk_sha256 == offer.sha256
+        ));
+        let end = receiver.recv().await.ok_or("artifact end")??;
+        assert!(matches!(
+            end.body,
+            Some(proto::control_response::Body::ArtifactEnd(received))
+                if received.transfer_id == offer.transfer_id
+                    && received.sha256 == offer.sha256
+                    && received.size_bytes == offer.size_bytes
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_allows_two_transfers_but_admits_no_third()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT, 2);
+        assert_eq!(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER, 4);
+
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (mut first, data) = test_artifact_offer("node");
+        first.transfer_id = "transfer-first".to_owned();
+        let (mut second, _) = test_artifact_offer("node");
+        second.transfer_id = "transfer-second".to_owned();
+        let (mut third, _) = test_artifact_offer("node");
+        third.transfer_id = "transfer-third".to_owned();
+
+        let first_task = {
+            let registry = registry.clone();
+            let data = data.clone();
+            tokio::spawn(async move { registry.dispatch_artifact(first, data).await })
+        };
+        let second_task = {
+            let registry = registry.clone();
+            let data = data.clone();
+            tokio::spawn(async move { registry.dispatch_artifact(second, data).await })
+        };
+
+        let mut offers = 0;
+        while offers < 2 {
+            let response = receiver.recv().await.ok_or("artifact response")??;
+            if matches!(
+                response.body,
+                Some(proto::control_response::Body::ArtifactOffer(_))
+            ) {
+                offers += 1;
+            }
+        }
+
+        let third_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.dispatch_artifact(third, data.clone()),
+        )
+        .await;
+        assert!(
+            third_result.is_err(),
+            "third transfer bypassed the per-agent bound"
+        );
+
+        let mut ends = 0;
+        while ends < 2 {
+            let response = receiver.recv().await.ok_or("artifact response")??;
+            if matches!(
+                response.body,
+                Some(proto::control_response::Body::ArtifactEnd(_))
+            ) {
+                ends += 1;
+            }
+        }
+        first_task.await??;
+        second_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_waits_for_matching_commit_ack()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(8);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (offer, data) = test_artifact_offer("node");
+        let publisher = registry.clone();
+        let expected = offer.clone();
+        tokio::spawn(async move {
+            for _ in 0..3 {
+                receiver.recv().await;
+            }
+            publisher.publish_event(AgentEvent::ArtifactAck(proto::ArtifactAck {
+                transfer_id: expected.transfer_id,
+                command_id: expected.command_id,
+                operation_id: expected.operation_id,
+                resource_id: expected.resource_id,
+                agent_id: expected.agent_id,
+                agent_epoch: "epoch".to_owned(),
+                contiguous_bytes: expected.size_bytes,
+                next_chunk_index: expected.chunk_count,
+                state: proto::ArtifactTransferState::Committed as i32,
+                redacted_message: String::new(),
+            }));
+        });
+
+        let ack = registry
+            .dispatch_artifact_and_wait(offer, data, Duration::from_secs(1))
+            .await?;
+        assert_eq!(ack.state, proto::ArtifactTransferState::Committed as i32);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_rejects_payload_and_fenced_offer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, _receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (mut offer, data) = test_artifact_offer("node");
+        offer.agent_id = "other-node".to_owned();
+        assert!(registry.dispatch_artifact(offer, data).await.is_err());
+
+        let (offer, mut data) = test_artifact_offer("node");
+        data[0] = b'X';
+        assert!(registry.dispatch_artifact(offer, data).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_transfer_requires_negotiated_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        let mut request = register("node", "epoch");
+        if let Some(capabilities) = request.capabilities.as_mut() {
+            capabilities.flags.clear();
+        }
+        registry.register(&request).await?;
+        let (sender, _receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (offer, data) = test_artifact_offer("node");
+        let error = registry.dispatch_artifact(offer, data).await;
+        assert!(error.is_err());
+        if let Err(error) = error {
+            assert!(error.to_string().contains("not negotiated"));
+        }
         Ok(())
     }
 
@@ -3652,5 +4356,183 @@ mod tests {
             b"urn:o3k:compute:agent:other"
         ));
         assert!(!certificate_has_uri_san(&certificate, uri));
+    }
+
+    fn test_artifact_offer(agent_id: &str) -> (proto::ArtifactOffer, Vec<u8>) {
+        let data = b"abc".to_vec();
+        let digest = Sha256::digest(&data);
+        let mut sha256 = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut sha256, "{byte:02x}");
+        }
+        (
+            proto::ArtifactOffer {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id: "operation-1".to_owned(),
+                resource_id: "resource-1".to_owned(),
+                agent_id: agent_id.to_owned(),
+                artifact_id: "artifact-1".to_owned(),
+                kind: proto::ArtifactKind::ImageBase as i32,
+                sha256,
+                size_bytes: data.len() as u64,
+                format: "raw".to_owned(),
+                chunk_size_bytes: data.len() as u32,
+                chunk_count: 1,
+                expires_at_unix_ms: unix_ms().saturating_add(10_000),
+            },
+            data,
+        )
+    }
+
+    async fn next_artifact_ack(
+        receiver: &mut mpsc::Receiver<proto::ControlRequest>,
+    ) -> Result<proto::ArtifactAck, AgentError> {
+        let request = receiver
+            .recv()
+            .await
+            .ok_or_else(|| AgentError::Protocol("artifact ack was not emitted".to_owned()))?;
+        match request.body {
+            Some(proto::control_request::Body::ArtifactAck(ack)) => Ok(ack),
+            _ => Err(AgentError::Protocol(
+                "unexpected artifact response in test".to_owned(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_messages_acknowledge_offer_progress_and_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3k-agent-artifacts-{}", Uuid::now_v7()));
+        let store = ArtifactStore::open(&root, "node")?;
+        let (offer, data) = test_artifact_offer("node");
+        let chunk = proto::ArtifactChunk {
+            transfer_id: offer.transfer_id.clone(),
+            chunk_index: 0,
+            offset_bytes: 0,
+            data: data.clone(),
+            chunk_sha256: offer.sha256.clone(),
+        };
+        let end = proto::ArtifactEnd {
+            transfer_id: offer.transfer_id.clone(),
+            sha256: offer.sha256.clone(),
+            size_bytes: offer.size_bytes,
+        };
+        let (tx, mut receiver) = mpsc::channel(4);
+        let mut offers = HashMap::new();
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(offer.clone()),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let offered = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(offered.state, proto::ArtifactTransferState::Offered as i32);
+        assert_eq!(offered.agent_epoch, "epoch-1");
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactChunk(chunk),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let receiving = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            receiving.state,
+            proto::ArtifactTransferState::Receiving as i32
+        );
+        assert_eq!(receiving.contiguous_bytes, data.len() as u64);
+        assert_eq!(receiving.next_chunk_index, 1);
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactEnd(end),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let committed = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            committed.state,
+            proto::ArtifactTransferState::Committed as i32
+        );
+        assert_eq!(committed.contiguous_bytes, data.len() as u64);
+        assert!(store.resolve(&offer).is_ok());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_identity_or_chunk_errors_reject_and_fail_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3k-agent-artifacts-{}", Uuid::now_v7()));
+        let store = ArtifactStore::open(&root, "node")?;
+        let (mut offer, data) = test_artifact_offer("other-node");
+        let (tx, mut receiver) = mpsc::channel(4);
+        let mut offers = HashMap::new();
+        assert!(
+            handle_artifact_response(
+                proto::control_response::Body::ArtifactOffer(offer.clone()),
+                &store,
+                &mut offers,
+                &tx,
+                "node",
+                "epoch-1",
+            )
+            .await
+            .is_err()
+        );
+        assert!(receiver.try_recv().is_err());
+
+        offer.agent_id = "node".to_owned();
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(offer.clone()),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let _ = next_artifact_ack(&mut receiver).await?;
+        let mut invalid = data;
+        invalid[0] = b'X';
+        assert!(
+            handle_artifact_response(
+                proto::control_response::Body::ArtifactChunk(proto::ArtifactChunk {
+                    transfer_id: offer.transfer_id.clone(),
+                    chunk_index: 0,
+                    offset_bytes: 0,
+                    data: invalid,
+                    chunk_sha256: offer.sha256.clone(),
+                }),
+                &store,
+                &mut offers,
+                &tx,
+                "node",
+                "epoch-1",
+            )
+            .await
+            .is_err()
+        );
+        let rejected = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            rejected.state,
+            proto::ArtifactTransferState::Rejected as i32
+        );
+        assert_eq!(rejected.agent_id, "node");
+        assert_eq!(rejected.agent_epoch, "epoch-1");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

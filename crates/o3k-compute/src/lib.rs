@@ -11,9 +11,13 @@ use o3k_provider::{
     Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
     InstanceAction, Operation, ProviderError,
 };
+use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
-use o3k_store::{AgentCommandRecord, AgentCommandState, DurableStore, SqliteStore, StoreError};
+use o3k_store::{
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
+    ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -115,6 +119,43 @@ pub struct ResolvedCreateInputs {
     pub network_attachments: Vec<NetworkAttachmentSpec>,
 }
 
+/// Verified bytes that must be present on the agent before a create command
+/// is dispatched. Implementations must source these bytes from managed,
+/// digest-checked stores; paths are intentionally not part of this contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCreateArtifact {
+    pub artifact_id: String,
+    pub kind: agent_proto::ArtifactKind,
+    pub sha256: String,
+    pub format: String,
+    pub bytes: Vec<u8>,
+}
+
+#[async_trait]
+pub trait CreateArtifactResolver: Send + Sync {
+    async fn resolve_artifacts(
+        &self,
+        request: &CreateInstanceRequest,
+        agent: &NodeSnapshot,
+        inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError>;
+}
+
+#[derive(Debug, Default)]
+pub struct UnconfiguredCreateArtifactResolver;
+
+#[async_trait]
+impl CreateArtifactResolver for UnconfiguredCreateArtifactResolver {
+    async fn resolve_artifacts(
+        &self,
+        _request: &CreateInstanceRequest,
+        _agent: &NodeSnapshot,
+        _inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+        Err(ProviderError::InvalidRequest)
+    }
+}
+
 /// Resolves control-plane-owned resources into the bounded protocol inputs
 /// required by an agent. Implementations must return verified references and
 /// digests; returning placeholder values is intentionally not supported.
@@ -168,6 +209,7 @@ struct AgentProviderState {
 pub struct AgentComputeProvider {
     registry: NodeRegistry,
     resolver: Arc<dyn ResolvedCreateResolver>,
+    artifact_resolver: Arc<dyn CreateArtifactResolver>,
     state: Arc<RwLock<AgentProviderState>>,
     store: Option<Arc<SqliteStore>>,
     command_timeout: Duration,
@@ -207,6 +249,7 @@ impl AgentComputeProvider {
         Self {
             registry,
             resolver,
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
             state,
             store,
             command_timeout: Duration::from_secs(30),
@@ -216,6 +259,27 @@ impl AgentComputeProvider {
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_artifact_resolver(mut self, resolver: Arc<dyn CreateArtifactResolver>) -> Self {
+        self.artifact_resolver = resolver.clone();
+        if let Some(recovery_store) = self.store.clone() {
+            let recovery_registry = self.registry.clone();
+            let recovery_resolver = self.resolver.clone();
+            let recovery_timeout = self.command_timeout;
+            tokio::spawn(async move {
+                recover_artifact_transfers(
+                    recovery_registry,
+                    recovery_resolver,
+                    resolver,
+                    recovery_store,
+                    recovery_timeout,
+                )
+                .await;
+            });
+        }
         self
     }
 
@@ -302,6 +366,147 @@ impl AgentComputeProvider {
         }
         Ok(operation)
     }
+
+    async fn persist_pending_command(
+        &self,
+        command: &o3k_provider_contract::compute_proto::Command,
+        operation_id: Uuid,
+    ) -> Result<Option<AgentCommandRecord>, ProviderError> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let record = AgentCommandRecord {
+            command_id: command.command_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            operation_id,
+            resource_id: Uuid::parse_str(&command.resource_id)
+                .map_err(|_| ProviderError::InvalidRequest)?,
+            agent_id: command.agent_id.clone(),
+            agent_epoch: command.agent_epoch.clone(),
+            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+            payload: command.encode_to_vec(),
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: Some(operation_id.to_string()),
+            provider_resource_id: None,
+        };
+        let existing = store
+            .insert_agent_command(&record)
+            .await
+            .map_err(|_| ProviderError::Conflict)?;
+        Ok(Some(existing))
+    }
+}
+
+async fn recover_artifact_transfers(
+    registry: NodeRegistry,
+    resolver: Arc<dyn ResolvedCreateResolver>,
+    artifact_resolver: Arc<dyn CreateArtifactResolver>,
+    store: Arc<SqliteStore>,
+    timeout: Duration,
+) {
+    let transfers = match store.list_recoverable_artifact_transfers().await {
+        Ok(transfers) => transfers,
+        Err(error) => {
+            tracing::warn!(%error, "artifact transfer recovery listing failed");
+            return;
+        }
+    };
+    for transfer in transfers {
+        let Some(agent) = registry.snapshot(&transfer.agent_id).await else {
+            continue;
+        };
+        if agent.agent_epoch != transfer.agent_epoch {
+            tracing::warn!(
+                transfer_id = %transfer.transfer_id,
+                "artifact transfer recovery skipped across an agent epoch change"
+            );
+            continue;
+        }
+        let resource = match store.get_resource(transfer.resource_id).await {
+            Ok(resource) => resource,
+            Err(error) => {
+                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer intent missing");
+                continue;
+            }
+        };
+        let request: CreateInstanceRequest = match serde_json::from_str(&resource.desired_state) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer intent is invalid");
+                continue;
+            }
+        };
+        let inputs = match resolver.resolve(&request, &agent).await {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer source recovery failed");
+                continue;
+            }
+        };
+        let artifacts = match artifact_resolver
+            .resolve_artifacts(&request, &agent, &inputs)
+            .await
+        {
+            Ok(artifacts) => artifacts,
+            Err(error) => {
+                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer bytes recovery failed");
+                continue;
+            }
+        };
+        let Some(artifact) = artifacts.into_iter().find(|artifact| {
+            artifact.artifact_id == transfer.artifact_id
+                && artifact.sha256 == transfer.sha256
+                && artifact.format == transfer.format
+                && artifact_kind_name(artifact.kind) == transfer.artifact_kind
+        }) else {
+            tracing::warn!(transfer_id = %transfer.transfer_id, "artifact transfer identity has no matching source");
+            continue;
+        };
+        let kind = match transfer.artifact_kind.as_str() {
+            "image_base" => agent_proto::ArtifactKind::ImageBase,
+            "config_drive_iso" => agent_proto::ArtifactKind::ConfigDriveIso,
+            _ => continue,
+        };
+        let offer = agent_proto::ArtifactOffer {
+            transfer_id: transfer.transfer_id.clone(),
+            command_id: transfer.command_id.clone(),
+            operation_id: transfer.operation_id.to_string(),
+            resource_id: transfer.resource_id.to_string(),
+            agent_id: transfer.agent_id.clone(),
+            artifact_id: transfer.artifact_id.clone(),
+            kind: kind as i32,
+            sha256: transfer.sha256.clone(),
+            size_bytes: transfer.size_bytes,
+            format: transfer.format.clone(),
+            chunk_size_bytes: transfer.chunk_size_bytes as u32,
+            chunk_count: transfer.chunk_count as u32,
+            expires_at_unix_ms: unix_ms_after(timeout),
+        };
+        match registry
+            .dispatch_artifact_and_wait(offer, artifact.bytes, timeout)
+            .await
+        {
+            Ok(_) => {
+                let _ = store
+                    .update_artifact_transfer(
+                        &transfer.transfer_id,
+                        &transfer.agent_epoch,
+                        ArtifactTransferUpdate {
+                            state: ArtifactTransferState::Committed,
+                            contiguous_bytes: transfer.size_bytes,
+                            next_chunk_index: transfer.chunk_count,
+                            retry_count: transfer.retry_count,
+                        },
+                    )
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer recovery dispatch failed")
+            }
+        }
+    }
 }
 
 fn map_agent_error(error: o3k_compute_agent::AgentError) -> ProviderError {
@@ -323,6 +528,14 @@ fn map_agent_error(error: o3k_compute_agent::AgentError) -> ProviderError {
         | o3k_compute_agent::AgentError::IdentityStore(_)
         | o3k_compute_agent::AgentError::TlsMaterial
         | o3k_compute_agent::AgentError::InvalidConfiguration(_) => ProviderError::Retryable,
+    }
+}
+
+fn artifact_kind_name(kind: agent_proto::ArtifactKind) -> &'static str {
+    match kind {
+        agent_proto::ArtifactKind::ImageBase => "image_base",
+        agent_proto::ArtifactKind::ConfigDriveIso => "config_drive_iso",
+        agent_proto::ArtifactKind::Unspecified => "unspecified",
     }
 }
 
@@ -535,6 +748,8 @@ async fn apply_agent_provider_event(
                 }
             }
         }
+        o3k_compute_agent::AgentEvent::ArtifactAck(_)
+        | o3k_compute_agent::AgentEvent::ArtifactStatus(_) => {}
     }
 }
 
@@ -678,6 +893,7 @@ impl ComputeProvider for AgentComputeProvider {
             .image_id
             .as_deref()
             .ok_or(ProviderError::InvalidRequest)?;
+        let artifact_inputs = resolved.clone();
         let command = build_create_command(CreateCommandSpec {
             agent_id: agent.agent_id.clone(),
             agent_epoch: agent.agent_epoch.clone(),
@@ -695,9 +911,179 @@ impl ComputeProvider for AgentComputeProvider {
             disk_gib: resolved.disk_gib,
             config_drive_artifact_id: resolved.config_drive_artifact_id,
             config_drive_sha256: resolved.config_drive_sha256,
-            network_attachments: resolved.network_attachments,
+            network_attachments: resolved.network_attachments.clone(),
         })
         .map_err(map_agent_error)?;
+        if let Some(existing) = self
+            .persist_pending_command(&command, request.operation_id)
+            .await?
+        {
+            if matches!(
+                existing.state,
+                AgentCommandState::Succeeded | AgentCommandState::Failed
+            ) {
+                return self.accepted_operation(request.operation_id).await;
+            }
+        }
+        let artifacts = self
+            .artifact_resolver
+            .resolve_artifacts(&request, &agent, &artifact_inputs)
+            .await?;
+        if artifacts.len() != 2 {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let required = [
+            (
+                agent_proto::ArtifactKind::ImageBase,
+                &artifact_inputs.image_artifact_id,
+                &artifact_inputs.image_sha256,
+                artifact_inputs.image_format.as_str(),
+            ),
+            (
+                agent_proto::ArtifactKind::ConfigDriveIso,
+                &artifact_inputs.config_drive_artifact_id,
+                &artifact_inputs.config_drive_sha256,
+                "iso",
+            ),
+        ];
+        let mut seen = [false; 2];
+        for (index, artifact) in artifacts.into_iter().enumerate() {
+            let expected_index = required
+                .iter()
+                .position(|(kind, artifact_id, _, _)| {
+                    *kind == artifact.kind && artifact_id.as_str() == artifact.artifact_id
+                })
+                .ok_or(ProviderError::InvalidRequest)?;
+            if seen[expected_index] {
+                return Err(ProviderError::InvalidRequest);
+            }
+            seen[expected_index] = true;
+            let expected = &required[expected_index];
+            let size_bytes =
+                u64::try_from(artifact.bytes.len()).map_err(|_| ProviderError::InvalidRequest)?;
+            if size_bytes == 0
+                || artifact.artifact_id.trim().is_empty()
+                || artifact.sha256.len() != 64
+                || artifact.format.trim().is_empty()
+                || artifact.kind == agent_proto::ArtifactKind::Unspecified
+                || artifact.sha256 != *expected.2
+                || artifact.format != expected.3
+            {
+                return Err(ProviderError::InvalidRequest);
+            }
+            let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
+            let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let transfer_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
+            )
+            .to_string();
+            let offer = agent_proto::ArtifactOffer {
+                transfer_id,
+                command_id: command.command_id.clone(),
+                operation_id: command.operation_id.clone(),
+                resource_id: command.resource_id.clone(),
+                agent_id: agent.agent_id.clone(),
+                artifact_id: artifact.artifact_id,
+                kind: artifact.kind as i32,
+                sha256: artifact.sha256,
+                size_bytes,
+                format: artifact.format,
+                chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
+                chunk_count,
+                expires_at_unix_ms: unix_ms_after(self.command_timeout),
+            };
+            if let Some(store) = &self.store {
+                let transfer = ArtifactTransferRecord {
+                    transfer_id: offer.transfer_id.clone(),
+                    command_id: offer.command_id.clone(),
+                    operation_id: request.operation_id,
+                    resource_id: request.o3k_server_id,
+                    agent_id: offer.agent_id.clone(),
+                    agent_epoch: agent.agent_epoch.clone(),
+                    artifact_id: offer.artifact_id.clone(),
+                    artifact_kind: artifact_kind_name(artifact.kind).to_owned(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                    format: offer.format.clone(),
+                    chunk_size_bytes: offer.chunk_size_bytes as u64,
+                    chunk_count: offer.chunk_count as u64,
+                    state: ArtifactTransferState::Offered,
+                    contiguous_bytes: 0,
+                    next_chunk_index: 0,
+                    retry_count: 0,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                };
+                let existing = match store.insert_artifact_transfer(&transfer).await {
+                    Ok(existing) => existing,
+                    Err(StoreError::ArtifactTransferConflict(_)) => {
+                        let previous = store
+                            .get_artifact_transfer(&transfer.transfer_id)
+                            .await
+                            .map_err(|_| ProviderError::Conflict)?;
+                        if previous.state == ArtifactTransferState::Committed {
+                            previous
+                        } else if previous.command_id == transfer.command_id
+                            && previous.operation_id == transfer.operation_id
+                            && previous.resource_id == transfer.resource_id
+                            && previous.agent_id == transfer.agent_id
+                            && previous.artifact_id == transfer.artifact_id
+                            && previous.artifact_kind == transfer.artifact_kind
+                            && previous.sha256 == transfer.sha256
+                            && previous.size_bytes == transfer.size_bytes
+                            && previous.format == transfer.format
+                            && previous.chunk_size_bytes == transfer.chunk_size_bytes
+                            && previous.chunk_count == transfer.chunk_count
+                        {
+                            store
+                                .rebind_artifact_transfer_epoch(
+                                    &transfer.transfer_id,
+                                    &previous.agent_epoch,
+                                    &transfer.agent_epoch,
+                                )
+                                .await
+                                .map_err(|_| ProviderError::Conflict)?
+                        } else {
+                            return Err(ProviderError::Conflict);
+                        }
+                    }
+                    Err(_) => return Err(ProviderError::Conflict),
+                };
+                if existing.state == ArtifactTransferState::Committed {
+                    continue;
+                }
+                if matches!(
+                    existing.state,
+                    ArtifactTransferState::Rejected | ArtifactTransferState::Expired
+                ) {
+                    return Err(ProviderError::Conflict);
+                }
+            }
+            self.registry
+                .dispatch_artifact_and_wait(offer.clone(), artifact.bytes, self.command_timeout)
+                .await
+                .map_err(map_agent_error)?;
+            if let Some(store) = &self.store {
+                store
+                    .update_artifact_transfer(
+                        &offer.transfer_id,
+                        &agent.agent_epoch,
+                        ArtifactTransferUpdate {
+                            state: ArtifactTransferState::Committed,
+                            contiguous_bytes: offer.size_bytes,
+                            next_chunk_index: offer.chunk_count as u64,
+                            retry_count: 0,
+                        },
+                    )
+                    .await
+                    .map_err(|_| ProviderError::Conflict)?;
+            }
+        }
+        if seen != [true, true] {
+            return Err(ProviderError::InvalidRequest);
+        }
         let operation = self
             .dispatch_recorded(command, request.operation_id)
             .await?;
@@ -2900,7 +3286,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_provider_maps_unavailable_registry_dispatch_to_retryable()
+    async fn agent_provider_rejects_create_without_verified_artifacts()
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
         registry.register(&registered_agent("node-a")).await?;
@@ -2923,7 +3309,7 @@ mod tests {
         };
         assert_eq!(
             provider.create_instance(request).await,
-            Err(ProviderError::Retryable)
+            Err(ProviderError::InvalidRequest)
         );
         assert_eq!(
             provider.get_operation(operation_id).await,
@@ -2984,6 +3370,7 @@ mod tests {
             resolver: Arc::new(UnconfiguredResolvedCreateResolver),
             state: state.clone(),
             store: None,
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
             command_timeout: Duration::from_secs(30),
         };
         assert_eq!(

@@ -26,6 +26,26 @@ assert "protobuf-compiler libvirt-dev pkg-config" in text
 assert "cargo clean -p virt-sys" in text
 assert "git fetch origin main:refs/heads/main" not in text
 assert "buf breaking --against '.git#branch=main,subdir=proto'" not in text
+assert "sha256sum result.json sbom.spdx.json > SHA256SUMS" in text
+assert "path: target/testlab-artifacts/" not in text
+artifact_paths = re.findall(r"^\s+target/testlab-artifacts/[^\s]+$", text, re.MULTILINE)
+assert artifact_paths == [
+    "            target/testlab-artifacts/result.json",
+    "            target/testlab-artifacts/sbom.spdx.json",
+    "            target/testlab-artifacts/SHA256SUMS",
+], artifact_paths
+for forbidden in (
+    "target/testlab-artifacts/o3kd.log",
+    "target/testlab-artifacts/openstack-cli-error.log",
+    "target/testlab-artifacts/server-show.json",
+    "target/testlab-artifacts/server-list.json",
+    "target/testlab-artifacts/server-show-after-reboot.json",
+    "target/testlab-artifacts/console.log",
+    "target/testlab-artifacts/console-error.log",
+    "target/testlab-artifacts/credentials",
+    "target/testlab-artifacts/secrets",
+):
+    assert forbidden not in text, forbidden
 
 for workflow in pathlib.Path(sys.argv[1]).parent.glob("*.y*ml"):
     for line in workflow.read_text(encoding="utf-8").splitlines():
@@ -37,6 +57,7 @@ assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/head
 assert "target/real-host-workflow-artifacts/console.log" not in real_host_text
 assert "target/real-host-workflow-artifacts/server-show.json" not in real_host_text
 assert "target/real-host-workflow-artifacts/openstack-cli-result.json" in real_host_text
+assert "target/real-host-workflow-artifacts/console-result.json" in real_host_text
 assert "Download and verify CirrOS image" in real_host_text
 assert "id: image" in real_host_text
 assert "steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success'" in real_host_text

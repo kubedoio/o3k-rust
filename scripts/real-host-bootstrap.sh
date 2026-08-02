@@ -25,9 +25,9 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is unavailable"
 command -v sudo >/dev/null 2>&1 || fail "sudo is unavailable"
 sudo -n true 2>/dev/null || fail "passwordless sudo is required for disposable host dependencies"
 
-if ! command -v genisoimage >/dev/null 2>&1; then
+if ! command -v xorriso >/dev/null 2>&1; then
   sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends genisoimage python3-venv
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xorriso python3-venv
 fi
 
 if [[ ! -x "$OPENSTACK_VENV/bin/openstack" ]]; then

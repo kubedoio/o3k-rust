@@ -159,6 +159,7 @@ impl ImageCache {
         }
         let temporary = self
             .root
+            .join("base")
             .join(format!("base-{checksum}.tmp-{}", Uuid::now_v7()));
         if let Err(error) = fs::write(&temporary, content) {
             let _ = fs::remove_file(&temporary);
@@ -199,6 +200,70 @@ impl ImageCache {
             size: artifact.size,
             path,
         })
+    }
+
+    /// Resolve a previously published base image without accepting a host
+    /// path from the caller.
+    ///
+    /// The checksum and format select only the cache-owned pathname. The
+    /// returned entry is still treated as untrusted: it must be a regular
+    /// file, have the expected bounded size, and match the complete SHA-256
+    /// digest. A qcow2 entry additionally needs fresh `qemu-img` format
+    /// evidence. This makes a cache hit safe after a process restart or an
+    /// out-of-band modification.
+    pub fn resolve_base(
+        &self,
+        checksum: &str,
+        format: &str,
+        expected_size: u64,
+    ) -> Result<PathBuf, ImageError> {
+        if !is_checksum(checksum) {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        if !matches!(format, "qcow2" | "raw") {
+            return Err(ImageError::UnsupportedFormat);
+        }
+        if expected_size > self.max_bytes {
+            return Err(ImageError::TooLarge);
+        }
+
+        let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
+        let path = self.root.join("base").join(format!("{checksum}.{format}"));
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ImageError::NotFound);
+            }
+            Err(error) => return Err(ImageError::Storage(error)),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(ImageError::InvalidPath);
+        }
+        if metadata.len() != expected_size || metadata.len() > self.max_bytes {
+            return Err(ImageError::ChecksumMismatch);
+        }
+
+        let mut file = fs::File::open(&path).map_err(ImageError::Storage)?;
+        let opened_metadata = file.metadata().map_err(ImageError::Storage)?;
+        if !opened_metadata.file_type().is_file() || opened_metadata.len() != expected_size {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(ImageError::Storage)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        if format!("{:x}", hasher.finalize()) != checksum {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        if format == "qcow2" {
+            verify_image_format(&self.qemu_img, &path, format)?;
+        }
+        Ok(path)
     }
 
     pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
@@ -788,16 +853,60 @@ mod tests {
         assert_eq!(first.id, image.id);
         assert_eq!(first.size, artifact.content.len() as u64);
         assert_eq!(fs::read(&first.path)?, artifact.content);
+        assert_eq!(
+            cache.resolve_base(&artifact.checksum, &artifact.format, artifact.size)?,
+            first.path
+        );
+
+        drop(cache);
+        let reopened_cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
+        assert_eq!(
+            reopened_cache.resolve_base(&artifact.checksum, &artifact.format, artifact.size)?,
+            first.path
+        );
 
         let mut inconsistent = artifact;
         inconsistent.size += 1;
         assert!(matches!(
-            cache.cache_artifact(&inconsistent),
+            reopened_cache.cache_artifact(&inconsistent),
             Err(ImageError::ChecksumMismatch)
         ));
 
         fs::remove_dir_all(service_path)?;
         fs::remove_dir_all(cache_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cached_base_resolution_rejects_tampering_and_wrong_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("cache-resolve-revalidation");
+        let _ = fs::remove_dir_all(&path);
+        let cache = ImageCache::open(&path, DEFAULT_MAX_CACHE_BYTES)?;
+        let content = b"stable-image-content";
+        let checksum = format!("{:x}", Sha256::digest(content));
+        let base = cache.cache_base(&checksum, "raw", content)?;
+
+        assert!(matches!(
+            cache.resolve_base(&checksum, "vmdk", content.len() as u64),
+            Err(ImageError::UnsupportedFormat)
+        ));
+        assert!(matches!(
+            cache.resolve_base(&"0".repeat(64), "raw", content.len() as u64),
+            Err(ImageError::NotFound)
+        ));
+        assert!(matches!(
+            cache.resolve_base(&checksum, "raw", content.len() as u64 + 1),
+            Err(ImageError::ChecksumMismatch)
+        ));
+
+        fs::write(&base, b"tampered-image-content")?;
+        assert!(matches!(
+            cache.resolve_base(&checksum, "raw", content.len() as u64),
+            Err(ImageError::ChecksumMismatch)
+        ));
+
+        fs::remove_dir_all(path)?;
         Ok(())
     }
 
@@ -956,16 +1065,21 @@ esac
         let stale = path
             .join("overlays")
             .join(format!(".instance.tmp-{}", Uuid::now_v7()));
+        let stale_base =
+            path.join("base")
+                .join(format!("base-{}.tmp-{}", "a".repeat(64), Uuid::now_v7()));
         let published = path.join("overlays").join("instance.qcow2");
         let unrelated = path.join("overlays").join("keep.txt");
         let unrelated_temporary = path.join("overlays").join("foo.tmp-user");
         fs::write(&stale, b"stale")?;
+        fs::write(&stale_base, b"stale-base")?;
         fs::write(&published, b"published")?;
         fs::write(&unrelated, b"keep")?;
         fs::write(&unrelated_temporary, b"keep")?;
 
         let _reopened = ImageCache::open(&path, 1024)?;
         assert!(!stale.exists());
+        assert!(!stale_base.exists());
         assert_eq!(fs::read(&published)?, b"published");
         assert_eq!(fs::read(&unrelated)?, b"keep");
         assert_eq!(fs::read(&unrelated_temporary)?, b"keep");

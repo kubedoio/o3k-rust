@@ -321,6 +321,7 @@ for needle in ("workflow_dispatch:",
                "contents: read",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
                "retention-days: 14",
+               "target/real-host-workflow-artifacts/console-result.json",
                "Run compute-agent process-boundary evidence",
                "tests/real-compute-agent-process-mtls.sh",
                "compute-agent-process-mtls-result.json"):
