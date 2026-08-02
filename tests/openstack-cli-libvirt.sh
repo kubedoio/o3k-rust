@@ -13,18 +13,21 @@ IMAGE_ID=
 KEYPAIR_ID=
 NETWORK_ID=
 SUBNET_ID=
+PORT_ID=
 FLAVOR_ID=
 SERVER_ID=
 CREATED_IMAGE_ID=
 CREATED_KEYPAIR_ID=
 CREATED_NETWORK_ID=
 CREATED_SUBNET_ID=
+CREATED_PORT_ID=
 CREATED_FLAVOR_ID=
 CREATED_SERVER_ID=
 CLEANUP_IMAGE_STATUS=
 CLEANUP_KEYPAIR_STATUS=
 CLEANUP_NETWORK_STATUS=
 CLEANUP_SUBNET_STATUS=
+CLEANUP_PORT_STATUS=
 CLEANUP_FLAVOR_STATUS=
 CLEANUP_SERVER_STATUS=
 SERVER_NAME=o3k-testlab-server
@@ -149,6 +152,7 @@ delete_resource_and_verify_absent() {
             keypair) CLEANUP_KEYPAIR_STATUS=verified_absent ;;
             network) CLEANUP_NETWORK_STATUS=verified_absent ;;
             subnet) CLEANUP_SUBNET_STATUS=verified_absent ;;
+            port) CLEANUP_PORT_STATUS=verified_absent ;;
             flavor) CLEANUP_FLAVOR_STATUS=verified_absent ;;
         esac
         return 0
@@ -158,6 +162,7 @@ delete_resource_and_verify_absent() {
         keypair) CLEANUP_KEYPAIR_STATUS=not_verified ;;
         network) CLEANUP_NETWORK_STATUS=not_verified ;;
         subnet) CLEANUP_SUBNET_STATUS=not_verified ;;
+        port) CLEANUP_PORT_STATUS=not_verified ;;
         flavor) CLEANUP_FLAVOR_STATUS=not_verified ;;
     esac
     return 1
@@ -178,6 +183,13 @@ cleanup_resources() {
     if [[ -n "${FLAVOR_ID}" ]]; then
         if delete_resource_and_verify_absent flavor "${FLAVOR_ID}"; then
             FLAVOR_ID=
+        else
+            cleanup_ok=0
+        fi
+    fi
+    if [[ -n "${PORT_ID}" ]]; then
+        if delete_resource_and_verify_absent port "${PORT_ID}"; then
+            PORT_ID=
         else
             cleanup_ok=0
         fi
@@ -217,9 +229,11 @@ write_result() {
     local status="$1" reason="$2" cleanup_status="${3:-not_run}"
     python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${status}" "${reason}" "${cleanup_status}" \
         "${CREATED_IMAGE_ID}" "${CREATED_NETWORK_ID}" "${CREATED_SUBNET_ID}" \
+        "${CREATED_PORT_ID}" \
         "${CREATED_KEYPAIR_ID}" "${CREATED_FLAVOR_ID}" "${CREATED_SERVER_ID}" \
         "${CLEANUP_IMAGE_STATUS}" "${CLEANUP_KEYPAIR_STATUS}" "${CLEANUP_NETWORK_STATUS}" \
         "${CLEANUP_SUBNET_STATUS}" "${CLEANUP_FLAVOR_STATUS}" \
+        "${CLEANUP_PORT_STATUS}" \
         "${CLEANUP_SERVER_STATUS}" "${SERVER_ACTIVE}" "${SERVER_CONFIG_DRIVE}" \
         "${SERVER_FIXED_IP}" "${CONSOLE_BOOT_MARKER}" \
         "${SERVER_RESTART_ACTIVE}" "${SERVER_RESTART_CONFIG_DRIVE}" \
@@ -227,8 +241,8 @@ write_result() {
 import json, sys, time
 (
     path, status, reason, cleanup_status, image_id, network_id, subnet_id,
-    keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
-    flavor_status, server_status, server_active, server_config_drive,
+    port_id, keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
+    flavor_status, port_status, server_status, server_active, server_config_drive,
     server_fixed_ip, console_boot_marker, restart_active, restart_config_drive,
     restart_fixed_ip,
 ) = sys.argv[1:]
@@ -249,6 +263,7 @@ cleanup_resources = {
         "network": network_status,
         "subnet": subnet_status,
         "flavor": flavor_status,
+        "port": port_status,
         "server": server_status,
     }.items() if value
 }
@@ -260,6 +275,7 @@ resources = {
         "keypair_id": keypair_id,
         "network_id": network_id,
         "subnet_id": subnet_id,
+        "port_id": port_id,
         "flavor_id": flavor_id,
         "server_id": server_id,
     }.items() if value
@@ -361,10 +377,13 @@ CLEANUP_NETWORK_STATUS=pending
 SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 o3k-testlab-subnet -f value -c id)"
 CREATED_SUBNET_ID="${SUBNET_ID}"
 CLEANUP_SUBNET_STATUS=pending
+PORT_ID="$(openstack port create --network "${NETWORK_ID}" o3k-testlab-port -f value -c id)"
+CREATED_PORT_ID="${PORT_ID}"
+CLEANUP_PORT_STATUS=pending
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "net-id=${NETWORK_ID},v4-fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "port-id=${PORT_ID}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
@@ -410,6 +429,9 @@ KEYPAIR_ID=
 delete_resource_and_verify_absent flavor "${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=verified_absent
 FLAVOR_ID=
+delete_resource_and_verify_absent port "${PORT_ID}"
+CLEANUP_PORT_STATUS=verified_absent
+PORT_ID=
 delete_resource_and_verify_absent subnet "${SUBNET_ID}"
 CLEANUP_SUBNET_STATUS=verified_absent
 SUBNET_ID=
