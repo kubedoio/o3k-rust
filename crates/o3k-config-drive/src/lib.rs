@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -169,7 +170,26 @@ impl ConfigDriveStore {
         &self,
         result: &ConfigDriveIsoResult,
     ) -> Result<Vec<u8>, ConfigDriveError> {
+        self.read_verified_iso_for_instance(result, None)
+    }
+
+    fn read_verified_iso_for_instance(
+        &self,
+        result: &ConfigDriveIsoResult,
+        expected_instance_id: Option<&str>,
+    ) -> Result<Vec<u8>, ConfigDriveError> {
+        let root = fs::canonicalize(&self.root).map_err(|_| ConfigDriveError::UnownedPath)?;
         let manifest_path = iso_manifest_path(&result.path)?;
+        let output_metadata =
+            fs::symlink_metadata(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
+        if !output_metadata.file_type().is_file() || output_metadata.len() > MAX_ISO_BYTES as u64 {
+            return Err(ConfigDriveError::InvalidIsoOutput);
+        }
+        let canonical_output =
+            fs::canonicalize(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
+        if !canonical_output.starts_with(&root) {
+            return Err(ConfigDriveError::UnownedPath);
+        }
         let manifest: IsoOwnershipManifest =
             serde_json::from_slice(&read_owned_file(&manifest_path)?)
                 .map_err(ConfigDriveError::CorruptManifest)?;
@@ -178,17 +198,21 @@ impl ConfigDriveStore {
             .file_name()
             .and_then(|value| value.to_str())
             .ok_or(ConfigDriveError::InvalidInput)?;
-        let verified = validate_owned_iso(
-            &result.path,
-            &manifest_path,
-            &manifest.instance_id,
-            &result.source_fingerprint_sha256,
-            output_name,
-        )?;
-        if verified.fingerprint_sha256 != result.fingerprint_sha256 {
+        if manifest.schema_version != 1
+            || manifest.managed_by != ISO_MANAGED_BY
+            || manifest.output_name != output_name
+            || expected_instance_id.is_some_and(|id| manifest.instance_id != id)
+            || manifest.source_fingerprint_sha256 != result.source_fingerprint_sha256
+        {
+            return Err(ConfigDriveError::UnownedPath);
+        }
+        let content = read_bounded_regular_file(&result.path, output_metadata.len())?;
+        if sha256(&content) != manifest.artifact_fingerprint_sha256
+            || sha256(&content) != result.fingerprint_sha256
+        {
             return Err(ConfigDriveError::InvalidIsoOutput);
         }
-        fs::read(&result.path).map_err(ConfigDriveError::Storage)
+        Ok(content)
     }
 
     /// Reads a verified ISO only when its output and ownership manifest are
@@ -196,22 +220,12 @@ impl ConfigDriveStore {
     pub fn read_verified_artifact(
         &self,
         result: &ConfigDriveIsoResult,
+        expected_instance_id: &str,
     ) -> Result<ConfigDriveArtifact, ConfigDriveError> {
-        let root = fs::canonicalize(&self.root).map_err(|_| ConfigDriveError::UnownedPath)?;
-        let output =
-            fs::symlink_metadata(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
-        if !output.file_type().is_file() || output.len() > MAX_ISO_BYTES as u64 {
-            return Err(ConfigDriveError::InvalidIsoOutput);
+        if !valid_instance_id(expected_instance_id) {
+            return Err(ConfigDriveError::InvalidInput);
         }
-        let canonical_output =
-            fs::canonicalize(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
-        if !canonical_output.starts_with(&root) {
-            return Err(ConfigDriveError::UnownedPath);
-        }
-        let content = self.read_verified_iso(result)?;
-        if content.len() > MAX_ISO_BYTES || content.len() as u64 != output.len() {
-            return Err(ConfigDriveError::InvalidIsoOutput);
-        }
+        let content = self.read_verified_iso_for_instance(result, Some(expected_instance_id))?;
         Ok(ConfigDriveArtifact {
             format: "iso".to_owned(),
             sha256: result.fingerprint_sha256.clone(),
@@ -219,6 +233,26 @@ impl ConfigDriveStore {
             content,
         })
     }
+}
+
+fn read_bounded_regular_file(path: &Path, expected_size: u64) -> Result<Vec<u8>, ConfigDriveError> {
+    let file = fs::File::open(path).map_err(ConfigDriveError::Storage)?;
+    let opened_size = file.metadata().map_err(ConfigDriveError::Storage)?.len();
+    if opened_size != expected_size || opened_size > MAX_ISO_BYTES as u64 {
+        return Err(ConfigDriveError::InvalidIsoOutput);
+    }
+    let mut content = Vec::with_capacity(opened_size as usize);
+    file.take(MAX_ISO_BYTES as u64 + 1)
+        .read_to_end(&mut content)
+        .map_err(ConfigDriveError::Storage)?;
+    if content.len() as u64 != expected_size {
+        return Err(ConfigDriveError::InvalidIsoOutput);
+    }
+    Ok(content)
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub fn generate(
@@ -950,11 +984,15 @@ mod tests {
         let runner = FakeRunner::successful(b"deterministic-iso");
         let first = materialize_iso_with_runner(&source, &output, &runner)?;
         assert_eq!(store.read_verified_iso(&first)?, b"deterministic-iso");
-        let artifact = store.read_verified_artifact(&first)?;
+        let artifact = store.read_verified_artifact(&first, "instance-1")?;
         assert_eq!(artifact.format, "iso");
         assert_eq!(artifact.size, b"deterministic-iso".len() as u64);
         assert_eq!(artifact.content, b"deterministic-iso");
         assert_eq!(artifact.sha256, first.fingerprint_sha256);
+        assert!(matches!(
+            store.read_verified_artifact(&first, "instance-2"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0][0], OsStr::new("-as"));
@@ -1046,7 +1084,7 @@ mod tests {
         let runner = FakeRunner::successful(b"foreign-iso");
         let foreign = materialize_iso_with_runner(&source, &output, &runner)?;
         assert!(matches!(
-            store.read_verified_artifact(&foreign),
+            store.read_verified_artifact(&foreign, "instance-1"),
             Err(ConfigDriveError::UnownedPath)
         ));
 
@@ -1061,7 +1099,7 @@ mod tests {
             &FakeRunner::successful(&oversized),
         )?;
         assert!(matches!(
-            oversized_store.read_verified_artifact(&oversized_result),
+            oversized_store.read_verified_artifact(&oversized_result, "instance-1"),
             Err(ConfigDriveError::InvalidIsoOutput)
         ));
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
