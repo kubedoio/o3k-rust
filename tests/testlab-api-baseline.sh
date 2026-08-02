@@ -30,7 +30,7 @@ assert len(operations) == len(baseline["operations"]), "duplicate baseline opera
 assert set(operations) <= inventory_ids, "baseline references unknown inventory operation"
 assert set(baseline["workflow"]) <= set(operations), "workflow references unclassified operation"
 assert operations["compute.flavor_collection_list"]["status"] == "required"
-assert 405 in operations["compute.flavor_collection_list"]["errors"]
+assert 405 not in operations["compute.flavor_collection_list"]["errors"]
 assert operations["compute.flavor_collection_create"]["status"] == "required"
 assert operations["compute.flavor_member_delete"]["status"] == "required"
 assert operations["compute.keypair_collection_import"]["status"] == "required"

@@ -24,6 +24,13 @@ pub struct CreateInstanceRequest {
     pub name: String,
     pub vcpus: u32,
     pub memory_mib: u64,
+    /// The selected Nova flavor identity is persisted with the create intent.
+    /// Providers do not resolve flavor values by dimension because distinct
+    /// flavors may legitimately share vCPU and memory values.
+    #[serde(default)]
+    pub flavor_id: String,
+    #[serde(default)]
+    pub disk_gib: u64,
     pub image_id: Option<String>,
     #[serde(default)]
     pub key_name: Option<String>,
@@ -546,6 +553,8 @@ pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(
         name: "conformance".to_owned(),
         vcpus: 1,
         memory_mib: 128,
+        flavor_id: String::new(),
+        disk_gib: 0,
         image_id: None,
         key_name: None,
         keypair_id: None,
@@ -580,6 +589,8 @@ mod tests {
             name: "test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: None,
             key_name: None,
             keypair_id: None,
