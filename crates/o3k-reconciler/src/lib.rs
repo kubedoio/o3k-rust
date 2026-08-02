@@ -94,7 +94,6 @@ pub struct OperationJournal<S, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
     max_attempts: u8,
-    attempts: Arc<Mutex<HashMap<Uuid, u8>>>,
     events: Arc<Mutex<Vec<JournalEvent>>>,
     agent_evidence: Arc<Mutex<HashMap<Uuid, AgentEvidenceFence>>>,
 }
@@ -105,7 +104,6 @@ impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
             store: self.store.clone(),
             provider: self.provider.clone(),
             max_attempts: self.max_attempts,
-            attempts: self.attempts.clone(),
             events: self.events.clone(),
             agent_evidence: self.agent_evidence.clone(),
         }
@@ -122,7 +120,6 @@ where
             store,
             provider,
             max_attempts: max_attempts.max(1),
-            attempts: Arc::new(Mutex::new(HashMap::new())),
             events: Arc::new(Mutex::new(Vec::new())),
             agent_evidence: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1086,15 +1083,7 @@ where
         resource_id: Uuid,
         error: ProviderError,
     ) -> Result<OperationState, ReconcileError> {
-        let attempts = {
-            let mut attempts = self
-                .attempts
-                .lock()
-                .map_err(|_| ReconcileError::RetryExhausted)?;
-            let value = attempts.entry(operation_id).or_insert(0);
-            *value = value.saturating_add(1);
-            *value
-        };
+        let attempts = self.store.increment_operation_retry(operation_id).await?;
         if attempts >= self.max_attempts {
             self.store
                 .update_operation(

@@ -265,6 +265,7 @@ pub trait DurableStore: Send + Sync {
         provider_resource_id: Option<&str>,
     ) -> Result<AgentCommandRecord, StoreError>;
     async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError>;
+    async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError>;
     async fn insert_resource_and_operation(
         &self,
         resource: &ResourceRecord,
@@ -328,12 +329,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 6 {
+        if table_count != 7 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
@@ -976,6 +977,35 @@ impl DurableStore for SqliteStore {
         rows.iter().map(agent_command_from_row).collect()
     }
 
+    async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let current: Option<i64> =
+            sqlx::query_scalar("SELECT attempts FROM operation_retry_state WHERE operation_id = ?")
+                .bind(operation_id.to_string())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?;
+        let attempts = current.unwrap_or(0).saturating_add(1);
+        if current.is_some() {
+            sqlx::query("UPDATE operation_retry_state SET attempts = ?, updated_at = CURRENT_TIMESTAMP WHERE operation_id = ?")
+                .bind(attempts)
+                .bind(operation_id.to_string())
+                .execute(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?;
+        } else {
+            sqlx::query("INSERT INTO operation_retry_state (operation_id, attempts) VALUES (?, ?)")
+                .bind(operation_id.to_string())
+                .bind(attempts)
+                .execute(&mut *transaction)
+                .await
+                .map_err(StoreError::Database)?;
+        }
+        transaction.commit().await.map_err(StoreError::Database)?;
+        u8::try_from(attempts)
+            .map_err(|_| StoreError::Corrupt("operation retry count exceeds limit".to_owned()))
+    }
+
     async fn insert_resource_and_operation(
         &self,
         resource: &ResourceRecord,
@@ -1268,6 +1298,8 @@ mod tests {
                 Some("provider-op-1")
             );
             assert_eq!(updated.provider_resource_id.as_deref(), Some("domain-1"));
+            assert_eq!(store.increment_operation_retry(operation.id).await?, 1);
+            assert_eq!(store.increment_operation_retry(operation.id).await?, 2);
             assert_eq!(
                 store
                     .update_agent_command(
@@ -1301,6 +1333,7 @@ mod tests {
             reopened.get_agent_command(&command.command_id).await?.state,
             AgentCommandState::Accepted
         );
+        assert_eq!(reopened.increment_operation_retry(operation.id).await?, 3);
         fs::remove_file(path)?;
         Ok(())
     }
