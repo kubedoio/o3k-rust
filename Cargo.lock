@@ -1001,6 +1001,7 @@ dependencies = [
  "o3k-reconciler",
  "o3k-scheduler",
  "o3k-store",
+ "prost",
  "serde",
  "serde_json",
  "thiserror",

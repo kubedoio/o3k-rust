@@ -723,6 +723,9 @@ mod tests {
             ["o3kd".to_owned(), "--provider=agent".to_owned()],
             Vec::new(),
         );
-        assert!(matches!(result, Err(ConfigError::MissingAgentConfiguration)));
+        assert!(matches!(
+            result,
+            Err(ConfigError::MissingAgentConfiguration)
+        ));
     }
 }
