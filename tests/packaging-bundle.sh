@@ -9,12 +9,13 @@ cleanup() { rm -f -- "$DIRTY_MARKER" "$ESCAPE_SENTINEL"; rm -rf -- "$WORK_DIR"; 
 trap cleanup EXIT
 
 BUNDLE_DIR="$WORK_DIR/bundle"
-mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging"
+mkdir -p "$BUNDLE_DIR/bin" "$BUNDLE_DIR/packaging" "$BUNDLE_DIR/scripts"
 for file in \
   install.sh o3kd.service reset.sh uninstall.sh diagnose.sh preflight.sh \
   bootstrap-certs.sh release-gate.sh validate-human-review.sh o3k-compute.service; do
   cp "$ROOT_DIR/packaging/$file" "$BUNDLE_DIR/packaging/$file"
 done
+cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passwords.sh"
 
 printf '#!/usr/bin/env bash\nprintf bundled-o3kd\n' >"$BUNDLE_DIR/bin/o3kd"
 chmod 0755 "$BUNDLE_DIR/bin/o3kd"
