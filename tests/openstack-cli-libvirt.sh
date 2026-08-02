@@ -8,7 +8,8 @@ mkdir -p "${ARTIFACT_DIR}"
 rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
     "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
     "${ARTIFACT_DIR}/server-show-after-reboot.json" \
-    "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log"
+    "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log" \
+    "${ARTIFACT_DIR}/console-result.json"
 IMAGE_ID=
 KEYPAIR_ID=
 NETWORK_ID=
@@ -46,6 +47,8 @@ SERVER_ACTIVE=false
 SERVER_CONFIG_DRIVE=false
 SERVER_FIXED_IP=
 CONSOLE_BOOT_MARKER=false
+CONSOLE_POLL_ATTEMPTS=0
+CONSOLE_POLL_SUCCEEDED=false
 SERVER_RESTART_ACTIVE=false
 SERVER_RESTART_CONFIG_DRIVE=false
 SERVER_RESTART_FIXED_IP=
@@ -113,6 +116,46 @@ if not isinstance(value, list):
     raise SystemExit("server list response is not an array")
 if any(isinstance(row, dict) and str(row.get("id", "")) == expected_id for row in value):
     raise SystemExit("server list still contains the deleted server")
+PY
+}
+
+write_console_result() {
+    local status="$1" reason="$2" marker_found="${3:-false}"
+    python3 - "${ARTIFACT_DIR}/console-result.json" "${status}" "${reason}" \
+        "${marker_found}" "${CONSOLE_POLL_ATTEMPTS}" \
+        "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}" <<'PY'
+import json
+import os
+import sys
+import tempfile
+import time
+
+path, status, reason, marker_found, attempts, max_attempts = sys.argv[1:]
+directory = os.path.dirname(path)
+fd, temporary = tempfile.mkstemp(prefix="console-result.", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        json.dump({
+            "artifact_type": "openstack-cli-console-result",
+            "status": status,
+            "assertion": "cirros_boot_marker",
+            "marker_found": marker_found == "true",
+            "polling": {
+                "attempts": int(attempts),
+                "max_attempts": int(max_attempts),
+            },
+            "reason": reason,
+            "redacted": True,
+            "finished_at": int(time.time()),
+        }, output, indent=2, sort_keys=True)
+        output.write("\n")
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
 PY
 }
 
@@ -323,6 +366,8 @@ on_exit() {
 }
 trap on_exit EXIT
 
+write_console_result pending "console polling not started"
+
 for command in openstack curl; do
     if ! command -v "${command}" >/dev/null 2>&1; then
         write_result skipped "missing command: ${command}"
@@ -444,18 +489,25 @@ with open(destination, "w", encoding="utf-8") as stream:
 PY
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
+    CONSOLE_POLL_ATTEMPTS=$((CONSOLE_POLL_ATTEMPTS + 1))
     if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
+        CONSOLE_POLL_SUCCEEDED=true
         break
     fi
     sleep "${O3K_TESTLAB_CONSOLE_INTERVAL_SECONDS:-1}"
 done
-[[ -s "${ARTIFACT_DIR}/console.log" ]]
+if [[ "${CONSOLE_POLL_SUCCEEDED}" != true ]]; then
+    write_console_result failed "console polling did not produce non-empty output"
+    [[ -s "${ARTIFACT_DIR}/console.log" ]]
+fi
 if ! grep -Eiq 'cirros|login:' "${ARTIFACT_DIR}/console.log"; then
+    write_console_result failed "console output did not contain a CirrOS boot marker"
     echo "console output did not contain a CirrOS boot marker" >&2
     exit 1
 fi
 CONSOLE_BOOT_MARKER=true
+write_console_result passed "CirrOS boot marker found" true
 tail -c 65536 "${ARTIFACT_DIR}/console.log" >"${ARTIFACT_DIR}/console.log.tmp"
 mv "${ARTIFACT_DIR}/console.log.tmp" "${ARTIFACT_DIR}/console.log"
 openstack server stop --wait "${SERVER_ID}"

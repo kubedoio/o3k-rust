@@ -37,6 +37,7 @@ assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/head
 assert "target/real-host-workflow-artifacts/console.log" not in real_host_text
 assert "target/real-host-workflow-artifacts/server-show.json" not in real_host_text
 assert "target/real-host-workflow-artifacts/openstack-cli-result.json" in real_host_text
+assert "target/real-host-workflow-artifacts/console-result.json" in real_host_text
 assert "Download and verify CirrOS image" in real_host_text
 assert "id: image" in real_host_text
 assert "steps.bootstrap.outcome == 'success' && steps.image.outcome == 'success'" in real_host_text

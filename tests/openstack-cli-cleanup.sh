@@ -72,7 +72,12 @@ case "$*" in
   subnet\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/subnet-subnet-id";;
   port\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/port-port-id";;
   flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
-  console\ log\ show*) echo 'CirrOS boot output\nlogin:';;
+  console\ log\ show*)
+    if [[ "${mode}" == console-failure ]]; then
+      echo 'console request failed' >&2
+      exit 1
+    fi
+    echo 'CirrOS boot output\nlogin:';;
   *) exit 0;;
 esac
 SH
@@ -116,6 +121,26 @@ PY
 assert_failed empty passed
 assert_failed unrelated passed
 assert_failed empty-list passed
+
+rm -f -- "${ARTIFACT_DIR}/console-result.json"
+if O3K_MOCK_MODE=console-failure bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
+  echo "CLI harness unexpectedly passed when console polling failed" >&2
+  exit 1
+fi
+python3 - "${ARTIFACT_DIR}/console-result.json" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["artifact_type"] == "openstack-cli-console-result"
+assert result["status"] == "failed"
+assert result["assertion"] == "cirros_boot_marker"
+assert result["marker_found"] is False
+assert result["polling"] == {"attempts": 1, "max_attempts": 1}
+assert result["reason"] == "console polling did not produce non-empty output"
+assert result["redacted"] is True
+assert "console request failed" not in json.dumps(result)
+PY
 
 python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}" <<'PY'
 import pathlib
