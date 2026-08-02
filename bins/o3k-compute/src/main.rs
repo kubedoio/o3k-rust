@@ -302,15 +302,20 @@ fn prepare_owned_taps(
             port_id: attachment.port_id.clone(),
             mac: attachment.mac.clone(),
         };
-        if let Err(error) = network.create_tap(&spec) {
-            for previous in &created {
-                let _ = network.delete_tap(previous);
+        let was_created = match network.ensure_tap(&spec) {
+            Ok((_, was_created)) => was_created,
+            Err(error) => {
+                for previous in created.iter().rev() {
+                    let _ = network.delete_tap(previous);
+                }
+                return Err(AgentError::Protocol(format!(
+                    "host TAP preparation failed: {error}"
+                )));
             }
-            return Err(AgentError::Protocol(format!(
-                "host TAP preparation failed: {error}"
-            )));
+        };
+        if was_created {
+            created.push(spec);
         }
-        created.push(spec);
     }
     Ok(created)
 }

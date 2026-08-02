@@ -885,7 +885,7 @@ impl HostNetworkManager {
         Ok(true)
     }
 
-    pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+    pub fn ensure_tap(&self, spec: &TapSpec) -> Result<(String, bool), HostNetworkError> {
         validate_reference(&spec.instance_id)?;
         validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
@@ -900,7 +900,7 @@ impl HostNetworkManager {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.validate_recorded_tap(&name, spec)?;
-            return Ok(name);
+            return Ok((name, false));
         }
         let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
         if let Err(error) = created_tap {
@@ -929,7 +929,11 @@ impl HostNetworkManager {
         if let Err(error) = self.record_tap_ownership(&name, spec) {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
-        Ok(name)
+        Ok((name, true))
+    }
+
+    pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        self.ensure_tap(spec).map(|(name, _)| name)
     }
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {

@@ -532,6 +532,19 @@ fn map_agent_error(error: o3k_compute_agent::AgentError) -> ProviderError {
     }
 }
 
+fn map_agent_error_for_operation(
+    error: o3k_compute_agent::AgentError,
+    operation_id: Uuid,
+) -> ProviderError {
+    if let o3k_compute_agent::AgentError::Protocol(message) = &error {
+        let message = message.to_ascii_lowercase();
+        if message.contains("unknown") || message.contains("timeout") {
+            return ProviderError::UnknownOutcome { operation_id };
+        }
+    }
+    map_agent_error(error)
+}
+
 fn artifact_kind_name(kind: agent_proto::ArtifactKind) -> &'static str {
     match kind {
         agent_proto::ArtifactKind::ImageBase => "image_base",
@@ -1035,7 +1048,7 @@ impl ComputeProvider for AgentComputeProvider {
             self.registry
                 .dispatch_artifact_and_wait(offer.clone(), artifact.bytes, self.command_timeout)
                 .await
-                .map_err(map_agent_error)?;
+                .map_err(|error| map_agent_error_for_operation(error, request.operation_id))?;
             if let Some(store) = &self.store {
                 store
                     .update_artifact_transfer(
