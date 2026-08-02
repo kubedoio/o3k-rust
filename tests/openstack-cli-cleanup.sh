@@ -41,7 +41,10 @@ case "$*" in
     case "${mode}" in
       empty) echo '{}';;
       unrelated) echo '{"id":"unrelated-server"}';;
-      *) echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}';;
+    *)
+      config_drive=true
+      [[ "${O3K_TESTLAB_CONFIG_DRIVE:-true}" == false ]] && config_drive=false
+      echo "{\"id\":\"server-id\",\"name\":\"o3k-testlab-server\",\"status\":\"ACTIVE\",\"config_drive\":${config_drive},\"addresses\":{\"o3k-testlab-network\":[{\"addr\":\"192.0.2.2\"}]}}";;
     esac
     ;;
   server\ list*)
@@ -142,6 +145,16 @@ grep -Fq -- "--nic net-id=network-id,v4-fixed-ip=192.0.2.2" "${O3K_MOCK_LOG}"
 grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
+
+O3K_TESTLAB_CONFIG_DRIVE=false O3K_MOCK_MODE=normal bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"
+python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
+import json, sys
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status"] == "passed"
+assert result["acceptance"]["config_drive"] is False
+assert result["acceptance"]["restart"]["config_drive"] is False
+PY
+grep -Fq -- "--no-config-drive" "${O3K_MOCK_LOG}"
 
 if O3K_MOCK_MODE=noop-delete bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
   echo "CLI harness accepted a no-op server delete" >&2

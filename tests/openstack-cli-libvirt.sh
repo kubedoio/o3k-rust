@@ -29,6 +29,16 @@ CLEANUP_FLAVOR_STATUS=
 CLEANUP_SERVER_STATUS=
 SERVER_NAME=o3k-testlab-server
 EXPECTED_FIXED_IP=192.0.2.2
+CONFIG_DRIVE_ENABLED="${O3K_TESTLAB_CONFIG_DRIVE:-true}"
+case "${CONFIG_DRIVE_ENABLED}" in
+    true|false) ;;
+    *) echo "O3K_TESTLAB_CONFIG_DRIVE must be true or false" >&2; exit 2 ;;
+esac
+if [[ "${CONFIG_DRIVE_ENABLED}" == true ]]; then
+    CONFIG_DRIVE_ARGS=(--config-drive true)
+else
+    CONFIG_DRIVE_ARGS=(--no-config-drive)
+fi
 SERVER_ACTIVE=false
 SERVER_CONFIG_DRIVE=false
 SERVER_FIXED_IP=
@@ -39,11 +49,11 @@ SERVER_RESTART_FIXED_IP=
 
 validate_server_json() {
     local kind="$1" path="$2" expected_id="$3"
-    python3 - "${kind}" "${path}" "${expected_id}" "${EXPECTED_FIXED_IP}" <<'PY'
+    python3 - "${kind}" "${path}" "${expected_id}" "${EXPECTED_FIXED_IP}" "${CONFIG_DRIVE_ENABLED}" <<'PY'
 import json
 import sys
 
-kind, path, expected_id, expected_fixed_ip = sys.argv[1:]
+kind, path, expected_id, expected_fixed_ip, expected_config_drive = sys.argv[1:]
 with open(path, encoding="utf-8") as stream:
     value = json.load(stream)
 
@@ -52,8 +62,10 @@ if kind == "show":
         raise SystemExit("server show did not identify the created server")
     if str(value.get("status", "")).upper() != "ACTIVE":
         raise SystemExit("server show did not prove ACTIVE state")
-    if value.get("config_drive") not in {True, "True", "true", 1}:
-        raise SystemExit("server show did not prove config-drive attachment")
+    config_drive = value.get("config_drive")
+    config_drive_enabled = config_drive in {True, "True", "true", 1}
+    if config_drive_enabled != (expected_config_drive == "true"):
+        raise SystemExit("server show did not match requested config-drive state")
     addresses = []
     def collect(node):
         if isinstance(node, dict):
@@ -352,13 +364,13 @@ CLEANUP_SUBNET_STATUS=pending
 FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --nic "net-id=${NETWORK_ID},v4-fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "net-id=${NETWORK_ID},v4-fixed-ip=${EXPECTED_FIXED_IP}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
 SERVER_ACTIVE=true
-SERVER_CONFIG_DRIVE=true
+SERVER_CONFIG_DRIVE="${CONFIG_DRIVE_ENABLED}"
 SERVER_FIXED_IP="${EXPECTED_FIXED_IP}"
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
@@ -383,7 +395,7 @@ openstack server reboot --hard --wait "${SERVER_ID}"
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show-after-reboot.json"
 validate_server_json show "${ARTIFACT_DIR}/server-show-after-reboot.json" "${SERVER_ID}"
 SERVER_RESTART_ACTIVE=true
-SERVER_RESTART_CONFIG_DRIVE=true
+SERVER_RESTART_CONFIG_DRIVE="${CONFIG_DRIVE_ENABLED}"
 SERVER_RESTART_FIXED_IP="${EXPECTED_FIXED_IP}"
 openstack server delete --wait "${SERVER_ID}"
 if ! server_is_absent "${SERVER_ID}"; then
