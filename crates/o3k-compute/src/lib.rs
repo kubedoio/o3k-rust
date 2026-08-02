@@ -1017,7 +1017,7 @@ impl ComputeProvider for AgentComputeProvider {
                 format: artifact.format,
                 chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
                 chunk_count,
-                expires_at_unix_ms: unix_ms_after(self.command_timeout),
+                expires_at_unix_ms: command.deadline_unix_ms,
             };
             if let Some(store) = &self.store {
                 let transfer = ArtifactTransferRecord {

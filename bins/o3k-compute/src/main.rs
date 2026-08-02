@@ -471,6 +471,8 @@ mod tests {
                     disk_gib: 1,
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    image_transfer: None,
+                    config_drive_transfer: None,
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
