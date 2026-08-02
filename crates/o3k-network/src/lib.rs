@@ -1054,11 +1054,11 @@ impl HostNetworkManager {
 
     fn record_bridge_ownership(&self) -> Result<(), HostNetworkError> {
         self.update_ownership(|manifest| {
-            if let Some(existing) = &manifest.bridge {
-                if existing.name != self.config.bridge_name || existing.uplink != self.config.uplink
-                {
-                    return Err(HostNetworkError::OwnershipConflict);
-                }
+            if let Some(existing) = &manifest.bridge
+                && (existing.name != self.config.bridge_name
+                    || existing.uplink != self.config.uplink)
+            {
+                return Err(HostNetworkError::OwnershipConflict);
             }
             manifest.bridge = Some(BridgeOwnership {
                 name: self.config.bridge_name.clone(),
@@ -1124,10 +1124,10 @@ impl HostNetworkManager {
                 bridge: self.config.bridge_name.clone(),
                 created_by_o3k: true,
             };
-            if let Some(existing) = manifest.taps.get(interface) {
-                if existing != &record {
-                    return Err(HostNetworkError::OwnershipConflict);
-                }
+            if let Some(existing) = manifest.taps.get(interface)
+                && existing != &record
+            {
+                return Err(HostNetworkError::OwnershipConflict);
             }
             manifest.taps.insert(interface.to_owned(), record);
             Ok(())
