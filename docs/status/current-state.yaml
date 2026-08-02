@@ -1,0 +1,52 @@
+schema_version: 1
+source_commit: 3fb5612d3fc79c2b18541c84a0174278a6361600
+release: v0.2.0-alpha.1
+updated_at: 2026-08-02T16:28:10Z
+last_protected_run:
+  id: 30756119584
+  commit: 791bd14ace19105aa7b5503a9393cf2b5aff89b7
+  result: failed
+
+current_blocker:
+  layer: agent
+  summary: >-
+    The protected agent-provider bootstrap starts o3k-compute, but o3kd does
+    not reach ready after the agent registration window; the workflow then
+    blocks lifecycle execution. The run also reports cleanup ownership or
+    permission failure.
+  evidence: >-
+    Protected workflow 30756119584 disposable-testlab-bootstrap.json and
+    real-host-workflow-result.json.
+
+completed:
+  api_baseline: true
+  nova_pre_dispatch: true
+  agent_command_path: true
+  server_active: true
+  fixed_ip_projection: true
+  cleanup_guard: false
+
+pending:
+  image_overlay_real_host: true
+  config_drive_guest_consumption: true
+  guest_network_connectivity: true
+  console_boot_output: true
+  restart_reconciliation: true
+
+open_prs:
+  - number: 349
+    purpose: Poll protected o3kd readiness after asynchronous agent registration.
+    action: rebase-and-merge
+  - number: 342
+    purpose: Connect verified image artifacts to agent-local overlays.
+    action: rebase-and-merge
+  - number: 345
+    purpose: Expose verified config-drive artifact handoff.
+    action: rebase-and-merge
+
+next_actions:
+  - Merge PR #349 after green CI and rerun the protected workflow.
+  - Diagnose authenticated agent registration, libvirt readiness, and cleanup on the updated protected run.
+  - Rebase and review the image and config-drive primitive PRs onto the latest main.
+  - Create the single agent-backed guest-realization integration issue and branch.
+  - Connect image, config-drive, network, Placement, libvirt, observation, console, and cleanup phases in order.
