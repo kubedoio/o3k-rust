@@ -457,9 +457,12 @@ mod tests {
             ..Default::default()
         };
 
-        let error = resolve_create_domain_spec(&command).expect_err("must fail closed");
-        assert!(error.to_string().contains("transfer_id and expiry"));
-        assert!(error.to_string().contains("owned TAP names"));
+        let result = resolve_create_domain_spec(&command);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("transfer_id and expiry"));
+            assert!(error.to_string().contains("owned TAP names"));
+        }
     }
 
     #[test]
@@ -475,11 +478,14 @@ mod tests {
             ..Default::default()
         };
 
-        let error = resolve_create_domain_spec(&command).expect_err("must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("artifact references are incomplete")
-        );
+        let result = resolve_create_domain_spec(&command);
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(
+                error
+                    .to_string()
+                    .contains("artifact references are incomplete")
+            );
+        }
     }
 }
