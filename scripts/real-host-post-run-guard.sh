@@ -6,6 +6,7 @@ ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflo
 RESULT_PATH="${ARTIFACT_DIR}/real-host-workflow-result.json"
 LEAK_RESULT_PATH="${ARTIFACT_DIR}/resource-leak-result.json"
 LIFECYCLE_RESULT="${ARTIFACT_DIR}/libvirt-result.json"
+AGENT_PROCESS_RESULT="${ARTIFACT_DIR}/compute-agent-process-mtls-result.json"
 STEP_STATUS="${O3K_REAL_HOST_WORKFLOW_STEP_STATUS:-skipped}"
 CURRENT_INVENTORY="${ARTIFACT_DIR}/real-host-owned-inventory-after.json"
 mkdir -p "${ARTIFACT_DIR}"
@@ -26,9 +27,9 @@ then
     fi
 fi
 
-python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
+python3 - "${RESULT_PATH}" "${LIFECYCLE_RESULT}" "${AGENT_PROCESS_RESULT}" "${STEP_STATUS}" "${CURRENT_INVENTORY}" "${inventory_status}" "${LEAK_RESULT_PATH}" <<'PY'
 import json, os, sys, tempfile, time
-result_path, lifecycle_path, step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
+result_path, lifecycle_path, agent_process_path, step_status, current_inventory_path, inventory_status, leak_result_path = sys.argv[1:]
 
 def write_atomic(path, document):
     directory = os.path.dirname(path) or "."
@@ -57,6 +58,11 @@ try:
         lifecycle_status = json.load(stream).get("status")
 except (OSError, json.JSONDecodeError):
     lifecycle_status = None
+try:
+    with open(agent_process_path, encoding="utf-8") as stream:
+        agent_process_status = json.load(stream).get("status")
+except (OSError, json.JSONDecodeError):
+    agent_process_status = None
 
 baseline = preflight.get("inventory_baseline", {})
 after = None
@@ -107,6 +113,9 @@ elif step_status != "success":
 elif lifecycle_status != "passed":
     final_status = lifecycle_status if lifecycle_status in {"failed", "skipped"} else "failed"
     reason = "lifecycle_workflow_failed" if final_status == "failed" else "lifecycle_workflow_skipped"
+elif agent_process_status != "passed":
+    final_status = "failed"
+    reason = "compute_agent_process_probe_failed"
 else:
     final_status = "passed"
     reason = "workflow_and_prerequisites_passed"
@@ -114,6 +123,7 @@ else:
 result = {"artifact_type": "real-host-workflow-result", "status": final_status,
           "reason": reason, "redacted": True, "finished_at": int(time.time()),
           "preflight_status": status, "lifecycle_status": lifecycle_status}
+result["agent_process_status"] = agent_process_status
 if result_leaks is not None:
     result["leaks"] = result_leaks
 if foreign_state_changed is not None:

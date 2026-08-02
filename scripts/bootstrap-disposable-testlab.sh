@@ -318,6 +318,12 @@ O3K_COMPUTE_TLS_DIR=$(printf '%q' "$STATE_ROOT/tls")
 O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
 O3K_COMPUTE_MAX_DISK_GB=10
 EOF
+if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
+  [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_ID:-}" =~ ^[0-9a-fA-F-]{36}$ ]] \
+    || fail "agent inspect probe resource id is invalid"
+  printf 'O3K_AGENT_INSPECT_PROBE_RESOURCE_ID=%s\nO3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' \
+    "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID" "$STATE_ROOT" >>"$o3kd_env_tmp"
+fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
 mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"

@@ -20,11 +20,13 @@ o3k-config = { path = "../../crates/o3k-config" }
 o3k-identity = { path = "../../crates/o3k-identity" }
 o3k-image = { path = "../../crates/o3k-image" }
 o3k-provider = { path = "../../crates/o3k-provider" }
+o3k-provider-contract = { path = "../../crates/o3k-provider-contract" }
 o3k-network = { path = "../../crates/o3k-network" }
 o3k-placement = { path = "../../crates/o3k-placement" }
 o3k-scheduler = { path = "../../crates/o3k-scheduler" }
 o3k-store = { path = "../../crates/o3k-store" }
 tokio.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
