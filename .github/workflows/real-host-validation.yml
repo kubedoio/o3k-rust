@@ -135,7 +135,7 @@ jobs:
             printf 'source_commit=%s\n' "${GITHUB_SHA}"
             if sudo -n test -d "${state_root}/log"; then
               sudo -n sh -c \
-                'grep -hE "server create reconciliation|artifact transfer|create reconciliation|create (request|command|artifact)|create artifacts" "$1"/log/*.log 2>/dev/null || true' \
+                'grep -hE "server create reconciliation|artifact transfer|create reconciliation|agent create|create (request|command|artifact)|create artifacts" "$1"/log/*.log 2>/dev/null || true' \
                 _ "${state_root}"
             else
               printf 'state_logs=unavailable\n'
