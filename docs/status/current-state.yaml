@@ -1,7 +1,7 @@
 schema_version: 1
-source_commit: 3fb5612d3fc79c2b18541c84a0174278a6361600
+source_commit: cc95aaa66d56d96959f7c6c188a4069053753da6
 release: v0.2.0-alpha.1
-updated_at: 2026-08-02T16:35:00Z
+updated_at: 2026-08-02T17:02:31Z
 last_protected_run:
   id: 30756669479
   commit: 3fb5612d3fc79c2b18541c84a0174278a6361600
@@ -33,17 +33,10 @@ pending:
   console_boot_output: true
   restart_reconciliation: true
 
-open_prs:
-  - number: 342
-    purpose: Connect verified image artifacts to agent-local overlays.
-    action: rebase-and-merge
-  - number: 345
-    purpose: Expose verified config-drive artifact handoff.
-    action: rebase-and-merge
+open_prs: []
 
 next_actions:
-  - Diagnose authenticated agent registration and libvirt readiness using protected-run logs; fix the first failing boundary.
+  - Rebase the existing agent-backed realization stack onto this main tip and submit it as the single integration PR for #351.
+  - Verify the readiness fix on the protected runner, then diagnose the next real guest boundary from uploaded evidence.
   - Resolve the cleanup ownership or permission failure without weakening the guard.
-  - Rebase and review the image and config-drive primitive PRs onto the latest main.
-  - Create the single agent-backed guest-realization integration issue and branch.
   - Connect image, config-drive, network, Placement, libvirt, observation, console, and cleanup phases in order.
