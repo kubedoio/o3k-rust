@@ -41,6 +41,8 @@ impl ResolvedCreateResolver for TestResolver {
                 port_id: "port.test".to_owned(),
                 mac: "52:54:00:12:34:56".to_owned(),
                 fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
             }],
         })
     }

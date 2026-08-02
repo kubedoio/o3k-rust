@@ -296,6 +296,39 @@ fn prepare_owned_taps(
             "resolved create inputs are missing".to_owned(),
         ));
     };
+    let Some(first_attachment) = resolved.network_attachments.first() else {
+        return Err(AgentError::Protocol(
+            "create command has no network attachments".to_owned(),
+        ));
+    };
+    let Some((_, prefix)) = first_attachment.subnet_cidr.split_once('/') else {
+        return Err(AgentError::Protocol(
+            "network subnet CIDR is invalid".to_owned(),
+        ));
+    };
+    let prefix_len = prefix
+        .parse::<u8>()
+        .map_err(|_| AgentError::Protocol("network subnet prefix is invalid".to_owned()))?;
+    let gateway = first_attachment
+        .gateway_ipv4
+        .parse()
+        .map_err(|_| AgentError::Protocol("network gateway address is invalid".to_owned()))?;
+    if resolved.network_attachments.iter().any(|attachment| {
+        attachment.subnet_cidr != first_attachment.subnet_cidr
+            || attachment.gateway_ipv4 != first_attachment.gateway_ipv4
+    }) {
+        return Err(AgentError::Protocol(
+            "multiple network subnets are not supported by the flat host profile".to_owned(),
+        ));
+    }
+    network
+        .ensure_gateway(o3k_network::GatewaySpec {
+            address: gateway,
+            prefix_len,
+        })
+        .map_err(|error| {
+            AgentError::Protocol(format!("host gateway preparation failed: {error}"))
+        })?;
     let mut created = Vec::with_capacity(resolved.network_attachments.len());
     for attachment in &resolved.network_attachments {
         let spec = o3k_network::TapSpec {
@@ -452,6 +485,9 @@ impl CommandExecutor for LibvirtCommandExecutor {
                                     "owned image overlay cleanup failed".to_owned(),
                                 )
                             })?;
+                        self.network.cleanup_if_unused().map_err(|_| {
+                            AgentError::Protocol("owned network cleanup failed".to_owned())
+                        })?;
                         cleanup_committed_artifacts(&self.artifact_root, command)?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
@@ -476,6 +512,9 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(|_| {
                         AgentError::Protocol("owned image overlay cleanup failed".to_owned())
                     })?;
+                self.network
+                    .cleanup_if_unused()
+                    .map_err(|_| AgentError::Protocol("owned network cleanup failed".to_owned()))?;
                 cleanup_committed_artifacts(&self.artifact_root, command)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
@@ -914,6 +953,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: "192.0.2.0/24".to_owned(),
+                        gateway_ipv4: "192.0.2.1".to_owned(),
                     }],
                 }),
             })),
@@ -1024,6 +1065,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: "192.0.2.0/24".to_owned(),
+                        gateway_ipv4: "192.0.2.1".to_owned(),
                     }],
                     ..Default::default()
                 }),

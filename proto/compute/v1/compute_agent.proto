@@ -195,6 +195,8 @@ message NetworkAttachment {
   string port_id = 1;
   string mac = 2;
   string fixed_ipv4 = 3;
+  string subnet_cidr = 4;
+  string gateway_ipv4 = 5;
 }
 
 message InspectCommand {}

@@ -61,6 +61,17 @@ impl DaemonCreateResolver {
                 port_id: port_id.clone(),
                 mac: port.mac_address.clone(),
                 fixed_ipv4: fixed_ip.clone(),
+                subnet_cidr: self
+                    .network
+                    .get_subnet(&request.project_id, port.subnet_id)
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .cidr,
+                gateway_ipv4: self
+                    .network
+                    .get_subnet(&request.project_id, port.subnet_id)
+                    .map_err(|_| ProviderError::InvalidRequest)?
+                    .gateway_ip
+                    .to_string(),
             });
             network_data.insert(format!("{port_id}.mac"), port.mac_address);
             network_data.insert(format!("{port_id}.ipv4"), fixed_ip);

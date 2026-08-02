@@ -915,6 +915,8 @@ pub struct NetworkAttachmentSpec {
     pub port_id: String,
     pub mac: String,
     pub fixed_ipv4: String,
+    pub subnet_cidr: String,
+    pub gateway_ipv4: String,
 }
 
 pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, AgentError> {
@@ -990,6 +992,8 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
                     port_id: attachment.port_id,
                     mac: attachment.mac,
                     fixed_ipv4: attachment.fixed_ipv4,
+                    subnet_cidr: attachment.subnet_cidr,
+                    gateway_ipv4: attachment.gateway_ipv4,
                 })
                 .collect(),
             project_id,
@@ -1221,6 +1225,19 @@ fn valid_network_attachment(attachment: &NetworkAttachmentSpec) -> bool {
             .split(':')
             .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
         && attachment.fixed_ipv4.parse::<std::net::Ipv4Addr>().is_ok()
+        && valid_ipv4_cidr(&attachment.subnet_cidr)
+        && attachment
+            .gateway_ipv4
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok()
+}
+
+fn valid_ipv4_cidr(value: &str) -> bool {
+    let Some((address, prefix)) = value.split_once('/') else {
+        return false;
+    };
+    address.parse::<std::net::Ipv4Addr>().is_ok()
+        && prefix.parse::<u8>().is_ok_and(|prefix| prefix <= 32)
 }
 
 fn has_duplicate_network_ports(attachments: &[NetworkAttachmentSpec]) -> bool {
@@ -1252,6 +1269,8 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
                 port_id: attachment.port_id.clone(),
                 mac: attachment.mac.clone(),
                 fixed_ipv4: attachment.fixed_ipv4.clone(),
+                subnet_cidr: attachment.subnet_cidr.clone(),
+                gateway_ipv4: attachment.gateway_ipv4.clone(),
             })
         })
         || resolved.network_attachments.is_empty()
@@ -1263,6 +1282,8 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
                     port_id: attachment.port_id.clone(),
                     mac: attachment.mac.clone(),
                     fixed_ipv4: attachment.fixed_ipv4.clone(),
+                    subnet_cidr: attachment.subnet_cidr.clone(),
+                    gateway_ipv4: attachment.gateway_ipv4.clone(),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -3778,6 +3799,8 @@ mod tests {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
                 fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
             }],
         }
     }
@@ -3801,6 +3824,8 @@ mod tests {
             port_id: "port-1".to_owned(),
             mac: "02:00:00:00:00:02".to_owned(),
             fixed_ipv4: "192.0.2.11".to_owned(),
+            subnet_cidr: "192.0.2.0/24".to_owned(),
+            gateway_ipv4: "192.0.2.1".to_owned(),
         });
         assert!(build_create_command(invalid).is_err());
 
@@ -3965,6 +3990,8 @@ mod tests {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
                 fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
             }],
         })?;
         let second = build_create_command(CreateCommandSpec {
@@ -3989,6 +4016,8 @@ mod tests {
                 port_id: "port-1".to_owned(),
                 mac: "02:00:00:00:00:01".to_owned(),
                 fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
             }],
         })?;
         assert_eq!(first, second);
@@ -4014,6 +4043,8 @@ mod tests {
                 port_id: "port-2".to_owned(),
                 mac: "02:00:00:00:00:02".to_owned(),
                 fixed_ipv4: "192.0.2.11".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
             }],
         })?;
         assert_eq!(first.command_id, changed.command_id);

@@ -450,8 +450,7 @@ mod host_network_tests {
             manager.delete_bridge(),
             Err(HostNetworkError::OwnershipConflict)
         ));
-        manager.remove_gateway(gateway)?;
-        manager.delete_bridge()?;
+        manager.cleanup_if_unused()?;
         assert_eq!(
             fs::read_to_string(root.join("ownership.json"))
                 .map_err(|_| HostNetworkError::CommandFailed)?,
@@ -830,6 +829,21 @@ impl HostNetworkManager {
             self.run_ip(["link", "del", "dev", &self.config.bridge_name])?;
         }
         self.clear_bridge_ownership()
+    }
+
+    /// Removes the managed gateway and bridge only when no owned TAP remains.
+    /// A busy bridge is intentionally left in place for the other instances.
+    pub fn cleanup_if_unused(&self) -> Result<(), HostNetworkError> {
+        if !self.recorded_taps_empty()? {
+            return Ok(());
+        }
+        if let Some(gateway) = self.recorded_gateway()? {
+            self.remove_gateway(gateway)?;
+        }
+        if self.recorded_bridge()?.is_some() {
+            self.delete_bridge()?;
+        }
+        Ok(())
     }
 
     fn ensure_bridge_with_ownership(&self) -> Result<bool, HostNetworkError> {
