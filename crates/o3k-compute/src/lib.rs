@@ -284,6 +284,76 @@ impl AgentComputeProvider {
         self
     }
 
+    /// Rebuilds the provider's volatile instance/binding projection from the
+    /// durable resource ledger after a daemon restart or agent reconnect.
+    /// Provider references and the currently authenticated agent epoch are
+    /// both required; stale or conflicting ownership evidence is rejected.
+    pub async fn rehydrate(&self) -> Result<(), ProviderError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let resources = store
+            .list_resources_by_kind("compute_instance")
+            .await
+            .map_err(|_| ProviderError::Retryable)?;
+        let mut instances = HashMap::new();
+        let mut bindings = HashMap::new();
+        for resource in resources {
+            if resource.observed_state.eq_ignore_ascii_case("DELETED") {
+                continue;
+            }
+            let Some(provider_id) = resource.provider_id.clone() else {
+                continue;
+            };
+            let reference = store
+                .get_provider_reference(resource.id, "agent")
+                .await
+                .map_err(|_| ProviderError::Conflict)?;
+            if reference.provider_resource_id != provider_id {
+                return Err(ProviderError::Conflict);
+            }
+            let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ProviderError::Conflict)?;
+            let Some(agent_id) = request.placement_provider_id.as_deref() else {
+                return Err(ProviderError::Conflict);
+            };
+            let Some(agent) = self.registry.snapshot(agent_id).await else {
+                continue;
+            };
+            if agent.agent_epoch.trim().is_empty() {
+                return Err(ProviderError::Conflict);
+            }
+            let state = instance_state_from_observed(&resource.observed_state)
+                .ok_or(ProviderError::Conflict)?;
+            instances.insert(
+                provider_id.clone(),
+                Instance {
+                    provider_instance_id: provider_id.clone(),
+                    o3k_server_id: resource.id,
+                    state,
+                    observed_message: None,
+                },
+            );
+            bindings.insert(
+                provider_id,
+                AgentBinding {
+                    agent_id: agent.agent_id,
+                    agent_epoch: agent.agent_epoch,
+                },
+            );
+        }
+        let mut state = self.state.write().await;
+        state
+            .instances
+            .retain(|provider_id, _| instances.contains_key(provider_id));
+        state
+            .bindings
+            .retain(|provider_id, _| bindings.contains_key(provider_id));
+        state.instances.extend(instances);
+        state.bindings.extend(bindings);
+        Ok(())
+    }
+
     async fn selected_agent(&self, provider_id: &str) -> Result<NodeSnapshot, ProviderError> {
         let snapshot = self
             .registry
@@ -606,6 +676,18 @@ fn instance_state_from_proto(state: i32) -> Option<o3k_provider::InstanceState> 
         value if value == WireState::Deleting as i32 => Some(o3k_provider::InstanceState::Deleting),
         value if value == WireState::Deleted as i32 => Some(o3k_provider::InstanceState::Deleted),
         value if value == WireState::Error as i32 => Some(o3k_provider::InstanceState::Error),
+        _ => None,
+    }
+}
+
+fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceState> {
+    match value.to_ascii_uppercase().as_str() {
+        "ACTIVE" | "RUNNING" => Some(o3k_provider::InstanceState::Running),
+        "SHUTOFF" | "STOPPED" => Some(o3k_provider::InstanceState::Stopped),
+        "BUILD" | "CREATING" | "REQUESTED" => Some(o3k_provider::InstanceState::Creating),
+        "DELETING" => Some(o3k_provider::InstanceState::Deleting),
+        "DELETED" => Some(o3k_provider::InstanceState::Deleted),
+        "ERROR" => Some(o3k_provider::InstanceState::Error),
         _ => None,
     }
 }
@@ -1100,6 +1182,7 @@ impl ComputeProvider for AgentComputeProvider {
     }
 
     async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
+        self.rehydrate().await?;
         self.state
             .read()
             .await
@@ -1113,6 +1196,7 @@ impl ComputeProvider for AgentComputeProvider {
         &self,
         request: DeleteInstanceRequest,
     ) -> Result<Operation, ProviderError> {
+        self.rehydrate().await?;
         let binding = self
             .state
             .read()
@@ -1143,6 +1227,7 @@ impl ComputeProvider for AgentComputeProvider {
         operation_id: Uuid,
         _idempotency_key: &str,
     ) -> Result<Operation, ProviderError> {
+        self.rehydrate().await?;
         let binding = self
             .state
             .read()
@@ -3281,6 +3366,62 @@ mod tests {
                 .iter()
                 .any(|value| value == "start")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_provider_rehydrates_instance_binding_from_durable_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&registered_agent("node-a")).await?;
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let server_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: server_id,
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: Some(Uuid::from_u128(1)),
+            disk_gib: Some(10),
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request)?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("domain-a".to_owned()),
+            })
+            .await?;
+        store
+            .attach_provider_reference(&o3k_store::ProviderReference {
+                resource_id: server_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-a".to_owned(),
+            })
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry,
+            Arc::new(UnconfiguredResolvedCreateResolver),
+            Some(store),
+        );
+        let instance = provider.get_instance("domain-a").await?;
+        assert_eq!(instance.o3k_server_id, server_id);
+        assert_eq!(instance.state, o3k_provider::InstanceState::Running);
         Ok(())
     }
 
