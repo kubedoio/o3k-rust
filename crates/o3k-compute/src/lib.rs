@@ -1134,6 +1134,17 @@ impl ComputeProvider for AgentComputeProvider {
                 .iter()
                 .any(|flag| flag.name == "config_drive" && flag.supported)
         {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                agent_id = %agent.agent_id,
+                capability_flags = ?agent
+                    .capabilities
+                    .flags
+                    .iter()
+                    .map(|flag| format!("{}={}", flag.name, flag.supported))
+                    .collect::<Vec<_>>(),
+                "create request requires an unsupported config-drive capability"
+            );
             return Err(ProviderError::InvalidRequest);
         }
         let resolved = self
