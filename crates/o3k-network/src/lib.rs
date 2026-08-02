@@ -1,8 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs, io,
     net::Ipv4Addr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
 };
@@ -15,6 +15,50 @@ use uuid::Uuid;
 pub struct HostNetworkConfig {
     pub bridge_name: String,
     pub uplink: Option<String>,
+}
+
+/// The address that O3K is allowed to add to its managed bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewaySpec {
+    pub address: Ipv4Addr,
+    pub prefix_len: u8,
+}
+
+/// Durable ownership metadata for host-local network resources.
+///
+/// This is deliberately separate from Neutron metadata. It records only
+/// resources that this host-network manager may mutate or remove.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NetworkOwnershipManifest {
+    #[serde(default)]
+    pub bridge: Option<BridgeOwnership>,
+    #[serde(default)]
+    pub taps: BTreeMap<String, TapOwnership>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeOwnership {
+    pub name: String,
+    pub uplink: Option<String>,
+    pub created_by_o3k: bool,
+    #[serde(default)]
+    pub gateway: Option<GatewayOwnership>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayOwnership {
+    pub address: Ipv4Addr,
+    pub prefix_len: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TapOwnership {
+    pub interface: String,
+    pub instance_id: String,
+    pub port_id: String,
+    pub mac: String,
+    pub bridge: String,
+    pub created_by_o3k: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +315,232 @@ mod host_network_tests {
         ));
     }
 
+    #[test]
+    fn tap_ownership_binds_instance_across_manager_restart() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-ownership-{}", Uuid::now_v7()));
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command),
+            &root,
+        )?;
+        let spec = TapSpec {
+            instance_id: "instance-a".to_owned(),
+            port_id: "port-a".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+        let name = manager.create_tap(&spec)?;
+        let manifest: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert_eq!(manifest.taps[&name].instance_id, "instance-a");
+
+        let reopened_command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true),
+            Response::output(true, "2: o3ktap-owned: <BROADCAST,UP>"),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true),
+            Response::output(true, "2: o3ktap-owned: <BROADCAST,UP>"),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true),
+            Response::output(true, "2: o3ktap-owned: <BROADCAST,UP>"),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
+        ]);
+        let reopened = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(reopened_command),
+            &root,
+        )?;
+        assert_eq!(reopened.create_tap(&spec)?, name);
+        assert!(matches!(
+            reopened.create_tap(&TapSpec {
+                instance_id: "instance-b".to_owned(),
+                ..spec
+            }),
+            Err(HostNetworkError::ForeignInterface)
+        ));
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_and_bridge_lifecycle_requires_owned_reverse_order() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-gateway-{}", Uuid::now_v7()));
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true),
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command),
+            &root,
+        )?;
+        let gateway = GatewaySpec {
+            address: "192.0.2.1"
+                .parse()
+                .map_err(|_| HostNetworkError::InvalidConfiguration)?,
+            prefix_len: 24,
+        };
+        manager.ensure_gateway(gateway)?;
+        assert!(matches!(
+            manager.delete_bridge(),
+            Err(HostNetworkError::OwnershipConflict)
+        ));
+        manager.remove_gateway(gateway)?;
+        manager.delete_bridge()?;
+        assert_eq!(
+            fs::read_to_string(root.join("ownership.json"))
+                .map_err(|_| HostNetworkError::CommandFailed)?,
+            "{\n  \"bridge\": null,\n  \"taps\": {}\n}"
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_does_not_mutate_an_unowned_existing_bridge() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-foreign-{}", Uuid::now_v7()));
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        assert!(matches!(
+            manager.ensure_gateway(GatewaySpec {
+                address: "192.0.2.1"
+                    .parse()
+                    .map_err(|_| HostNetworkError::InvalidConfiguration)?,
+                prefix_len: 24,
+            }),
+            Err(HostNetworkError::ForeignInterface)
+        ));
+        assert_eq!(command.calls().len(), 2);
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_accepts_multiple_taps_for_one_instance() -> Result<(), HostNetworkError> {
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                gateway: None,
+            }),
+            taps: [
+                (
+                    "o3ktap-a".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-a".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-a".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+                (
+                    "o3ktap-b".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-b".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-b".to_owned(),
+                        mac: "02:00:00:00:00:02".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        validate_manifest(
+            &HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            &manifest,
+        )
+    }
+
     #[derive(Clone)]
     struct FakeNetworkCommand {
         responses: Arc<Mutex<VecDeque<Response>>>,
@@ -367,6 +637,12 @@ pub enum HostNetworkError {
     ForeignInterface,
     #[error("host network rollback failed after an operation error")]
     RollbackFailed,
+    #[error("host network ownership metadata is corrupt")]
+    CorruptOwnership(#[source] serde_json::Error),
+    #[error("host network ownership metadata could not be persisted")]
+    OwnershipStorage(#[source] io::Error),
+    #[error("host network ownership metadata conflicts with the requested resource")]
+    OwnershipConflict,
 }
 
 impl HostNetworkConfig {
@@ -382,6 +658,12 @@ impl HostNetworkConfig {
 pub struct HostNetworkManager {
     config: HostNetworkConfig,
     command: Arc<dyn NetworkCommand>,
+    ownership: Option<Mutex<OwnershipStore>>,
+}
+
+struct OwnershipStore {
+    path: PathBuf,
+    manifest: NetworkOwnershipManifest,
 }
 
 impl HostNetworkManager {
@@ -390,6 +672,29 @@ impl HostNetworkManager {
         Ok(Self {
             config,
             command: Arc::new(SystemNetworkCommand),
+            ownership: None,
+        })
+    }
+
+    /// Opens a manager with a durable, manager-owned host resource manifest.
+    ///
+    /// Existing links are still validated using read-only `ip` metadata. The
+    /// manifest is required before O3K will mutate or remove a gateway or
+    /// bridge, and it binds each reusable TAP to its instance and port.
+    pub fn with_ownership_root(
+        config: HostNetworkConfig,
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, HostNetworkError> {
+        config.validate()?;
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(HostNetworkError::OwnershipStorage)?;
+        let path = root.join("ownership.json");
+        let manifest = load_ownership(&path)?;
+        validate_manifest(&config, &manifest)?;
+        Ok(Self {
+            config,
+            command: Arc::new(SystemNetworkCommand),
+            ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
         })
     }
 
@@ -399,7 +704,30 @@ impl HostNetworkManager {
         command: Arc<dyn NetworkCommand>,
     ) -> Result<Self, HostNetworkError> {
         config.validate()?;
-        Ok(Self { config, command })
+        Ok(Self {
+            config,
+            command,
+            ownership: None,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_command_and_ownership(
+        config: HostNetworkConfig,
+        command: Arc<dyn NetworkCommand>,
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, HostNetworkError> {
+        config.validate()?;
+        let root = root.into();
+        fs::create_dir_all(&root).map_err(HostNetworkError::OwnershipStorage)?;
+        let path = root.join("ownership.json");
+        let manifest = load_ownership(&path)?;
+        validate_manifest(&config, &manifest)?;
+        Ok(Self {
+            config,
+            command,
+            ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
+        })
     }
     pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
         if port_id.trim().is_empty() {
@@ -429,11 +757,81 @@ impl HostNetworkManager {
         self.ensure_bridge_with_ownership().map(|_| ())
     }
 
+    /// Adds the managed gateway address after proving that the bridge is an
+    /// O3K-owned bridge. A pre-existing bridge without a matching manifest is
+    /// intentionally not mutated.
+    pub fn ensure_gateway(&self, gateway: GatewaySpec) -> Result<(), HostNetworkError> {
+        validate_gateway(gateway)?;
+        let bridge_created = self.ensure_bridge_with_ownership()?;
+        if !bridge_created && !self.bridge_is_owned() {
+            return Err(HostNetworkError::ForeignInterface);
+        }
+        let address = format!("{}/{}", gateway.address, gateway.prefix_len);
+        if let Err(error) =
+            self.run_ip(["addr", "replace", &address, "dev", &self.config.bridge_name])
+        {
+            let error = if bridge_created {
+                self.rollback_bridge(error)
+            } else {
+                error
+            };
+            return Err(error);
+        }
+        if let Err(error) = self.set_gateway_ownership(gateway) {
+            let rollback = self.run_ip(["addr", "del", &address, "dev", &self.config.bridge_name]);
+            if rollback.is_err() {
+                return Err(HostNetworkError::RollbackFailed);
+            }
+            if bridge_created {
+                return Err(self.rollback_bridge(error));
+            } else {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes only the gateway address recorded in the ownership manifest.
+    pub fn remove_gateway(&self, gateway: GatewaySpec) -> Result<(), HostNetworkError> {
+        validate_gateway(gateway)?;
+        let Some(recorded) = self.recorded_gateway()? else {
+            return Ok(());
+        };
+        if recorded != gateway {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+        let address = format!("{}/{}", gateway.address, gateway.prefix_len);
+        self.run_ip(["addr", "del", &address, "dev", &self.config.bridge_name])?;
+        self.clear_gateway_ownership()
+    }
+
+    /// Deletes the bridge only when O3K created it and no owned TAP remains.
+    pub fn delete_bridge(&self) -> Result<(), HostNetworkError> {
+        let Some(bridge) = self.recorded_bridge()? else {
+            return Err(HostNetworkError::ForeignInterface);
+        };
+        if !bridge.created_by_o3k || bridge.gateway.is_some() || !self.recorded_taps_empty()? {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+        if self.link_exists(&self.config.bridge_name) {
+            let output =
+                self.command_output(["-d", "link", "show", "dev", &self.config.bridge_name])?;
+            if !output.success || !interface_output_is_bridge(&output.stdout) {
+                return Err(HostNetworkError::ForeignInterface);
+            }
+            self.run_ip(["link", "del", "dev", &self.config.bridge_name])?;
+        }
+        self.clear_bridge_ownership()
+    }
+
     fn ensure_bridge_with_ownership(&self) -> Result<bool, HostNetworkError> {
         if self.link_exists(&self.config.bridge_name) {
             let output =
                 self.command_output(["-d", "link", "show", "dev", &self.config.bridge_name])?;
             if !output.success || !interface_output_is_bridge(&output.stdout) {
+                return Err(HostNetworkError::ForeignInterface);
+            }
+            if self.ownership.is_some() && !self.bridge_is_owned() {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
@@ -473,11 +871,15 @@ impl HostNetworkManager {
         if let Err(error) = setup {
             return Err(self.rollback_bridge(error));
         }
+        if let Err(error) = self.record_bridge_ownership() {
+            return Err(self.rollback_bridge(error));
+        }
         Ok(true)
     }
 
     pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
         validate_reference(&spec.instance_id)?;
+        validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
         let bridge_created = self.ensure_bridge_with_ownership()?;
         let name = Self::tap_name(&spec.port_id)?;
@@ -489,6 +891,7 @@ impl HostNetworkManager {
                 }
                 return Err(HostNetworkError::ForeignInterface);
             }
+            self.validate_recorded_tap(&name, spec)?;
             return Ok(name);
         }
         let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
@@ -515,11 +918,15 @@ impl HostNetworkManager {
         if let Err(error) = setup {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
+        if let Err(error) = self.record_tap_ownership(&name, spec) {
+            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
+        }
         Ok(name)
     }
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
         validate_reference(&spec.instance_id)?;
+        validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
         let name = Self::tap_name(&spec.port_id)?;
         if self.link_exists(&name) {
@@ -527,16 +934,278 @@ impl HostNetworkManager {
             {
                 return Err(HostNetworkError::ForeignInterface);
             }
+            self.validate_recorded_tap(&name, spec)?;
             self.run_ip(["link", "del", "dev", &name])?;
         }
+        self.clear_tap_ownership(&name, spec)?;
         Ok(())
     }
+
+    /// Removes every TAP recorded as owned by one instance. Foreign or
+    /// malformed ownership records are never selected for deletion.
+    pub fn delete_taps_for_instance(&self, instance_id: &str) -> Result<(), HostNetworkError> {
+        validate_reference(instance_id)?;
+        let specs = self
+            .ownership_snapshot(|manifest| {
+                manifest
+                    .taps
+                    .values()
+                    .filter(|record| record.created_by_o3k && record.instance_id == instance_id)
+                    .map(|record| TapSpec {
+                        instance_id: record.instance_id.clone(),
+                        port_id: record.port_id.clone(),
+                        mac: record.mac.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })?
+            .unwrap_or_default();
+        let mut first_error = None;
+        for spec in specs {
+            if let Err(error) = self.delete_tap(&spec) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Returns durable port identities owned by an instance before its TAP
+    /// records are removed. Coupled host services use these identities for
+    /// fixed-lease cleanup.
+    pub fn owned_port_ids_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<String>, HostNetworkError> {
+        validate_reference(instance_id)?;
+        let Some(ownership) = &self.ownership else {
+            return Ok(Vec::new());
+        };
+        let store = ownership.lock().map_err(|_| {
+            HostNetworkError::OwnershipStorage(io::Error::other("ownership lock poisoned"))
+        })?;
+        Ok(store
+            .manifest
+            .taps
+            .values()
+            .filter(|record| record.instance_id == instance_id)
+            .map(|record| record.port_id.clone())
+            .collect())
+    }
+
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
         let output = self.command_output(["-d", "link", "show"])?;
         if !output.success {
             return Err(HostNetworkError::CommandFailed);
         }
         Ok(managed_tap_names(&output.stdout, &self.config.bridge_name))
+    }
+
+    /// Resolves a live TAP only when the durable ownership manifest and the
+    /// current kernel interface both prove the requested instance/port/MAC
+    /// binding. A deterministic TAP name alone is not sufficient evidence.
+    pub fn resolve_owned_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        validate_reference(&spec.instance_id)?;
+        validate_reference(&spec.port_id)?;
+        validate_mac(&spec.mac)?;
+        if self.ownership.is_none() {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+        let name = Self::tap_name(&spec.port_id)?;
+        if !self.link_exists(&name) {
+            return Err(HostNetworkError::CommandFailed);
+        }
+        if !interface_is_owned_with(&*self.command, &name, &spec.mac, &self.config.bridge_name)? {
+            return Err(HostNetworkError::ForeignInterface);
+        }
+        self.validate_recorded_tap(&name, spec)?;
+        Ok(name)
+    }
+
+    pub fn ownership_path(&self) -> Option<PathBuf> {
+        self.ownership
+            .as_ref()
+            .and_then(|store| store.lock().ok().map(|guard| guard.path.clone()))
+    }
+
+    fn bridge_is_owned(&self) -> bool {
+        self.recorded_bridge()
+            .map(|bridge| bridge.is_some_and(|record| record.created_by_o3k))
+            .unwrap_or(false)
+    }
+
+    fn recorded_bridge(&self) -> Result<Option<BridgeOwnership>, HostNetworkError> {
+        self.ownership_snapshot(|manifest| manifest.bridge.clone())
+            .map(|value| value.flatten())
+    }
+
+    fn recorded_gateway(&self) -> Result<Option<GatewaySpec>, HostNetworkError> {
+        Ok(self
+            .recorded_bridge()?
+            .and_then(|bridge| bridge.gateway)
+            .map(|gateway| GatewaySpec {
+                address: gateway.address,
+                prefix_len: gateway.prefix_len,
+            }))
+    }
+
+    fn recorded_taps_empty(&self) -> Result<bool, HostNetworkError> {
+        self.ownership_snapshot(|manifest| manifest.taps.is_empty())
+            .map(|empty| empty.unwrap_or(true))
+    }
+
+    fn record_bridge_ownership(&self) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            if let Some(existing) = &manifest.bridge {
+                if existing.name != self.config.bridge_name || existing.uplink != self.config.uplink
+                {
+                    return Err(HostNetworkError::OwnershipConflict);
+                }
+            }
+            manifest.bridge = Some(BridgeOwnership {
+                name: self.config.bridge_name.clone(),
+                uplink: self.config.uplink.clone(),
+                created_by_o3k: true,
+                gateway: manifest
+                    .bridge
+                    .as_ref()
+                    .and_then(|bridge| bridge.gateway.clone()),
+            });
+            Ok(())
+        })
+    }
+
+    fn set_gateway_ownership(&self, gateway: GatewaySpec) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            let bridge = manifest
+                .bridge
+                .as_mut()
+                .ok_or(HostNetworkError::ForeignInterface)?;
+            if bridge.name != self.config.bridge_name || !bridge.created_by_o3k {
+                return Err(HostNetworkError::ForeignInterface);
+            }
+            bridge.gateway = Some(GatewayOwnership {
+                address: gateway.address,
+                prefix_len: gateway.prefix_len,
+            });
+            Ok(())
+        })
+    }
+
+    fn clear_gateway_ownership(&self) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            if let Some(bridge) = manifest.bridge.as_mut() {
+                bridge.gateway = None;
+            }
+            Ok(())
+        })
+    }
+
+    fn clear_bridge_ownership(&self) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            if manifest.taps.is_empty() {
+                manifest.bridge = None;
+                Ok(())
+            } else {
+                Err(HostNetworkError::OwnershipConflict)
+            }
+        })
+    }
+
+    fn record_tap_ownership(
+        &self,
+        interface: &str,
+        spec: &TapSpec,
+    ) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            let record = TapOwnership {
+                interface: interface.to_owned(),
+                instance_id: spec.instance_id.clone(),
+                port_id: spec.port_id.clone(),
+                mac: spec.mac.to_ascii_lowercase(),
+                bridge: self.config.bridge_name.clone(),
+                created_by_o3k: true,
+            };
+            if let Some(existing) = manifest.taps.get(interface) {
+                if existing != &record {
+                    return Err(HostNetworkError::OwnershipConflict);
+                }
+            }
+            manifest.taps.insert(interface.to_owned(), record);
+            Ok(())
+        })
+    }
+
+    fn validate_recorded_tap(
+        &self,
+        interface: &str,
+        spec: &TapSpec,
+    ) -> Result<(), HostNetworkError> {
+        let Some(record) = self
+            .ownership_snapshot(|manifest| manifest.taps.get(interface).cloned())?
+            .flatten()
+        else {
+            return if self.ownership.is_some() {
+                Err(HostNetworkError::ForeignInterface)
+            } else {
+                Ok(())
+            };
+        };
+        if record.instance_id != spec.instance_id
+            || record.port_id != spec.port_id
+            || !record.mac.eq_ignore_ascii_case(&spec.mac)
+            || record.bridge != self.config.bridge_name
+            || !record.created_by_o3k
+        {
+            return Err(HostNetworkError::ForeignInterface);
+        }
+        Ok(())
+    }
+
+    fn clear_tap_ownership(&self, interface: &str, spec: &TapSpec) -> Result<(), HostNetworkError> {
+        self.update_ownership(|manifest| {
+            let Some(record) = manifest.taps.get(interface) else {
+                return Ok(());
+            };
+            if record.instance_id != spec.instance_id
+                || record.port_id != spec.port_id
+                || !record.mac.eq_ignore_ascii_case(&spec.mac)
+            {
+                return Err(HostNetworkError::ForeignInterface);
+            }
+            manifest.taps.remove(interface);
+            Ok(())
+        })
+    }
+
+    fn ownership_snapshot<T>(
+        &self,
+        read: impl FnOnce(&NetworkOwnershipManifest) -> T,
+    ) -> Result<Option<T>, HostNetworkError> {
+        let Some(ownership) = &self.ownership else {
+            return Ok(None);
+        };
+        let guard = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?;
+        Ok(Some(read(&guard.manifest)))
+    }
+
+    fn update_ownership(
+        &self,
+        update: impl FnOnce(&mut NetworkOwnershipManifest) -> Result<(), HostNetworkError>,
+    ) -> Result<(), HostNetworkError> {
+        let Some(ownership) = &self.ownership else {
+            return Ok(());
+        };
+        let mut guard = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?;
+        let previous = guard.manifest.clone();
+        update(&mut guard.manifest)?;
+        if let Err(error) = persist_ownership(&guard.path, &guard.manifest) {
+            guard.manifest = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn link_exists(&self, name: &str) -> bool {
@@ -572,7 +1241,10 @@ impl HostNetworkManager {
             .run_ip(["link", "del", "dev", &self.config.bridge_name])
             .is_ok()
         {
-            original
+            match self.clear_bridge_ownership() {
+                Ok(()) => original,
+                Err(_) => HostNetworkError::RollbackFailed,
+            }
         } else {
             HostNetworkError::RollbackFailed
         }
@@ -629,6 +1301,77 @@ fn validate_mac(mac: &str) -> Result<(), HostNetworkError> {
     }
     Ok(())
 }
+
+fn validate_gateway(gateway: GatewaySpec) -> Result<(), HostNetworkError> {
+    if gateway.prefix_len > 30 {
+        return Err(HostNetworkError::InvalidConfiguration);
+    }
+    Ok(())
+}
+
+fn load_ownership(path: &Path) -> Result<NetworkOwnershipManifest, HostNetworkError> {
+    if !path.exists() {
+        return Ok(NetworkOwnershipManifest::default());
+    }
+    serde_json::from_slice(&fs::read(path).map_err(HostNetworkError::OwnershipStorage)?)
+        .map_err(HostNetworkError::CorruptOwnership)
+}
+
+fn validate_manifest(
+    config: &HostNetworkConfig,
+    manifest: &NetworkOwnershipManifest,
+) -> Result<(), HostNetworkError> {
+    if let Some(bridge) = &manifest.bridge {
+        if bridge.name != config.bridge_name || bridge.uplink != config.uplink {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+        if let Some(gateway) = bridge.gateway.as_ref() {
+            validate_gateway(GatewaySpec {
+                address: gateway.address,
+                prefix_len: gateway.prefix_len,
+            })?;
+        }
+    }
+    let mut ports = HashSet::new();
+    for (interface, tap) in &manifest.taps {
+        validate_ifname(interface)?;
+        validate_ifname(&tap.interface)?;
+        validate_reference(&tap.instance_id)?;
+        validate_reference(&tap.port_id)?;
+        validate_mac(&tap.mac)?;
+        if interface != &tap.interface
+            || tap.bridge != config.bridge_name
+            || !tap.created_by_o3k
+            || !ports.insert(tap.port_id.clone())
+        {
+            return Err(HostNetworkError::OwnershipConflict);
+        }
+    }
+    Ok(())
+}
+
+fn persist_ownership(
+    path: &Path,
+    manifest: &NetworkOwnershipManifest,
+) -> Result<(), HostNetworkError> {
+    let temporary = path.with_extension(format!("tmp-{}", Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|_| {
+        HostNetworkError::OwnershipStorage(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "ownership metadata serialization failed",
+        ))
+    })?;
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(HostNetworkError::OwnershipStorage(error));
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(HostNetworkError::OwnershipStorage(error));
+    }
+    Ok(())
+}
+
 fn interface_is_owned_with(
     command: &dyn NetworkCommand,
     name: &str,
