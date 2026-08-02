@@ -703,6 +703,24 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider.clone());
+    let network_root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-compute-network-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let network_service = NetworkService::open(&network_root)?;
+    let network = network_service.create_network("bootstrap-project", "flat".to_owned())?;
+    let _subnet = network_service.create_subnet(
+        "bootstrap-project",
+        network.id,
+        "subnet".to_owned(),
+        "192.0.2.0/29".to_owned(),
+        None,
+        None,
+        None,
+    )?;
+    let port =
+        network_service.create_port("bootstrap-project", network.id, "server-port".to_owned())?;
+    let port_id = port.id.to_string();
     let console = o3k_console::ConsoleService::open(format!(
         "/tmp/o3k-api-console-{}",
         uuid::Uuid::now_v7()
@@ -710,6 +728,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_compute(compute)
+        .with_network(network_service)
         .with_console(console.clone());
     let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let response = o3k_api::router_with_state(state.clone())
@@ -829,7 +848,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
             .map(Vec::len),
         Some(1)
     );
-    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"uuid":"network-1"}],"key_name":"nova-test-key"}});
+    let request_body = serde_json::json!({"server":{"name":"nova-test","image":{"id":"image-1"},"flavor":{"id":flavor_id},"networks":[{"port":port_id.clone()}],"key_name":"nova-test-key"}});
     let created = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -918,7 +937,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .await?;
     assert_eq!(keypair_deleted.status(), StatusCode::NO_CONTENT);
 
-    let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":"network-1"}]}});
+    let second_body = serde_json::json!({"server":{"name":"nova-failed-delete","image":{"id":"image-1"},"flavor":{"id":default_flavor_id},"networks":[{"uuid":port_id}]}});
     let second_created = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -966,5 +985,6 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         Err(o3k_console::ConsoleError::NotFound)
     ));
     std::fs::remove_file(path)?;
+    std::fs::remove_dir_all(network_root)?;
     Ok(())
 }

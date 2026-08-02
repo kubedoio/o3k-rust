@@ -1679,9 +1679,13 @@ async fn create_server(
         );
     };
     if networks.is_empty()
-        || networks
-            .iter()
-            .any(|network| network.uuid.as_deref().is_none_or(str::is_empty))
+        || networks.iter().any(|network| {
+            network
+                .port
+                .as_deref()
+                .or(network.uuid.as_deref())
+                .is_none_or(str::is_empty)
+        })
     {
         return keystone_error(
             StatusCode::BAD_REQUEST,
