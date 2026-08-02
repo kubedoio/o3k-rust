@@ -232,6 +232,7 @@ python3 -m venv --help >/dev/null 2>&1 || need_packages=true
 command -v pkg-config >/dev/null 2>&1 || need_packages=true
 command -v protoc >/dev/null 2>&1 || need_packages=true
 command -v dnsmasq >/dev/null 2>&1 || need_packages=true
+command -v capsh >/dev/null 2>&1 || need_packages=true
 if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
   command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
   sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
@@ -241,7 +242,7 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
       apt-get -o DPkg::Lock::Timeout=300 update -qq
     timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
       apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
-        genisoimage openssh-client python3-venv pkg-config libvirt-dev protobuf-compiler dnsmasq-base
+        genisoimage openssh-client python3-venv pkg-config libvirt-dev protobuf-compiler dnsmasq-base libcap2-bin
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
 sudo -n install -d -o root -g root -m 0755 "$SERVICE_STATE_BASE"
@@ -315,6 +316,7 @@ command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after d
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
 command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq is unavailable after dependency setup"
+command -v capsh >/dev/null 2>&1 || fail "capsh is unavailable after dependency setup"
 cargo build --locked --release --bin o3kd
 # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
 # make the runtime link explicit after the host preflight proves libvirt exists.
@@ -385,9 +387,22 @@ sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
 
 start_service() {
   local name="$1" env_file="$2" binary="$3" log_file="$4" pid_file="$5"
-  local supervisor child candidate
-  sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
-    "$env_file" "$binary" "$log_file" &
+  local supervisor child candidate supplementary_groups capability_hex
+  supplementary_groups="$(id -G "$SERVICE_ACCOUNT" | tr ' ' ',')"
+  if [[ "$name" == o3k-compute ]]; then
+    # CAP_NET_ADMIN is required for owned TAP/bridge/DHCP operations.  The
+    # transition capabilities are not ambient and are therefore unavailable
+    # to the service after capsh changes identity.
+    sudo -n capsh --keep=1 --secbits=4 \
+      --caps=cap_net_admin,cap_setgid,cap_setuid+eip \
+      --addamb=cap_net_admin --groups="$supplementary_groups" \
+      --user="$SERVICE_ACCOUNT" -- -c \
+      'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+      "$env_file" "$binary" "$log_file" &
+  else
+    sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+      "$env_file" "$binary" "$log_file" &
+  fi
   supervisor=$!
   child=
   for _ in $(seq 1 50); do
@@ -409,6 +424,13 @@ start_service() {
   uid="$(process_uid "$child")"
   [[ "$start_ticks" =~ ^[0-9]+$ && "$uid" == "$SERVICE_ACCOUNT" ]] \
     || fail "$name did not expose a valid service identity"
+  if [[ "$name" == o3k-compute ]]; then
+    capability_hex="$(sudo -n awk '/^CapEff:/ {print $2}' "/proc/$child/status")"
+    [[ "$capability_hex" =~ ^[0-9a-fA-F]+$ ]] \
+      || fail "o3k-compute capability state is unavailable"
+    sudo -n capsh --decode="$capability_hex" | grep -qw cap_net_admin \
+      || fail "o3k-compute lacks CAP_NET_ADMIN"
+  fi
   printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
   if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
 }

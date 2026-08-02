@@ -31,6 +31,12 @@ assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in b
 assert 'O3K_PROVIDER=agent' in bootstrap
 assert 'O3K_PROVIDER=fake' not in bootstrap
 assert 'dnsmasq-base' in bootstrap
+assert 'libcap2-bin' in bootstrap
+assert 'capsh is unavailable after dependency setup' in bootstrap
+assert '--secbits=4' in bootstrap
+assert '--addamb=cap_net_admin' in bootstrap
+assert '--caps=cap_net_admin,cap_setgid,cap_setuid+eip' in bootstrap
+assert 'o3k-compute lacks CAP_NET_ADMIN' in bootstrap
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
