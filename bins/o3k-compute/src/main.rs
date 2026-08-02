@@ -415,11 +415,18 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain rebooted", resource_state(&inspection))
             }
             Some(proto::command::Action::Delete(_)) => {
-                let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
+                let inspection = match self.adapter.inspect(name.clone()).await {
+                    Ok(value) => value,
+                    Err(error) if error.category == ErrorCategory::NotFound => {
+                        self.network
+                            .delete_taps_for_instance(&command.resource_id)
+                            .map_err(|_| {
+                                AgentError::Protocol("owned TAP cleanup failed".to_owned())
+                            })?;
+                        return success("domain already absent", proto::ResourceState::Deleted);
+                    }
+                    Err(error) => return Err(agent_error(error)),
+                };
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 if inspection.active {
                     self.adapter
@@ -431,9 +438,20 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .undefine(name.clone())
                     .await
                     .map_err(agent_error)?;
+                self.network
+                    .delete_taps_for_instance(&command.resource_id)
+                    .map_err(|_| AgentError::Protocol("owned TAP cleanup failed".to_owned()))?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
+                match self.adapter.inspect(name.clone()).await {
+                    Ok(existing) => {
+                        verify_owned_domain(&existing, &command.resource_id)?;
+                        return success("domain already exists", resource_state(&existing));
+                    }
+                    Err(error) if error.category == ErrorCategory::NotFound => {}
+                    Err(error) => return Err(agent_error(error)),
+                }
                 let taps = prepare_owned_taps(command, &self.network)?;
                 let committed = match resolve_committed_create_inputs(
                     command,
@@ -461,28 +479,35 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     }
                 };
                 let definition_name = definition.name.clone();
-                if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
-                    verify_owned_domain(&existing, &command.resource_id)?;
-                    return success("domain already exists", resource_state(&existing));
-                }
-                self.adapter
+                if let Err(error) = self
+                    .adapter
                     .define(o3k_libvirt::DomainDefinition {
                         name: definition_name.clone(),
                         xml: definition.xml,
                     })
                     .await
-                    .map_err(agent_error)?;
+                {
+                    rollback_owned_taps(&self.network, &taps);
+                    return Err(agent_error(error));
+                }
                 if let Err(error) = self.adapter.start(definition_name.clone()).await {
                     let _ = self.adapter.undefine(definition_name.clone()).await;
                     rollback_owned_taps(&self.network, &taps);
                     return Err(agent_error(error));
                 }
-                let inspection = self
-                    .adapter
-                    .inspect(definition_name)
-                    .await
-                    .map_err(agent_error)?;
-                verify_owned_domain(&inspection, &command.resource_id)?;
+                let inspection = match self.adapter.inspect(definition_name).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = self.adapter.undefine(name.clone()).await;
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(agent_error(error));
+                    }
+                };
+                if let Err(error) = verify_owned_domain(&inspection, &command.resource_id) {
+                    let _ = self.adapter.undefine(name.clone()).await;
+                    rollback_owned_taps(&self.network, &taps);
+                    return Err(error);
+                }
                 success("domain created", resource_state(&inspection))
             }
             Some(proto::command::Action::ConsoleLog(request)) => {

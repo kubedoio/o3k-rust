@@ -496,6 +496,59 @@ mod host_network_tests {
         Ok(())
     }
 
+    #[test]
+    fn deletes_only_owned_taps_for_the_requested_instance() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-delete-{}", Uuid::now_v7()));
+        let command = FakeNetworkCommand::new([Response::output(false, "")]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command),
+            &root,
+        )?;
+        manager.update_ownership(|manifest| {
+            manifest.taps.insert(
+                HostNetworkManager::tap_name("port-a")?,
+                TapOwnership {
+                    interface: HostNetworkManager::tap_name("port-a")?,
+                    instance_id: "instance-a".to_owned(),
+                    port_id: "port-a".to_owned(),
+                    mac: "02:00:00:00:00:01".to_owned(),
+                    bridge: "o3k-br0".to_owned(),
+                    created_by_o3k: true,
+                },
+            );
+            manifest.taps.insert(
+                "o3ktap-foreign".to_owned(),
+                TapOwnership {
+                    interface: "o3ktap-foreign".to_owned(),
+                    instance_id: "instance-b".to_owned(),
+                    port_id: "port-b".to_owned(),
+                    mac: "02:00:00:00:00:02".to_owned(),
+                    bridge: "o3k-br0".to_owned(),
+                    created_by_o3k: true,
+                },
+            );
+            Ok(())
+        })?;
+        manager.delete_taps_for_instance("instance-a")?;
+        let manifest: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert!(
+            !manifest
+                .taps
+                .values()
+                .any(|record| record.instance_id == "instance-a")
+        );
+        assert!(manifest.taps.contains_key("o3ktap-foreign"));
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
     #[derive(Clone)]
     struct FakeNetworkCommand {
         responses: Arc<Mutex<VecDeque<Response>>>,
@@ -894,6 +947,33 @@ impl HostNetworkManager {
         }
         self.clear_tap_ownership(&name, spec)?;
         Ok(())
+    }
+
+    /// Removes every TAP recorded as owned by one instance. Foreign or
+    /// malformed ownership records are never selected for deletion.
+    pub fn delete_taps_for_instance(&self, instance_id: &str) -> Result<(), HostNetworkError> {
+        validate_reference(instance_id)?;
+        let specs = self
+            .ownership_snapshot(|manifest| {
+                manifest
+                    .taps
+                    .values()
+                    .filter(|record| record.created_by_o3k && record.instance_id == instance_id)
+                    .map(|record| TapSpec {
+                        instance_id: record.instance_id.clone(),
+                        port_id: record.port_id.clone(),
+                        mac: record.mac.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })?
+            .unwrap_or_default();
+        let mut first_error = None;
+        for spec in specs {
+            if let Err(error) = self.delete_tap(&spec) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
         let output = self.command_output(["-d", "link", "show"])?;
