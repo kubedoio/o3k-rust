@@ -135,6 +135,32 @@ pub fn stable_domain_name(server_id: &str) -> String {
     format!("o3k-{suffix}")
 }
 
+/// Returns the agent-owned durable serial log path for a domain image path.
+pub fn console_log_path(image_path: &str, domain_name: &str) -> Result<String, LibvirtError> {
+    let image_path = Path::new(image_path);
+    if validate_image_source(image_path.to_str().unwrap_or_default()).is_err()
+        || domain_name.is_empty()
+        || Path::new(domain_name).file_name().and_then(|v| v.to_str()) != Some(domain_name)
+    {
+        return Err(LibvirtError::new(
+            ErrorCategory::InvalidRequest,
+            "console log path is invalid",
+        ));
+    }
+    let root = image_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            LibvirtError::new(ErrorCategory::InvalidRequest, "image path has no root")
+        })?;
+    Ok(root
+        .join("console")
+        .join(format!("{domain_name}.log"))
+        .to_string_lossy()
+        .into_owned())
+}
+
 pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtError> {
     validate_metadata(&spec.metadata)?;
     if spec.vcpus == 0
@@ -156,6 +182,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         ));
     }
     let name = stable_domain_name(&spec.metadata.server_id);
+    let console_path = console_log_path(&spec.image_id, &name)?;
     let m = &spec.metadata;
     let config_drive = spec.config_drive_image.as_ref().map(|image| {
             format!(
@@ -175,7 +202,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         );
     }
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><serial type=\"file\"><source path=\"{}\" /><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"file\"><source path=\"{}\" /><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -186,6 +213,8 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         m.generation,
         xml_escape(&m.operation_id),
         xml_escape(&m.managed_by),
+        xml_escape(&console_path),
+        xml_escape(&console_path),
         xml_escape(&spec.image_id),
         config_drive,
         network_interfaces
@@ -831,6 +860,50 @@ fn backend_read_console(
         )
     })?;
     validate_console_ownership(name, &xml, expected_server_id)?;
+    if let Some(console) = xml.split("<console type=\"file\">").nth(1) {
+        let path = console
+            .split_once("<source path=\"")
+            .and_then(|(_, value)| value.split_once('"'))
+            .map(|(value, _)| value)
+            .ok_or_else(|| {
+                LibvirtError::new(
+                    ErrorCategory::OperationFailed,
+                    "durable console path is unavailable",
+                )
+            })?;
+        let path = Path::new(path);
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| component == Component::ParentDir)
+        {
+            return Err(LibvirtError::new(
+                ErrorCategory::OperationFailed,
+                "durable console path is invalid",
+            ));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match fs::read(path) {
+                Ok(bytes) => {
+                    let start = bytes.len().saturating_sub(max_bytes);
+                    return Ok(bytes[start..].to_vec());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if std::time::Instant::now() >= deadline {
+                        return Ok(Vec::new());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => {
+                    return Err(LibvirtError::new(
+                        ErrorCategory::OperationFailed,
+                        "durable console log cannot be read",
+                    ));
+                }
+            }
+        }
+    }
     let stream = Stream::new(&connection, virt::sys::VIR_STREAM_NONBLOCK).map_err(|_| {
         LibvirtError::new(
             ErrorCategory::OperationFailed,
@@ -1189,8 +1262,9 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.xml.contains("project&amp;1"));
         assert!(
-            first.xml.contains("<console type=\"pty\">")
-                && first.xml.contains("<serial type=\"pty\">")
+            first.xml.contains("<console type=\"file\">")
+                && first.xml.contains("<serial type=\"file\">")
+                && first.xml.contains("/console/o3k-")
         );
         assert_eq!(
             discover_domain_xml(&first.name, &first.xml),

@@ -281,12 +281,18 @@ fn return_after_create_rollback(
     dhcp: &Arc<Mutex<DhcpRuntime>>,
     preparation: &NetworkPreparation,
     image_materializer: &o3k_compute_agent::ImageMaterializer,
+    artifact_root: &std::path::Path,
     instance_id: &str,
     error: AgentError,
 ) -> AgentError {
     let error = return_after_network_rollback(network, dhcp, preparation, error);
     match image_materializer.delete_instance(instance_id) {
-        Ok(()) => error,
+        Ok(()) => match cleanup_console_log(artifact_root, instance_id) {
+            Ok(()) => error,
+            Err(cleanup_error) => AgentError::Protocol(format!(
+                "{error}; console rollback also failed: {cleanup_error}"
+            )),
+        },
         Err(cleanup_error) => AgentError::Protocol(format!(
             "{error}; image rollback also failed: {cleanup_error}"
         )),
@@ -313,6 +319,35 @@ fn cleanup_instance_network(
     network
         .cleanup_if_unused()
         .map_err(|error| AgentError::Protocol(format!("owned bridge cleanup failed: {error}")))
+}
+
+fn cleanup_console_log(
+    artifact_root: &std::path::Path,
+    instance_id: &str,
+) -> Result<(), AgentError> {
+    let domain_name = o3k_libvirt::stable_domain_name(instance_id);
+    let path = artifact_root
+        .parent()
+        .ok_or_else(|| AgentError::Protocol("agent artifact root has no service root".to_owned()))?
+        .join("console")
+        .join(format!("{domain_name}.log"));
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir(
+                artifact_root
+                    .parent()
+                    .ok_or_else(|| {
+                        AgentError::Protocol("agent artifact root has no service root".to_owned())
+                    })?
+                    .join("console"),
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AgentError::Protocol(
+            "console log cleanup failed".to_owned(),
+        )),
+    }
 }
 
 fn prepare_network(
@@ -771,6 +806,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             .map_err(|_| {
                                 AgentError::Protocol("instance image cleanup failed".to_owned())
                             })?;
+                        cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
                     Err(error) => return Err(agent_error(error)),
@@ -797,6 +833,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(|_| {
                         AgentError::Protocol("instance image cleanup failed".to_owned())
                     })?;
+                cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
@@ -836,6 +873,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &self.dhcp,
                             &preparation,
                             &self.image_materializer,
+                            &self.artifact_root,
                             &command.resource_id,
                             error,
                         ));
@@ -849,6 +887,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &self.dhcp,
                             &preparation,
                             &self.image_materializer,
+                            &self.artifact_root,
                             &command.resource_id,
                             error,
                         ));
@@ -862,12 +901,27 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &self.dhcp,
                             &preparation,
                             &self.image_materializer,
+                            &self.artifact_root,
                             &command.resource_id,
                             AgentError::Protocol("domain XML is invalid".to_owned()),
                         ));
                     }
                 };
                 let definition_name = definition.name.clone();
+                let console_path = o3k_libvirt::console_log_path(
+                    &committed.image.path.to_string_lossy(),
+                    &definition_name,
+                )
+                .map_err(|_| AgentError::Protocol("console log path is invalid".to_owned()))?;
+                let console_root =
+                    std::path::Path::new(&console_path)
+                        .parent()
+                        .ok_or_else(|| {
+                            AgentError::Protocol("console log root is invalid".to_owned())
+                        })?;
+                std::fs::create_dir_all(console_root).map_err(|_| {
+                    AgentError::Protocol("console log root could not be created".to_owned())
+                })?;
                 if let Err(error) = self
                     .adapter
                     .define(o3k_libvirt::DomainDefinition {
@@ -881,6 +935,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         &self.dhcp,
                         &preparation,
                         &self.image_materializer,
+                        &self.artifact_root,
                         &command.resource_id,
                         agent_error(error),
                     ));
@@ -900,6 +955,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         &self.dhcp,
                         &preparation,
                         &self.image_materializer,
+                        &self.artifact_root,
                         &command.resource_id,
                         error,
                     ));
@@ -920,6 +976,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &self.dhcp,
                             &preparation,
                             &self.image_materializer,
+                            &self.artifact_root,
                             &command.resource_id,
                             error,
                         ));
@@ -937,6 +994,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         &self.dhcp,
                         &preparation,
                         &self.image_materializer,
+                        &self.artifact_root,
                         &command.resource_id,
                         error,
                     ));
