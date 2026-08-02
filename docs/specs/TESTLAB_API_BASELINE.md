@@ -1,6 +1,6 @@
 # TestLab API compatibility baseline
 
-Status: Normative. Release: `v0.2.0-testlab`. OpenStack primary target:
+Status: Normative. Release: `v0.2.0-alpha.1`. OpenStack primary target:
 `2026.1 Gazpacho`; backward-compatibility profile: `2025.2 Flamingo`.
 
 This document freezes the OpenStack-facing contract for the TestLab vertical

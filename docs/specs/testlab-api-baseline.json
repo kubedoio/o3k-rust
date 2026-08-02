@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "status": "normative",
-  "release": "v0.2.0-testlab",
+  "release": "v0.2.0-alpha.1",
   "openstack_compatibility": {
     "series": "2026.1",
     "codename": "Gazpacho",

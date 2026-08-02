@@ -10,7 +10,7 @@ baseline = json.loads((root / "docs/specs/testlab-api-baseline.json").read_text(
 inventory = json.loads((root / "docs/compatibility/capability-inventory.json").read_text())
 
 assert baseline["status"] == "normative"
-assert baseline["release"] == "v0.2.0-testlab"
+assert baseline["release"] == "v0.2.0-alpha.1"
 assert baseline["openstack_compatibility"] == {
     "series": "2026.1",
     "codename": "Gazpacho",

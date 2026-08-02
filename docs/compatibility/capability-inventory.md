@@ -4,7 +4,7 @@ This file is generated from `capability-inventory-source.json`; edit the source 
 
 - Profile: `testlab-alpha`
 - Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
-- Rust reference: `5ca770f3156741a7a283603b3e42b5cd9d5920a4`
+- Rust reference: `3e508ea72e55a4c1e0113fbcf3643f4ffdbda735`
 - Operations: `41`
 
 Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.

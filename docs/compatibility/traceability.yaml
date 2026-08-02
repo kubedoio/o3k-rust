@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "format": "json-compatible-yaml-1.2",
-  "purpose": "Requirements-to-evidence traceability for the v0.2.0-testlab baseline",
+  "purpose": "Requirements-to-evidence traceability for the v0.2.0-alpha.1 baseline",
   "sources": {
     "baseline": "docs/specs/testlab-api-baseline.json",
     "inventory": "docs/compatibility/capability-inventory.json",
