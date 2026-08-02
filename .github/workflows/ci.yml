@@ -139,6 +139,8 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
+      - name: Validate advisory exception policy
+        run: bash tests/supply-chain-governance.sh
       - name: Audit Rust dependencies for vulnerabilities
         run: |
           advisory_db="${RUNNER_TEMP}/rustsec-advisory-db"
