@@ -503,6 +503,11 @@ impl LibvirtCapabilities {
                     supported: true,
                     bounded_value: String::new(),
                 },
+                proto::CapabilityFlag {
+                    name: "artifact_transfer".to_owned(),
+                    supported: true,
+                    bounded_value: String::new(),
+                },
             ],
             ..Default::default()
         }
@@ -1148,6 +1153,12 @@ mod tests {
                 .flags
                 .iter()
                 .any(|flag| flag.name == "kvm" && flag.supported)
+        );
+        assert!(
+            capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "artifact_transfer" && flag.supported)
         );
         assert!(
             capabilities

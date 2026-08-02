@@ -525,10 +525,12 @@ fn xorriso_args(output: &Path, source: &Path) -> Vec<OsString> {
         OsString::from("-r"),
         OsString::from("-J"),
         OsString::from("-joliet-long"),
-        OsString::from("-volume_date"),
-        OsString::from(format!("all_file_dates={ISO_DATE}")),
-        OsString::from("-volume_date"),
-        OsString::from(format!("uuid={ISO_DATE}")),
+        // xorriso's mkisofs emulation accepts the documented mkisofs date
+        // options. The native `-volume_date` form is rejected by the
+        // installed xorriso versions when combined with `-as mkisofs`.
+        OsString::from(format!("--modification-date={ISO_DATE}")),
+        OsString::from("--set_all_file_dates"),
+        OsString::from(ISO_DATE),
         source.as_os_str().to_owned(),
     ]
 }
@@ -1000,13 +1002,14 @@ mod tests {
         assert_eq!(calls[0][2], OsStr::new("-o"));
         assert_eq!(calls[0][4], OsStr::new("-V"));
         assert_eq!(calls[0][5], OsStr::new(ISO_VOLUME_ID));
+        assert!(
+            calls
+                .iter()
+                .flatten()
+                .any(|arg| { arg == &OsString::from(format!("--modification-date={ISO_DATE}")) })
+        );
         assert!(calls[0].windows(2).any(|pair| {
-            pair[0] == OsStr::new("-volume_date")
-                && pair[1] == OsString::from(format!("all_file_dates={ISO_DATE}"))
-        }));
-        assert!(calls[0].windows(2).any(|pair| {
-            pair[0] == OsStr::new("-volume_date")
-                && pair[1] == OsString::from(format!("uuid={ISO_DATE}"))
+            pair[0] == OsStr::new("--set_all_file_dates") && pair[1] == OsStr::new(ISO_DATE)
         }));
         drop(calls);
 
