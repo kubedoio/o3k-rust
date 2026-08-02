@@ -70,6 +70,7 @@ const COMMAND_JOURNAL_VERSION: u8 = 1;
 const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
 const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
+const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -2609,6 +2610,182 @@ fn protocol_error_for_command(
     }
 }
 
+fn artifact_store_root(identity_path: &Path) -> PathBuf {
+    identity_path.with_extension(ARTIFACT_STORE_FILE_EXTENSION)
+}
+
+fn artifact_store_error() -> AgentError {
+    AgentError::Protocol("artifact transfer failed closed".to_owned())
+}
+
+fn artifact_offer_is_current(
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+) -> Result<(), AgentError> {
+    if offer.agent_id != agent_id {
+        return Err(AgentError::Protocol(
+            "artifact offer identity does not match registration".to_owned(),
+        ));
+    }
+    if offer.expires_at_unix_ms <= unix_ms() {
+        return Err(AgentError::Protocol(
+            "artifact offer has expired".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+async fn send_artifact_ack(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+    agent_epoch: &str,
+    receipt: &ArtifactReceipt,
+    redacted_message: impl Into<String>,
+) -> Result<(), AgentError> {
+    tx.send(proto::ControlRequest {
+        body: Some(proto::control_request::Body::ArtifactAck(
+            proto::ArtifactAck {
+                transfer_id: offer.transfer_id.clone(),
+                command_id: offer.command_id.clone(),
+                operation_id: offer.operation_id.clone(),
+                resource_id: offer.resource_id.clone(),
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+                contiguous_bytes: receipt.contiguous_bytes,
+                next_chunk_index: receipt.next_chunk_index,
+                state: receipt.state as i32,
+                redacted_message: redacted_message.into(),
+            },
+        )),
+    })
+    .await
+    .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))
+}
+
+async fn reject_artifact(
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    offer: &proto::ArtifactOffer,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    if offer.agent_id != agent_id {
+        return Ok(());
+    }
+    let receipt = ArtifactReceipt {
+        transfer_id: offer.transfer_id.clone(),
+        next_chunk_index: 0,
+        contiguous_bytes: 0,
+        state: proto::ArtifactTransferState::Rejected,
+        path: None,
+    };
+    send_artifact_ack(
+        tx,
+        offer,
+        agent_id,
+        agent_epoch,
+        &receipt,
+        "artifact transfer rejected",
+    )
+    .await
+}
+
+async fn handle_artifact_response(
+    body: proto::control_response::Body,
+    store: &ArtifactStore,
+    offers: &mut HashMap<String, proto::ArtifactOffer>,
+    tx: &mpsc::Sender<proto::ControlRequest>,
+    agent_id: &str,
+    agent_epoch: &str,
+) -> Result<(), AgentError> {
+    match body {
+        proto::control_response::Body::ArtifactOffer(offer) => {
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            if let Some(existing) = offers.get(&offer.transfer_id) {
+                if existing != &offer {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(AgentError::Protocol(
+                        "artifact offer conflicts with this connection".to_owned(),
+                    ));
+                }
+            }
+            let receipt = match store.begin(&offer) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            offers.insert(offer.transfer_id.clone(), offer.clone());
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact offer accepted",
+            )
+            .await
+        }
+        proto::control_response::Body::ArtifactChunk(chunk) => {
+            let offer = offers.get(&chunk.transfer_id).cloned().ok_or_else(|| {
+                AgentError::Protocol("artifact chunk has no active offer".to_owned())
+            })?;
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            let receipt = match store.accept_chunk(&offer, &chunk) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact chunk accepted",
+            )
+            .await
+        }
+        proto::control_response::Body::ArtifactEnd(end) => {
+            let offer = offers.get(&end.transfer_id).cloned().ok_or_else(|| {
+                AgentError::Protocol("artifact end has no active offer".to_owned())
+            })?;
+            if let Err(error) = artifact_offer_is_current(&offer, agent_id) {
+                reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                return Err(error);
+            }
+            let receipt = match store.finish(&offer, &end) {
+                Ok(receipt) => receipt,
+                Err(_) => {
+                    reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
+                    return Err(artifact_store_error());
+                }
+            };
+            send_artifact_ack(
+                tx,
+                &offer,
+                agent_id,
+                agent_epoch,
+                &receipt,
+                "artifact committed",
+            )
+            .await
+        }
+        _ => Err(AgentError::Protocol(
+            "unexpected artifact response".to_owned(),
+        )),
+    }
+}
+
 impl AgentClient {
     pub fn new(config: AgentConfig) -> Result<Self, AgentError> {
         config.validate()?;
@@ -2758,6 +2935,10 @@ impl AgentClient {
             }
         };
         validate_register_response(&register, agent_id, &epoch)?;
+        let artifact_store =
+            ArtifactStore::open(artifact_store_root(&self.config.identity_file), agent_id)
+                .map_err(|_| artifact_store_error())?;
+        let mut artifact_offers = HashMap::new();
         let state = administrative_state_from_i32(register.desired_state)?;
         persist_administrative_state(
             &administrative_state_file(&self.config.identity_file),
@@ -2898,14 +3079,44 @@ impl AgentClient {
                             .await
                             .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
                         }
+                        Some(proto::control_response::Body::ArtifactOffer(offer)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactOffer(offer),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
+                        Some(proto::control_response::Body::ArtifactChunk(chunk)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactChunk(chunk),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
+                        Some(proto::control_response::Body::ArtifactEnd(end)) => {
+                            handle_artifact_response(
+                                proto::control_response::Body::ArtifactEnd(end),
+                                &artifact_store,
+                                &mut artifact_offers,
+                                &tx,
+                                agent_id,
+                                &epoch,
+                            )
+                            .await?;
+                        }
                         | Some(proto::control_response::Body::ObservationAck(_))
                         | Some(proto::control_response::Body::Resync(_))
-                        | Some(proto::control_response::Body::Error(_))
-                        | Some(proto::control_response::Body::ArtifactOffer(_))
-                        | Some(proto::control_response::Body::ArtifactChunk(_))
-                        | Some(proto::control_response::Body::ArtifactEnd(_)) => {
+                        | Some(proto::control_response::Body::Error(_)) => {
                             return Err(AgentError::Protocol(
-                                "artifact transfer is not enabled on this compute agent".to_owned(),
+                                "unsupported control response".to_owned(),
                             ));
                         }
                         None => {}
@@ -3674,5 +3885,183 @@ mod tests {
             b"urn:o3k:compute:agent:other"
         ));
         assert!(!certificate_has_uri_san(&certificate, uri));
+    }
+
+    fn test_artifact_offer(agent_id: &str) -> (proto::ArtifactOffer, Vec<u8>) {
+        let data = b"abc".to_vec();
+        let digest = Sha256::digest(&data);
+        let mut sha256 = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut sha256, "{byte:02x}");
+        }
+        (
+            proto::ArtifactOffer {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id: "operation-1".to_owned(),
+                resource_id: "resource-1".to_owned(),
+                agent_id: agent_id.to_owned(),
+                artifact_id: "artifact-1".to_owned(),
+                kind: proto::ArtifactKind::ImageBase as i32,
+                sha256,
+                size_bytes: data.len() as u64,
+                format: "raw".to_owned(),
+                chunk_size_bytes: data.len() as u32,
+                chunk_count: 1,
+                expires_at_unix_ms: unix_ms().saturating_add(10_000),
+            },
+            data,
+        )
+    }
+
+    async fn next_artifact_ack(
+        receiver: &mut mpsc::Receiver<proto::ControlRequest>,
+    ) -> Result<proto::ArtifactAck, AgentError> {
+        let request = receiver
+            .recv()
+            .await
+            .ok_or_else(|| AgentError::Protocol("artifact ack was not emitted".to_owned()))?;
+        match request.body {
+            Some(proto::control_request::Body::ArtifactAck(ack)) => Ok(ack),
+            _ => Err(AgentError::Protocol(
+                "unexpected artifact response in test".to_owned(),
+            )),
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_messages_acknowledge_offer_progress_and_commit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3k-agent-artifacts-{}", Uuid::now_v7()));
+        let store = ArtifactStore::open(&root, "node")?;
+        let (offer, data) = test_artifact_offer("node");
+        let chunk = proto::ArtifactChunk {
+            transfer_id: offer.transfer_id.clone(),
+            chunk_index: 0,
+            offset_bytes: 0,
+            data: data.clone(),
+            chunk_sha256: offer.sha256.clone(),
+        };
+        let end = proto::ArtifactEnd {
+            transfer_id: offer.transfer_id.clone(),
+            sha256: offer.sha256.clone(),
+            size_bytes: offer.size_bytes,
+        };
+        let (tx, mut receiver) = mpsc::channel(4);
+        let mut offers = HashMap::new();
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(offer.clone()),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let offered = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(offered.state, proto::ArtifactTransferState::Offered as i32);
+        assert_eq!(offered.agent_epoch, "epoch-1");
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactChunk(chunk),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let receiving = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            receiving.state,
+            proto::ArtifactTransferState::Receiving as i32
+        );
+        assert_eq!(receiving.contiguous_bytes, data.len() as u64);
+        assert_eq!(receiving.next_chunk_index, 1);
+
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactEnd(end),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let committed = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            committed.state,
+            proto::ArtifactTransferState::Committed as i32
+        );
+        assert_eq!(committed.contiguous_bytes, data.len() as u64);
+        assert!(store.resolve(&offer).is_ok());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_identity_or_chunk_errors_reject_and_fail_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3k-agent-artifacts-{}", Uuid::now_v7()));
+        let store = ArtifactStore::open(&root, "node")?;
+        let (mut offer, data) = test_artifact_offer("other-node");
+        let (tx, mut receiver) = mpsc::channel(4);
+        let mut offers = HashMap::new();
+        assert!(
+            handle_artifact_response(
+                proto::control_response::Body::ArtifactOffer(offer.clone()),
+                &store,
+                &mut offers,
+                &tx,
+                "node",
+                "epoch-1",
+            )
+            .await
+            .is_err()
+        );
+        assert!(receiver.try_recv().is_err());
+
+        offer.agent_id = "node".to_owned();
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(offer.clone()),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let _ = next_artifact_ack(&mut receiver).await?;
+        let mut invalid = data;
+        invalid[0] = b'X';
+        assert!(
+            handle_artifact_response(
+                proto::control_response::Body::ArtifactChunk(proto::ArtifactChunk {
+                    transfer_id: offer.transfer_id.clone(),
+                    chunk_index: 0,
+                    offset_bytes: 0,
+                    data: invalid,
+                    chunk_sha256: offer.sha256.clone(),
+                }),
+                &store,
+                &mut offers,
+                &tx,
+                "node",
+                "epoch-1",
+            )
+            .await
+            .is_err()
+        );
+        let rejected = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            rejected.state,
+            proto::ArtifactTransferState::Rejected as i32
+        );
+        assert_eq!(rejected.agent_id, "node");
+        assert_eq!(rejected.agent_epoch, "epoch-1");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
