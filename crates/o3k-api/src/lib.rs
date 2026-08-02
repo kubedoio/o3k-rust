@@ -2151,8 +2151,8 @@ mod tests {
                 None,
                 Some("ssh-ed25519 AAAA generated-by-keypair".to_owned())
             )
-            .expect("keypair public key should be accepted"),
-            "ssh-ed25519 AAAA generated-by-keypair"
+            .as_deref(),
+            Ok("ssh-ed25519 AAAA generated-by-keypair")
         );
         assert!(super::config_drive_ssh_public_key(None, None).is_err());
     }
