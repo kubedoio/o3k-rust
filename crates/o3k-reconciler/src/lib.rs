@@ -8,8 +8,8 @@ use o3k_provider::{
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_store::{
-    DurableStore, ObservationUpdate, OperationRecord, OperationState, ProviderReference,
-    ResourceRecord, StoreError,
+    AgentCommandState, DurableStore, ObservationUpdate, OperationRecord, OperationState,
+    ProviderReference, ResourceRecord, StoreError,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -125,7 +125,7 @@ where
         }
     }
 
-    fn fence_agent_evidence(
+    fn fence_agent_evidence_in_memory(
         &self,
         operation_id: Uuid,
         agent_id: &str,
@@ -176,6 +176,59 @@ where
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
             }
+        }
+    }
+
+    async fn fence_agent_evidence_durable(
+        &self,
+        operation_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+        sequence: u64,
+        state: AgentCommandState,
+        provider_resource_id: Option<&str>,
+    ) -> Result<EvidenceDisposition, ReconcileError> {
+        match self
+            .store
+            .get_agent_command_by_operation(operation_id)
+            .await
+        {
+            Ok(command) => {
+                if command.agent_id != agent_id || command.agent_epoch != agent_epoch {
+                    return Err(ReconcileError::InvalidIntent);
+                }
+                if sequence < command.last_sequence {
+                    return Ok(EvidenceDisposition::Stale);
+                }
+                if sequence == command.last_sequence {
+                    let same_resource = provider_resource_id
+                        .is_none_or(|value| command.provider_resource_id.as_deref() == Some(value));
+                    if command.state == state && same_resource {
+                        return Ok(EvidenceDisposition::Duplicate);
+                    }
+                    return Err(ReconcileError::InvalidIntent);
+                }
+                self.store
+                    .update_agent_command(
+                        &command.command_id,
+                        state,
+                        command.accepted_sequence,
+                        sequence,
+                        None,
+                        provider_resource_id,
+                    )
+                    .await?;
+                Ok(EvidenceDisposition::New)
+            }
+            Err(StoreError::OperationNotFound) => Ok(self.fence_agent_evidence_in_memory(
+                operation_id,
+                agent_id,
+                agent_epoch,
+                sequence,
+                state as i32,
+                provider_resource_id.unwrap_or_default(),
+            )?),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -258,16 +311,27 @@ where
         if operation.resource_id != resource_id {
             return Err(ReconcileError::InvalidIntent);
         }
-        let state = agent_proto::OperationState::try_from(update.state)
+        let protocol_state = agent_proto::OperationState::try_from(update.state)
             .map_err(|_| ReconcileError::InvalidIntent)?;
-        let disposition = self.fence_agent_evidence(
-            operation_id,
-            &update.agent_id,
-            &update.agent_epoch,
-            update.operation_sequence,
-            update.state,
-            &update.provider_resource_id,
-        )?;
+        let command_state = match protocol_state {
+            agent_proto::OperationState::Accepted => AgentCommandState::Accepted,
+            agent_proto::OperationState::Running => AgentCommandState::Running,
+            agent_proto::OperationState::Succeeded => AgentCommandState::Succeeded,
+            agent_proto::OperationState::Failed => AgentCommandState::Failed,
+            agent_proto::OperationState::UnknownOutcome => AgentCommandState::UnknownOutcome,
+            agent_proto::OperationState::Unspecified => return Err(ReconcileError::InvalidIntent),
+        };
+        let disposition = self
+            .fence_agent_evidence_durable(
+                operation_id,
+                &update.agent_id,
+                &update.agent_epoch,
+                update.operation_sequence,
+                command_state,
+                (!update.provider_resource_id.is_empty())
+                    .then_some(update.provider_resource_id.as_str()),
+            )
+            .await?;
         if disposition != EvidenceDisposition::New {
             return Ok(operation.state);
         }
@@ -277,7 +341,7 @@ where
         ) {
             return Ok(operation.state);
         }
-        let durable_state = match state {
+        let durable_state = match protocol_state {
             agent_proto::OperationState::Accepted | agent_proto::OperationState::Running => {
                 OperationState::Running
             }
@@ -366,14 +430,16 @@ where
         let operation_id =
             Uuid::parse_str(&accepted.operation_id).map_err(|_| ReconcileError::InvalidIntent)?;
         let operation = self.store.get_operation(operation_id).await?;
-        let disposition = self.fence_agent_evidence(
-            operation_id,
-            &accepted.agent_id,
-            &accepted.agent_epoch,
-            accepted.operation_sequence,
-            accepted.state,
-            "",
-        )?;
+        let disposition = self
+            .fence_agent_evidence_durable(
+                operation_id,
+                &accepted.agent_id,
+                &accepted.agent_epoch,
+                accepted.operation_sequence,
+                AgentCommandState::Accepted,
+                None,
+            )
+            .await?;
         if disposition != EvidenceDisposition::New {
             return Ok(operation.state);
         }
@@ -1173,7 +1239,7 @@ fn valid_agent_reference(value: &str) -> bool {
 mod tests {
     use super::*;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
-    use o3k_store::SqliteStore;
+    use o3k_store::{AgentCommandRecord, AgentCommandState, SqliteStore};
     use std::path::PathBuf;
 
     fn request() -> CreateInstanceRequest {
@@ -1408,6 +1474,23 @@ mod tests {
         let (journal, store, _) = journal("agent-evidence-fence", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: "command-agent-evidence".to_owned(),
+                idempotency_key: "agent-evidence-key".to_owned(),
+                operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-a".to_owned(),
+                agent_epoch: "epoch-a".to_owned(),
+                payload_fingerprint_sha256: "a".repeat(64),
+                payload: b"test-command".to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         let succeeded = agent_proto::OperationUpdate {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-a".to_owned(),
@@ -1422,6 +1505,8 @@ mod tests {
             journal.apply_agent_update(&succeeded).await?,
             OperationState::Succeeded
         );
+        let restarted =
+            OperationJournal::new(store.clone(), Arc::new(FakeComputeProvider::new()), 2);
         let stale = agent_proto::OperationUpdate {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-a".to_owned(),
@@ -1432,7 +1517,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            journal.apply_agent_update(&stale).await?,
+            restarted.apply_agent_update(&stale).await?,
             OperationState::Succeeded
         );
         let foreign = agent_proto::OperationUpdate {
@@ -1445,7 +1530,7 @@ mod tests {
             ..Default::default()
         };
         assert!(matches!(
-            journal.apply_agent_update(&foreign).await,
+            restarted.apply_agent_update(&foreign).await,
             Err(ReconcileError::InvalidIntent)
         ));
         assert_eq!(
