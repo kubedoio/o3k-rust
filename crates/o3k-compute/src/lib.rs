@@ -1503,10 +1503,15 @@ impl ComputeService {
                 && serde_json::from_str::<serde_json::Value>(&server.desired_state)
                     .ok()
                     .is_some_and(|value| {
-                        value.get("vcpus").and_then(serde_json::Value::as_u64)
-                            == Some(u64::from(flavor.vcpus))
-                            && value.get("memory_mib").and_then(serde_json::Value::as_u64)
-                                == Some(flavor.ram_mib)
+                        value
+                            .get("flavor_id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|value| value == flavor.id.to_string())
+                            || (value.get("flavor_id").is_none()
+                                && value.get("vcpus").and_then(serde_json::Value::as_u64)
+                                    == Some(u64::from(flavor.vcpus))
+                                && value.get("memory_mib").and_then(serde_json::Value::as_u64)
+                                    == Some(flavor.ram_mib))
                     })
             {
                 return Err(ComputeError::Conflict);
@@ -1604,6 +1609,8 @@ impl ComputeService {
             name: name.clone(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: flavor.id.to_string(),
+            disk_gib: flavor.disk_gib,
             image_id: Some(image_id.clone()),
             key_name: key_name.clone(),
             keypair_id: keypair.as_ref().map(|value| value.id),
@@ -2136,10 +2143,15 @@ fn server_from_resource(
 ) -> Result<Server, ()> {
     let request: CreateInstanceRequest =
         serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
-    let flavor = flavors
-        .iter()
-        .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
-        .ok_or(())?;
+    let flavor = if request.flavor_id.trim().is_empty() {
+        flavors
+            .iter()
+            .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
+    } else {
+        let flavor_id = request.flavor_id.parse::<Uuid>().map_err(|_| ())?;
+        flavors.iter().find(|flavor| flavor.id == flavor_id)
+    }
+    .ok_or(())?;
     Ok(Server {
         id: resource.id,
         name: request.name,
@@ -2208,6 +2220,9 @@ mod tests {
         let flavor = service
             .create_flavor("project-a", "custom.small".to_owned(), 1, 1024, 5)
             .await?;
+        let same_dimensions = service
+            .create_flavor("project-a", "custom.small-alias".to_owned(), 1, 1024, 5)
+            .await?;
         assert!(
             service
                 .flavors_for_project("project-b")
@@ -2235,7 +2250,7 @@ mod tests {
                 "project-a",
                 "custom-flavor-server".to_owned(),
                 "image-1".to_owned(),
-                flavor.id,
+                same_dimensions.id,
                 vec!["network-1".to_owned()],
                 "custom-flavor-request".to_owned(),
             )
@@ -2245,14 +2260,17 @@ mod tests {
                 .show_server("project-a", server.id)
                 .await?
                 .flavor_id,
-            flavor.id
+            same_dimensions.id
         );
-        assert!(matches!(
-            reopened.delete_flavor("project-a", flavor.id).await,
-            Err(ComputeError::Conflict)
-        ));
-        reopened.delete_server("project-a", server.id).await?;
+        let persisted_intent: CreateInstanceRequest =
+            serde_json::from_str(&reopened.store.get_resource(server.id).await?.desired_state)?;
+        assert_eq!(persisted_intent.flavor_id, same_dimensions.id.to_string());
+        assert_eq!(persisted_intent.disk_gib, same_dimensions.disk_gib);
         reopened.delete_flavor("project-a", flavor.id).await?;
+        reopened.delete_server("project-a", server.id).await?;
+        reopened
+            .delete_flavor("project-a", same_dimensions.id)
+            .await?;
         assert!(matches!(
             reopened.flavor_for_project("project-a", flavor.id).await,
             Err(ComputeError::NotFound)
@@ -2496,6 +2514,8 @@ mod tests {
             name: "agent-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -2548,6 +2568,8 @@ mod tests {
             name: "observed-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -2919,6 +2941,8 @@ mod tests {
             name: "existing-name".to_owned(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: flavor.id.to_string(),
+            disk_gib: flavor.disk_gib,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -3263,6 +3287,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -3292,6 +3318,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,

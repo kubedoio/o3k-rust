@@ -6,11 +6,17 @@ O3K exposes `/v2.1/{project_id}` flavor and server routes for the TestLab
 profile. The verified token, not the URL, supplies project ownership; a
 mismatched project path is concealed as `404`.
 
-The flavor catalog is a fixed read-only set (`test.small` and `test.medium`).
-Server creation requires a name, image ID, flavor ID, and at least one network
-reference. Creation journals the request in SQLite before invoking the fake
-compute provider. The reconciler projects provider success to `ACTIVE` and
-retains provider references for delete and action operations.
+Flavors are project-scoped durable resources. The alpha subset supports flavor
+create, list, detailed list, show, and delete with immutable `id`, `name`,
+`vcpus`, `ram`, and `disk` values. The built-in `test.small` and `test.medium`
+entries are available as the initial catalog; custom flavors use the same
+resource contract. Server creation requires a name, image ID, flavor ID, and
+at least one network reference. Creation journals the request in SQLite before
+invoking the fake compute provider. The reconciler projects provider success
+to `ACTIVE` and retains provider references for delete and action operations.
+The durable create intent records the selected flavor UUID and immutable
+resource dimensions, so server reads and flavor deletion do not infer identity
+from vCPU/RAM values when two flavors share dimensions.
 
 The Nova keypair subset supports public-key import and project/user-scoped
 list, show, and delete operations under `/os-keypairs`. Keypair records are
@@ -32,7 +38,8 @@ provider's internal `Stopped` state is not exposed as the non-Nova `STOPPED`
 string.
 
 Supported actions are start, stop, and reboot. Delete is idempotent after the
-server has reached the deleted projection. Metadata, resize,
+server has reached the deleted projection. Flavor extra specifications and
+administrative flavor extensions, metadata, resize,
 rebuild, rescue, pagination, quotas, full microversion coverage, and provider
 network attachment are intentionally out of scope for this alpha slice.
 Keypair private-key generation and guest `authorized_keys` injection are also

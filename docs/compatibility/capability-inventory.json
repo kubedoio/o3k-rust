@@ -19,7 +19,7 @@
       "id": "compute.flavor_collection_list",
       "implementation_state": "implemented",
       "known_gaps": [
-        "Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200."
+        "Protected run 30717871057 historically observed GET /v2.1/bootstrap-project/flavors returning 405; protected evidence remains failed and requires a rerun."
       ],
       "method": "GET",
       "observed_method_status": {
@@ -64,7 +64,9 @@
       "portable_contract": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "rust_locations": [],
+      "rust_locations": [
+        "crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes"
+      ],
       "service": "compute"
     },
     {
@@ -115,7 +117,9 @@
       "portable_contract": "verified",
       "protected_runner": "pending",
       "release_relevance": "required",
-      "rust_locations": [],
+      "rust_locations": [
+        "crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes"
+      ],
       "service": "compute"
     },
     {

@@ -392,7 +392,7 @@
         "status": 405,
         "run_id": "30717871057"
       },
-      "known_gaps": ["Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200."]
+      "known_gaps": ["Protected run 30717871057 historically observed GET /v2.1/bootstrap-project/flavors returning 405; protected evidence remains failed and requires a rerun."]
     },
     {
       "id": "compute.flavor_collection_detail",
@@ -436,7 +436,7 @@
       "path": "/v2.1/{project_id}/flavors",
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#create-flavor"],
       "go_locations": ["internal/nova/handlers.go", "internal/nova/flavors.go"],
-      "rust_locations": [],
+      "rust_locations": ["crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes"],
       "cli_command": "openstack flavor create",
       "implementation_state": "implemented",
       "portable_contract": "verified",
@@ -453,7 +453,7 @@
       "path": "/v2.1/{project_id}/flavors/{id}",
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#delete-flavor"],
       "go_locations": ["internal/nova/handlers.go", "internal/nova/flavors.go"],
-      "rust_locations": [],
+      "rust_locations": ["crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes"],
       "cli_command": "openstack flavor delete",
       "implementation_state": "implemented",
       "portable_contract": "verified",

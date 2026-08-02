@@ -16,7 +16,7 @@ The supported path is deliberately finite and ordered:
 1. obtain a project-scoped Keystone token;
 2. create an image, upload its content, and verify/list it;
 3. create a flat network, subnet, and port;
-4. select a flavor (list and detailed list; flavor creation is unsupported);
+4. create or select a flavor, then list, inspect, and delete it;
 5. import an ed25519 public key and verify/list it;
 6. create a server, inspect it, then delete it;
 7. delete the port, subnet, network, and image.
@@ -28,10 +28,12 @@ multi-node behavior are outside this release.
 
 ## HTTP contract
 
-The operation records define success and expected failure statuses. In
-particular, the protected flavor-list probe currently returns `405`; this is a
-recorded planned Nova gap, not a compatibility change. The keypair import
-contract is covered by the public HTTP harness and includes cleanup.
+The operation records define success and expected failure statuses. Flavor
+create, list, detailed list, show, and delete are required Nova operations in
+this alpha subset. The historical protected flavor-list probe returned `405`;
+that result remains failed protected-runner evidence and must not be promoted
+to a compatibility claim until rerun. The keypair import contract is covered
+by the public HTTP harness and includes cleanup.
 
 Project-scoped paths must use the authenticated project. Cross-project paths
 are concealed with `404`; missing project context is `400`. Clients omit the

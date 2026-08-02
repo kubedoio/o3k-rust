@@ -55,7 +55,7 @@ Evidence states are independent: route implementation does not imply contract, C
 
 ## Known gaps
 
-- `compute.flavor_collection_list`: Protected run 30717871057 observed GET /v2.1/bootstrap-project/flavors returning 405; local route/test currently expects 200.
+- `compute.flavor_collection_list`: Protected run 30717871057 historically observed GET /v2.1/bootstrap-project/flavors returning 405; protected evidence remains failed and requires a rerun.
 - `compute.flavor_collection_create`: Protected deployment verification remains a release-gate task.
 - `compute.flavor_member_delete`: Protected deployment verification remains a release-gate task.
 - `compute.keypair_collection_list`: Private-key generation is intentionally unsupported.

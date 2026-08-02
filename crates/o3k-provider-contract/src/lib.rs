@@ -46,6 +46,8 @@ pub mod mapping {
             name: request.name,
             vcpus: request.vcpus,
             memory_mib: request.memory_mib,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: (!request.image_id.is_empty()).then_some(request.image_id),
             key_name: None,
             keypair_id: None,

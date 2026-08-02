@@ -1184,6 +1184,8 @@ mod tests {
             name: "journal-test".to_owned(),
             vcpus: 1,
             memory_mib: 128,
+            flavor_id: String::new(),
+            disk_gib: 0,
             image_id: None,
             key_name: None,
             keypair_id: None,

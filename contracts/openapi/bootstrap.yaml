@@ -168,10 +168,27 @@ paths:
     delete: {operationId: deletePort, responses: {'204': {description: Port deleted.}}}
   /v2.1/{project_id}/flavors:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
-    get: {operationId: listFlavors, responses: {'200': {description: TestLab flavor catalog.}, '401': {description: Authentication required.}}}
+    get: {operationId: listFlavors, responses: {'200': {description: Project-scoped TestLab flavor catalog.}, '401': {description: Authentication required.}}}
+    post:
+      operationId: createFlavor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/FlavorCreate'}
+      responses:
+        '201':
+          description: Project-scoped flavor created.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/FlavorResponse'}
+        '400': {description: Invalid flavor request.}
+        '401': {description: Authentication required.}
+        '409': {description: Flavor name already exists.}
   /v2.1/{project_id}/flavors/{id}:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}, {name: id, in: path, required: true, schema: {type: string, format: uuid}}]
     get: {operationId: showFlavor, responses: {'200': {description: Flavor details.}, '404': {description: Flavor not found.}}}
+    delete: {operationId: deleteFlavor, responses: {'204': {description: Flavor deleted.}, '401': {description: Authentication required.}, '404': {description: Flavor not found.}, '409': {description: Flavor is still referenced.}}}
   /v2.1/{project_id}/os-keypairs:
     parameters: [{name: project_id, in: path, required: true, schema: {type: string}}]
     get:
@@ -268,6 +285,36 @@ components:
             name: {type: string, minLength: 1, maxLength: 255}
             public_key: {type: string, minLength: 1}
             type: {type: string, enum: [ssh]}
+    FlavorCreate:
+      type: object
+      additionalProperties: false
+      required: [flavor]
+      properties:
+        flavor:
+          type: object
+          additionalProperties: false
+          required: [name, vcpus, ram, disk]
+          properties:
+            name: {type: string, minLength: 1, maxLength: 255}
+            vcpus: {type: integer, minimum: 1}
+            ram: {type: integer, minimum: 1}
+            disk: {type: integer, minimum: 0}
+    FlavorResponse:
+      type: object
+      additionalProperties: false
+      required: [flavor]
+      properties:
+        flavor: {$ref: '#/components/schemas/Flavor'}
+    Flavor:
+      type: object
+      additionalProperties: false
+      required: [id, name, vcpus, ram, disk]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        vcpus: {type: integer, minimum: 1}
+        ram: {type: integer, minimum: 1}
+        disk: {type: integer, minimum: 0}
     ServerCreate:
       type: object
       additionalProperties: false
