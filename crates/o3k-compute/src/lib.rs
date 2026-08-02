@@ -1246,6 +1246,11 @@ impl ComputeProvider for AgentComputeProvider {
                 );
                 error
             })?;
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            artifact_count = artifacts.len(),
+            "agent create artifacts resolved"
+        );
         if artifacts.len() != 2 {
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
@@ -1433,6 +1438,11 @@ impl ComputeProvider for AgentComputeProvider {
                     );
                     map_agent_error(error)
                 })?;
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                artifact_kind = artifact_kind_name(artifact.kind),
+                "agent create artifact transfer committed"
+            );
             if let Some(store) = &self.store {
                 store
                     .update_artifact_transfer(
