@@ -45,6 +45,32 @@ pub struct Allocation {
     pub resources: BTreeMap<String, u64>,
 }
 
+/// Durable control-plane intent recorded before a caller reserves capacity.
+/// The intent is deliberately independent from provider execution: a restart
+/// can either finish the idempotent allocation or abandon it during
+/// reconciliation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AllocationIntent {
+    pub provider_id: String,
+    pub allocation_id: String,
+    pub consumer_id: String,
+    pub resources: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrphanedAllocation {
+    pub provider_id: String,
+    pub allocation_id: String,
+    pub consumer_id: String,
+    pub resources: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationReport {
+    pub orphaned_allocations: Vec<OrphanedAllocation>,
+    pub abandoned_intents: Vec<AllocationIntent>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ResourceProvider {
     pub id: String,
@@ -79,6 +105,7 @@ pub enum PlacementError {
 pub struct PlacementLedger {
     root: PathBuf,
     state: Arc<Mutex<BTreeMap<String, ResourceProvider>>>,
+    intents: Arc<Mutex<BTreeMap<String, AllocationIntent>>>,
 }
 
 impl PlacementLedger {
@@ -92,9 +119,188 @@ impl PlacementLedger {
         } else {
             BTreeMap::new()
         };
+        let intents_path = root.join("allocation-intents.json");
+        let intents = if intents_path.exists() {
+            serde_json::from_slice(&fs::read(intents_path).map_err(PlacementError::Storage)?)
+                .map_err(PlacementError::Corrupt)?
+        } else {
+            BTreeMap::new()
+        };
         Ok(Self {
             root,
             state: Arc::new(Mutex::new(providers)),
+            intents: Arc::new(Mutex::new(intents)),
+        })
+    }
+
+    pub fn begin_allocation_intent(
+        &self,
+        provider_id: &str,
+        allocation_id: &str,
+        consumer_id: &str,
+        resources: BTreeMap<String, u64>,
+    ) -> Result<AllocationIntent, PlacementError> {
+        if provider_id.is_empty()
+            || allocation_id.is_empty()
+            || consumer_id.is_empty()
+            || resources.is_empty()
+            || resources.values().any(|value| *value == 0)
+        {
+            return Err(PlacementError::InvalidAllocation);
+        }
+        let intent = AllocationIntent {
+            provider_id: provider_id.to_owned(),
+            allocation_id: allocation_id.to_owned(),
+            consumer_id: consumer_id.to_owned(),
+            resources,
+        };
+        let mut intents = self.intents.lock().map_err(|_| PlacementError::Lock)?;
+        if let Some(existing) = intents.get(allocation_id) {
+            if existing == &intent {
+                return Ok(existing.clone());
+            }
+            return Err(PlacementError::InvalidAllocation);
+        }
+        intents.insert(allocation_id.to_owned(), intent.clone());
+        if let Err(error) = persist_intents(&self.root, &intents) {
+            intents.remove(allocation_id);
+            return Err(error);
+        }
+        Ok(intent)
+    }
+
+    pub fn allocation_intent(
+        &self,
+        allocation_id: &str,
+    ) -> Result<Option<AllocationIntent>, PlacementError> {
+        Ok(self
+            .intents
+            .lock()
+            .map_err(|_| PlacementError::Lock)?
+            .get(allocation_id)
+            .cloned())
+    }
+
+    pub fn commit_allocation_intent(
+        &self,
+        intent: &AllocationIntent,
+        generation: u64,
+    ) -> Result<Allocation, PlacementError> {
+        let stored = self
+            .allocation_intent(&intent.allocation_id)?
+            .or_else(|| {
+                self.provider(&intent.provider_id)
+                    .ok()
+                    .and_then(|provider| {
+                        provider
+                            .allocations
+                            .get(&intent.allocation_id)
+                            .filter(|allocation| {
+                                allocation.consumer_id == intent.consumer_id
+                                    && allocation.resources == intent.resources
+                            })
+                            .map(|_| intent.clone())
+                    })
+            })
+            .ok_or(PlacementError::InvalidAllocation)?;
+        if stored != *intent {
+            return Err(PlacementError::InvalidAllocation);
+        }
+        let allocation = self.allocate(
+            &intent.provider_id,
+            &intent.allocation_id,
+            &intent.consumer_id,
+            intent.resources.clone(),
+            generation,
+        )?;
+        self.clear_allocation_intent(&intent.allocation_id)?;
+        Ok(allocation)
+    }
+
+    fn clear_allocation_intent(&self, allocation_id: &str) -> Result<(), PlacementError> {
+        let mut intents = self.intents.lock().map_err(|_| PlacementError::Lock)?;
+        let previous = intents.clone();
+        if intents.remove(allocation_id).is_some()
+            && let Err(error) = persist_intents(&self.root, &intents)
+        {
+            *intents = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Release allocations and pending intents whose consumers are absent
+    /// from the durable control-plane resource set supplied by the caller.
+    /// The result is deterministic and the changes are persisted before the
+    /// method returns, so reopening the ledger cannot resurrect them.
+    pub fn reconcile_consumers<I, S>(
+        &self,
+        durable_consumer_ids: I,
+    ) -> Result<ReconciliationReport, PlacementError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let consumers: std::collections::BTreeSet<String> = durable_consumer_ids
+            .into_iter()
+            .map(|id| id.as_ref().to_owned())
+            .collect();
+        let mut state = self.state.lock().map_err(|_| PlacementError::Lock)?;
+        let mut intents = self.intents.lock().map_err(|_| PlacementError::Lock)?;
+        let previous_state = state.clone();
+        let previous_intents = intents.clone();
+        let mut orphaned_allocations = Vec::new();
+        for provider in state.values_mut() {
+            let mut provider_changed = false;
+            let orphaned_ids: Vec<String> = provider
+                .allocations
+                .iter()
+                .filter(|(_, allocation)| !consumers.contains(&allocation.consumer_id))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for allocation_id in orphaned_ids {
+                if let Some(allocation) = provider.allocations.remove(&allocation_id) {
+                    provider_changed = true;
+                    orphaned_allocations.push(OrphanedAllocation {
+                        provider_id: provider.id.clone(),
+                        allocation_id,
+                        consumer_id: allocation.consumer_id,
+                        resources: allocation.resources,
+                    });
+                }
+            }
+            if provider_changed {
+                reconcile_inventory_usage(&mut provider.inventories, &provider.allocations);
+                provider.generation = provider.generation.saturating_add(1);
+            }
+        }
+        orphaned_allocations.sort_by(|left, right| {
+            (&left.provider_id, &left.allocation_id)
+                .cmp(&(&right.provider_id, &right.allocation_id))
+        });
+        let abandoned_intents: Vec<AllocationIntent> = intents
+            .values()
+            .filter(|intent| !consumers.contains(&intent.consumer_id))
+            .cloned()
+            .collect();
+        for intent in &abandoned_intents {
+            intents.remove(&intent.allocation_id);
+        }
+        if let Err(error) =
+            persist(&self.root, &state).and_then(|_| persist_intents(&self.root, &intents))
+        {
+            *state = previous_state;
+            *intents = previous_intents;
+            // The two journals have independent atomic publication points.
+            // Restore both snapshots so a failed reconciliation cannot leave
+            // disk state different from the state observed by this process.
+            let _ = persist(&self.root, &state);
+            let _ = persist_intents(&self.root, &intents);
+            return Err(error);
+        }
+        Ok(ReconciliationReport {
+            orphaned_allocations,
+            abandoned_intents,
         })
     }
 
@@ -293,6 +499,23 @@ fn persist(root: &Path, state: &BTreeMap<String, ResourceProvider>) -> Result<()
         return Err(PlacementError::Storage(error));
     }
     if let Err(error) = fs::rename(&temporary, root.join("placement.json")) {
+        let _ = fs::remove_file(&temporary);
+        return Err(PlacementError::Storage(error));
+    }
+    Ok(())
+}
+
+fn persist_intents(
+    root: &Path,
+    intents: &BTreeMap<String, AllocationIntent>,
+) -> Result<(), PlacementError> {
+    let temporary = root.join(format!("allocation-intents.json.tmp-{}", Uuid::now_v7()));
+    let bytes = serde_json::to_vec_pretty(intents).map_err(PlacementError::Corrupt)?;
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(PlacementError::Storage(error));
+    }
+    if let Err(error) = fs::rename(&temporary, root.join("allocation-intents.json")) {
         let _ = fs::remove_file(&temporary);
         return Err(PlacementError::Storage(error));
     }
@@ -573,6 +796,88 @@ mod tests {
         assert_eq!(refreshed.state, ProviderState::Unavailable);
         let reopened = PlacementLedger::open(&root)?;
         assert_eq!(reopened.provider("node-1")?.allocations.len(), 1);
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn allocation_intent_is_restart_safe_and_commit_is_idempotent() -> Result<(), PlacementError> {
+        let root = std::env::temp_dir().join(format!("o3k-placement-intent-{}", Uuid::now_v7()));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.register_provider("node-1", inventory())?;
+        let resources = BTreeMap::from([(VCPU.to_owned(), 1)]);
+        let intent = ledger.begin_allocation_intent(
+            "node-1",
+            "allocation-1",
+            "server-1",
+            resources.clone(),
+        )?;
+
+        let reopened = PlacementLedger::open(&root)?;
+        assert_eq!(
+            reopened.allocation_intent("allocation-1")?,
+            Some(intent.clone())
+        );
+        let allocation = reopened.commit_allocation_intent(&intent, provider.generation)?;
+        assert_eq!(allocation.consumer_id, "server-1");
+        assert_eq!(reopened.allocation_intent("allocation-1")?, None);
+        assert_eq!(
+            reopened.commit_allocation_intent(&intent, provider.generation)?,
+            allocation
+        );
+        assert_eq!(reopened.provider("node-1")?.allocations.len(), 1);
+
+        let final_state = PlacementLedger::open(&root)?;
+        assert_eq!(final_state.provider("node-1")?.allocations.len(), 1);
+        assert_eq!(final_state.allocation_intent("allocation-1")?, None);
+        fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_releases_orphans_and_abandons_pending_intents_after_restart()
+    -> Result<(), PlacementError> {
+        let root = std::env::temp_dir().join(format!("o3k-placement-reconcile-{}", Uuid::now_v7()));
+        let ledger = PlacementLedger::open(&root)?;
+        let provider = ledger.register_provider("node-1", inventory())?;
+        let resources = BTreeMap::from([(VCPU.to_owned(), 1)]);
+        let retained = ledger.begin_allocation_intent(
+            "node-1",
+            "allocation-retained",
+            "server-retained",
+            resources.clone(),
+        )?;
+        ledger.commit_allocation_intent(&retained, provider.generation)?;
+        let orphaned = ledger.begin_allocation_intent(
+            "node-1",
+            "allocation-orphaned",
+            "server-orphaned",
+            resources,
+        )?;
+        ledger.commit_allocation_intent(&orphaned, ledger.provider("node-1")?.generation)?;
+        let pending = ledger.begin_allocation_intent(
+            "node-1",
+            "allocation-pending",
+            "server-pending",
+            BTreeMap::from([(VCPU.to_owned(), 1)]),
+        )?;
+
+        let reopened = PlacementLedger::open(&root)?;
+        let report = reopened.reconcile_consumers(["server-retained".to_owned()])?;
+        assert_eq!(report.orphaned_allocations.len(), 1);
+        assert_eq!(
+            report.orphaned_allocations[0].allocation_id,
+            "allocation-orphaned"
+        );
+        assert_eq!(report.abandoned_intents, vec![pending]);
+        let current = reopened.provider("node-1")?;
+        assert_eq!(current.allocations.len(), 1);
+        assert_eq!(current.inventories[VCPU].used, 1);
+        assert_eq!(reopened.allocation_intent("allocation-pending")?, None);
+
+        let final_state = PlacementLedger::open(&root)?;
+        assert_eq!(final_state.provider("node-1")?.allocations.len(), 1);
+        assert_eq!(final_state.provider("node-1")?.inventories[VCPU].used, 1);
         fs::remove_dir_all(root).map_err(PlacementError::Storage)?;
         Ok(())
     }
