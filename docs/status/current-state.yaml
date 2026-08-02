@@ -1,30 +1,33 @@
 schema_version: 1
 source_commit: 74cf5f6e83c92a1430815d23c796e099a0f1a198
 release: v0.2.0-alpha.1
-updated_at: 2026-08-02T17:28:00Z
+updated_at: 2026-08-02T17:30:33Z
 last_protected_run:
-  id: 30756669479
-  commit: 3fb5612d3fc79c2b18541c84a0174278a6361600
+  id: 30758733367
+  commit: 74cf5f6e83c92a1430815d23c796e099a0f1a198
   result: failed
 
 current_blocker:
-  layer: agent
+  layer: guest
   summary: >-
-    The vertical agent-backed realization integration is merged, but its
-    readiness and real guest lifecycle are not yet protected-verified. The
-    previous run failed because o3kd stayed not ready after bounded polling;
-    the merged integration changes that bootstrap boundary. Cleanup also
-    requires a fresh protected verification.
+    Protected bootstrap and authenticated command evidence now pass, but the
+    first real public server create returned a compute-state conflict. The
+    lifecycle therefore did not reach guest observation or console polling,
+    and the process-boundary probe could not obtain a durable server record.
+    The failed run also left owned OpenStack server and flavor records until
+    workflow cleanup; foreign host state was unchanged.
   evidence: >-
-    Protected workflow 30756669479 disposable-testlab-bootstrap.json and
+    Protected workflow 30758733367 disposable-testlab-bootstrap.json,
+    openstack-cli-result.json, compute-agent-mtls-result.json,
+    compute-agent-process-mtls-result.json, resource-leak-result.json, and
     real-host-workflow-result.json.
 
 completed:
   api_baseline: true
   nova_pre_dispatch: true
   agent_command_path: true
-  server_active: true
-  fixed_ip_projection: true
+  server_active: false
+  fixed_ip_projection: false
   cleanup_guard: false
 
 pending:
@@ -37,7 +40,7 @@ pending:
 open_prs: []
 
 next_actions:
-  - Dispatch the protected workflow from main 74cf5f6 and inspect its first failing phase.
-  - Verify authenticated registration/libvirt readiness, then diagnose the next real guest boundary from uploaded evidence.
-  - Resolve the cleanup ownership or permission failure without weakening the guard.
-  - Connect image, config-drive, network, Placement, libvirt, observation, console, and cleanup phases in order.
+  - Diagnose the protected compute-state conflict during the first public server create and preserve idempotent retry semantics.
+  - Make the process-boundary inspect probe observe a durable server after the lifecycle creates it.
+  - Re-run the protected lifecycle and prove image overlay, config-drive consumption, fixed IP, console, restart, and delete.
+  - Resolve owned-resource cleanup after failed create without weakening foreign-state protection.
