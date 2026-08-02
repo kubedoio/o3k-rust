@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   evidence:
-    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/runner-2404-console-debug'
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/runner-2404-console-debug-2'
     runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
     steps:
       - name: Capture exact console evidence
