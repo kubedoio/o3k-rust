@@ -203,23 +203,16 @@ impl ImageCache {
 
     pub fn create_overlay(&self, instance_id: &str, base: &Path) -> Result<PathBuf, ImageError> {
         let base_dir = self.root.join("base");
-        let base_is_owned = base.parent() == Some(base_dir.as_path());
-        let base_is_regular = match fs::symlink_metadata(base) {
-            Ok(metadata) => metadata.file_type().is_file(),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(ImageError::Storage(error)),
-        };
         if instance_id.is_empty()
             || instance_id
                 != Path::new(instance_id)
                     .file_name()
                     .and_then(|v| v.to_str())
                     .unwrap_or_default()
-            || !base_is_owned
-            || !base_is_regular
         {
             return Err(ImageError::InvalidPath);
         }
+        validate_verified_base(&self.qemu_img, &base_dir, base, self.max_bytes)?;
         let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
         let overlay = self
             .root
@@ -243,6 +236,7 @@ impl ImageCache {
         let status = std::process::Command::new(&self.qemu_img)
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
+            .args(["-F", "qcow2"])
             .arg(&temporary)
             .status()
             .map_err(|_| {
@@ -296,6 +290,45 @@ impl ImageCache {
         }
         Ok(())
     }
+}
+
+fn validate_verified_base(
+    qemu_img: &Path,
+    base_dir: &Path,
+    base: &Path,
+    max_bytes: u64,
+) -> Result<(), ImageError> {
+    if base.parent() != Some(base_dir) {
+        return Err(ImageError::InvalidPath);
+    }
+    let name = base
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(ImageError::InvalidPath)?;
+    let (checksum, format) = name.rsplit_once('.').ok_or(ImageError::InvalidPath)?;
+    if !is_checksum(checksum) || !matches!(format, "raw" | "qcow2") {
+        return Err(ImageError::InvalidPath);
+    }
+    let metadata = fs::symlink_metadata(base).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ImageError::NotFound
+        } else {
+            ImageError::Storage(error)
+        }
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        return Err(ImageError::InvalidPath);
+    }
+    let content = fs::read(base).map_err(ImageError::Storage)?;
+    if content.len() as u64 != metadata.len()
+        || format!("{:x}", Sha256::digest(&content)) != checksum
+    {
+        return Err(ImageError::ChecksumMismatch);
+    }
+    if format == "qcow2" {
+        verify_image_format(qemu_img, base, format)?;
+    }
+    Ok(())
 }
 
 fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
@@ -956,10 +989,13 @@ esac
 set -eu
 case "$1" in
   create)
-    : > "$6"
+    : > "$8"
     ;;
   info)
-    backing="../base/base.qcow2"
+    case "$3" in
+      */base/*) printf '{"format":"qcow2"}\n'; exit 0 ;;
+    esac
+    backing="$(find "$(dirname "$3")/../base" \( -name '*.qcow2' -o -name '*.raw' \) -print -quit)"
     case "$(basename "$3")" in
       *wrong-format*) format=raw; reported="$backing" ;;
       *wrong-backing*) format=qcow2; reported="/tmp/o3k-foreign-base" ;;
@@ -977,12 +1013,25 @@ esac
         fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
-            let base = path.join("base").join("base.qcow2");
-            fs::write(&base, b"base")?;
+            let base_content = b"base";
+            let base_checksum = format!("{:x}", Sha256::digest(base_content));
+            let base = cache.cache_base(&base_checksum, "raw", base_content)?;
 
             let overlay = cache.create_overlay("valid", &base)?;
             assert!(overlay.is_file());
             assert_eq!(cache.create_overlay("valid", &base)?, overlay);
+            let foreign = path.join("base").join("foreign.raw");
+            fs::write(&foreign, b"foreign")?;
+            assert!(matches!(
+                cache.create_overlay("foreign", &foreign),
+                Err(ImageError::InvalidPath)
+            ));
+            fs::write(&base, b"tampered")?;
+            assert!(matches!(
+                cache.create_overlay("tampered", &base),
+                Err(ImageError::ChecksumMismatch)
+            ));
+            fs::write(&base, base_content)?;
 
             for instance in ["wrong-format", "wrong-backing", "missing-backing"] {
                 assert!(matches!(
