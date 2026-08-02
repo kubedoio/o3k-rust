@@ -84,6 +84,17 @@ jobs:
         run: bash tests/release-bundle-integrity.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Install pinned cargo-nextest
+        run: cargo install cargo-nextest --version 0.9.131 --locked
+      - name: Test governed nextest PR profile
+        run: cargo nextest run --workspace --all-features --profile pr
+      - name: Upload nextest JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nextest-junit
+          if-no-files-found: warn
+          path: target/nextest/pr/junit.xml
       - name: Test
         run: cargo test --workspace --all-features
       - name: Validate compute-agent protobuf draft
