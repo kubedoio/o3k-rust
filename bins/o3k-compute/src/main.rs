@@ -302,15 +302,20 @@ fn prepare_owned_taps(
             port_id: attachment.port_id.clone(),
             mac: attachment.mac.clone(),
         };
-        if let Err(error) = network.create_tap(&spec) {
-            for previous in &created {
-                let _ = network.delete_tap(previous);
+        let was_created = match network.ensure_tap(&spec) {
+            Ok((_, was_created)) => was_created,
+            Err(error) => {
+                for previous in created.iter().rev() {
+                    let _ = network.delete_tap(previous);
+                }
+                return Err(AgentError::Protocol(format!(
+                    "host TAP preparation failed: {error}"
+                )));
             }
-            return Err(AgentError::Protocol(format!(
-                "host TAP preparation failed: {error}"
-            )));
+        };
+        if was_created {
+            created.push(spec);
         }
-        created.push(spec);
     }
     Ok(created)
 }
@@ -429,6 +434,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .undefine(name.clone())
                     .await
                     .map_err(agent_error)?;
+                self.network
+                    .delete_taps_for_instance(&command.resource_id)
+                    .map_err(|error| {
+                        AgentError::Protocol(format!("host TAP cleanup failed: {error}"))
+                    })?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
@@ -461,6 +471,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let definition_name = definition.name.clone();
                 if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
                     verify_owned_domain(&existing, &command.resource_id)?;
+                    rollback_owned_taps(&self.network, &taps);
                     return success("domain already exists", resource_state(&existing));
                 }
                 self.adapter

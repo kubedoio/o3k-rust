@@ -832,7 +832,7 @@ impl HostNetworkManager {
         Ok(true)
     }
 
-    pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+    pub fn ensure_tap(&self, spec: &TapSpec) -> Result<(String, bool), HostNetworkError> {
         validate_reference(&spec.instance_id)?;
         validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
@@ -847,7 +847,7 @@ impl HostNetworkManager {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.validate_recorded_tap(&name, spec)?;
-            return Ok(name);
+            return Ok((name, false));
         }
         let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
         if let Err(error) = created_tap {
@@ -876,7 +876,11 @@ impl HostNetworkManager {
         if let Err(error) = self.record_tap_ownership(&name, spec) {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
-        Ok(name)
+        Ok((name, true))
+    }
+
+    pub fn create_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        self.ensure_tap(spec).map(|(name, _)| name)
     }
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
@@ -922,6 +926,30 @@ impl HostNetworkManager {
         }
         self.validate_recorded_tap(&name, spec)?;
         Ok(name)
+    }
+
+    /// Deletes only TAPs recorded as O3K-owned for one instance, in reverse
+    /// manifest order. Foreign or unrecorded interfaces are never targeted.
+    pub fn delete_taps_for_instance(&self, instance_id: &str) -> Result<(), HostNetworkError> {
+        validate_reference(instance_id)?;
+        let specs = self
+            .ownership_snapshot(|manifest| {
+                manifest
+                    .taps
+                    .values()
+                    .filter(|tap| tap.instance_id == instance_id && tap.created_by_o3k)
+                    .map(|tap| TapSpec {
+                        instance_id: tap.instance_id.clone(),
+                        port_id: tap.port_id.clone(),
+                        mac: tap.mac.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })?
+            .unwrap_or_default();
+        for spec in specs.into_iter().rev() {
+            self.delete_tap(&spec)?;
+        }
+        Ok(())
     }
 
     pub fn ownership_path(&self) -> Option<PathBuf> {
