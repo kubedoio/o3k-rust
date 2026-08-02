@@ -125,6 +125,24 @@ jobs:
           O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.lifecycle.outcome || 'skipped' }}
         run: bash scripts/real-host-post-run-guard.sh
 
+      - name: Extract redacted create diagnostics
+        if: always()
+        run: |
+          output=target/real-host-workflow-artifacts/create-diagnostics.log
+          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
+          {
+            printf 'artifact_type=protected-create-diagnostics\n'
+            printf 'source_commit=%s\n' "${GITHUB_SHA}"
+            if sudo -n test -d "${state_root}/log"; then
+              sudo -n grep -hE \
+                'server create reconciliation|artifact transfer (insert|commit)|create reconciliation' \
+                "${state_root}"/log/*.log 2>/dev/null || true
+            else
+              printf 'state_logs=unavailable\n'
+            fi
+          } >"${output}"
+          chmod 0644 "${output}"
+
       - name: Stop and remove disposable TestLab
         if: always()
         run: bash scripts/cleanup-disposable-testlab.sh
@@ -149,5 +167,6 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/agent-inspect-resource-id
+            target/real-host-workflow-artifacts/create-diagnostics.log
           if-no-files-found: warn
           retention-days: 14
