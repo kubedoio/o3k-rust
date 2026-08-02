@@ -79,6 +79,8 @@ if kind == "show":
         elif isinstance(node, list):
             for child in node:
                 collect(child)
+        elif isinstance(node, str):
+            addresses.append(node)
     collect(value.get("addresses", {}))
     if expected_fixed_ip not in addresses:
         raise SystemExit("server show did not prove the expected fixed IP")
