@@ -8,7 +8,8 @@ mkdir -p "${ARTIFACT_DIR}"
 rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli-error.log" \
     "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
     "${ARTIFACT_DIR}/server-show-after-reboot.json" \
-    "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log"
+    "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log" \
+    "${ARTIFACT_DIR}/config-drive-evidence.json"
 IMAGE_ID=
 KEYPAIR_ID=
 NETWORK_ID=
@@ -113,6 +114,76 @@ if not isinstance(value, list):
     raise SystemExit("server list response is not an array")
 if any(isinstance(row, dict) and str(row.get("id", "")) == expected_id for row in value):
     raise SystemExit("server list still contains the deleted server")
+PY
+}
+
+verify_real_config_drive_attachment() {
+    local server_id="$1"
+    local evidence_path="${ARTIFACT_DIR}/config-drive-evidence.json"
+    if [[ -z "${O3K_TESTLAB_STATE_ROOT:-}" ]]; then
+        python3 - "${evidence_path}" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump({"artifact_type": "config-drive-libvirt-attachment", "status": "skipped", "reason": "protected state root is unavailable", "redacted": True}, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+        return 0
+    fi
+    local suffix domain xml_path source_path source_sha
+    suffix="$(printf '%s' "${server_id}" | sha256sum | cut -c1-20)"
+    domain="o3k-${suffix}"
+    xml_path="${DATA_DIR}/config-drive-domain.xml"
+    if ! sudo -n virsh -c qemu:///system dumpxml "${domain}" >"${xml_path}" 2>"${DATA_DIR}/config-drive-virsh.error"; then
+        write_result failed "libvirt config-drive domain inspection failed"
+        return 1
+    fi
+    source_path="$(python3 - "${xml_path}" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+matches = []
+for disk in root.findall(".//disk"):
+    if disk.attrib.get("device") != "cdrom":
+        continue
+    source = disk.find("source")
+    target = disk.find("target")
+    readonly = disk.find("readonly") is not None
+    if source is not None and source.attrib.get("file") and target is not None and readonly:
+        matches.append(source.attrib["file"])
+if len(matches) != 1:
+    raise SystemExit("expected exactly one read-only config-drive CD-ROM")
+print(matches[0], end="")
+PY
+)" || {
+        write_result failed "libvirt domain did not expose one read-only config-drive CD-ROM"
+        return 1
+    }
+    case "${source_path}" in
+        "${O3K_TESTLAB_STATE_ROOT}"/data/*) ;;
+        *) write_result failed "config-drive source is outside the owned TestLab state root"; return 1 ;;
+    esac
+    sudo -n test -f "${source_path}" && ! sudo -n test -L "${source_path}" \
+        || { write_result failed "config-drive source is not an owned regular file"; return 1; }
+    source_sha="$(sudo -n sha256sum "${source_path}" | awk '{print $1}')"
+    [[ "${source_sha}" =~ ^[0-9a-f]{64}$ ]] \
+        || { write_result failed "config-drive source digest is invalid"; return 1; }
+    python3 - "${evidence_path}" "${domain}" "${source_path##*/}" "${source_sha}" <<'PY'
+import json, sys
+path, domain, source_name, source_sha = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({
+        "artifact_type": "config-drive-libvirt-attachment",
+        "status": "passed",
+        "redacted": True,
+        "domain": domain,
+        "device": "cdrom",
+        "read_only": True,
+        "source_basename": source_name,
+        "source_sha256": source_sha,
+        "source_under_owned_state": True,
+    }, stream, indent=2, sort_keys=True)
+    stream.write("\n")
 PY
 }
 
@@ -416,6 +487,9 @@ validate_server_json show "${ARTIFACT_DIR}/server-show.json" "${SERVER_ID}"
 SERVER_ACTIVE=true
 SERVER_CONFIG_DRIVE="${CONFIG_DRIVE_ENABLED}"
 SERVER_FIXED_IP="${EXPECTED_FIXED_IP}"
+if [[ "${CONFIG_DRIVE_ENABLED}" == true ]]; then
+    verify_real_config_drive_attachment "${SERVER_ID}"
+fi
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
 python3 - "${ARTIFACT_DIR}/server-list.json" "${ARTIFACT_DIR}/server-list-evidence.json" <<'PY'
 import json

@@ -92,6 +92,17 @@ then
     write_result failed "lifecycle harness produced an invalid evidence artifact"
     exit 1
 fi
+if [[ "${O3K_TESTLAB_CONFIG_DRIVE:-true}" == true && -n "${O3K_TESTLAB_STATE_ROOT:-}" ]]; then
+    python3 - "${ARTIFACT_DIR}/config-drive-evidence.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream)
+if value.get("artifact_type") != "config-drive-libvirt-attachment" or value.get("status") != "passed":
+    raise SystemExit("protected config-drive evidence did not prove libvirt attachment")
+if value.get("redacted") is not True or value.get("read_only") is not True or value.get("source_under_owned_state") is not True:
+    raise SystemExit("config-drive evidence is not safely redacted or owned")
+PY
+fi
 cp "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/libvirt-result.json"
 if [[ ${status} -ne 0 ]]; then
     echo "real-libvirt lifecycle harness failed; see ${ARTIFACT_DIR}/libvirt-result.json" >&2

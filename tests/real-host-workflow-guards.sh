@@ -318,6 +318,7 @@ assert "target/real-host-workflow-artifacts/server-show.json" not in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
 post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
 assert "compute-agent-process-mtls-result.json" in post_guard
+assert "config-drive-evidence.json" in text
 assert "compute_agent_process_probe_failed" in post_guard
 PY
 echo "real-host workflow guard tests passed"
