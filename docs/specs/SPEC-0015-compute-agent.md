@@ -1,15 +1,17 @@
 # SPEC-0015 — `o3k-compute` agent and control-plane protocol
 
-Status: Accepted contract draft for issue #37; runtime implementation pending
+Status: Accepted contract with repository runtime implementation for issue #78;
+protected real-host evidence pending
 Version: `o3k.compute.v1` / wire revision 1
 
 ## 1. Scope and boundary
 
 This specification defines the identity, enrollment, transport, lifecycle
 command, operation, observation, liveness, and recovery contract between
-`o3kd` and one `o3k-compute` process. The contract is accepted; runtime
-implementation and real-host evidence are tracked separately by issue #38 and
-the later release issues.
+`o3kd` and one `o3k-compute` process. The contract is accepted. The repository
+implements the fenced command, durable acceptance/replay, operation retry,
+observation, and recovery boundary; protected real-host evidence remains
+tracked by issue #78 and the later release issues.
 
 The execution path is:
 

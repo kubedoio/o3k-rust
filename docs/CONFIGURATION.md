@@ -50,9 +50,10 @@ provides a trusted value; disk format support is not capacity evidence.
 an authorized-agent mapping. TLS can also be enabled independently while the
 `fake` provider is selected, which is useful for protected protocol tests.
 Although `libvirt` remains a reserved profile value for packaging and release
-tracking, `o3kd` rejects it before startup because no agent-backed provider
-path exists. The daemon must never construct or open a local libvirt adapter;
-use `o3k-compute` only through a future agent-backed wiring path.
+tracking, `o3kd` rejects it before startup. The `agent` provider is the only
+supported path to the host-local `o3k-compute` libvirt adapter; the daemon must
+never construct or open a local libvirt adapter. Protected real-host execution
+and guest-level acceptance remain evidence-gated follow-ups.
 The CellHV profile now connects to the configured versioned endpoint; HTTPS
 endpoints additionally require the CA, client certificate, and client key.
 The default address must remain loopback unless an operator explicitly changes
