@@ -20,6 +20,7 @@ pub const MAX_USER_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_NETWORK_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_VENDOR_DATA_BYTES: usize = 64 * 1024;
+pub const MAX_ISO_BYTES: usize = 64 * 1024 * 1024;
 const MANIFEST_NAME: &str = "o3k-ownership.json";
 const MANAGED_BY: &str = "o3k-config-drive";
 const ISO_MANIFEST_SUFFIX: &str = ".o3k-iso-ownership.json";
@@ -76,6 +77,17 @@ pub struct ConfigDriveIsoResult {
     pub path: PathBuf,
     pub fingerprint_sha256: String,
     pub source_fingerprint_sha256: String,
+}
+
+/// Verified config-drive bytes suitable for an authenticated artifact offer.
+/// The path remains local to the config-drive store and is not part of this
+/// handoff value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDriveArtifact {
+    pub format: String,
+    pub sha256: String,
+    pub size: u64,
+    pub content: Vec<u8>,
 }
 
 /// Injectable boundary for the external ISO builder.
@@ -177,6 +189,35 @@ impl ConfigDriveStore {
             return Err(ConfigDriveError::InvalidIsoOutput);
         }
         fs::read(&result.path).map_err(ConfigDriveError::Storage)
+    }
+
+    /// Reads a verified ISO only when its output and ownership manifest are
+    /// beneath this store's root and the bounded artifact contract holds.
+    pub fn read_verified_artifact(
+        &self,
+        result: &ConfigDriveIsoResult,
+    ) -> Result<ConfigDriveArtifact, ConfigDriveError> {
+        let root = fs::canonicalize(&self.root).map_err(|_| ConfigDriveError::UnownedPath)?;
+        let output =
+            fs::symlink_metadata(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
+        if !output.file_type().is_file() || output.len() > MAX_ISO_BYTES as u64 {
+            return Err(ConfigDriveError::InvalidIsoOutput);
+        }
+        let canonical_output =
+            fs::canonicalize(&result.path).map_err(|_| ConfigDriveError::UnownedPath)?;
+        if !canonical_output.starts_with(&root) {
+            return Err(ConfigDriveError::UnownedPath);
+        }
+        let content = self.read_verified_iso(result)?;
+        if content.len() > MAX_ISO_BYTES || content.len() as u64 != output.len() {
+            return Err(ConfigDriveError::InvalidIsoOutput);
+        }
+        Ok(ConfigDriveArtifact {
+            format: "iso".to_owned(),
+            sha256: result.fingerprint_sha256.clone(),
+            size: content.len() as u64,
+            content,
+        })
     }
 }
 
@@ -909,6 +950,11 @@ mod tests {
         let runner = FakeRunner::successful(b"deterministic-iso");
         let first = materialize_iso_with_runner(&source, &output, &runner)?;
         assert_eq!(store.read_verified_iso(&first)?, b"deterministic-iso");
+        let artifact = store.read_verified_artifact(&first)?;
+        assert_eq!(artifact.format, "iso");
+        assert_eq!(artifact.size, b"deterministic-iso".len() as u64);
+        assert_eq!(artifact.content, b"deterministic-iso");
+        assert_eq!(artifact.sha256, first.fingerprint_sha256);
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0][0], OsStr::new("-as"));
@@ -985,6 +1031,42 @@ mod tests {
             Err(ConfigDriveError::UnownedPath)
         ));
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn verified_artifact_rejects_foreign_root_and_oversized_output() -> Result<(), ConfigDriveError>
+    {
+        let root = test_root("o3k-drive-iso-artifact");
+        let foreign_root = test_root("o3k-drive-iso-foreign");
+        let store = ConfigDriveStore::open(&root)?;
+        let foreign_store = ConfigDriveStore::open(&foreign_root)?;
+        let source = foreign_store.generate(&input())?.directory;
+        let output = foreign_root.join("instance-1.iso");
+        let runner = FakeRunner::successful(b"foreign-iso");
+        let foreign = materialize_iso_with_runner(&source, &output, &runner)?;
+        assert!(matches!(
+            store.read_verified_artifact(&foreign),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+
+        let oversized_root = test_root("o3k-drive-iso-large");
+        let oversized_store = ConfigDriveStore::open(&oversized_root)?;
+        let oversized_source = oversized_store.generate(&input())?.directory;
+        let oversized_output = oversized_root.join("instance-1.iso");
+        let oversized = vec![b'x'; MAX_ISO_BYTES + 1];
+        let oversized_result = materialize_iso_with_runner(
+            &oversized_source,
+            &oversized_output,
+            &FakeRunner::successful(&oversized),
+        )?;
+        assert!(matches!(
+            oversized_store.read_verified_artifact(&oversized_result),
+            Err(ConfigDriveError::InvalidIsoOutput)
+        ));
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        fs::remove_dir_all(foreign_root).map_err(ConfigDriveError::Storage)?;
+        fs::remove_dir_all(oversized_root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }
 }

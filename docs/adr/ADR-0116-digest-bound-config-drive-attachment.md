@@ -26,6 +26,8 @@ consumption, or provide real-host evidence.
 
 ## Consequences
 
-Callers must carry the digest alongside a materialized artifact. The domain
-builder cannot silently attach stale or modified bytes, while the existing
-read-only attachment and XML escaping behavior remain unchanged.
+Callers must carry the digest alongside a materialized artifact. The
+config-drive store can hand off bounded verified ISO bytes plus `iso`, size,
+and SHA-256 metadata without exposing its host path. The domain builder cannot
+silently attach stale or modified bytes, while the existing read-only
+attachment and XML escaping behavior remain unchanged.
