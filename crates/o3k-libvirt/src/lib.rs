@@ -492,11 +492,18 @@ impl LibvirtCapabilities {
             lifecycle_actions: self.supported_operations.clone(),
             console_log: true,
             max_console_log_bytes: 64 * 1024,
-            flags: vec![proto::CapabilityFlag {
-                name: "kvm".to_owned(),
-                supported: self.kvm_available,
-                bounded_value: String::new(),
-            }],
+            flags: vec![
+                proto::CapabilityFlag {
+                    name: "kvm".to_owned(),
+                    supported: self.kvm_available,
+                    bounded_value: String::new(),
+                },
+                proto::CapabilityFlag {
+                    name: "config_drive".to_owned(),
+                    supported: true,
+                    bounded_value: String::new(),
+                },
+            ],
             ..Default::default()
         }
     }
@@ -1141,6 +1148,12 @@ mod tests {
                 .flags
                 .iter()
                 .any(|flag| flag.name == "kvm" && flag.supported)
+        );
+        assert!(
+            capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "config_drive" && flag.supported)
         );
     }
 
