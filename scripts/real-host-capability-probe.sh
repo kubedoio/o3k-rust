@@ -20,7 +20,7 @@ rm -f -- "${OUTPUT_PATH}"
 
 python3 - "${OUTPUT_PATH}" "${DISK_PATH}" "${KVM_PATH}" "${MIN_FREE_BYTES}" "${EXPECTED_LABELS}" \
     "${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}" "${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}" \
-    "${GITHUB_SHA:-}" "${O3K_REAL_HOST_RUNNER_NAME:-}" "${O3K_REAL_HOST_RUNNER_ID:-}" <<'PY'
+    "${GITHUB_SHA:-}" "${O3K_REAL_HOST_RUNNER_NAME:-}" "${O3K_REAL_HOST_RUNNER_ID:-${RUNNER_ID:-}}" <<'PY'
 import json
 import os
 import pwd
