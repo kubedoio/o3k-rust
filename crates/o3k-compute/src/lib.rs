@@ -1298,7 +1298,15 @@ impl ComputeProvider for AgentComputeProvider {
                             return Err(ProviderError::Conflict);
                         }
                     }
-                    Err(_) => return Err(ProviderError::Conflict),
+                    Err(error) => {
+                        tracing::warn!(
+                            resource_id = %request.o3k_server_id,
+                            artifact_kind = artifact_kind_name(artifact.kind),
+                            error = %error,
+                            "artifact transfer insert failed"
+                        );
+                        return Err(ProviderError::Conflict);
+                    }
                 };
                 if existing.state == ArtifactTransferState::Committed {
                     continue;
@@ -1327,7 +1335,15 @@ impl ComputeProvider for AgentComputeProvider {
                         },
                     )
                     .await
-                    .map_err(|_| ProviderError::Conflict)?;
+                    .map_err(|error| {
+                        tracing::warn!(
+                            resource_id = %request.o3k_server_id,
+                            artifact_kind = artifact_kind_name(artifact.kind),
+                            error = %error,
+                            "artifact transfer commit update failed"
+                        );
+                        ProviderError::Conflict
+                    })?;
             }
         }
         if seen != [true, true] {
@@ -2168,10 +2184,25 @@ impl ComputeService {
             Ok(state) => state,
             Err(error) => {
                 self.store.detach_server_keypair(id).await?;
+                tracing::warn!(
+                    operation_id = %request.operation_id,
+                    resource_id = %id,
+                    error = %error,
+                    "server create reconciliation returned an error"
+                );
                 return Err(ComputeError::Reconcile(error));
             }
         };
         if reconcile_state == o3k_store::OperationState::Failed {
+            if let Ok(operation) = self.store.get_operation(request.operation_id).await {
+                tracing::warn!(
+                    operation_id = %request.operation_id,
+                    resource_id = %id,
+                    error_category = ?operation.error_category,
+                    error_message = ?operation.error_message,
+                    "server create reconciliation failed"
+                );
+            }
             self.store.detach_server_keypair(id).await?;
             if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
                 self.scheduler.as_ref(),
