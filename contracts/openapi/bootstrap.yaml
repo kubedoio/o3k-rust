@@ -282,7 +282,18 @@ components:
             imageRef: {type: string}
             flavor: {oneOf: [{type: object}, {type: string}]}
             flavorRef: {type: string}
-            networks: {type: array, minItems: 1, items: {type: object}}
+            networks:
+              type: array
+              minItems: 1
+              items:
+                type: object
+                anyOf:
+                  - required: [port]
+                  - required: [uuid]
+                properties:
+                  port: {type: string, format: uuid}
+                  uuid: {type: string, format: uuid}
+                  fixed_ip: {type: string, format: ipv4}
             key_name: {type: string}
             config_drive: {type: boolean}
     ImageCreate:
