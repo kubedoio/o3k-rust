@@ -14,7 +14,10 @@ use o3k_provider::{
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
-use o3k_store::{AgentCommandRecord, AgentCommandState, DurableStore, SqliteStore, StoreError};
+use o3k_store::{
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
+    ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError,
+};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -399,6 +402,14 @@ fn map_agent_error(error: o3k_compute_agent::AgentError) -> ProviderError {
         | o3k_compute_agent::AgentError::IdentityStore(_)
         | o3k_compute_agent::AgentError::TlsMaterial
         | o3k_compute_agent::AgentError::InvalidConfiguration(_) => ProviderError::Retryable,
+    }
+}
+
+fn artifact_kind_name(kind: agent_proto::ArtifactKind) -> &'static str {
+    match kind {
+        agent_proto::ArtifactKind::ImageBase => "image_base",
+        agent_proto::ArtifactKind::ConfigDriveIso => "config_drive_iso",
+        agent_proto::ArtifactKind::Unspecified => "unspecified",
     }
 }
 
@@ -857,10 +868,61 @@ impl ComputeProvider for AgentComputeProvider {
                 chunk_count,
                 expires_at_unix_ms: unix_ms_after(self.command_timeout),
             };
+            if let Some(store) = &self.store {
+                let transfer = ArtifactTransferRecord {
+                    transfer_id: offer.transfer_id.clone(),
+                    command_id: offer.command_id.clone(),
+                    operation_id: request.operation_id,
+                    resource_id: request.o3k_server_id,
+                    agent_id: offer.agent_id.clone(),
+                    agent_epoch: agent.agent_epoch.clone(),
+                    artifact_id: offer.artifact_id.clone(),
+                    artifact_kind: artifact_kind_name(artifact.kind).to_owned(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                    format: offer.format.clone(),
+                    chunk_size_bytes: offer.chunk_size_bytes as u64,
+                    chunk_count: offer.chunk_count as u64,
+                    state: ArtifactTransferState::Offered,
+                    contiguous_bytes: 0,
+                    next_chunk_index: 0,
+                    retry_count: 0,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                };
+                let existing = store
+                    .insert_artifact_transfer(&transfer)
+                    .await
+                    .map_err(|_| ProviderError::Conflict)?;
+                if existing.state == ArtifactTransferState::Committed {
+                    continue;
+                }
+                if matches!(
+                    existing.state,
+                    ArtifactTransferState::Rejected | ArtifactTransferState::Expired
+                ) {
+                    return Err(ProviderError::Conflict);
+                }
+            }
             self.registry
-                .dispatch_artifact_and_wait(offer, artifact.bytes, self.command_timeout)
+                .dispatch_artifact_and_wait(offer.clone(), artifact.bytes, self.command_timeout)
                 .await
                 .map_err(map_agent_error)?;
+            if let Some(store) = &self.store {
+                store
+                    .update_artifact_transfer(
+                        &offer.transfer_id,
+                        &agent.agent_epoch,
+                        ArtifactTransferUpdate {
+                            state: ArtifactTransferState::Committed,
+                            contiguous_bytes: offer.size_bytes,
+                            next_chunk_index: offer.chunk_count as u64,
+                            retry_count: 0,
+                        },
+                    )
+                    .await
+                    .map_err(|_| ProviderError::Conflict)?;
+            }
         }
         if seen != [true, true] {
             return Err(ProviderError::InvalidRequest);
