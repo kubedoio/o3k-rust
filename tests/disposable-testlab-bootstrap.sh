@@ -28,6 +28,15 @@ assert 'gpasswd --delete o3k' in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
+agent_start = bootstrap.index('if [[ "$O3K_PROVIDER" == agent ]]; then')
+provider_else = bootstrap.index('\nelse\n', agent_start)
+provider_end = bootstrap.index('\nfi\nelse\n', provider_else)
+agent_block = bootstrap[agent_start:provider_else]
+fake_block = bootstrap[provider_else:provider_end]
+assert agent_block.index('start_compute') < agent_block.index('wait_for_o3kd_ready')
+assert agent_block.index('wait_for_o3kd_ready') < agent_block.index('wait_for_compute_ready')
+assert bootstrap.index('wait_for_o3kd_health') < agent_start
+assert fake_block.index('wait_for_o3kd_ready') < fake_block.index('start_compute')
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1

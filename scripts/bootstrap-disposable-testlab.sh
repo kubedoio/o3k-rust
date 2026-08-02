@@ -419,24 +419,50 @@ start_service() {
   printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
   if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
 }
-  start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
-for _ in $(seq 1 60); do
-  curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/healthz" >/dev/null 2>&1 && break
-  sleep 1
-done
-curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 || fail "o3kd did not become ready"
-O3KD_READY=true
-start_service o3k-compute "$STATE_ROOT/o3k-compute.env" "$STATE_ROOT/bin/o3k-compute" \
-  "$STATE_ROOT/log/o3k-compute.log" "$PID_ROOT/o3k-compute.pid"
-for _ in $(seq 1 30); do
-  curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 && break
-  sleep 1
-done
-curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 \
-  || fail "o3k-compute health endpoint did not become ready"
-curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" >/dev/null 2>&1 \
-  || fail "o3k-compute libvirt/control-plane readiness did not become ready"
-COMPUTE_READY=true
+
+wait_for_o3kd_health() {
+  for _ in $(seq 1 60); do
+    curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/healthz" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/healthz" >/dev/null 2>&1 \
+    || fail "o3kd health endpoint did not become ready"
+}
+
+wait_for_o3kd_ready() {
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 \
+    || fail "o3kd did not become ready"
+  O3KD_READY=true
+}
+
+start_compute() {
+  start_service o3k-compute "$STATE_ROOT/o3k-compute.env" "$STATE_ROOT/bin/o3k-compute" \
+    "$STATE_ROOT/log/o3k-compute.log" "$PID_ROOT/o3k-compute.pid"
+}
+
+wait_for_compute_ready() {
+  for _ in $(seq 1 30); do
+    curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" >/dev/null 2>&1 \
+    || fail "o3k-compute health endpoint did not become ready"
+  curl --fail --silent --max-time 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" >/dev/null 2>&1 \
+    || fail "o3k-compute libvirt/control-plane readiness did not become ready"
+  COMPUTE_READY=true
+}
+
+start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
+wait_for_o3kd_health
+if [[ "$O3K_PROVIDER" == agent ]]; then
+  start_compute
+  wait_for_o3kd_ready
+  wait_for_compute_ready
+else
+  wait_for_o3kd_ready
+  start_compute
+  wait_for_compute_ready
+fi
 else
   echo "reusing authenticated disposable TestLab for run ${RUN_ID}"
   curl --fail --silent --max-time 2 "http://127.0.0.1:${AUTH_PORT}/readyz" >/dev/null 2>&1 \
