@@ -358,7 +358,7 @@ impl AgentComputeProvider {
                 existing.state,
                 AgentCommandState::Succeeded | AgentCommandState::Failed
             ) {
-                return self.accepted_operation(operation_id).await;
+                return self.get_operation(operation_id).await;
             }
         }
         let operation = self.accepted_operation(operation_id).await?;
@@ -608,6 +608,22 @@ fn provider_error_category_from_name(name: &str) -> Option<o3k_provider::ErrorCa
         "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
         "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
         _ => None,
+    }
+}
+
+fn durable_inspect_error(error: &ProviderError) -> (o3k_store::OperationState, &'static str) {
+    match error {
+        ProviderError::Retryable | ProviderError::Storage => {
+            (o3k_store::OperationState::Retryable, "retryable")
+        }
+        ProviderError::UnknownOutcome { .. } | ProviderError::StaleState => {
+            (o3k_store::OperationState::UnknownOutcome, "unknown_outcome")
+        }
+        ProviderError::InvalidRequest => (o3k_store::OperationState::Failed, "invalid_request"),
+        ProviderError::NotFound => (o3k_store::OperationState::Failed, "not_found"),
+        ProviderError::Conflict => (o3k_store::OperationState::Failed, "conflict"),
+        ProviderError::Capacity => (o3k_store::OperationState::Failed, "capacity"),
+        ProviderError::Terminal => (o3k_store::OperationState::Failed, "terminal"),
     }
 }
 
@@ -1124,8 +1140,11 @@ impl ComputeProvider for AgentComputeProvider {
         resource_id: &str,
         provider_instance_id: &str,
         operation_id: Uuid,
-        _idempotency_key: &str,
+        idempotency_key: &str,
     ) -> Result<Operation, ProviderError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
         let binding = {
             let state = self.state.read().await;
             state.bindings.get(resource_id).cloned().or_else(|| {
@@ -1148,7 +1167,7 @@ impl ComputeProvider for AgentComputeProvider {
         {
             return Err(ProviderError::StaleState);
         }
-        let command = build_lifecycle_command(
+        let mut command = build_lifecycle_command(
             LifecycleCommand::Inspect,
             &agent.agent_id,
             &agent.agent_epoch,
@@ -1156,6 +1175,7 @@ impl ComputeProvider for AgentComputeProvider {
             resource_id,
         )
         .map_err(map_agent_error)?;
+        command.idempotency_key = idempotency_key.to_owned();
         self.dispatch_recorded(command, operation_id).await
     }
 
@@ -2034,43 +2054,46 @@ impl ComputeService {
             &Uuid::NAMESPACE_URL,
             format!("o3k:inspect:{project_id}:{id}:{idempotency_key}").as_bytes(),
         );
-        if let Ok(existing) = self.store.get_operation(operation_id).await {
-            let state = match existing.state {
-                o3k_store::OperationState::Pending => o3k_provider::OperationState::Accepted,
-                o3k_store::OperationState::Running => o3k_provider::OperationState::Running,
+        let existing = self.store.get_operation(operation_id).await.ok();
+        if let Some(record) = existing.as_ref()
+            && matches!(
+                record.state,
+                o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            )
+        {
+            let state = match record.state {
                 o3k_store::OperationState::Succeeded => o3k_provider::OperationState::Succeeded,
-                o3k_store::OperationState::Retryable => o3k_provider::OperationState::Retryable,
-                o3k_store::OperationState::UnknownOutcome => {
-                    o3k_provider::OperationState::UnknownOutcome
-                }
                 o3k_store::OperationState::Failed => o3k_provider::OperationState::Failed,
+                _ => unreachable!("terminal state checked above"),
             };
             return Ok(Operation {
-                provider_operation_id: existing
+                provider_operation_id: record
                     .provider_operation_id
                     .as_deref()
                     .and_then(|value| Uuid::parse_str(value).ok())
                     .unwrap_or(operation_id),
                 o3k_operation_id: operation_id,
                 state,
-                error_category: existing
+                error_category: record
                     .error_category
                     .as_deref()
                     .and_then(provider_error_category_from_name),
                 provider_resource_id: Some(_reference.provider_resource_id.clone()),
             });
         }
-        self.store
-            .insert_operation(&o3k_store::OperationRecord {
-                id: operation_id,
-                resource_id: id,
-                kind: "inspect".to_owned(),
-                state: o3k_store::OperationState::Pending,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
-            })
-            .await?;
+        if existing.is_none() {
+            self.store
+                .insert_operation(&o3k_store::OperationRecord {
+                    id: operation_id,
+                    resource_id: id,
+                    kind: "inspect".to_owned(),
+                    state: o3k_store::OperationState::Pending,
+                    provider_operation_id: None,
+                    error_category: None,
+                    error_message: None,
+                })
+                .await?;
+        }
         let result = self
             .provider
             .inspect_instance(
@@ -2103,12 +2126,13 @@ impl ComputeService {
                 Ok(operation)
             }
             Err(error) => {
+                let (durable_state, category) = durable_inspect_error(&error);
                 self.store
                     .update_operation(
                         operation_id,
-                        o3k_store::OperationState::Failed,
+                        durable_state,
                         None,
-                        Some("terminal"),
+                        Some(category),
                         Some(&error.to_string()),
                     )
                     .await?;
