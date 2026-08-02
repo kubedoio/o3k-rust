@@ -664,6 +664,8 @@ mod tests {
         assert!(encoded.get("config_drive").is_none());
         let decoded: CreateInstanceRequest = serde_json::from_value(encoded)?;
         assert_eq!(decoded.config_drive, None);
+        assert_eq!(decoded.flavor_id, None);
+        assert_eq!(decoded.disk_gib, None);
         Ok(())
     }
 

@@ -1542,6 +1542,8 @@ mod tests {
             name: "server".to_owned(),
             vcpus: 1,
             memory_mib: 128,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("/var/lib/o3k/image.qcow2".to_owned()),
             key_name: None,
             keypair_id: None,
