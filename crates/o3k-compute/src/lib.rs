@@ -1227,11 +1227,17 @@ impl ComputeProvider for AgentComputeProvider {
         {
             let provider_resource_id =
                 if let Ok(command) = store.get_agent_command_by_operation(id).await {
-                    store
-                        .get_provider_reference(command.resource_id, "agent")
+                    let reference = match store
+                        .get_provider_reference(command.resource_id, "compute")
                         .await
-                        .ok()
-                        .map(|reference| reference.provider_resource_id)
+                    {
+                        Ok(reference) => Some(reference),
+                        Err(_) => store
+                            .get_provider_reference(command.resource_id, "agent")
+                            .await
+                            .ok(),
+                    };
+                    reference.map(|reference| reference.provider_resource_id)
                 } else {
                     None
                 };

@@ -208,17 +208,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Runs an opt-in, read-only process-boundary probe for protected validation.
-/// It is deliberately absent unless both environment variables are set and
-/// records only command/observation state; it never creates or mutates a
-/// provider resource.
+/// It is deliberately absent unless its output and either a fixed resource ID
+/// or a lifecycle-produced resource-ID file are configured. It records only
+/// command/observation state; it never creates or mutates a provider resource.
 fn agent_inspect_probe_from_env(
     compute: o3k_compute::ComputeService,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    let resource_id = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_ID").ok()?;
+    let resource_id = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_ID").ok();
+    let resource_file = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE").ok();
     let output = std::env::var("O3K_AGENT_INSPECT_PROBE_OUTPUT").ok()?;
     let project_id = std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID")
         .unwrap_or_else(|_| "bootstrap-project".to_owned());
-    if resource_id.trim().is_empty() || output.trim().is_empty() {
+    if resource_id
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty())
+        && resource_file
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+    {
         tracing::warn!("agent inspect probe configuration is incomplete");
         return None;
     }
@@ -227,8 +234,21 @@ fn agent_inspect_probe_from_env(
         tracing::warn!("agent inspect probe output path is invalid");
         return None;
     }
+    let resource_file = resource_file.map(PathBuf::from);
+    if resource_file.as_ref().is_some_and(|path| {
+        !path.is_absolute() || path.to_string_lossy().contains("..") || path.is_symlink()
+    }) {
+        tracing::warn!("agent inspect probe resource file is invalid");
+        return None;
+    }
     Some(tokio::spawn(async move {
-        let result = run_agent_inspect_probe(&compute, &project_id, &resource_id).await;
+        let result = run_agent_inspect_probe(
+            &compute,
+            &project_id,
+            resource_id.as_deref(),
+            resource_file.as_deref(),
+        )
+        .await;
         let document = match result {
             Ok(evidence) => evidence,
             Err(reason) => serde_json::json!({
@@ -247,12 +267,23 @@ fn agent_inspect_probe_from_env(
 async fn run_agent_inspect_probe(
     compute: &o3k_compute::ComputeService,
     project_id: &str,
-    resource_id: &str,
+    fixed_resource_id: Option<&str>,
+    resource_file: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
-    let resource_id = Uuid::parse_str(resource_id)
-        .map_err(|_| "agent inspect probe resource id is invalid".to_owned())?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while tokio::time::Instant::now() < deadline {
+        let resource_id = match (fixed_resource_id, resource_file) {
+            (Some(value), _) => value.trim().to_owned(),
+            (None, Some(path)) => std::fs::read_to_string(path)
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_default(),
+            (None, None) => String::new(),
+        };
+        let Ok(resource_id) = Uuid::parse_str(&resource_id) else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
         match compute
             .inspect_server(project_id, resource_id, "o3k-agent-inspect-probe")
             .await

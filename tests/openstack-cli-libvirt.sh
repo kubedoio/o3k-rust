@@ -438,6 +438,13 @@ CLEANUP_FLAVOR_STATUS=pending
 SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "port-id=${PORT_ID}" "${SERVER_NAME}" -f value -c id)"
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
+if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
+    [[ "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}" == /* \
+        && "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}" != *..* ]] \
+        || { echo "agent inspect probe resource file is invalid" >&2; exit 1; }
+    printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+    chmod 0644 "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+fi
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 python3 - "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-show-evidence.json" <<'PY'
 import json

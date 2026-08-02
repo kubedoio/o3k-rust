@@ -35,7 +35,7 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PROVIDER: agent
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
-          O3K_AGENT_INSPECT_PROBE_RESOURCE_ID: 00000000-0000-4000-8000-000000000078
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
         run: bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Download and verify CirrOS image
@@ -98,6 +98,7 @@ jobs:
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-host-workflow-artifacts/runner-capabilities.json
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_TESTLAB_CONFIG_DRIVE: false
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
         run: bash tests/testlab-libvirt.sh
 
       - name: Run compute-agent mTLS command evidence
@@ -147,5 +148,6 @@ jobs:
             target/real-host-workflow-artifacts/server-list-evidence.json
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
+            target/real-host-workflow-artifacts/agent-inspect-resource-id
           if-no-files-found: warn
           retention-days: 14
