@@ -248,6 +248,30 @@ impl ImageMaterializer {
         fs::remove_file(path).map_err(ImageMaterializerError::Storage)
     }
 
+    /// Deletes the overlay owned by an instance after a lifecycle delete.
+    /// The durable ownership manifest is the authority because lifecycle
+    /// commands do not carry the original create transfer identity.
+    pub fn delete_instance(&self, instance_id: &str) -> Result<(), ImageMaterializerError> {
+        let path = self.ownership_path(instance_id)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(ImageMaterializerError::Storage(error)),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(ImageMaterializerError::Ownership);
+        }
+        let manifest = self.read_manifest(&path)?;
+        if manifest.instance_id != instance_id
+            || manifest.agent_id != self.artifacts.agent_id()
+            || manifest.overlay_file != format!("{instance_id}.qcow2")
+        {
+            return Err(ImageMaterializerError::Ownership);
+        }
+        self.cache.delete_overlay(instance_id)?;
+        fs::remove_file(path).map_err(ImageMaterializerError::Storage)
+    }
+
     fn ownership_path(&self, instance_id: &str) -> Result<PathBuf, ImageMaterializerError> {
         if instance_id.is_empty()
             || Path::new(instance_id).file_name().and_then(|v| v.to_str()) != Some(instance_id)
@@ -428,6 +452,21 @@ mod tests {
         assert!(first.base_path.is_file());
         assert!(second.overlay_path.is_file());
 
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_delete_removes_overlay_from_owned_manifest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let content = vec![0_u8; 1024 * 1024];
+        let (store, request) = request(&content)?;
+        let root = std::env::temp_dir().join(format!("o3k-image-delete-{}", uuid::Uuid::now_v7()));
+        let materializer = ImageMaterializer::open(store, &root, 2 * 1024 * 1024 * 1024)?;
+        let materialized = materializer.materialize(&request)?;
+        materializer.delete_instance("instance-1")?;
+        assert!(!materialized.overlay_path.exists());
+        materializer.delete_instance("instance-1")?;
         std::fs::remove_dir_all(root).ok();
         Ok(())
     }
