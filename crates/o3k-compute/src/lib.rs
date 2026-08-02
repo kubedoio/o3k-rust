@@ -488,13 +488,28 @@ async fn recover_artifact_transfers(
         let Some(agent) = registry.snapshot(&transfer.agent_id).await else {
             continue;
         };
-        if agent.agent_epoch != transfer.agent_epoch {
-            tracing::warn!(
-                transfer_id = %transfer.transfer_id,
-                "artifact transfer recovery skipped across an agent epoch change"
-            );
-            continue;
-        }
+        let transfer = if agent.agent_epoch != transfer.agent_epoch {
+            match store
+                .rebind_artifact_transfer_epoch(
+                    &transfer.transfer_id,
+                    &transfer.agent_epoch,
+                    &agent.agent_epoch,
+                )
+                .await
+            {
+                Ok(transfer) => transfer,
+                Err(error) => {
+                    tracing::warn!(
+                        transfer_id = %transfer.transfer_id,
+                        %error,
+                        "artifact transfer recovery could not rebind agent epoch"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            transfer
+        };
         let resource = match store.get_resource(transfer.resource_id).await {
             Ok(resource) => resource,
             Err(error) => {
@@ -555,8 +570,12 @@ async fn recover_artifact_transfers(
             chunk_count: transfer.chunk_count as u32,
             expires_at_unix_ms: unix_ms_after(timeout),
         };
+        let Ok(start_chunk_index) = u32::try_from(transfer.next_chunk_index) else {
+            tracing::warn!(transfer_id = %transfer.transfer_id, "artifact transfer resume index is invalid");
+            continue;
+        };
         match registry
-            .dispatch_artifact_and_wait(offer, artifact.bytes, timeout)
+            .dispatch_artifact_and_wait_from(offer, artifact.bytes, start_chunk_index, timeout)
             .await
         {
             Ok(_) => {
@@ -690,6 +709,70 @@ fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceSta
         "ERROR" => Some(o3k_provider::InstanceState::Error),
         _ => None,
     }
+}
+
+async fn apply_artifact_status(
+    store: &SqliteStore,
+    status: &agent_proto::ArtifactStatus,
+) -> Result<(), StoreError> {
+    let transfer = store.get_artifact_transfer(&status.transfer_id).await?;
+    let operation_id = Uuid::parse_str(&status.operation_id).map_err(|_| {
+        StoreError::ArtifactTransferConflict("invalid operation identity".to_owned())
+    })?;
+    let resource_id = Uuid::parse_str(&status.resource_id).map_err(|_| {
+        StoreError::ArtifactTransferConflict("invalid resource identity".to_owned())
+    })?;
+    if transfer.command_id != status.command_id
+        || transfer.operation_id != operation_id
+        || transfer.resource_id != resource_id
+        || transfer.agent_id != status.agent_id
+    {
+        return Err(StoreError::ArtifactTransferConflict(
+            "artifact status identity conflicts with durable state".to_owned(),
+        ));
+    }
+    let state = match agent_proto::ArtifactTransferState::try_from(status.state) {
+        Ok(agent_proto::ArtifactTransferState::Offered) => ArtifactTransferState::Offered,
+        Ok(agent_proto::ArtifactTransferState::Receiving) => ArtifactTransferState::Receiving,
+        Ok(agent_proto::ArtifactTransferState::Committed) => ArtifactTransferState::Committed,
+        Ok(agent_proto::ArtifactTransferState::Rejected) => ArtifactTransferState::Rejected,
+        Ok(agent_proto::ArtifactTransferState::Expired) => ArtifactTransferState::Expired,
+        _ => {
+            return Err(StoreError::ArtifactTransferConflict(
+                "artifact status state is not recoverable".to_owned(),
+            ));
+        }
+    };
+    if transfer.agent_epoch != status.agent_epoch {
+        if matches!(
+            transfer.state,
+            ArtifactTransferState::Committed
+                | ArtifactTransferState::Rejected
+                | ArtifactTransferState::Expired
+        ) {
+            return Err(StoreError::ArtifactTransferEpochConflict);
+        }
+        store
+            .rebind_artifact_transfer_epoch(
+                &transfer.transfer_id,
+                &transfer.agent_epoch,
+                &status.agent_epoch,
+            )
+            .await?;
+    }
+    store
+        .update_artifact_transfer(
+            &status.transfer_id,
+            &status.agent_epoch,
+            ArtifactTransferUpdate {
+                state,
+                contiguous_bytes: status.contiguous_bytes,
+                next_chunk_index: u64::from(status.next_chunk_index),
+                retry_count: transfer.retry_count,
+            },
+        )
+        .await
+        .map(|_| ())
 }
 
 async fn apply_agent_provider_event(
@@ -831,8 +914,31 @@ async fn apply_agent_provider_event(
                 }
             }
         }
-        o3k_compute_agent::AgentEvent::ArtifactAck(_)
-        | o3k_compute_agent::AgentEvent::ArtifactStatus(_) => {}
+        o3k_compute_agent::AgentEvent::ArtifactAck(ack) => {
+            if let Some(store) = store {
+                let status = agent_proto::ArtifactStatus {
+                    transfer_id: ack.transfer_id,
+                    command_id: ack.command_id,
+                    operation_id: ack.operation_id,
+                    resource_id: ack.resource_id,
+                    agent_id: ack.agent_id,
+                    agent_epoch: ack.agent_epoch,
+                    contiguous_bytes: ack.contiguous_bytes,
+                    next_chunk_index: ack.next_chunk_index,
+                    state: ack.state,
+                };
+                if let Err(error) = apply_artifact_status(store, &status).await {
+                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact acknowledgement rejected");
+                }
+            }
+        }
+        o3k_compute_agent::AgentEvent::ArtifactStatus(status) => {
+            if let Some(store) = store {
+                if let Err(error) = apply_artifact_status(store, &status).await {
+                    tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
+                }
+            }
+        }
     }
 }
 
@@ -3577,6 +3683,103 @@ mod tests {
             provider.get_operation(operation_id).await?.state,
             o3k_provider::OperationState::Retryable
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_status_rebinds_epoch_and_rejects_identity_conflicts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "BUILD".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "compute_create".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        store
+            .insert_artifact_transfer(&ArtifactTransferRecord {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id,
+                resource_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                artifact_id: "artifact-1".to_owned(),
+                artifact_kind: "image_base".to_owned(),
+                sha256: sha256.to_owned(),
+                size_bytes: 8,
+                format: "raw".to_owned(),
+                chunk_size_bytes: 4,
+                chunk_count: 2,
+                state: ArtifactTransferState::Offered,
+                contiguous_bytes: 0,
+                next_chunk_index: 0,
+                retry_count: 0,
+                created_at: String::new(),
+                updated_at: String::new(),
+            })
+            .await?;
+        let state = Arc::new(RwLock::new(AgentProviderState::default()));
+        apply_agent_provider_event(
+            &state,
+            Some(&store),
+            o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "command-1".to_owned(),
+                operation_id: operation_id.to_string(),
+                resource_id: resource_id.to_string(),
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                contiguous_bytes: 4,
+                next_chunk_index: 1,
+                state: agent_proto::ArtifactTransferState::Receiving as i32,
+            }),
+        )
+        .await;
+        let transfer = store.get_artifact_transfer("transfer-1").await?;
+        assert_eq!(transfer.agent_epoch, "epoch-2");
+        assert_eq!(transfer.state, ArtifactTransferState::Receiving);
+        assert_eq!(transfer.contiguous_bytes, 4);
+
+        apply_agent_provider_event(
+            &state,
+            Some(&store),
+            o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
+                transfer_id: "transfer-1".to_owned(),
+                command_id: "different-command".to_owned(),
+                operation_id: operation_id.to_string(),
+                resource_id: resource_id.to_string(),
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                contiguous_bytes: 8,
+                next_chunk_index: 2,
+                state: agent_proto::ArtifactTransferState::Committed as i32,
+            }),
+        )
+        .await;
+        let unchanged = store.get_artifact_transfer("transfer-1").await?;
+        assert_eq!(unchanged.state, ArtifactTransferState::Receiving);
+        assert_eq!(unchanged.contiguous_bytes, 4);
         Ok(())
     }
 }

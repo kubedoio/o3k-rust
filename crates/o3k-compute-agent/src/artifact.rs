@@ -11,6 +11,7 @@ use thiserror::Error;
 
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ARTIFACT_CHUNK_BYTES: usize = 256 * 1024;
+pub const MAX_ARTIFACT_CHUNKS: u32 = 256;
 const MAGIC: &[u8] = b"O3KART1";
 
 #[derive(Debug, Error)]
@@ -266,6 +267,73 @@ impl ArtifactStore {
         Ok(path)
     }
 
+    /// Reports the durable transfer manifests that can still be reconciled
+    /// after a reconnect.  The offer identity is read from the authenticated
+    /// manifest rather than reconstructed by the caller; only the current
+    /// stream epoch is supplied by the registration handshake.
+    pub fn artifact_statuses(
+        &self,
+        agent_epoch: &str,
+    ) -> Result<Vec<proto::ArtifactStatus>, ArtifactStoreError> {
+        if !valid_reference(agent_epoch) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut statuses = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            if statuses.len() >= 1024 {
+                return Err(ArtifactStoreError::Conflict);
+            }
+            let path = entry.path();
+            if fs::symlink_metadata(&path)
+                .map_err(ArtifactStoreError::Storage)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&path)?;
+            validate_offer(&manifest.offer, &self.agent_id)?;
+            let state = proto::ArtifactTransferState::try_from(manifest.state)
+                .map_err(|_| ArtifactStoreError::CorruptManifest)?;
+            if !matches!(
+                state,
+                proto::ArtifactTransferState::Offered
+                    | proto::ArtifactTransferState::Receiving
+                    | proto::ArtifactTransferState::Committed
+            ) {
+                return Err(ArtifactStoreError::CorruptManifest);
+            }
+            if state == proto::ArtifactTransferState::Committed {
+                verify_file(&self.final_path(&manifest.offer)?, &manifest.offer)?;
+            } else {
+                let part = self.part_path(&manifest.offer.transfer_id)?;
+                let metadata = fs::symlink_metadata(&part).map_err(ArtifactStoreError::Storage)?;
+                if !metadata.file_type().is_file() || metadata.len() != manifest.bytes {
+                    return Err(ArtifactStoreError::CorruptManifest);
+                }
+            }
+            statuses.push(proto::ArtifactStatus {
+                transfer_id: manifest.offer.transfer_id.clone(),
+                command_id: manifest.offer.command_id.clone(),
+                operation_id: manifest.offer.operation_id.clone(),
+                resource_id: manifest.offer.resource_id.clone(),
+                agent_id: self.agent_id.clone(),
+                agent_epoch: agent_epoch.to_owned(),
+                contiguous_bytes: manifest.bytes,
+                next_chunk_index: manifest.next_chunk,
+                state: state as i32,
+            });
+        }
+        statuses.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        Ok(statuses)
+    }
+
     /// Resolves a committed artifact without reconstructing a transfer offer
     /// from incomplete command data. The complete offer remains the
     /// authority; this lookup only finds a single manifest whose authenticated
@@ -361,6 +429,7 @@ fn validate_offer(offer: &proto::ArtifactOffer, agent: &str) -> Result<(), Artif
         || offer.chunk_size_bytes == 0
         || offer.chunk_size_bytes as usize > MAX_ARTIFACT_CHUNK_BYTES
         || offer.chunk_count == 0
+        || offer.chunk_count > MAX_ARTIFACT_CHUNKS
         || u64::from(offer.chunk_count) != chunks
         || !matches!(offer.kind, 1 | 2)
         || !matches!(offer.format.as_str(), "raw" | "qcow2" | "iso")
@@ -617,6 +686,41 @@ mod tests {
             store.accept_chunk(&offer, &conflict),
             Err(ArtifactStoreError::Conflict)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reconnect_statuses_are_manifest_bound_and_deterministically_ordered() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-{}", Uuid::now_v7()));
+        let (store, offer, content) = fixture(&root);
+        store.begin(&offer).unwrap();
+        store
+            .accept_chunk(
+                &offer,
+                &proto::ArtifactChunk {
+                    transfer_id: offer.transfer_id.clone(),
+                    chunk_index: 0,
+                    offset_bytes: 0,
+                    data: content[..4].to_vec(),
+                    chunk_sha256: digest(&content[..4]),
+                },
+            )
+            .unwrap();
+
+        let statuses = store.artifact_statuses("epoch-2").unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].transfer_id, offer.transfer_id);
+        assert_eq!(statuses[0].command_id, offer.command_id);
+        assert_eq!(statuses[0].operation_id, offer.operation_id);
+        assert_eq!(statuses[0].resource_id, offer.resource_id);
+        assert_eq!(statuses[0].agent_id, offer.agent_id);
+        assert_eq!(statuses[0].agent_epoch, "epoch-2");
+        assert_eq!(
+            statuses[0].state,
+            proto::ArtifactTransferState::Receiving as i32
+        );
+        assert_eq!(statuses[0].contiguous_bytes, 4);
+        assert_eq!(statuses[0].next_chunk_index, 1);
         fs::remove_dir_all(root).unwrap();
     }
 }
