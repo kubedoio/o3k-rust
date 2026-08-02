@@ -33,6 +33,8 @@ jobs:
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_AGENT_INSPECT_PROBE_ENABLED: true
+          O3K_AGENT_INSPECT_PROBE_RESOURCE_ID: 00000000-0000-4000-8000-000000000078
         run: bash scripts/bootstrap-disposable-testlab.sh
 
       - name: Download and verify CirrOS image
@@ -104,6 +106,14 @@ jobs:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
         run: bash tests/real-compute-agent-mtls.sh
 
+      - name: Run compute-agent process-boundary evidence
+        id: agent_process
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+        run: bash tests/real-compute-agent-process-mtls.sh
+
       - name: Post-run result guard
         if: always()
         env:
@@ -133,5 +143,6 @@ jobs:
             target/real-host-workflow-artifacts/server-show-evidence.json
             target/real-host-workflow-artifacts/server-list-evidence.json
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
+            target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
           if-no-files-found: warn
           retention-days: 14

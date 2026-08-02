@@ -6,7 +6,7 @@ use o3k_compute_agent::{
     AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor,
     ConsoleLogResult, TlsFiles,
 };
-use o3k_libvirt::{LibvirtAdapter, LibvirtConfig, stable_domain_name};
+use o3k_libvirt::{ErrorCategory, LibvirtAdapter, LibvirtConfig, stable_domain_name};
 use o3k_provider_contract::compute_proto as proto;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -42,11 +42,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
         };
         match command.action.as_ref() {
             Some(proto::command::Action::Inspect(_)) => {
-                let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
+                let inspection = match self.adapter.inspect(name.clone()).await {
+                    Ok(inspection) => inspection,
+                    Err(error) if error.category == ErrorCategory::NotFound => {
+                        return Ok(inspect_not_found_result(name));
+                    }
+                    Err(error) => return Err(agent_error(error)),
+                };
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 success(
                     if inspection.active {
@@ -175,6 +177,17 @@ impl CommandExecutor for LibvirtCommandExecutor {
             }
             None => Err(AgentError::Protocol("command action is missing".to_owned())),
         }
+    }
+}
+
+fn inspect_not_found_result(provider_resource_id: String) -> CommandExecutionResult {
+    CommandExecutionResult {
+        state: proto::OperationState::Failed as i32,
+        error_category: proto::ErrorCategory::NotFound as i32,
+        resource_state: proto::ResourceState::Error as i32,
+        redacted_message: "requested domain was not found".to_owned(),
+        provider_resource_id,
+        console_log: None,
     }
 }
 
@@ -382,5 +395,21 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn absent_domain_inspection_is_a_redacted_not_found_failure() {
+        let result = inspect_not_found_result("o3k-domain".to_owned());
+
+        assert_eq!(
+            result.state,
+            proto::OperationState::Failed as i32,
+            "an absent domain is a terminal observation, not an unknown transport outcome"
+        );
+        assert_eq!(result.error_category, proto::ErrorCategory::NotFound as i32);
+        assert_eq!(result.resource_state, proto::ResourceState::Error as i32);
+        assert_eq!(result.redacted_message, "requested domain was not found");
+        assert_eq!(result.provider_resource_id, "o3k-domain");
+        assert!(result.console_log.is_none());
     }
 }

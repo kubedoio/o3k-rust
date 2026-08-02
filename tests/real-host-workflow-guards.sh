@@ -196,6 +196,10 @@ python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/libvirt-result.json" <<'PY'
 import json, sys
 json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))
 PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/compute-agent-process-mtls-result.json" <<'PY'
+import json, sys
+json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
@@ -300,7 +304,10 @@ for needle in ("workflow_dispatch:",
                "continue-on-error: true", "timeout-minutes: 60",
                "contents: read",
                "if: always()", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-               "retention-days: 14"):
+               "retention-days: 14",
+               "Run compute-agent process-boundary evidence",
+               "tests/real-compute-agent-process-mtls.sh",
+               "compute-agent-process-mtls-result.json"):
     assert needle in text, needle
 assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in text
 assert "ref: ${{ github.sha }}" in text
@@ -309,5 +316,8 @@ assert "Verify immutable source checkout" in text
 assert "target/real-host-workflow-artifacts/console.log" not in text
 assert "target/real-host-workflow-artifacts/server-show.json" not in text
 assert pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-owned-inventory.sh").exists()
+post_guard = pathlib.Path(sys.argv[1]).parents[2].joinpath("scripts/real-host-post-run-guard.sh").read_text(encoding="utf-8")
+assert "compute-agent-process-mtls-result.json" in post_guard
+assert "compute_agent_process_probe_failed" in post_guard
 PY
 echo "real-host workflow guard tests passed"

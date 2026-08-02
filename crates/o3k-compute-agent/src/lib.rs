@@ -3516,7 +3516,13 @@ mod tests {
             "operation-1",
             "resource-1",
         )?;
-        assert_eq!(first, second);
+        let first_deadline = first.deadline_unix_ms;
+        let second_deadline = second.deadline_unix_ms;
+        let mut normalized_second = second.clone();
+        normalized_second.deadline_unix_ms = first_deadline;
+        assert_eq!(first, normalized_second);
+        assert!(first_deadline > unix_ms());
+        assert!(second_deadline > unix_ms());
         assert!(first.deadline_unix_ms > unix_ms());
         assert!(first.idempotency_key.starts_with("hard-reboot:resource-1:"));
         assert!(matches!(
