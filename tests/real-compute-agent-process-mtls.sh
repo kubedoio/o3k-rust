@@ -78,5 +78,5 @@ fi
 
 mv -f -- "$temporary" "$RESULT_FILE"
 trap - EXIT
-write_result failed "real process-boundary probe evidence did not satisfy the expected NotFound contract"
+echo "real process-boundary probe evidence did not satisfy the expected NotFound contract" >&2
 exit 1
