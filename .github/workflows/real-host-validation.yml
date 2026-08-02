@@ -96,6 +96,14 @@ jobs:
           O3K_TESTLAB_CONFIG_DRIVE: false
         run: bash tests/testlab-libvirt.sh
 
+      - name: Run compute-agent mTLS command evidence
+        id: agent_mtls
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+        run: bash tests/real-compute-agent-mtls.sh
+
       - name: Post-run result guard
         if: always()
         env:
@@ -124,5 +132,6 @@ jobs:
             target/real-host-workflow-artifacts/openstack-cli-result.json
             target/real-host-workflow-artifacts/server-show-evidence.json
             target/real-host-workflow-artifacts/server-list-evidence.json
+            target/real-host-workflow-artifacts/compute-agent-mtls-result.json
           if-no-files-found: warn
           retention-days: 14
