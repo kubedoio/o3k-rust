@@ -48,8 +48,8 @@ use uuid::Uuid;
 
 mod artifact;
 pub use artifact::{
-    ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery, MAX_ARTIFACT_BYTES,
-    MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNKS,
+    ArtifactCleanup, ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery,
+    MAX_ARTIFACT_BYTES, MAX_ARTIFACT_CHUNK_BYTES, MAX_ARTIFACT_CHUNKS,
 };
 
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {

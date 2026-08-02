@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_compute_agent::{
-    AgentClient, AgentConfig, AgentError, CommandExecutionResult, CommandExecutor,
+    AgentClient, AgentConfig, AgentError, ArtifactStore, CommandExecutionResult, CommandExecutor,
     ConsoleLogResult, TlsFiles,
 };
 use o3k_libvirt::{ErrorCategory, LibvirtAdapter, LibvirtConfig, stable_domain_name};
@@ -37,6 +37,19 @@ struct DhcpRuntime {
     supervisor: Option<o3k_dhcp::DnsmasqSupervisor>,
     binary: PathBuf,
     interface: String,
+}
+
+fn cleanup_config_drive_artifact(
+    root: &std::path::Path,
+    agent_id: &str,
+    resource_id: &str,
+) -> Result<(), AgentError> {
+    let store = ArtifactStore::open(root, agent_id)
+        .map_err(|_| AgentError::Protocol("artifact store is unavailable".to_owned()))?;
+    store
+        .cleanup_config_drive_for_resource(resource_id)
+        .map(|_| ())
+        .map_err(|_| AgentError::Protocol("owned config-drive cleanup failed".to_owned()))
 }
 
 impl DhcpRuntime {
@@ -719,6 +732,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     Ok(value) => value,
                     Err(error) if error.category == ErrorCategory::NotFound => {
                         cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                        cleanup_config_drive_artifact(
+                            &self.artifact_root,
+                            &command.agent_id,
+                            &command.resource_id,
+                        )?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
                     Err(error) => return Err(agent_error(error)),
@@ -735,6 +753,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .await
                     .map_err(agent_error)?;
                 cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                cleanup_config_drive_artifact(
+                    &self.artifact_root,
+                    &command.agent_id,
+                    &command.resource_id,
+                )?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {

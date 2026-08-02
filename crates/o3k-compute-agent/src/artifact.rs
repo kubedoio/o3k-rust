@@ -32,6 +32,12 @@ pub enum ArtifactStoreError {
     UnownedPath,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactCleanup {
+    AlreadyAbsent,
+    Removed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactReceipt {
     pub transfer_id: String,
@@ -384,6 +390,77 @@ impl ArtifactStore {
         self.resolve(&offer)
     }
 
+    /// Removes only config-drive transfer state owned by this agent and
+    /// resource. Shared final content remains until every owned manifest
+    /// referring to it has been removed.
+    pub fn cleanup_config_drive_for_resource(
+        &self,
+        resource_id: &str,
+    ) -> Result<ArtifactCleanup, ArtifactStoreError> {
+        if !valid_reference(resource_id) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut manifests = Vec::new();
+        let mut final_references = std::collections::HashMap::<PathBuf, usize>::new();
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            let manifest_path = entry.path();
+            let metadata =
+                fs::symlink_metadata(&manifest_path).map_err(ArtifactStoreError::Storage)?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            let manifest = read_manifest(&manifest_path)?;
+            validate_offer(&manifest.offer, &self.agent_id)?;
+            let state = proto::ArtifactTransferState::try_from(manifest.state)
+                .map_err(|_| ArtifactStoreError::CorruptManifest)?;
+            if !matches!(
+                state,
+                proto::ArtifactTransferState::Offered
+                    | proto::ArtifactTransferState::Receiving
+                    | proto::ArtifactTransferState::Committed
+            ) {
+                return Err(ArtifactStoreError::CorruptManifest);
+            }
+            if state == proto::ArtifactTransferState::Committed {
+                *final_references
+                    .entry(self.final_path(&manifest.offer)?)
+                    .or_default() += 1;
+            }
+            if manifest.offer.resource_id == resource_id
+                && manifest.offer.kind == proto::ArtifactKind::ConfigDriveIso as i32
+            {
+                manifests.push((manifest_path, manifest, state));
+            }
+        }
+        if manifests.is_empty() {
+            return Ok(ArtifactCleanup::AlreadyAbsent);
+        }
+        let mut removed = false;
+        for (manifest_path, manifest, state) in manifests {
+            let part = self.part_path(&manifest.offer.transfer_id)?;
+            remove_owned_file(&part)?;
+            if state == proto::ArtifactTransferState::Committed {
+                let final_path = self.final_path(&manifest.offer)?;
+                if final_references.get(&final_path) == Some(&1) {
+                    remove_owned_file(&final_path)?;
+                }
+            }
+            remove_owned_file(&manifest_path)?;
+            removed = true;
+        }
+        Ok(if removed {
+            ArtifactCleanup::Removed
+        } else {
+            ArtifactCleanup::AlreadyAbsent
+        })
+    }
+
     fn manifest_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
         valid_reference(id)
             .then(|| self.root.join(format!(".{id}.manifest")))
@@ -473,6 +550,19 @@ fn verify_file(path: &Path, offer: &proto::ArtifactOffer) -> Result<(), Artifact
         return Err(ArtifactStoreError::DigestMismatch);
     }
     Ok(())
+}
+
+fn remove_owned_file(path: &Path) -> Result<(), ArtifactStoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            fs::remove_file(path).map_err(ArtifactStoreError::Storage)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(ArtifactStoreError::Storage(error)),
+    }
 }
 
 fn atomic_manifest(path: &Path, manifest: &Manifest) -> Result<(), ArtifactStoreError> {
@@ -721,6 +811,58 @@ mod tests {
         );
         assert_eq!(statuses[0].contiguous_bytes, 4);
         assert_eq!(statuses[0].next_chunk_index, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_drive_cleanup_is_owned_idempotent_and_preserves_foreign_resources() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-cleanup-{}", Uuid::now_v7()));
+        let (store, mut offer, content) = fixture(&root);
+        offer.kind = proto::ArtifactKind::ConfigDriveIso as i32;
+        offer.format = "iso".to_owned();
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-1")
+                .unwrap(),
+            ArtifactCleanup::Removed
+        );
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-1")
+                .unwrap(),
+            ArtifactCleanup::AlreadyAbsent
+        );
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-2")
+                .unwrap(),
+            ArtifactCleanup::AlreadyAbsent
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
