@@ -31,10 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && config.compute_client_ca.is_some();
     let mut compute_service = if config.provider == o3k_config::Provider::Agent {
         o3k_compute::ComputeService::new(
-            store,
-            Arc::new(o3k_compute::AgentComputeProvider::new(
+            store.clone(),
+            Arc::new(o3k_compute::AgentComputeProvider::new_with_store(
                 registry.clone(),
                 Arc::new(o3k_compute::UnconfiguredResolvedCreateResolver),
+                Some(store.clone()),
             )),
         )
     } else {

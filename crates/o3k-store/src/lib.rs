@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest as Md5Digest, Md5};
 use sqlx::{
     Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -104,6 +104,63 @@ pub struct ProviderReference {
     pub provider_resource_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCommandState {
+    Pending,
+    Accepted,
+    Running,
+    Succeeded,
+    Retryable,
+    UnknownOutcome,
+    Failed,
+}
+
+impl AgentCommandState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Accepted => "accepted",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Retryable => "retryable",
+            Self::UnknownOutcome => "unknown_outcome",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "accepted" => Ok(Self::Accepted),
+            "running" => Ok(Self::Running),
+            "succeeded" => Ok(Self::Succeeded),
+            "retryable" => Ok(Self::Retryable),
+            "unknown_outcome" => Ok(Self::UnknownOutcome),
+            "failed" => Ok(Self::Failed),
+            _ => Err(StoreError::Corrupt(format!(
+                "unknown agent command state `{value}`"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCommandRecord {
+    pub command_id: String,
+    pub idempotency_key: String,
+    pub operation_id: Uuid,
+    pub resource_id: Uuid,
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub payload_fingerprint_sha256: String,
+    pub payload: Vec<u8>,
+    pub state: AgentCommandState,
+    pub accepted_sequence: u64,
+    pub last_sequence: u64,
+    pub provider_operation_id: Option<String>,
+    pub provider_resource_id: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error")]
@@ -185,6 +242,29 @@ pub trait DurableStore: Send + Sync {
         resource_id: Uuid,
         provider_name: &str,
     ) -> Result<ProviderReference, StoreError>;
+    async fn insert_agent_command(
+        &self,
+        command: &AgentCommandRecord,
+    ) -> Result<AgentCommandRecord, StoreError>;
+    async fn get_agent_command(&self, command_id: &str) -> Result<AgentCommandRecord, StoreError>;
+    async fn get_agent_command_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<AgentCommandRecord, StoreError>;
+    async fn get_agent_command_by_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<AgentCommandRecord, StoreError>;
+    async fn update_agent_command(
+        &self,
+        command_id: &str,
+        state: AgentCommandState,
+        accepted_sequence: u64,
+        last_sequence: u64,
+        provider_operation_id: Option<&str>,
+        provider_resource_id: Option<&str>,
+    ) -> Result<AgentCommandRecord, StoreError>;
+    async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError>;
     async fn insert_resource_and_operation(
         &self,
         resource: &ResourceRecord,
@@ -248,12 +328,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 5 {
+        if table_count != 6 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
@@ -746,6 +826,156 @@ impl DurableStore for SqliteStore {
         })
     }
 
+    async fn insert_agent_command(
+        &self,
+        command: &AgentCommandRecord,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO agent_commands (command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&command.command_id)
+        .bind(&command.idempotency_key)
+        .bind(command.operation_id.to_string())
+        .bind(command.resource_id.to_string())
+        .bind(&command.agent_id)
+        .bind(&command.agent_epoch)
+        .bind(&command.payload_fingerprint_sha256)
+        .bind(&command.payload)
+        .bind(command.state.as_str())
+        .bind(sqlite_sequence(command.accepted_sequence)?)
+        .bind(sqlite_sequence(command.last_sequence)?)
+        .bind(&command.provider_operation_id)
+        .bind(&command.provider_resource_id)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(command.clone()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let existing = self
+                    .get_agent_command_by_idempotency_key(&command.idempotency_key)
+                    .await?;
+                if existing.command_id == command.command_id
+                    && existing.operation_id == command.operation_id
+                    && existing.resource_id == command.resource_id
+                    && existing.agent_id == command.agent_id
+                    && existing.agent_epoch == command.agent_epoch
+                    && existing.payload_fingerprint_sha256 == command.payload_fingerprint_sha256
+                    && existing.payload == command.payload
+                {
+                    Ok(existing)
+                } else {
+                    Err(StoreError::Corrupt(
+                        "agent command idempotency identity conflicts with durable state"
+                            .to_owned(),
+                    ))
+                }
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    async fn get_agent_command(&self, command_id: &str) -> Result<AgentCommandRecord, StoreError> {
+        let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE command_id = ?")
+            .bind(command_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        agent_command_from_row(&row)
+    }
+
+    async fn get_agent_command_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE idempotency_key = ?")
+            .bind(idempotency_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        agent_command_from_row(&row)
+    }
+
+    async fn get_agent_command_by_operation(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE operation_id = ? ORDER BY created_at DESC LIMIT 1")
+            .bind(operation_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        agent_command_from_row(&row)
+    }
+
+    async fn update_agent_command(
+        &self,
+        command_id: &str,
+        state: AgentCommandState,
+        accepted_sequence: u64,
+        last_sequence: u64,
+        provider_operation_id: Option<&str>,
+        provider_resource_id: Option<&str>,
+    ) -> Result<AgentCommandRecord, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE command_id = ?")
+            .bind(command_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let current = agent_command_from_row(&row)?;
+        if last_sequence < current.last_sequence {
+            transaction.rollback().await.map_err(StoreError::Database)?;
+            return Ok(current);
+        }
+        if last_sequence == current.last_sequence {
+            if current.state == state
+                && current.accepted_sequence == accepted_sequence
+                && provider_operation_id
+                    .is_none_or(|value| current.provider_operation_id.as_deref() == Some(value))
+                && provider_resource_id
+                    .is_none_or(|value| current.provider_resource_id.as_deref() == Some(value))
+            {
+                transaction.rollback().await.map_err(StoreError::Database)?;
+                return Ok(current);
+            }
+            return Err(StoreError::Corrupt(
+                "conflicting agent command evidence at one sequence".to_owned(),
+            ));
+        }
+        let accepted_sequence = accepted_sequence.max(current.accepted_sequence);
+        let provider_operation_id =
+            provider_operation_id.or(current.provider_operation_id.as_deref());
+        let provider_resource_id = provider_resource_id.or(current.provider_resource_id.as_deref());
+        let result = sqlx::query("UPDATE agent_commands SET state = ?, accepted_sequence = ?, last_sequence = ?, provider_operation_id = ?, provider_resource_id = ?, updated_at = CURRENT_TIMESTAMP WHERE command_id = ? AND last_sequence = ?")
+            .bind(state.as_str())
+            .bind(sqlite_sequence(accepted_sequence)?)
+            .bind(sqlite_sequence(last_sequence)?)
+            .bind(provider_operation_id)
+            .bind(provider_resource_id)
+            .bind(command_id)
+            .bind(sqlite_sequence(current.last_sequence)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::OperationNotFound);
+        }
+        transaction.commit().await.map_err(StoreError::Database)?;
+        self.get_agent_command(command_id).await
+    }
+
+    async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError> {
+        let rows = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE state IN ('pending', 'accepted', 'running', 'retryable', 'unknown_outcome') ORDER BY created_at ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(agent_command_from_row).collect()
+    }
+
     async fn insert_resource_and_operation(
         &self,
         resource: &ResourceRecord,
@@ -814,6 +1044,33 @@ fn operation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<OperationRecord, 
         provider_operation_id: row.get("provider_operation_id"),
         error_category: row.get("error_category"),
         error_message: row.get("error_message"),
+    })
+}
+
+fn sqlite_sequence(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value)
+        .map_err(|_| StoreError::Corrupt("agent command sequence exceeds SQLite range".to_owned()))
+}
+
+fn agent_command_from_row(row: &SqliteRow) -> Result<AgentCommandRecord, StoreError> {
+    let accepted_sequence: i64 = row.get("accepted_sequence");
+    let last_sequence: i64 = row.get("last_sequence");
+    Ok(AgentCommandRecord {
+        command_id: row.get("command_id"),
+        idempotency_key: row.get("idempotency_key"),
+        operation_id: parse_uuid(row.get("operation_id"))?,
+        resource_id: parse_uuid(row.get("resource_id"))?,
+        agent_id: row.get("agent_id"),
+        agent_epoch: row.get("agent_epoch"),
+        payload_fingerprint_sha256: row.get("payload_fingerprint_sha256"),
+        payload: row.get("payload"),
+        state: AgentCommandState::parse(row.get::<String, _>("state").as_str())?,
+        accepted_sequence: u64::try_from(accepted_sequence)
+            .map_err(|_| StoreError::Corrupt("negative agent command sequence".to_owned()))?,
+        last_sequence: u64::try_from(last_sequence)
+            .map_err(|_| StoreError::Corrupt("negative agent command sequence".to_owned()))?,
+        provider_operation_id: row.get("provider_operation_id"),
+        provider_resource_id: row.get("provider_resource_id"),
     })
 }
 
@@ -944,6 +1201,107 @@ mod tests {
             store.insert_resource(&resource).await,
             Err(StoreError::ResourceAlreadyExists)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_command_identity_is_idempotent_and_survives_restart()
+    -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-agent-commands-{}.sqlite",
+            std::process::id()
+        ));
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let command = AgentCommandRecord {
+            command_id: "command-1".to_owned(),
+            idempotency_key: "create-1".to_owned(),
+            operation_id: operation.id,
+            resource_id: resource.id,
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            payload_fingerprint_sha256: "a".repeat(64),
+            payload: b"command-payload".to_vec(),
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: None,
+            provider_resource_id: None,
+        };
+        {
+            let store = SqliteStore::connect_file(&path).await?;
+            store
+                .insert_resource_and_operation(&resource, &operation)
+                .await?;
+            assert_eq!(store.insert_agent_command(&command).await?, command);
+            assert_eq!(store.insert_agent_command(&command).await?, command);
+            let updated = store
+                .update_agent_command(
+                    &command.command_id,
+                    AgentCommandState::Accepted,
+                    1,
+                    1,
+                    Some("provider-op-1"),
+                    Some("domain-1"),
+                )
+                .await?;
+            assert_eq!(updated.accepted_sequence, 1);
+            assert_eq!(
+                updated.provider_operation_id.as_deref(),
+                Some("provider-op-1")
+            );
+            assert_eq!(updated.provider_resource_id.as_deref(), Some("domain-1"));
+            assert_eq!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Pending,
+                        0,
+                        0,
+                        None,
+                        None,
+                    )
+                    .await?
+                    .state,
+                AgentCommandState::Accepted
+            );
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Failed,
+                        1,
+                        1,
+                        Some("provider-op-1"),
+                        Some("domain-1"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
+        }
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened.get_agent_command(&command.command_id).await?.state,
+            AgentCommandState::Accepted
+        );
+        fs::remove_file(path)?;
         Ok(())
     }
 
