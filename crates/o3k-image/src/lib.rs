@@ -243,6 +243,7 @@ impl ImageCache {
         let status = std::process::Command::new(&self.qemu_img)
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
+            .args(["-F", "qcow2"])
             .arg(&temporary)
             .status()
             .map_err(|_| {
@@ -376,6 +377,13 @@ fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), Im
     let info: serde_json::Value =
         serde_json::from_slice(&output.stdout).map_err(|_| ImageError::OverlayFailed)?;
     if info.get("format").and_then(serde_json::Value::as_str) != Some("qcow2") {
+        return Err(ImageError::OverlayFailed);
+    }
+    if info
+        .get("backing-filename-format")
+        .and_then(serde_json::Value::as_str)
+        != Some("qcow2")
+    {
         return Err(ImageError::OverlayFailed);
     }
 
@@ -956,18 +964,25 @@ esac
 set -eu
 case "$1" in
   create)
-    : > "$6"
+    [ "$2" = "-f" ]
+    [ "$3" = "qcow2" ]
+    [ "$4" = "-b" ]
+    [ "$6" = "-F" ]
+    [ "$7" = "qcow2" ]
+    : > "$8"
     ;;
   info)
     backing="../base/base.qcow2"
     case "$(basename "$3")" in
       *wrong-format*) format=raw; reported="$backing" ;;
+      *wrong-backing-format*) format=qcow2; backing_format=raw; reported="$backing" ;;
       *wrong-backing*) format=qcow2; reported="/tmp/o3k-foreign-base" ;;
       *) format=qcow2; reported="$backing" ;;
     esac
     case "$(basename "$3")" in
       *missing-backing*) printf '{"format":"qcow2"}\n' ;;
-      *) printf '{"format":"%s","backing-filename":"%s"}\n' "$format" "$reported" ;;
+      *malformed*) printf '{"format":"qcow2"\n' ;;
+      *) printf '{"format":"%s","backing-filename":"%s","backing-filename-format":"%s"}\n' "$format" "$reported" "${backing_format:-qcow2}" ;;
     esac
     ;;
   *) exit 1 ;;
@@ -984,7 +999,13 @@ esac
             assert!(overlay.is_file());
             assert_eq!(cache.create_overlay("valid", &base)?, overlay);
 
-            for instance in ["wrong-format", "wrong-backing", "missing-backing"] {
+            for instance in [
+                "wrong-format",
+                "wrong-backing-format",
+                "wrong-backing",
+                "missing-backing",
+                "malformed",
+            ] {
                 assert!(matches!(
                     cache.create_overlay(instance, &base),
                     Err(ImageError::OverlayFailed)
