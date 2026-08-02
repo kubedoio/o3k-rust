@@ -42,6 +42,7 @@ pub struct Server {
     pub image_id: String,
     pub status: String,
     pub key_name: Option<String>,
+    pub network_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1768,6 +1769,7 @@ fn server_from_resource(
         image_id: request.image_id.unwrap_or_default(),
         status: resource.observed_state.to_ascii_uppercase(),
         key_name: None,
+        network_ids: request.network_ids,
     })
 }
 

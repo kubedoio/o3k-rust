@@ -1210,7 +1210,28 @@ struct IdResponse {
     id: String,
 }
 
-fn server_response(server: Server) -> ServerResponse {
+fn server_response(server: Server, network_service: Option<&NetworkService>) -> ServerResponse {
+    let mut addresses = serde_json::Map::new();
+    if let Some(network_service) = network_service {
+        for port_id in &server.network_ids {
+            let Ok(port_id) = port_id.parse::<uuid::Uuid>() else {
+                continue;
+            };
+            let Ok(port) = network_service.get_port(&server.project_id, port_id) else {
+                continue;
+            };
+            let address_list = addresses
+                .entry(port.network_id.to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let Some(address_list) = address_list.as_array_mut() {
+                address_list.push(serde_json::json!({
+                    "version": 4,
+                    "addr": port.fixed_ip.to_string(),
+                    "OS-EXT-IPS:type": "fixed"
+                }));
+            }
+        }
+    }
     ServerResponse {
         id: server.id.to_string(),
         name: server.name,
@@ -1223,7 +1244,7 @@ fn server_response(server: Server) -> ServerResponse {
         flavor: IdResponse {
             id: server.flavor_id.to_string(),
         },
-        addresses: serde_json::json!({}),
+        addresses: serde_json::Value::Object(addresses),
         key_name: server.key_name,
     }
 }
@@ -1755,7 +1776,7 @@ async fn create_server(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server),
+                server: server_response(server, state.network.as_deref()),
             }),
         )
             .into_response(),
@@ -1778,7 +1799,10 @@ async fn list_servers(
     };
     match service.list_servers(&token.project_id).await {
         Ok(servers) => Json(ServerListResponse {
-            servers: servers.into_iter().map(server_response).collect(),
+            servers: servers
+                .into_iter()
+                .map(|server| server_response(server, state.network.as_deref()))
+                .collect(),
         })
         .into_response(),
         Err(error) => compute_error(error),
@@ -1800,7 +1824,7 @@ async fn show_server(
     };
     match service.show_server(&token.project_id, id).await {
         Ok(server) => Json(ServerEnvelope {
-            server: server_response(server),
+            server: server_response(server, state.network.as_deref()),
         })
         .into_response(),
         Err(error) => compute_error(error),
@@ -2012,7 +2036,7 @@ async fn server_action(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server),
+                server: server_response(server, state.network.as_deref()),
             }),
         )
             .into_response(),

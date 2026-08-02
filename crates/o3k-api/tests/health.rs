@@ -721,6 +721,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let port =
         network_service.create_port("bootstrap-project", network.id, "server-port".to_owned())?;
     let port_id = port.id.to_string();
+    let expected_fixed_ip = port.fixed_ip.to_string();
     let console = o3k_console::ConsoleService::open(format!(
         "/tmp/o3k-api-console-{}",
         uuid::Uuid::now_v7()
@@ -864,6 +865,10 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let server_json: Value =
         serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 8192).await?)?;
     assert_eq!(server_json["server"]["status"], "ACTIVE");
+    assert_eq!(
+        server_json["server"]["addresses"][network.id.to_string()][0]["addr"],
+        expected_fixed_ip
+    );
     let server_id = server_json["server"]["id"]
         .as_str()
         .ok_or_else(|| std::io::Error::other("server missing"))?;
