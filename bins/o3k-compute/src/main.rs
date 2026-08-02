@@ -1,4 +1,10 @@
-use std::{env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    net::{Ipv4Addr, SocketAddr},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
@@ -23,6 +29,336 @@ struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
     artifact_root: PathBuf,
     network: o3k_network::HostNetworkManager,
+    dhcp: Arc<Mutex<DhcpRuntime>>,
+}
+
+struct DhcpRuntime {
+    service: o3k_dhcp::DhcpService,
+    supervisor: Option<o3k_dhcp::DnsmasqSupervisor>,
+    binary: PathBuf,
+    interface: String,
+}
+
+impl DhcpRuntime {
+    fn open(
+        root: impl Into<PathBuf>,
+        binary: impl Into<PathBuf>,
+        interface: String,
+    ) -> Result<Self, o3k_dhcp::DhcpError> {
+        Ok(Self {
+            service: o3k_dhcp::DhcpService::open(root)?,
+            supervisor: None,
+            binary: binary.into(),
+            interface,
+        })
+    }
+
+    fn validate(&self, attachments: &[proto::NetworkAttachment]) -> Result<(), AgentError> {
+        let Some(first) = attachments.first() else {
+            return Err(AgentError::Protocol(
+                "DHCP requires a network attachment".to_owned(),
+            ));
+        };
+        if attachments.iter().any(|attachment| {
+            attachment.subnet_cidr != first.subnet_cidr
+                || attachment.gateway_ipv4 != first.gateway_ipv4
+        }) {
+            return Err(AgentError::Protocol(
+                "multiple network subnets are not supported by the flat DHCP profile".to_owned(),
+            ));
+        }
+        let gateway = first
+            .gateway_ipv4
+            .parse()
+            .map_err(|_| AgentError::Protocol("DHCP gateway address is invalid".to_owned()))?;
+        let expected = o3k_dhcp::DhcpConfig {
+            subnet: first.subnet_cidr.clone(),
+            gateway,
+            dns: vec![gateway],
+            interface: self.interface.clone(),
+            lease_seconds: 3600,
+        };
+        if let Some(existing) = self.service.configuration() {
+            if existing != &expected {
+                return Err(AgentError::Protocol(
+                    "the managed bridge already has a different DHCP subnet".to_owned(),
+                ));
+            }
+        }
+        for attachment in attachments {
+            let address: Ipv4Addr = attachment
+                .fixed_ipv4
+                .parse()
+                .map_err(|_| AgentError::Protocol("DHCP fixed address is invalid".to_owned()))?;
+            if let Some(existing) = self.service.binding(&attachment.port_id) {
+                if existing.mac != attachment.mac || existing.address != address {
+                    return Err(AgentError::Protocol(
+                        "DHCP port binding conflicts with durable state".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Applies only new bindings and returns those identities for precise rollback.
+    fn apply(
+        &mut self,
+        attachments: &[proto::NetworkAttachment],
+    ) -> Result<Vec<String>, AgentError> {
+        self.validate(attachments)?;
+        let first = attachments
+            .first()
+            .ok_or_else(|| AgentError::Protocol("DHCP requires a network attachment".to_owned()))?;
+        let gateway = first
+            .gateway_ipv4
+            .parse()
+            .map_err(|_| AgentError::Protocol("DHCP gateway address is invalid".to_owned()))?;
+        if self.service.configuration().is_none() {
+            self.service
+                .configure(o3k_dhcp::DhcpConfig {
+                    subnet: first.subnet_cidr.clone(),
+                    gateway,
+                    dns: vec![gateway],
+                    interface: self.interface.clone(),
+                    lease_seconds: 3600,
+                })
+                .map_err(|_| AgentError::Protocol("DHCP configuration is invalid".to_owned()))?;
+        }
+        let mut added = Vec::new();
+        for attachment in attachments {
+            if self.service.binding(&attachment.port_id).is_some() {
+                continue;
+            }
+            let address = attachment
+                .fixed_ipv4
+                .parse()
+                .map_err(|_| AgentError::Protocol("DHCP fixed address is invalid".to_owned()))?;
+            if let Err(error) = self.service.upsert_binding(o3k_dhcp::Binding {
+                port_id: attachment.port_id.clone(),
+                mac: attachment.mac.clone(),
+                address,
+            }) {
+                let _ = self.remove_ports(&added);
+                return Err(AgentError::Protocol(format!(
+                    "DHCP binding failed: {error}"
+                )));
+            }
+            added.push(attachment.port_id.clone());
+        }
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            self.service
+                .reload(supervisor)
+                .map_err(|_| AgentError::Protocol("DHCP reload failed".to_owned()))?;
+        } else {
+            self.supervisor = Some(
+                self.service
+                    .start(&self.binary)
+                    .map_err(|_| AgentError::Protocol("DHCP start failed".to_owned()))?,
+            );
+        }
+        Ok(added)
+    }
+
+    fn remove_ports(&mut self, ports: &[String]) -> Result<(), AgentError> {
+        for port in ports {
+            self.service
+                .remove_binding(port)
+                .map_err(|_| AgentError::Protocol("DHCP binding cleanup failed".to_owned()))?;
+        }
+        self.service
+            .write_config()
+            .map_err(|_| AgentError::Protocol("DHCP configuration cleanup failed".to_owned()))?;
+        if self.service.bindings().next().is_none() {
+            if let Some(mut supervisor) = self.supervisor.take() {
+                supervisor
+                    .stop()
+                    .map_err(|_| AgentError::Protocol("DHCP stop failed".to_owned()))?;
+            }
+        } else if let Some(supervisor) = self.supervisor.as_mut() {
+            self.service
+                .reload(supervisor)
+                .map_err(|_| AgentError::Protocol("DHCP reload failed".to_owned()))?;
+        }
+        Ok(())
+    }
+
+    fn start_after_restart(
+        &mut self,
+        network: &o3k_network::HostNetworkManager,
+    ) -> Result<(), AgentError> {
+        if self.service.bindings().next().is_none() || self.supervisor.is_some() {
+            return Ok(());
+        }
+        let config = self.service.configuration().cloned().ok_or_else(|| {
+            AgentError::Protocol("DHCP bindings exist without configuration".to_owned())
+        })?;
+        let prefix_len = config
+            .subnet
+            .split_once('/')
+            .and_then(|(_, prefix)| prefix.parse().ok())
+            .ok_or_else(|| AgentError::Protocol("DHCP subnet prefix is invalid".to_owned()))?;
+        network
+            .ensure_gateway(o3k_network::GatewaySpec {
+                address: config.gateway,
+                prefix_len,
+            })
+            .map_err(|_| AgentError::Protocol("managed DHCP gateway is unavailable".to_owned()))?;
+        self.supervisor = Some(
+            self.service
+                .start(&self.binary)
+                .map_err(|_| AgentError::Protocol("DHCP restart failed".to_owned()))?,
+        );
+        Ok(())
+    }
+}
+
+struct NetworkPreparation {
+    created_taps: Vec<o3k_network::TapSpec>,
+    added_dhcp_ports: Vec<String>,
+}
+
+fn rollback_network(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    preparation: &NetworkPreparation,
+) -> Result<(), AgentError> {
+    let mut first_error = None;
+    if let Ok(mut runtime) = dhcp.lock() {
+        if let Err(error) = runtime.remove_ports(&preparation.added_dhcp_ports) {
+            first_error = Some(error);
+        }
+    } else {
+        first_error = Some(AgentError::Protocol(
+            "DHCP runtime lock is poisoned".to_owned(),
+        ));
+    }
+    for tap in preparation.created_taps.iter().rev() {
+        if let Err(error) = network.delete_tap(tap) {
+            first_error.get_or_insert_with(|| {
+                AgentError::Protocol(format!("TAP rollback failed: {error}"))
+            });
+        }
+    }
+    if let Err(error) = network.cleanup_if_unused() {
+        first_error.get_or_insert_with(|| {
+            AgentError::Protocol(format!("network rollback failed: {error}"))
+        });
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn return_after_network_rollback(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    preparation: &NetworkPreparation,
+    error: AgentError,
+) -> AgentError {
+    match rollback_network(network, dhcp, preparation) {
+        Ok(()) => error,
+        Err(rollback_error) => AgentError::Protocol(format!(
+            "{error}; network rollback also failed: {rollback_error}"
+        )),
+    }
+}
+
+fn cleanup_instance_network(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    instance_id: &str,
+) -> Result<(), AgentError> {
+    let port_ids = network
+        .owned_port_ids_for_instance(instance_id)
+        .map_err(|_| AgentError::Protocol("owned network lookup failed".to_owned()))?;
+    {
+        let mut runtime = dhcp
+            .lock()
+            .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))?;
+        runtime.remove_ports(&port_ids)?;
+    }
+    network
+        .delete_taps_for_instance(instance_id)
+        .map_err(|error| AgentError::Protocol(format!("owned TAP cleanup failed: {error}")))?;
+    network
+        .cleanup_if_unused()
+        .map_err(|error| AgentError::Protocol(format!("owned bridge cleanup failed: {error}")))
+}
+
+fn prepare_network(
+    command: &proto::Command,
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+) -> Result<NetworkPreparation, AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol("create action is missing".to_owned()));
+    };
+    let resolved = create
+        .resolved
+        .as_ref()
+        .ok_or_else(|| AgentError::Protocol("resolved create inputs are missing".to_owned()))?;
+    let runtime = dhcp
+        .lock()
+        .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))?;
+    runtime.validate(&resolved.network_attachments)?;
+    let first = resolved
+        .network_attachments
+        .first()
+        .ok_or_else(|| AgentError::Protocol("network attachment is missing".to_owned()))?;
+    let gateway = first
+        .gateway_ipv4
+        .parse()
+        .map_err(|_| AgentError::Protocol("network gateway address is invalid".to_owned()))?;
+    let prefix_len = first
+        .subnet_cidr
+        .split_once('/')
+        .and_then(|(_, prefix)| prefix.parse().ok())
+        .ok_or_else(|| AgentError::Protocol("network subnet prefix is invalid".to_owned()))?;
+    network
+        .ensure_gateway(o3k_network::GatewaySpec {
+            address: gateway,
+            prefix_len,
+        })
+        .map_err(|error| AgentError::Protocol(format!("gateway preparation failed: {error}")))?;
+    drop(runtime);
+    let mut preparation = NetworkPreparation {
+        created_taps: Vec::new(),
+        added_dhcp_ports: Vec::new(),
+    };
+    for attachment in &resolved.network_attachments {
+        let spec = o3k_network::TapSpec {
+            instance_id: command.resource_id.clone(),
+            port_id: attachment.port_id.clone(),
+            mac: attachment.mac.clone(),
+        };
+        match network.ensure_tap(&spec) {
+            Ok((_, true)) => preparation.created_taps.push(spec.clone()),
+            Ok((_, false)) => {}
+            Err(error) => {
+                return Err(return_after_network_rollback(
+                    network,
+                    dhcp,
+                    &preparation,
+                    AgentError::Protocol(format!("TAP preparation failed: {error}")),
+                ));
+            }
+        }
+    }
+    let mut runtime = dhcp
+        .lock()
+        .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))?;
+    match runtime.apply(&resolved.network_attachments) {
+        Ok(added) => preparation.added_dhcp_ports = added,
+        Err(error) => {
+            drop(runtime);
+            return Err(return_after_network_rollback(
+                network,
+                dhcp,
+                &preparation,
+                error,
+            ));
+        }
+    }
+    Ok(preparation)
 }
 
 /// Host-local evidence required to turn a create request into a libvirt
@@ -320,11 +656,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 )
             }
             Some(proto::command::Action::Start(_)) => {
-                let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
+                let inspection = match self.adapter.inspect(name.clone()).await {
+                    Ok(value) => value,
+                    Err(error) if error.category == ErrorCategory::NotFound => {
+                        return Err(agent_error(error));
+                    }
+                    Err(error) => return Err(agent_error(error)),
+                };
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 self.adapter
                     .start(name.clone())
@@ -377,11 +715,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain rebooted", resource_state(&inspection))
             }
             Some(proto::command::Action::Delete(_)) => {
-                let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
+                let inspection = match self.adapter.inspect(name.clone()).await {
+                    Ok(value) => value,
+                    Err(error) if error.category == ErrorCategory::NotFound => {
+                        cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                        return success("domain already absent", proto::ResourceState::Deleted);
+                    }
+                    Err(error) => return Err(agent_error(error)),
+                };
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 if inspection.active {
                     self.adapter
@@ -393,36 +734,136 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .undefine(name.clone())
                     .await
                     .map_err(agent_error)?;
+                cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
-                let committed =
-                    resolve_committed_create_inputs(command, &self.artifact_root, &self.network)?;
-                let spec = resolve_create_domain_spec(command, Some(&committed))?;
-                let definition = o3k_libvirt::build_domain_xml(&spec)
-                    .map_err(|_| AgentError::Protocol("domain XML is invalid".to_owned()))?;
-                let definition_name = definition.name.clone();
-                if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
-                    verify_owned_domain(&existing, &command.resource_id)?;
-                    return success("domain already exists", resource_state(&existing));
+                let preparation = prepare_network(command, &self.network, &self.dhcp)?;
+                match self.adapter.inspect(name.clone()).await {
+                    Ok(existing) => {
+                        if let Err(error) = verify_owned_domain(&existing, &command.resource_id) {
+                            return Err(return_after_network_rollback(
+                                &self.network,
+                                &self.dhcp,
+                                &preparation,
+                                error,
+                            ));
+                        }
+                        return success("domain already exists", resource_state(&existing));
+                    }
+                    Err(error) if error.category == ErrorCategory::NotFound => {}
+                    Err(error) => {
+                        return Err(return_after_network_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            agent_error(error),
+                        ));
+                    }
                 }
-                self.adapter
+                let committed = match resolve_committed_create_inputs(
+                    command,
+                    &self.artifact_root,
+                    &self.network,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(return_after_network_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            error,
+                        ));
+                    }
+                };
+                let spec = match resolve_create_domain_spec(command, Some(&committed)) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(return_after_network_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            error,
+                        ));
+                    }
+                };
+                let definition = match o3k_libvirt::build_domain_xml(&spec) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return Err(return_after_network_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            AgentError::Protocol("domain XML is invalid".to_owned()),
+                        ));
+                    }
+                };
+                let definition_name = definition.name.clone();
+                if let Err(error) = self
+                    .adapter
                     .define(o3k_libvirt::DomainDefinition {
                         name: definition_name.clone(),
                         xml: definition.xml,
                     })
                     .await
-                    .map_err(agent_error)?;
-                if let Err(error) = self.adapter.start(definition_name.clone()).await {
-                    let _ = self.adapter.undefine(definition_name.clone()).await;
-                    return Err(agent_error(error));
+                {
+                    return Err(return_after_network_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        agent_error(error),
+                    ));
                 }
-                let inspection = self
-                    .adapter
-                    .inspect(definition_name)
-                    .await
-                    .map_err(agent_error)?;
-                verify_owned_domain(&inspection, &command.resource_id)?;
+                if let Err(error) = self.adapter.start(definition_name.clone()).await {
+                    let undefine_result = self.adapter.undefine(definition_name.clone()).await;
+                    let error = match undefine_result {
+                        Ok(()) => agent_error(error),
+                        Err(cleanup_error) => AgentError::Protocol(format!(
+                            "{}; domain rollback also failed: {}",
+                            agent_error(error),
+                            cleanup_error
+                        )),
+                    };
+                    return Err(return_after_network_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        error,
+                    ));
+                }
+                let inspection = match self.adapter.inspect(definition_name).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let error = match self.adapter.undefine(name.clone()).await {
+                            Ok(()) => agent_error(error),
+                            Err(cleanup_error) => AgentError::Protocol(format!(
+                                "{}; domain rollback also failed: {}",
+                                agent_error(error),
+                                cleanup_error
+                            )),
+                        };
+                        return Err(return_after_network_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            error,
+                        ));
+                    }
+                };
+                if let Err(error) = verify_owned_domain(&inspection, &command.resource_id) {
+                    let error = match self.adapter.undefine(name.clone()).await {
+                        Ok(()) => error,
+                        Err(cleanup_error) => AgentError::Protocol(format!(
+                            "{error}; domain rollback also failed: {cleanup_error}"
+                        )),
+                    };
+                    return Err(return_after_network_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        error,
+                    ));
+                }
                 success("domain created", resource_state(&inspection))
             }
             Some(proto::command::Action::ConsoleLog(request)) => {
@@ -547,10 +988,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         network_root,
     )?;
+    let bridge_name = env::var("O3K_COMPUTE_BRIDGE_NAME").unwrap_or_else(|_| "o3k-br0".to_owned());
+    let service_root = agent
+        .identity_file()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let dhcp = Arc::new(Mutex::new(DhcpRuntime::open(
+        service_root.join("dhcp"),
+        env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
+        bridge_name,
+    )?));
+    dhcp.lock()
+        .map_err(|_| "DHCP runtime lock is poisoned")?
+        .start_after_restart(&network)
+        .map_err(|error| format!("DHCP reconciliation failed: {error}"))?;
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
         network,
+        dhcp,
     });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
@@ -666,6 +1122,21 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
 
+    fn network_attachment(
+        port_id: &str,
+        fixed_ipv4: &str,
+        subnet_cidr: &str,
+        gateway_ipv4: &str,
+    ) -> proto::NetworkAttachment {
+        proto::NetworkAttachment {
+            port_id: port_id.to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            fixed_ipv4: fixed_ipv4.to_owned(),
+            subnet_cidr: subnet_cidr.to_owned(),
+            gateway_ipv4: gateway_ipv4.to_owned(),
+        }
+    }
+
     fn inspection(xml: &str) -> o3k_libvirt::DomainInspection {
         o3k_libvirt::DomainInspection {
             name: "o3k-domain".to_owned(),
@@ -709,6 +1180,24 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn dhcp_runtime_rejects_mixed_flat_networks_before_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!(
+            "o3k-compute-dhcp-validation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let attachments = vec![
+            network_attachment("port-1", "192.0.2.2", "192.0.2.0/29", "192.0.2.1"),
+            network_attachment("port-2", "198.51.100.2", "198.51.100.0/29", "198.51.100.1"),
+        ];
+        assert!(runtime.validate(&attachments).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]

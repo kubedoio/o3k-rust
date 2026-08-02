@@ -1040,6 +1040,7 @@ dependencies = [
  "axum",
  "o3k-compute-agent",
  "o3k-console",
+ "o3k-dhcp",
  "o3k-libvirt",
  "o3k-network",
  "o3k-provider",
