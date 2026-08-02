@@ -46,6 +46,12 @@ use tower::service_fn;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+mod artifact;
+pub use artifact::{
+    ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
+    MAX_ARTIFACT_CHUNK_BYTES,
+};
+
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {
     major: 1,
     minor: 0,
