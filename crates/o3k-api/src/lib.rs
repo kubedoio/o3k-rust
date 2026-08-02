@@ -113,6 +113,7 @@ pub fn router_with_state(state: AppState) -> Router {
             "/v2/images/{id}/file",
             get(download_image).put(upload_image),
         )
+        .route("/v2.0/extensions", get(list_extensions))
         .route("/v2.0/networks", get(list_networks).post(create_network))
         .route(
             "/v2.0/networks/{id}",
@@ -799,6 +800,19 @@ fn network_service(state: &AppState) -> Result<&Arc<NetworkService>, axum::respo
             "network service is not configured",
         )
     })
+}
+
+async fn list_extensions(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Err(response) = require_token(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = network_service(&state) {
+        return response;
+    }
+    Json(serde_json::json!({"extensions": []})).into_response()
 }
 
 async fn create_network(
