@@ -21,6 +21,11 @@ assert '--no-create-home' in bootstrap
 assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
+assert 'SupplementaryGroups' not in bootstrap
+assert '.o3k-supplementary-groups-added' in bootstrap
+assert 'usermod --append --groups' in bootstrap
+assert 'gpasswd --delete o3k' in bootstrap
+assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'userdel o3k' in cleanup
