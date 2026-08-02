@@ -972,7 +972,7 @@ impl ComputeProvider for AgentComputeProvider {
             ),
         ];
         let mut seen = [false; 2];
-        for (index, artifact) in artifacts.into_iter().enumerate() {
+        for artifact in artifacts {
             let expected_index = required
                 .iter()
                 .position(|(kind, artifact_id, _, _)| {
@@ -999,11 +999,11 @@ impl ComputeProvider for AgentComputeProvider {
             let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
             let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
                 .map_err(|_| ProviderError::InvalidRequest)?;
-            let transfer_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
-            )
-            .to_string();
+            let transfer_id = o3k_compute_agent::deterministic_artifact_transfer_id(
+                &command.command_id,
+                artifact.kind,
+                &artifact.artifact_id,
+            );
             let offer = agent_proto::ArtifactOffer {
                 transfer_id,
                 command_id: command.command_id.clone(),

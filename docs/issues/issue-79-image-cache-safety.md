@@ -28,6 +28,10 @@ This bounded repository change hardens the existing image-cache boundary:
 - declared `qcow2` bases are verified with `qemu-img info --output=json`
   before publication and before cache-hit reuse; invalid temporary content is
   removed without publishing a base.
+- committed image artifacts now have an agent-local exact-identity lookup;
+  the new materializer publishes them into the managed base cache, creates an
+  instance-owned qcow2 overlay, persists an ownership manifest, supports
+  idempotent restart reuse, and removes only the owned overlay.
 
 See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
 [ADR-0104](../adr/ADR-0104-image-overlay-backing-verification.md) and
@@ -36,7 +40,6 @@ See [ADR-0087](../adr/ADR-0087-image-cache-node-safety.md) and
 
 ## Explicit boundary
 
-This does not claim completion of the full issue. Glance-backed image
-resolution, authenticated transfer to a selected compute host,
-compute-agent dispatch, durable image/overlay ownership, libvirt image
-realization, and trusted real-host evidence remain separate follow-ups.
+This does not claim completion of the full issue. Control-plane Glance-to-agent
+orchestration, full libvirt create wiring with network/config-drive inputs, and
+trusted real-host qemu-img evidence remain separate follow-ups.

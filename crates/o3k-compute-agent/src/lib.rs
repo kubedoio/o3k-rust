@@ -47,9 +47,13 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod artifact;
+mod image;
 pub use artifact::{
     ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_CHUNK_BYTES,
+};
+pub use image::{
+    ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
 };
 
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {
@@ -74,6 +78,28 @@ const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
 const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
 const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
+
+/// Derives the stable transfer identity shared by the control-plane journal
+/// and the agent-local committed-artifact lookup. The artifact kind is part
+/// of the identity so resolver ordering cannot alias image and config-drive
+/// transfers.
+#[must_use]
+pub fn deterministic_artifact_transfer_id(
+    command_id: &str,
+    kind: proto::ArtifactKind,
+    artifact_id: &str,
+) -> String {
+    let kind = match kind {
+        proto::ArtifactKind::ImageBase => "image_base",
+        proto::ArtifactKind::ConfigDriveIso => "config_drive_iso",
+        proto::ArtifactKind::Unspecified => "unspecified",
+    };
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:artifact-transfer:{command_id}:{kind}:{artifact_id}").as_bytes(),
+    )
+    .to_string()
+}
 
 #[derive(Debug, Error)]
 pub enum AgentError {

@@ -284,7 +284,6 @@ impl ArtifactStore {
             || !valid_reference(&query.artifact_id)
             || !valid_sha256(&query.sha256)
             || !matches!(query.format.as_str(), "raw" | "qcow2")
-            || query.size_bytes == 0
             || query.size_bytes > MAX_ARTIFACT_BYTES
         {
             return Err(ArtifactStoreError::InvalidOffer);
@@ -313,7 +312,7 @@ impl ArtifactStore {
             || manifest.offer.artifact_id != query.artifact_id
             || manifest.offer.sha256 != query.sha256
             || manifest.offer.format != query.format
-            || manifest.offer.size_bytes != query.size_bytes
+            || (query.size_bytes != 0 && manifest.offer.size_bytes != query.size_bytes)
         {
             return Err(ArtifactStoreError::Conflict);
         }
