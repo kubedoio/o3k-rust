@@ -1227,7 +1227,7 @@ impl ComputeProvider for AgentComputeProvider {
                 AgentCommandState::Succeeded | AgentCommandState::Failed
             )
         {
-            return self.accepted_operation(request.operation_id).await;
+            return self.get_operation(request.operation_id).await;
         }
         tracing::warn!(
             resource_id = %request.o3k_server_id,
