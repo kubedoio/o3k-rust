@@ -26,7 +26,7 @@ jobs:
           ip -details link show >"$artifact/ip-link.txt"
           bridge link show >"$artifact/bridge-link.txt"
           sudo -n find /var/lib/o3k-testlab/30770439657 -maxdepth 6 -type f -printf '%p %s bytes\n' \
-            | sort >"$artifact/state-files.txt"
+            2>/dev/null | sort >"$artifact/state-files.txt" || true
           sudo -n ps -eo pid,user,stat,args --sort=pid \
             | grep -E 'qemu-system|o3k-compute|o3kd' | grep -v grep >"$artifact/processes.txt" || true
       - name: Upload evidence
