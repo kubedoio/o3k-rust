@@ -221,8 +221,19 @@ delete_resource_and_verify_absent() {
 cleanup_resources() {
     local cleanup_ok=1
     if [[ -n "${SERVER_ID}" ]]; then
-        openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || cleanup_ok=0
-        if ! server_is_absent "${SERVER_ID}"; then
+        local server_deleted=false
+        # Delete has an unknown outcome if the API request times out or the
+        # provider is still converging. Retry while observing absence so a
+        # transient Nova/libvirt state does not strand the VM and its domain.
+        for _ in {1..15}; do
+            openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || true
+            if server_is_absent "${SERVER_ID}"; then
+                server_deleted=true
+                break
+            fi
+            sleep 2
+        done
+        if [[ "${server_deleted}" != true ]]; then
             CLEANUP_SERVER_STATUS=not_verified
             cleanup_ok=0
         else
