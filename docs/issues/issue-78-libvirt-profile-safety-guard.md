@@ -14,6 +14,9 @@ Implemented on the repository branch:
 - authenticated `CommandAccepted` events now durably transition pending
   operations to `running`, with duplicate acceptance idempotency coverage;
 - [ADR-0148](../adr/ADR-0148-durable-command-acceptance.md).
+- the protected real-host workflow records its selected provider mode and
+  refuses lifecycle evidence unless `O3K_PROVIDER=agent`; the former
+  fake-provider path is explicitly non-evidence.
 
 ## Explicit boundary
 
@@ -21,4 +24,7 @@ The repository now implements durable command replay, command-id storage,
 agent dispatch, and compute-agent lifecycle execution through the `agent`
 provider. The reserved/package `libvirt` profile remains rejected so the daemon
 cannot bypass that boundary. Host capability evidence and a passing protected
-real-run artifact remain required for issue closure.
+real-run artifact remain required for issue closure. The protected workflow is
+now configured for `agent`; until the agent create/artifact path is implemented,
+it must fail closed rather than report a fake-provider lifecycle as real
+compute evidence.

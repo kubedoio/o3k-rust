@@ -9,6 +9,7 @@ EXPECTED_REPOSITORY="kubedoio/o3k-rust"
 KVM_PATH="${O3K_REAL_HOST_KVM_PATH:-/dev/kvm}"
 INVENTORY_PATH="${ARTIFACT_DIR}/real-host-owned-inventory-baseline.json"
 CAPABILITY_PATH="${O3K_REAL_HOST_CAPABILITY_OUTPUT:-${ARTIFACT_DIR}/runner-capabilities.json}"
+BOOTSTRAP_PATH="${ARTIFACT_DIR}/disposable-testlab-bootstrap.json"
 EXPECTED_RUN_ID="${O3K_REAL_HOST_WORKFLOW_RUN_ID:-}"
 EXPECTED_RUN_ATTEMPT="${O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT:-}"
 EXPECTED_SOURCE_COMMIT="${GITHUB_SHA:-}"
@@ -90,6 +91,41 @@ with open(path, "w", encoding="utf-8") as output:
     output.write("\n")
 PY
     echo "real-host capability probe did not pass; lifecycle blocked" >&2
+    exit 1
+fi
+
+provider_mode=unavailable
+if [[ -r "${BOOTSTRAP_PATH}" ]]; then
+    provider_mode="$(python3 - "${BOOTSTRAP_PATH}" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, json.JSONDecodeError):
+    print("unavailable")
+else:
+    valid = (
+        value.get("artifact_type") == "disposable-testlab-bootstrap"
+        and value.get("redacted") is True
+        and value.get("status") == "passed"
+        and value.get("provider") in {"agent", "fake"}
+    )
+    print(value.get("provider", "unavailable") if valid else "unavailable")
+PY
+)"
+fi
+if [[ "${provider_mode}" != agent ]]; then
+    python3 - "${RESULT_PATH}" "${provider_mode}" <<'PY'
+import json, sys, time
+path, provider = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as output:
+    json.dump({"artifact_type": "real-host-workflow-result", "status": "blocked",
+               "reason": "provider_mode_not_agent", "provider": provider,
+               "redacted": True, "finished_at": int(time.time())},
+              output, indent=2)
+    output.write("\n")
+PY
+    echo "real-host provider mode is not agent; lifecycle blocked" >&2
     exit 1
 fi
 

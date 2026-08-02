@@ -71,6 +71,12 @@ json.dump({"artifact_type": "runner-capabilities", "schema_version": 1,
            "finished_at": 1},
           open(sys.argv[1], "w", encoding="utf-8"))
 PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/disposable-testlab-bootstrap.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "disposable-testlab-bootstrap", "status": "passed",
+           "provider": "agent", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
 
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
 grep -qx 'ready=true' "${GITHUB_OUTPUT}"
@@ -85,6 +91,32 @@ assert "do-not-upload-this-value" not in json.dumps(value)
 assert "environment_variables" not in value
 assert value["inventory_baseline"]["foreign_state"]["protected_paths_sha256"]
 assert value["inventory_baseline"]["network_links"] == []
+PY
+
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/disposable-testlab-bootstrap.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["provider"] = "fake"
+json.dump(value, open(path, "w", encoding="utf-8"))
+PY
+if bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"; then
+    echo "fake provider was accepted for real-host evidence" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked"
+assert value["reason"] == "provider_mode_not_agent"
+assert value["provider"] == "fake"
+PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/disposable-testlab-bootstrap.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["provider"] = "agent"
+json.dump(value, open(path, "w", encoding="utf-8"))
 PY
 
 unset O3K_REAL_HOST_PROTECTED_PATHS
@@ -310,6 +342,7 @@ for needle in ("workflow_dispatch:",
                "cancel-in-progress: false", "environment: o3k-real-host-validation",
                "Bootstrap disposable TestLab",
                "scripts/bootstrap-disposable-testlab.sh",
+               "O3K_PROVIDER: agent",
                "scripts/cleanup-disposable-testlab.sh",
                "disposable-testlab-bootstrap.json",
                "Probe runner capabilities", "runner-capabilities.json",
