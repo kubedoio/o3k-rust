@@ -64,6 +64,8 @@ message ControlRequest {
     CommandAccepted command_accepted = 6;
     ResyncSnapshot resync_snapshot = 7;
     ProtocolError error = 8;
+    ArtifactAck artifact_ack = 9;
+    ArtifactStatus artifact_status = 10;
   }
 }
 
@@ -76,6 +78,9 @@ message ControlResponse {
     ObservationAck observation_ack = 5;
     ResyncRequest resync = 6;
     ProtocolError error = 7;
+    ArtifactOffer artifact_offer = 8;
+    ArtifactChunk artifact_chunk = 9;
+    ArtifactEnd artifact_end = 10;
   }
 }
 
@@ -339,4 +344,77 @@ message ProtocolError {
   string operation_id = 4;
   bool retryable = 5;
   string command_id = 6;
+}
+
+// Artifact transfer is an optional, command-correlated prerequisite for
+// agent-side realization. Paths and source-store credentials never cross the
+// protocol boundary.
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_IMAGE_BASE = 1;
+  ARTIFACT_KIND_CONFIG_DRIVE_ISO = 2;
+}
+
+enum ArtifactTransferState {
+  ARTIFACT_TRANSFER_STATE_UNSPECIFIED = 0;
+  ARTIFACT_TRANSFER_STATE_OFFERED = 1;
+  ARTIFACT_TRANSFER_STATE_RECEIVING = 2;
+  ARTIFACT_TRANSFER_STATE_COMMITTED = 3;
+  ARTIFACT_TRANSFER_STATE_REJECTED = 4;
+  ARTIFACT_TRANSFER_STATE_EXPIRED = 5;
+}
+
+message ArtifactOffer {
+  string transfer_id = 1;
+  string command_id = 2;
+  string operation_id = 3;
+  string resource_id = 4;
+  string agent_id = 5;
+  string artifact_id = 6;
+  ArtifactKind kind = 7;
+  string sha256 = 8;
+  uint64 size_bytes = 9;
+  string format = 10;
+  uint32 chunk_size_bytes = 11;
+  uint32 chunk_count = 12;
+  int64 expires_at_unix_ms = 13;
+}
+
+message ArtifactChunk {
+  string transfer_id = 1;
+  uint32 chunk_index = 2;
+  uint64 offset_bytes = 3;
+  bytes data = 4;
+  string chunk_sha256 = 5;
+}
+
+message ArtifactEnd {
+  string transfer_id = 1;
+  string sha256 = 2;
+  uint64 size_bytes = 3;
+}
+
+message ArtifactAck {
+  string transfer_id = 1;
+  string command_id = 2;
+  string operation_id = 3;
+  string resource_id = 4;
+  string agent_id = 5;
+  string agent_epoch = 6;
+  uint64 contiguous_bytes = 7;
+  uint32 next_chunk_index = 8;
+  ArtifactTransferState state = 9;
+  string redacted_message = 10;
+}
+
+message ArtifactStatus {
+  string transfer_id = 1;
+  string command_id = 2;
+  string operation_id = 3;
+  string resource_id = 4;
+  string agent_id = 5;
+  string agent_epoch = 6;
+  uint64 contiguous_bytes = 7;
+  uint32 next_chunk_index = 8;
+  ArtifactTransferState state = 9;
 }
