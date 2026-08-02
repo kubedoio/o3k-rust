@@ -168,12 +168,15 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
         name: "mtls-server".to_owned(),
         vcpus: 1,
         memory_mib: 512,
+        flavor_id: None,
+        disk_gib: Some(10),
         image_id: Some("image-a".to_owned()),
         key_name: None,
         keypair_id: None,
         network_ids: vec!["port.test".to_owned()],
         placement_provider_id: Some("node-test".to_owned()),
         placement_allocation_id: Some("allocation-a".to_owned()),
+        config_drive: None,
         idempotency_key: "mtls-request".to_owned(),
     };
     let accepted = provider.create_instance(request).await?;
