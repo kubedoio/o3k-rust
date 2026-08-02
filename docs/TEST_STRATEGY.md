@@ -93,4 +93,10 @@ Provider fakes must support scripted delay, timeout, unknown result, transient e
 
 ## CI gates
 
-Bootstrap CI requires formatting, clippy with warnings denied, all workspace tests, and documentation link checks when added. Later gates add cargo-deny, audit, OpenAPI validation, protobuf compatibility, E2E, SBOM, and signed artifacts.
+Bootstrap CI requires formatting, clippy with warnings denied, the governed
+nextest PR profile, doctests through cargo test, all workspace tests, and
+documentation link checks when added. The pinned nextest profile uses zero
+retries, fails flaky results, has deterministic slow/global timeouts, and emits
+JUnit output. Later gates add cargo-deny, audit, OpenAPI validation, protobuf
+compatibility, E2E, SBOM, and signed artifacts. The deeper profile is defined
+but is not claimed as executed by the PR job.

@@ -92,12 +92,13 @@ closed when any required artifact is missing or failed.
 
 ## Test-profile rules
 
-The intended canonical test runner and checked-in profiles must specify
-deterministic parallelism, timeouts, JUnit output, no silent retries, and
-separate doctest execution. Property, store-conformance, protocol, provider,
-restart/recovery, concurrency, fuzz, native-boundary, and real-host cases are
-selected by risk; a global coverage percentage is not a substitute for a
-missing behavioral category.
+The intended canonical test runner is cargo-nextest `0.9.131`, configured in
+`.config/nextest.toml`. The checked-in PR and deep profiles specify
+deterministic timeouts, JUnit output, zero retries, and failing flaky results;
+doctests run separately through cargo test. Property, store-conformance,
+protocol, provider, restart/recovery, concurrency, fuzz, native-boundary, and
+real-host cases are selected by risk; a global coverage percentage is not a
+substitute for a missing behavioral category.
 
 Fuzz and model-checking smoke lanes may be bounded and scheduled. A crash must
 produce a minimized reproducer and regression test before the associated

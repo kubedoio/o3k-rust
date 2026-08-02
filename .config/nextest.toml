@@ -1,0 +1,25 @@
+# cargo-nextest 0.9.131 repository configuration.
+# Doctests remain in the cargo test lane because nextest does not execute them.
+nextest-version = "0.9.131"
+
+[profile.pr]
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+slow-timeout = { period = "60s", terminate-after = 2 }
+global-timeout = "30m"
+
+[profile.pr.junit]
+path = "junit.xml"
+report-name = "o3k-nextest-pr"
+store-success-output = false
+store-failure-output = true
+
+[profile.deep]
+inherits = "pr"
+slow-timeout = { period = "120s", terminate-after = 3 }
+global-timeout = "60m"
+
+[profile.deep.junit]
+path = "junit.xml"
+report-name = "o3k-nextest-deep"
