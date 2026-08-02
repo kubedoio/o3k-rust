@@ -316,6 +316,82 @@ impl ArtifactStore {
         self.resolve(&offer)
     }
 
+    /// Removes only completed or in-progress transfers owned by one resource.
+    ///
+    /// Final files are content-addressed and may be shared by more than one
+    /// transfer.  A final file is therefore removed only after confirming
+    /// that no other committed manifest still references it.  The manifest
+    /// is retained until its private file has been removed (or proven to be
+    /// shared), so a retry after an interrupted cleanup remains observable.
+    pub fn remove_for_resource(&self, resource_id: &str) -> Result<usize, ArtifactStoreError> {
+        if !valid_reference(resource_id) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with('.') || !name.ends_with(".manifest") {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_symlink() {
+                return Err(ArtifactStoreError::UnownedPath);
+            }
+            entries.push((path, read_manifest(&entry.path())?));
+        }
+
+        let mut removed = 0;
+        for (manifest_path, manifest) in entries
+            .iter()
+            .filter(|(_, manifest)| manifest.offer.resource_id == resource_id)
+        {
+            let offer = &manifest.offer;
+            let final_path = self.final_path(offer)?;
+            if manifest.state == proto::ArtifactTransferState::Committed as i32 {
+                let shared = entries.iter().any(|(other_path, other)| {
+                    other_path != manifest_path
+                        && other.state == proto::ArtifactTransferState::Committed as i32
+                        && other.offer.agent_id == self.agent_id
+                        && other.offer.sha256 == offer.sha256
+                        && other.offer.format == offer.format
+                });
+                if !shared {
+                    match fs::symlink_metadata(&final_path) {
+                        Ok(metadata) if metadata.file_type().is_symlink() => {
+                            return Err(ArtifactStoreError::UnownedPath);
+                        }
+                        Ok(metadata) if !metadata.file_type().is_file() => {
+                            return Err(ArtifactStoreError::UnownedPath);
+                        }
+                        Ok(_) => {
+                            fs::remove_file(&final_path).map_err(ArtifactStoreError::Storage)?
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(ArtifactStoreError::Storage(error)),
+                    }
+                }
+            } else {
+                let part_path = self.part_path(&offer.transfer_id)?;
+                match fs::symlink_metadata(&part_path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(ArtifactStoreError::UnownedPath);
+                    }
+                    Ok(metadata) if !metadata.file_type().is_file() => {
+                        return Err(ArtifactStoreError::UnownedPath);
+                    }
+                    Ok(_) => fs::remove_file(&part_path).map_err(ArtifactStoreError::Storage)?,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(ArtifactStoreError::Storage(error)),
+                }
+            }
+            fs::remove_file(manifest_path).map_err(ArtifactStoreError::Storage)?;
+            removed += 1;
+        }
+        Ok(removed)
+    }
+
     fn manifest_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
         valid_reference(id)
             .then(|| self.root.join(format!(".{id}.manifest")))
@@ -617,6 +693,74 @@ mod tests {
             store.accept_chunk(&offer, &conflict),
             Err(ArtifactStoreError::Conflict)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn removes_owned_artifacts_but_preserves_shared_content() {
+        let root = std::env::temp_dir().join(format!("o3k-artifact-cleanup-{}", Uuid::now_v7()));
+        let (store, offer, content) = fixture(&root);
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+
+        let mut shared = offer.clone();
+        shared.transfer_id = Uuid::now_v7().to_string();
+        shared.resource_id = "resource-2".to_owned();
+        shared.command_id = "command-2".to_owned();
+        shared.operation_id = "operation-2".to_owned();
+        store.begin(&shared).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &shared,
+                    &proto::ArtifactChunk {
+                        transfer_id: shared.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &shared,
+                &proto::ArtifactEnd {
+                    transfer_id: shared.transfer_id.clone(),
+                    sha256: shared.sha256.clone(),
+                    size_bytes: shared.size_bytes,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(store.remove_for_resource("resource-1").unwrap(), 1);
+        assert!(store.resolve(&shared).is_ok());
+        assert!(store.remove_for_resource("resource-2").is_ok());
+        assert!(!root.join(format!("{}.raw", offer.sha256)).exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -331,6 +331,18 @@ fn rollback_overlay(cache: &o3k_image::ImageCache, instance_id: &str) {
     let _ = cache.delete_overlay(instance_id);
 }
 
+fn cleanup_committed_artifacts(
+    artifact_root: &std::path::Path,
+    command: &proto::Command,
+) -> Result<(), AgentError> {
+    let store = o3k_compute_agent::ArtifactStore::open(artifact_root, &command.agent_id)
+        .map_err(|_| AgentError::Protocol("agent artifact store is unavailable".to_owned()))?;
+    store
+        .remove_for_resource(&command.resource_id)
+        .map(|_| ())
+        .map_err(|_| AgentError::Protocol("owned artifact cleanup failed".to_owned()))
+}
+
 #[async_trait]
 impl CommandExecutor for LibvirtCommandExecutor {
     async fn execute(
@@ -440,6 +452,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                                     "owned image overlay cleanup failed".to_owned(),
                                 )
                             })?;
+                        cleanup_committed_artifacts(&self.artifact_root, command)?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
                     Err(error) => return Err(agent_error(error)),
@@ -463,6 +476,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(|_| {
                         AgentError::Protocol("owned image overlay cleanup failed".to_owned())
                     })?;
+                cleanup_committed_artifacts(&self.artifact_root, command)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
