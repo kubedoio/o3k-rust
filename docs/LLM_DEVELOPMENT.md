@@ -116,3 +116,25 @@ An agent task is rejected when it:
 8. CI produces evidence;
 9. documentation/compatibility matrix is updated;
 10. PR merges.
+
+## Governance policies
+
+The following proposed policies define the controls for work that changes
+public contracts, engineering decisions, toolchains, or evidence. They are
+deliberately non-claiming: a policy requirement is not proof that its
+automation or evidence artifact exists.
+
+- [ADR-0154 — Engineering governance lifecycle](adr/ADR-0154-engineering-governance-lifecycle.md)
+  defines decision status, supersession, fitness functions, and the human
+  authority boundary.
+- [SPEC-0017 — OpenAPI contract governance](specs/SPEC-0017-openapi-contract-governance.md)
+  defines contract-first changes, OpenAPI 3.1.2 migration policy, semantic
+  validation, and compatibility-diff gates.
+- [SPEC-0018 — Toolchain and test-evidence governance](specs/SPEC-0018-toolchain-and-test-evidence-governance.md)
+  defines reproducible toolchain records, evidence states, and fast/deep/
+  protected/release tiers.
+
+Agents must not describe a proposed policy as an accepted decision, or a
+passing portable check as protected-host, measured, human-approved, or release
+evidence. When a required artifact is absent, record `missing` and identify
+the next executable acceptance check.

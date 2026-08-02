@@ -23,12 +23,19 @@ The associated decision is
 
 The profile maxima in the manifest are reference deployment maxima, not O3K
 claims. O3K must return correct version-negotiation errors outside its
-implemented contiguous window. The nonexistent label `2026.1 Flamingo` is
-rejected by CI.
+implemented contiguous window. The release-series/codename pairing
+`2026.1`/`Flamingo` is invalid and is rejected by CI. The manifest is parsed
+and schema-validated; it is not a substring-only document.
+
+For services with microversions, each version header is an object containing
+the header name and a service-qualified `value_template`, for example
+`compute {microversion}` or `placement {microversion}`. Header templates must
+be used consistently for request and response negotiation.
 
 ## Acceptance
 
-`tests/compatibility-target.sh` checks exact toolchain metadata, both release
-profiles, service mappings, Nova maxima, the implemented windows, baseline
-linkage, and forbidden release-name wording. CI also runs locked workspace
-checks and the existing API/compatibility tests.
+`tests/compatibility-target.sh` parses the YAML manifest and checks its closed
+schema, exact field types, unique profile/service IDs, valid release pairings,
+service-qualified header templates, both release profiles, service mappings,
+Nova maxima, implemented windows, and baseline linkage. CI also runs locked
+workspace checks and the existing API/compatibility tests.

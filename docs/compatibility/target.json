@@ -9,7 +9,9 @@
   "openstack": {
     "primary_profile": "gazpacho-2026.1",
     "backward_compatibility_profiles": ["flamingo-2025.2"],
-    "forbidden_labels": ["2026.1 Flamingo"],
+    "forbidden_release_pairings": [
+      {"release_series": "2026.1", "codename": "Flamingo"}
+    ],
     "api_manifest": "compatibility/openstack-targets.yaml",
     "api_baseline": "docs/specs/testlab-api-baseline.json"
   },

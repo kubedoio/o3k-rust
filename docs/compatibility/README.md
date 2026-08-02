@@ -2,8 +2,8 @@
 
 The static release and toolchain target is frozen in
 [`SPEC-0016`](../specs/SPEC-0016-static-compatibility-target.md) and its
- machine-readable target manifest. It selects OpenStack `2026.1` (Gazpacho) as
- primary, retains `2025.2` (Flamingo) as the backward-compatibility profile,
+machine-readable target manifest. It selects OpenStack `2026.1` (Gazpacho) as
+primary, retains `2025.2` (Flamingo) as the backward-compatibility profile,
  and pins Rust `1.97.1`; it does not claim that every operation in either
  release is implemented.
 
@@ -28,6 +28,22 @@ operation entry contains:
 
 The file is deliberately data-only YAML so a later CI check can parse it without
 having to infer behavior from prose or implementation details.
+
+## Requirements traceability
+
+[`traceability.yaml`](traceability.yaml) links every normative baseline operation
+to its capability-inventory record and, where one exists, to a public contract
+fixture. It mirrors implementation, portable-contract, and CLI evidence states
+from the inventory. The file uses the JSON-compatible subset of YAML so the
+dependency-free validator can parse it deterministically with Python's standard
+library. Its `protected_runner` field is always `not-claimed`; this artifact does
+not create, promote, or assert protected-runner evidence.
+
+Validate the links and the negative mutation case with:
+
+```bash
+bash tests/traceability.sh
+```
 
 ## Status vocabulary
 

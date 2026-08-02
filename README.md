@@ -57,8 +57,8 @@ override an official OpenStack contract, or used to reproduce its monolithic
 architecture. Any copied or adapted code, test, or fixture requires a pinned
 commit, Apache-2.0 attribution, preserved copyright/NOTICE information, and a
 clear change record. Agents record inspected paths and official sources in the
-issue or pull request. See [ADR-0151](adr/ADR-0151-public-go-o3k-reference-policy.md)
-and [CLEAN_IMPLEMENTATION.md](CLEAN_IMPLEMENTATION.md).
+issue or pull request. See [ADR-0151](docs/adr/ADR-0151-public-go-o3k-reference-policy.md)
+and [CLEAN_IMPLEMENTATION.md](docs/CLEAN_IMPLEMENTATION.md).
 
 ## Initial product: O3K TestLab
 
@@ -139,6 +139,13 @@ Every agent must:
 9. update compatibility and evidence documents when behavior changes.
 
 See [AGENTS.md](AGENTS.md), [docs/LLM_DEVELOPMENT.md](docs/LLM_DEVELOPMENT.md), and [docs/CLEAN_IMPLEMENTATION.md](docs/CLEAN_IMPLEMENTATION.md).
+
+The proposed governance controls for contract changes, ADRs, toolchains, and
+test evidence are collected in [ADR-0154](docs/adr/ADR-0154-engineering-governance-lifecycle.md)
+and its linked [OpenAPI](docs/specs/SPEC-0017-openapi-contract-governance.md)
+and [toolchain/evidence](docs/specs/SPEC-0018-toolchain-and-test-evidence-governance.md)
+specifications. They describe required gates; they do not claim that missing
+automation or protected-runner evidence already exists.
 
 ## Build status
 
