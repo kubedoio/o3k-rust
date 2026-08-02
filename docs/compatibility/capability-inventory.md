@@ -4,7 +4,7 @@ This file is generated from `capability-inventory-source.json`; edit the source 
 
 - Profile: `testlab-alpha`
 - Go O3K reference: `53fd2cb36ee79f42da49c8181d6ceed12b41b3aa`
-- Rust reference: `5ca770f3156741a7a283603b3e42b5cd9d5920a4`
+- Rust reference: `3e508ea72e55a4c1e0113fbcf3643f4ffdbda735`
 - Operations: `41`
 
 Evidence states are independent: route implementation does not imply contract, CLI, or protected-runner verification.
@@ -16,10 +16,10 @@ Evidence states are independent: route implementation does not imply contract, C
 | compute | flavor_list_detail | GET | /v2.1/{project_id}/flavors/detail | implemented | verified | pending | pending | required |
 | compute | flavor_delete | DELETE | /v2.1/{project_id}/flavors/{id} | implemented | verified | pending | pending | required |
 | compute | flavor_show | GET | /v2.1/{project_id}/flavors/{id} | implemented | verified | pending | pending | required |
-| compute | keypair_list | GET | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
-| compute | keypair_import | POST | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | verified | required |
-| compute | keypair_delete | DELETE | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | verified | required |
-| compute | keypair_show | GET | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | verified | required |
+| compute | keypair_list | GET | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | pending | required |
+| compute | keypair_import | POST | /v2.1/{project_id}/os-keypairs | implemented | verified | verified | pending | required |
+| compute | keypair_delete | DELETE | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | pending | required |
+| compute | keypair_show | GET | /v2.1/{project_id}/os-keypairs/{name} | implemented | verified | verified | pending | required |
 | compute | server_list | GET | /v2.1/{project_id}/servers | implemented | verified | pending | pending | required |
 | compute | server_create | POST | /v2.1/{project_id}/servers | implemented | verified | pending | pending | required |
 | compute | server_list_detail | GET | /v2.1/{project_id}/servers/detail | implemented | verified | pending | pending | required |
@@ -28,13 +28,13 @@ Evidence states are independent: route implementation does not imply contract, C
 | compute | server_actions_start_stop_reboot_console | POST | /v2.1/{project_id}/servers/{id}/action | implemented | verified | pending | pending | required |
 | identity | version_discovery_root | GET | / | implemented | verified | pending | pending | required |
 | identity | version_discovery_v3 | GET | /v3 | implemented | verified | pending | pending | required |
-| identity | password_authentication_scoped_token | POST | /v3/auth/tokens | implemented | verified | verified | verified | required |
-| image | image_list | GET | /v2/images | implemented | verified | pending | verified | required |
-| image | image_create | POST | /v2/images | implemented | verified | verified | verified | required |
-| image | image_delete | DELETE | /v2/images/{id} | implemented | verified | pending | verified | required |
-| image | image_show | GET | /v2/images/{id} | implemented | verified | pending | verified | required |
+| identity | password_authentication_scoped_token | POST | /v3/auth/tokens | implemented | verified | verified | pending | required |
+| image | image_list | GET | /v2/images | implemented | verified | pending | pending | required |
+| image | image_create | POST | /v2/images | implemented | verified | verified | pending | required |
+| image | image_delete | DELETE | /v2/images/{id} | implemented | verified | pending | pending | required |
+| image | image_show | GET | /v2/images/{id} | implemented | verified | pending | pending | required |
 | image | image_download_binary | GET | /v2/images/{id}/file | implemented | verified | pending | pending | required |
-| image | image_upload_binary | PUT | /v2/images/{id}/file | implemented | verified | verified | verified | required |
+| image | image_upload_binary | PUT | /v2/images/{id}/file | implemented | verified | verified | pending | required |
 | network | network_list | GET | /v2.0/networks | implemented | verified | pending | pending | required |
 | network | network_create | POST | /v2.0/networks | implemented | verified | pending | pending | required |
 | network | network_delete | DELETE | /v2.0/networks/{id} | implemented | verified | pending | pending | required |

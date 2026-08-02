@@ -32,6 +32,8 @@ assert trace["sources"] == {
     "inventory": "docs/compatibility/capability-inventory.json",
     "contract_fixtures": "docs/compatibility/contract-fixtures.json",
 }
+fixture_coverage = trace["fixture_coverage"]
+assert len(fixture_coverage) == len(set(fixture_coverage)), "duplicate fixture coverage row"
 
 baseline_by_id = {item["id"]: item for item in baseline["operations"]}
 inventory_by_id = {item["id"]: item for item in inventory["operations"]}
@@ -65,6 +67,11 @@ for item in requirements:
         assert fixture_id == baseline_id
         assert fixture_id in fixture_ids, f"unknown contract fixture {fixture_id}"
 
+for reference in fixture_coverage:
+    prefix, separator, fixture_id = reference.partition("#")
+    assert prefix == "tests/compatibility-harness.py" and separator and fixture_id
+    assert fixture_id in fixture_ids, f"unknown fixture coverage id {fixture_id}"
+
 excluded = {item["inventory_id"] for item in trace["inventory_exclusions"]}
 assert excluded == set(inventory_by_id) - set(baseline_by_id)
 assert all(item["reason"] for item in trace["inventory_exclusions"])
@@ -73,6 +80,7 @@ referenced_fixtures = {
     for item in requirements
     for reference in item["contract_tests"]
 }
+referenced_fixtures.update(reference.partition("#")[2] for reference in fixture_coverage)
 assert referenced_fixtures == fixture_ids, "contract fixture coverage is not traceable"
 assert "protected-runner-verified" not in artifact_path.read_text(encoding="utf-8")
 print(f"validated traceability: {len(requirements)} baseline operations, {len(fixture_ids)} contract fixtures, protected evidence not claimed")

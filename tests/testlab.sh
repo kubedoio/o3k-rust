@@ -56,10 +56,23 @@ for _ in $(seq 1 100); do
 done
 curl -fsS "${BASE_URL}/readyz" >/dev/null
 
-AUTH_BODY='{"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}}'
+AUTH_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}"
+AUTH_BODY="{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"password\":\"${AUTH_PASSWORD}\"}}},\"scope\":{\"project\":{\"name\":\"admin\"}}}}"
 TOKEN_HEADERS="$(curl -fsSi -X POST "${BASE_URL}/v3/auth/tokens" -H 'content-type: application/json' --data "${AUTH_BODY}")"
 TOKEN="$(python3 -c 'import sys; print(next((line.split(":",1)[1].strip() for line in sys.stdin.read().splitlines() if line.lower().startswith("x-subject-token:")), ""))' <<<"${TOKEN_HEADERS}")"
 [[ -n "${TOKEN}" ]]
+
+mkdir -p "${ARTIFACT_DIR}/compatibility"
+O3K_COMPATIBILITY_PASSWORD="${AUTH_PASSWORD}" OS_AUTH_TOKEN="${TOKEN}" \
+    python3 "${ROOT_DIR}/tests/compatibility-harness.py" \
+    --target rust \
+    --base-url "${BASE_URL}" \
+    --project-id bootstrap-project \
+    --source-commit "$(git -C "${ROOT_DIR}" rev-parse HEAD)" \
+    --json-out "${ARTIFACT_DIR}/compatibility/rust.json" \
+    --junit-out "${ARTIFACT_DIR}/compatibility/rust.xml"
+test -s "${ARTIFACT_DIR}/compatibility/rust.json"
+test -s "${ARTIFACT_DIR}/compatibility/rust.xml"
 
 json() { curl -fsS "$@" -H "x-auth-token: ${TOKEN}"; }
 field() { python3 -c 'import json,sys; value=json.load(sys.stdin)

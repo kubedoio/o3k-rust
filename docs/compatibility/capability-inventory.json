@@ -168,7 +168,7 @@
       "operation": "keypair_list",
       "path": "/v2.1/{project_id}/os-keypairs",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:121-124",
@@ -196,7 +196,7 @@
       "operation": "keypair_import",
       "path": "/v2.1/{project_id}/os-keypairs",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:122-124",
@@ -224,7 +224,7 @@
       "operation": "keypair_delete",
       "path": "/v2.1/{project_id}/os-keypairs/{name}",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:125-127",
@@ -250,7 +250,7 @@
       "operation": "keypair_show",
       "path": "/v2.1/{project_id}/os-keypairs/{name}",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:125-127",
@@ -495,7 +495,7 @@
       "operation": "password_authentication_scoped_token",
       "path": "/v3/auth/tokens",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:105",
@@ -522,7 +522,7 @@
       "operation": "image_list",
       "path": "/v2/images",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:106",
@@ -549,7 +549,7 @@
       "operation": "image_create",
       "path": "/v2/images",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:106",
@@ -574,7 +574,7 @@
       "operation": "image_delete",
       "path": "/v2/images/{id}",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:107",
@@ -599,7 +599,7 @@
       "operation": "image_show",
       "path": "/v2/images/{id}",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:107",
@@ -654,7 +654,7 @@
       "operation": "image_upload_binary",
       "path": "/v2/images/{id}/file",
       "portable_contract": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "rust_locations": [
         "crates/o3k-api/src/lib.rs:108",
@@ -1120,7 +1120,7 @@
     "placement"
   ],
   "rust_reference": {
-    "commit": "5ca770f3156741a7a283603b3e42b5cd9d5920a4",
+    "commit": "3e508ea72e55a4c1e0113fbcf3643f4ffdbda735",
     "repository": "https://github.com/kubedoio/o3k-rust"
   },
   "schema_version": 1

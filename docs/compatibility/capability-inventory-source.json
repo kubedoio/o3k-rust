@@ -11,7 +11,7 @@
   },
   "rust_reference": {
     "repository": "https://github.com/kubedoio/o3k-rust",
-    "commit": "5ca770f3156741a7a283603b3e42b5cd9d5920a4"
+    "commit": "3e508ea72e55a4c1e0113fbcf3643f4ffdbda735"
   },
   "operations": [
     {
@@ -61,7 +61,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["Federation and non-password authentication are outside the alpha profile."]
     },
@@ -78,7 +78,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["Local filesystem storage is the only alpha backend."]
     },
@@ -95,7 +95,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "pending",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["The broad Glance filter and pagination surface is outside the alpha profile."]
     },
@@ -112,7 +112,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "pending",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": []
     },
@@ -129,7 +129,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "pending",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": []
     },
@@ -146,7 +146,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["Import, multi-store, and signature workflows are outside the alpha profile."]
     },
@@ -475,7 +475,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["Private-key generation is intentionally unsupported."]
     },
@@ -492,7 +492,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["The private key never crosses the API boundary."]
     },
@@ -509,7 +509,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": []
     },
@@ -526,7 +526,7 @@
       "implementation_state": "implemented",
       "portable_contract": "verified",
       "cli_verification": "verified",
-      "protected_runner": "verified",
+      "protected_runner": "pending",
       "release_relevance": "required",
       "known_gaps": ["Deletion is rejected while an owned server still references the keypair."]
     },

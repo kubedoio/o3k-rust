@@ -15,3 +15,18 @@ test -s "${temp_dir}/self-test.json"
 test -s "${temp_dir}/self-test.xml"
 grep -Fq '"passed": true' "${temp_dir}/self-test.json"
 grep -Fq '<testsuite' "${temp_dir}/self-test.xml"
+
+python3 - "${repo_root}/docs/compatibility/contract-fixtures.json" "${temp_dir}/missing.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source_file:
+    source = json.load(source_file)
+source["fixtures"] = source["fixtures"][1:]
+with open(sys.argv[2], "w", encoding="utf-8") as output_file:
+    json.dump(source, output_file)
+PY
+if O3K_COMPATIBILITY_FIXTURES="${temp_dir}/missing.json" python3 "${harness}" --validate; then
+  echo "incomplete required fixture set was accepted" >&2
+  exit 1
+fi

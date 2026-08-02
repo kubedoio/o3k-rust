@@ -20,7 +20,12 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-FIXTURE_PATH = ROOT / "docs/compatibility/contract-fixtures.json"
+FIXTURE_PATH = pathlib.Path(
+    os.environ.get(
+        "O3K_COMPATIBILITY_FIXTURES",
+        str(ROOT / "docs/compatibility/contract-fixtures.json"),
+    )
+)
 INVENTORY_PATH = ROOT / "docs/compatibility/capability-inventory.json"
 BASELINE_PATH = ROOT / "docs/specs/testlab-api-baseline.json"
 
@@ -36,6 +41,11 @@ def load_fixtures() -> dict[str, Any]:
     inventory_ids = {entry["id"] for entry in inventory["operations"]}
     baseline_operations = {
         entry["id"]: entry for entry in baseline.get("operations", [])
+    }
+    required_ids = {
+        operation_id
+        for operation_id, operation in baseline_operations.items()
+        if operation.get("status") == "required"
     }
     fixtures = source.get("fixtures")
     if not isinstance(fixtures, list) or not fixtures:
@@ -58,6 +68,12 @@ def load_fixtures() -> dict[str, Any]:
             not url.startswith("https://docs.openstack.org/") for url in fixture["official_sources"]
         ):
             raise ValueError(f"fixture {fixture_id} lacks an official OpenStack source")
+    missing = sorted(required_ids - seen)
+    if missing:
+        raise ValueError(
+            "contract fixtures do not cover every required baseline operation: "
+            + ", ".join(missing)
+        )
     return source
 
 
@@ -85,10 +101,15 @@ def make_request(
     path: str,
     body: dict[str, Any] | None,
     token: str | None,
+    raw_body: bytes | None = None,
 ) -> tuple[int, dict[str, str], bytes, dict[str, Any]]:
-    encoded = None if body is None else json.dumps(body, sort_keys=True).encode("utf-8")
+    encoded = raw_body if raw_body is not None else (
+        None if body is None else json.dumps(body, sort_keys=True).encode("utf-8")
+    )
     headers = {"Accept": "application/json"}
-    if encoded is not None:
+    if raw_body is not None:
+        headers["Content-Type"] = "application/octet-stream"
+    elif encoded is not None:
         headers["Content-Type"] = "application/json"
     if token:
         headers["X-Auth-Token"] = token
@@ -97,7 +118,7 @@ def make_request(
         "method": method,
         "path": path,
         "headers": redact_headers(headers),
-        "body": "<redacted>" if body is not None else None,
+        "body": "<redacted>" if encoded is not None else None,
     }
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -122,13 +143,16 @@ def check_json_keys(body: bytes, required: list[str]) -> list[str]:
     return [f"missing JSON key: {key}" for key in required if key not in decoded]
 
 
-def render(value: Any, project_id: str, keypair_name: str) -> Any:
+def render(value: Any, project_id: str, keypair_name: str, variables: dict[str, str] | None = None) -> Any:
+    replacements = {"project_id": project_id, "keypair_name": keypair_name}
+    if variables:
+        replacements.update(variables)
     if isinstance(value, str):
-        return value.format(project_id=project_id, keypair_name=keypair_name)
+        return value.format(**replacements)
     if isinstance(value, dict):
-        return {key: render(item, project_id, keypair_name) for key, item in value.items()}
+        return {key: render(item, project_id, keypair_name, variables) for key, item in value.items()}
     if isinstance(value, list):
-        return [render(item, project_id, keypair_name) for item in value]
+        return [render(item, project_id, keypair_name, variables) for item in value]
     return value
 
 
@@ -142,8 +166,24 @@ def run_target(
     token: str | None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
+    variables: dict[str, str] = {
+        "auth_password": os.environ.get("O3K_COMPATIBILITY_PASSWORD", "password")
+    }
     for fixture in fixtures:
-        path = render(fixture["path"], project_id, keypair_name)
+        try:
+            path = render(fixture["path"], project_id, keypair_name, variables)
+        except (KeyError, ValueError) as error:
+            results.append(
+                {
+                    "fixture": fixture["id"],
+                    "name": fixture["name"],
+                    "source": fixture["official_sources"],
+                    "request": {"method": fixture["method"], "path": fixture["path"]},
+                    "status": "error",
+                    "failures": [f"fixture variable resolution failed: {error}"],
+                }
+            )
+            continue
         record: dict[str, Any] = {
             "fixture": fixture["id"],
             "name": fixture["name"],
@@ -152,7 +192,12 @@ def run_target(
         }
         try:
             status, headers, body, request_record = make_request(
-                base_url, fixture["method"], path, render(fixture.get("request_json"), project_id, keypair_name), token
+                base_url,
+                fixture["method"],
+                path,
+                render(fixture.get("request_json"), project_id, keypair_name, variables),
+                token,
+                fixture.get("request_bytes", "").encode("utf-8") if "request_bytes" in fixture else None,
             )
             record["request"] = request_record
             record["response"] = {
@@ -164,9 +209,29 @@ def run_target(
             if status not in fixture["expected_status"]:
                 failures.append(f"expected status {fixture['expected_status']}, got {status}")
             failures.extend(check_json_keys(body, fixture.get("required_json_keys", [])))
+            if not failures:
+                try:
+                    decoded = json.loads(body)
+                except json.JSONDecodeError:
+                    decoded = None
+                captures = {
+                    "image.collection_create": ("image_id", ("id",)),
+                    "network.network_collection_create": ("network_id", ("network", "id")),
+                    "network.subnet_collection_create": ("subnet_id", ("subnet", "id")),
+                    "network.port_collection_create": ("port_id", ("port", "id")),
+                    "compute.flavor_collection_create": ("flavor_id", ("flavor", "id")),
+                    "compute.server_collection_create": ("server_id", ("server", "id")),
+                }
+                if fixture["id"] in captures and isinstance(decoded, dict):
+                    name, path_parts = captures[fixture["id"]]
+                    captured: Any = decoded
+                    for part in path_parts:
+                        captured = captured.get(part) if isinstance(captured, dict) else None
+                    if isinstance(captured, str) and captured:
+                        variables[name] = captured
             cleanup = fixture.get("cleanup")
             if cleanup:
-                cleanup_path = render(cleanup["path"], project_id, keypair_name)
+                cleanup_path = render(cleanup["path"], project_id, keypair_name, variables)
                 cleanup_status, cleanup_headers, cleanup_body, cleanup_request = make_request(
                     base_url, cleanup["method"], cleanup_path, None, token
                 )
@@ -186,6 +251,9 @@ def run_target(
         except RuntimeError as error:
             record["status"] = "error"
             record["failures"] = [str(error)]
+        except (KeyError, ValueError) as error:
+            record["status"] = "error"
+            record["failures"] = [f"fixture variable resolution failed: {error}"]
         results.append(record)
     return {
         "schema_version": 1,
@@ -263,17 +331,61 @@ class SelfTestHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"flavors": [{"id": "self-test-flavor"}]})
         elif self.path.endswith("/os-keypairs"):
             self.send_json(200, {"keypairs": []})
+        elif "/os-keypairs/" in self.path:
+            self.send_json(200, {"keypair": {"name": "contract-harness-key"}})
+        elif self.path == "/v2/images":
+            self.send_json(200, {"images": []})
+        elif self.path.endswith("/file") and self.path.startswith("/v2/images/"):
+            self.send_bytes(200, b"contract-image")
+        elif self.path.startswith("/v2.0/networks/"):
+            self.send_json(200, {"network": {"id": "network-id"}})
+        elif self.path.startswith("/v2.0/subnets/"):
+            self.send_json(200, {"subnet": {"id": "subnet-id"}})
+        elif self.path.startswith("/v2.0/ports/"):
+            self.send_json(200, {"port": {"id": "port-id"}})
+        elif "/flavors/" in self.path:
+            self.send_json(200, {"flavor": {"id": "flavor-id"}})
+        elif self.path.endswith("/servers"):
+            self.send_json(200, {"servers": []})
+        elif "/servers/" in self.path and self.path.endswith("/action"):
+            self.send_json(200, {})
+        elif "/servers/" in self.path:
+            self.send_json(200, {"server": {"id": "server-id"}})
         else:
             self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         if self.path.endswith("/os-keypairs"):
             self.send_json(200, {"keypair": {"name": "contract-harness-key"}})
+        elif self.path == "/v3/auth/tokens":
+            self.send_json(201, {"token": {"expires_at": "2099-01-01T00:00:00Z"}})
+        elif self.path == "/v2/images":
+            self.send_json(201, {"id": "image-id"})
+        elif self.path == "/v2.0/networks":
+            self.send_json(201, {"network": {"id": "network-id"}})
+        elif self.path == "/v2.0/subnets":
+            self.send_json(201, {"subnet": {"id": "subnet-id"}})
+        elif self.path == "/v2.0/ports":
+            self.send_json(201, {"port": {"id": "port-id"}})
+        elif self.path.endswith("/action"):
+            self.send_response(202)
+            self.end_headers()
+        elif self.path.endswith("/flavors"):
+            self.send_json(201, {"flavor": {"id": "flavor-id"}})
+        elif self.path.endswith("/servers"):
+            self.send_json(202, {"server": {"id": "server-id"}})
         else:
             self.send_error(405)
 
+    def do_PUT(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path.startswith("/v2/images/") and self.path.endswith("/file"):
+            self.send_response(204)
+            self.end_headers()
+        else:
+            self.send_error(404)
+
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
-        if "/os-keypairs/" in self.path:
+        if "/os-keypairs/" in self.path or "/flavors/" in self.path or "/servers/" in self.path or self.path.startswith("/v2.0/") or self.path.startswith("/v2/images/"):
             self.send_response(204)
             self.end_headers()
         else:
@@ -283,6 +395,13 @@ class SelfTestHandler(http.server.BaseHTTPRequestHandler):
         payload = json.dumps(value).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def send_bytes(self, status: int, payload: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
