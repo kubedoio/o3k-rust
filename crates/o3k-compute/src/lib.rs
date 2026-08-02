@@ -2146,15 +2146,13 @@ fn server_from_resource(
 ) -> Result<Server, ()> {
     let request: CreateInstanceRequest =
         serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
-    let flavor = request
-        .flavor_id
-        .and_then(|id| flavors.iter().find(|flavor| flavor.id == id))
-        .or_else(|| {
-            flavors.iter().find(|flavor| {
-                flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib
-            })
-        })
-        .ok_or(())?;
+    let flavor = match request.flavor_id {
+        Some(id) => flavors.iter().find(|flavor| flavor.id == id).ok_or(())?,
+        None => flavors
+            .iter()
+            .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
+            .ok_or(())?,
+    };
     Ok(Server {
         id: resource.id,
         name: request.name,
@@ -2262,6 +2260,10 @@ mod tests {
                 .flavor_id,
             flavor.id
         );
+        let intent = reopened.store.get_resource(server.id).await?;
+        let intent: CreateInstanceRequest = serde_json::from_str(&intent.desired_state)?;
+        assert_eq!(intent.flavor_id, Some(flavor.id));
+        assert_eq!(intent.disk_gib, Some(flavor.disk_gib));
         assert!(matches!(
             reopened.delete_flavor("project-a", flavor.id).await,
             Err(ComputeError::Conflict)

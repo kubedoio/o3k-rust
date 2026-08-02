@@ -732,6 +732,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: "192.0.2.0/24".to_owned(),
+                        gateway_ipv4: "192.0.2.1".to_owned(),
                     }],
                 }),
             })),
@@ -842,6 +844,8 @@ mod tests {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
+                        subnet_cidr: "192.0.2.0/24".to_owned(),
+                        gateway_ipv4: "192.0.2.1".to_owned(),
                     }],
                     ..Default::default()
                 }),
