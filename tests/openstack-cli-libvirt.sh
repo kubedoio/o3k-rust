@@ -86,7 +86,12 @@ if kind == "show":
         raise SystemExit("server show did not prove the expected fixed IP")
 elif kind == "list":
     if not isinstance(value, list) or not any(
-        isinstance(row, dict) and str(row.get("id", "")) == expected_id
+        isinstance(row, dict)
+        and next(
+            (str(item) for key, item in row.items() if str(key).lower() == "id"),
+            "",
+        )
+        == expected_id
         for row in value
     ):
         raise SystemExit("server list did not contain the created server")
@@ -420,9 +425,14 @@ source, destination = sys.argv[1:]
 with open(source, encoding="utf-8") as stream:
     value = json.load(stream)
 rows = value if isinstance(value, list) else value.get("servers", [])
+def field(row, wanted):
+    return next(
+        (item for key, item in row.items() if str(key).lower() == wanted),
+        None,
+    )
 evidence = {
     "rows": [
-        {key: row.get(key) for key in ("id", "name", "status")}
+        {key: field(row, key) for key in ("id", "name", "status")}
         for row in rows
         if isinstance(row, dict)
     ],
