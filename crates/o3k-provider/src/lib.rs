@@ -373,12 +373,11 @@ impl ComputeProvider for FakeComputeProvider {
         if state.failure == FailureInjection::StaleState {
             return Err(ProviderError::StaleState);
         }
-        if state.failure == FailureInjection::None {
-            if let Some(instance) = state.instances.get_mut(provider_instance_id) {
-                if instance.state == InstanceState::Creating {
-                    instance.state = InstanceState::Running;
-                }
-            }
+        if state.failure == FailureInjection::None
+            && let Some(instance) = state.instances.get_mut(provider_instance_id)
+            && instance.state == InstanceState::Creating
+        {
+            instance.state = InstanceState::Running;
         }
         state
             .instances

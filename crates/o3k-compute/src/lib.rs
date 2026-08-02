@@ -617,8 +617,8 @@ async fn apply_agent_provider_event(
     let mut state = state.write().await;
     match event {
         o3k_compute_agent::AgentEvent::CommandAccepted(accepted) => {
-            if let Some(store) = store {
-                if let Err(error) = store
+            if let Some(store) = store
+                && let Err(error) = store
                     .update_agent_command(
                         &accepted.command_id,
                         AgentCommandState::Accepted,
@@ -628,61 +628,54 @@ async fn apply_agent_provider_event(
                         None,
                     )
                     .await
-                {
-                    tracing::debug!(%error, command_id = %accepted.command_id, "agent command acceptance was not durably projected");
-                }
+            {
+                tracing::debug!(%error, command_id = %accepted.command_id, "agent command acceptance was not durably projected");
             }
-            if let Ok(operation_id) = Uuid::parse_str(&accepted.operation_id) {
-                if let Some(operation) = state.operations.get_mut(&operation_id) {
-                    if let Some(next) = operation_state_from_proto(accepted.state) {
-                        operation.state = next;
-                    }
-                }
+            if let Ok(operation_id) = Uuid::parse_str(&accepted.operation_id)
+                && let Some(operation) = state.operations.get_mut(&operation_id)
+                && let Some(next) = operation_state_from_proto(accepted.state)
+            {
+                operation.state = next;
             }
         }
         o3k_compute_agent::AgentEvent::Operation(update) => {
-            if let Some(store) = store {
-                if let Ok(operation_id) = Uuid::parse_str(&update.operation_id) {
-                    if let Ok(command) = store.get_agent_command_by_operation(operation_id).await {
-                        let state = match operation_state_from_proto(update.state) {
-                            Some(o3k_provider::OperationState::Succeeded) => {
-                                AgentCommandState::Succeeded
-                            }
-                            Some(o3k_provider::OperationState::Retryable) => {
-                                AgentCommandState::Retryable
-                            }
-                            Some(o3k_provider::OperationState::UnknownOutcome) => {
-                                AgentCommandState::UnknownOutcome
-                            }
-                            Some(o3k_provider::OperationState::Failed) => AgentCommandState::Failed,
-                            _ => AgentCommandState::Running,
-                        };
-                        if let Err(error) = store
-                            .update_agent_command(
-                                &command.command_id,
-                                state,
-                                command.accepted_sequence,
-                                update.operation_sequence,
-                                command.provider_operation_id.as_deref(),
-                                (!update.provider_resource_id.is_empty())
-                                    .then_some(update.provider_resource_id.as_str()),
-                            )
-                            .await
-                        {
-                            tracing::debug!(%error, operation_id = %update.operation_id, "agent operation was not durably projected");
-                        }
+            if let Some(store) = store
+                && let Ok(operation_id) = Uuid::parse_str(&update.operation_id)
+                && let Ok(command) = store.get_agent_command_by_operation(operation_id).await
+            {
+                let state = match operation_state_from_proto(update.state) {
+                    Some(o3k_provider::OperationState::Succeeded) => AgentCommandState::Succeeded,
+                    Some(o3k_provider::OperationState::Retryable) => AgentCommandState::Retryable,
+                    Some(o3k_provider::OperationState::UnknownOutcome) => {
+                        AgentCommandState::UnknownOutcome
                     }
+                    Some(o3k_provider::OperationState::Failed) => AgentCommandState::Failed,
+                    _ => AgentCommandState::Running,
+                };
+                if let Err(error) = store
+                    .update_agent_command(
+                        &command.command_id,
+                        state,
+                        command.accepted_sequence,
+                        update.operation_sequence,
+                        command.provider_operation_id.as_deref(),
+                        (!update.provider_resource_id.is_empty())
+                            .then_some(update.provider_resource_id.as_str()),
+                    )
+                    .await
+                {
+                    tracing::debug!(%error, operation_id = %update.operation_id, "agent operation was not durably projected");
                 }
             }
-            if let Ok(operation_id) = Uuid::parse_str(&update.operation_id) {
-                if let Some(operation) = state.operations.get_mut(&operation_id) {
-                    if let Some(next) = operation_state_from_proto(update.state) {
-                        operation.state = next;
-                    }
-                    operation.error_category = error_category_from_proto(update.error_category);
-                    if !update.provider_resource_id.is_empty() {
-                        operation.provider_resource_id = Some(update.provider_resource_id);
-                    }
+            if let Ok(operation_id) = Uuid::parse_str(&update.operation_id)
+                && let Some(operation) = state.operations.get_mut(&operation_id)
+            {
+                if let Some(next) = operation_state_from_proto(update.state) {
+                    operation.state = next;
+                }
+                operation.error_category = error_category_from_proto(update.error_category);
+                if !update.provider_resource_id.is_empty() {
+                    operation.provider_resource_id = Some(update.provider_resource_id);
                 }
             }
         }
@@ -692,18 +685,18 @@ async fn apply_agent_provider_event(
             };
             let provider_id = observation.provider_resource_id.clone();
             if !provider_id.is_empty() {
-                if let Some(store) = store {
-                    if let Ok(resource_id) = Uuid::parse_str(&observation.resource_id) {
-                        let reference = o3k_store::ProviderReference {
-                            resource_id,
-                            provider_name: "agent".to_owned(),
-                            provider_resource_id: provider_id.clone(),
-                        };
-                        if let Err(error) = store.attach_provider_reference(&reference).await {
-                            if !matches!(error, StoreError::ProviderReferenceAlreadyExists) {
-                                tracing::debug!(%error, resource_id = %observation.resource_id, "agent provider reference was not durably projected");
-                            }
-                        }
+                if let Some(store) = store
+                    && let Ok(resource_id) = Uuid::parse_str(&observation.resource_id)
+                {
+                    let reference = o3k_store::ProviderReference {
+                        resource_id,
+                        provider_name: "agent".to_owned(),
+                        provider_resource_id: provider_id.clone(),
+                    };
+                    if let Err(error) = store.attach_provider_reference(&reference).await
+                        && !matches!(error, StoreError::ProviderReferenceAlreadyExists)
+                    {
+                        tracing::debug!(%error, resource_id = %observation.resource_id, "agent provider reference was not durably projected");
                     }
                 }
                 state.bindings.insert(
@@ -725,27 +718,27 @@ async fn apply_agent_provider_event(
                     },
                 );
             }
-            if let Ok(operation_id) = Uuid::parse_str(&observation.operation_id) {
-                if let Some(operation) = state.operations.get_mut(&operation_id) {
-                    if let Some(next) = operation_state_from_proto(observation.operation_state) {
-                        operation.state = next;
-                    }
-                    if !provider_id.is_empty() {
-                        operation.provider_resource_id = Some(provider_id);
-                    }
+            if let Ok(operation_id) = Uuid::parse_str(&observation.operation_id)
+                && let Some(operation) = state.operations.get_mut(&operation_id)
+            {
+                if let Some(next) = operation_state_from_proto(observation.operation_state) {
+                    operation.state = next;
+                }
+                if !provider_id.is_empty() {
+                    operation.provider_resource_id = Some(provider_id);
                 }
             }
         }
         o3k_compute_agent::AgentEvent::Error(error) => {
-            if let Ok(operation_id) = Uuid::parse_str(&error.operation_id) {
-                if let Some(operation) = state.operations.get_mut(&operation_id) {
-                    operation.state = if error.retryable {
-                        o3k_provider::OperationState::Retryable
-                    } else {
-                        o3k_provider::OperationState::Failed
-                    };
-                    operation.error_category = error_category_from_proto(error.category);
-                }
+            if let Ok(operation_id) = Uuid::parse_str(&error.operation_id)
+                && let Some(operation) = state.operations.get_mut(&operation_id)
+            {
+                operation.state = if error.retryable {
+                    o3k_provider::OperationState::Retryable
+                } else {
+                    o3k_provider::OperationState::Failed
+                };
+                operation.error_category = error_category_from_proto(error.category);
             }
         }
         o3k_compute_agent::AgentEvent::ArtifactAck(_)
@@ -917,13 +910,12 @@ impl ComputeProvider for AgentComputeProvider {
         if let Some(existing) = self
             .persist_pending_command(&command, request.operation_id)
             .await?
-        {
-            if matches!(
+            && matches!(
                 existing.state,
                 AgentCommandState::Succeeded | AgentCommandState::Failed
-            ) {
-                return self.accepted_operation(request.operation_id).await;
-            }
+            )
+        {
+            return self.accepted_operation(request.operation_id).await;
         }
         let artifacts = self
             .artifact_resolver
@@ -1170,51 +1162,52 @@ impl ComputeProvider for AgentComputeProvider {
     }
 
     async fn get_operation(&self, id: Uuid) -> Result<Operation, ProviderError> {
-        if let Some(store) = &self.store {
-            if let Ok(record) = store.get_operation(id).await {
-                let provider_resource_id =
-                    if let Ok(command) = store.get_agent_command_by_operation(id).await {
-                        store
-                            .get_provider_reference(command.resource_id, "agent")
-                            .await
-                            .ok()
-                            .map(|reference| reference.provider_resource_id)
-                    } else {
-                        None
-                    };
-                let state = match record.state {
-                    o3k_store::OperationState::Pending => o3k_provider::OperationState::Accepted,
-                    o3k_store::OperationState::Running => o3k_provider::OperationState::Running,
-                    o3k_store::OperationState::Succeeded => o3k_provider::OperationState::Succeeded,
-                    o3k_store::OperationState::Retryable => o3k_provider::OperationState::Retryable,
-                    o3k_store::OperationState::UnknownOutcome => {
-                        o3k_provider::OperationState::UnknownOutcome
-                    }
-                    o3k_store::OperationState::Failed => o3k_provider::OperationState::Failed,
+        if let Some(store) = &self.store
+            && let Ok(record) = store.get_operation(id).await
+        {
+            let provider_resource_id =
+                if let Ok(command) = store.get_agent_command_by_operation(id).await {
+                    store
+                        .get_provider_reference(command.resource_id, "agent")
+                        .await
+                        .ok()
+                        .map(|reference| reference.provider_resource_id)
+                } else {
+                    None
                 };
-                return Ok(Operation {
-                    provider_operation_id: record
-                        .provider_operation_id
-                        .as_deref()
-                        .and_then(|value| Uuid::parse_str(value).ok())
-                        .unwrap_or(id),
-                    o3k_operation_id: id,
-                    state,
-                    error_category: record.error_category.as_deref().and_then(
-                        |value| match value {
-                            "invalid_request" => Some(o3k_provider::ErrorCategory::InvalidRequest),
-                            "conflict" => Some(o3k_provider::ErrorCategory::Conflict),
-                            "capacity" => Some(o3k_provider::ErrorCategory::Capacity),
-                            "not_found" => Some(o3k_provider::ErrorCategory::NotFound),
-                            "retryable" => Some(o3k_provider::ErrorCategory::Retryable),
-                            "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
-                            "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
-                            _ => None,
-                        },
-                    ),
-                    provider_resource_id,
-                });
-            }
+            let state = match record.state {
+                o3k_store::OperationState::Pending => o3k_provider::OperationState::Accepted,
+                o3k_store::OperationState::Running => o3k_provider::OperationState::Running,
+                o3k_store::OperationState::Succeeded => o3k_provider::OperationState::Succeeded,
+                o3k_store::OperationState::Retryable => o3k_provider::OperationState::Retryable,
+                o3k_store::OperationState::UnknownOutcome => {
+                    o3k_provider::OperationState::UnknownOutcome
+                }
+                o3k_store::OperationState::Failed => o3k_provider::OperationState::Failed,
+            };
+            return Ok(Operation {
+                provider_operation_id: record
+                    .provider_operation_id
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .unwrap_or(id),
+                o3k_operation_id: id,
+                state,
+                error_category: record
+                    .error_category
+                    .as_deref()
+                    .and_then(|value| match value {
+                        "invalid_request" => Some(o3k_provider::ErrorCategory::InvalidRequest),
+                        "conflict" => Some(o3k_provider::ErrorCategory::Conflict),
+                        "capacity" => Some(o3k_provider::ErrorCategory::Capacity),
+                        "not_found" => Some(o3k_provider::ErrorCategory::NotFound),
+                        "retryable" => Some(o3k_provider::ErrorCategory::Retryable),
+                        "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
+                        "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
+                        _ => None,
+                    }),
+                provider_resource_id,
+            });
         }
         self.state
             .read()
@@ -1775,10 +1768,10 @@ impl ComputeService {
                         && existing_request.placement_allocation_id.as_deref()
                             == Some(decision.allocation_id.as_str())
                 });
-                if let Some(decision) = placement.as_ref() {
-                    if !owns_persisted_placement {
-                        self.release_placement_decision(decision)?;
-                    }
+                if let Some(decision) = placement.as_ref()
+                    && !owns_persisted_placement
+                {
+                    self.release_placement_decision(decision)?;
                 }
                 let legacy_keypair_intent =
                     requests_match_with_keypair_migration(&existing_request, &request);
@@ -1873,11 +1866,11 @@ impl ComputeService {
             .await?;
         let mut servers = Vec::new();
         for resource in resources {
-            if let Ok(mut server) = server_from_resource(resource, &flavors) {
-                if server.status != "DELETED" {
-                    server.key_name = self.store.get_server_keypair_name(server.id).await?;
-                    servers.push(server);
-                }
+            if let Ok(mut server) = server_from_resource(resource, &flavors)
+                && server.status != "DELETED"
+            {
+                server.key_name = self.store.get_server_keypair_name(server.id).await?;
+                servers.push(server);
             }
         }
         Ok(servers)

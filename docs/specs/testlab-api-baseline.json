@@ -2,6 +2,13 @@
   "schema_version": 1,
   "status": "normative",
   "release": "v0.2.0-testlab",
+  "openstack_compatibility": {
+    "series": "2026.1",
+    "codename": "Gazpacho",
+    "selection": "static",
+    "specification": "compatibility/openstack-targets.yaml",
+    "backward_compatibility": {"series": "2025.2", "codename": "Flamingo"}
+  },
   "source_policy": {
     "official": [
       "https://docs.openstack.org/api-ref/identity/v3/",
@@ -50,7 +57,9 @@
       "nova_baseline": "2.1",
       "client_rule": "Baseline clients omit X-OpenStack-Nova-API-Version.",
       "requested_above_baseline": 406,
-      "negotiation_required": false
+      "negotiation_required": false,
+      "placement_allocation": "1.28",
+      "placement_allocation_exact": true
     },
     "extensions": {
       "rule": "Only extensions named by an operation in this document are supported; unknown extensions are rejected predictably.",
