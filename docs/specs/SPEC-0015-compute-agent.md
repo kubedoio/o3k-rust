@@ -1,17 +1,16 @@
 # SPEC-0015 — `o3k-compute` agent and control-plane protocol
 
-Status: Accepted contract with repository runtime implementation for issue #78;
-protected real-host evidence pending
+Status: Accepted contract draft for issue #37; additive artifact-transfer
+contract accepted; runtime implementation pending
 Version: `o3k.compute.v1` / wire revision 1
 
 ## 1. Scope and boundary
 
 This specification defines the identity, enrollment, transport, lifecycle
 command, operation, observation, liveness, and recovery contract between
-`o3kd` and one `o3k-compute` process. The contract is accepted. The repository
-implements the fenced command, durable acceptance/replay, operation retry,
-observation, and recovery boundary; protected real-host evidence remains
-tracked by issue #78 and the later release issues.
+`o3kd` and one `o3k-compute` process. The contract is accepted; runtime
+implementation and real-host evidence are tracked separately by issue #38 and
+the later release issues.
 
 The execution path is:
 
@@ -22,7 +21,8 @@ OpenStack client -> o3kd -> versioned mTLS stream -> o3k-compute
 
 `o3kd` owns OpenStack semantics, project authorization, resource IDs, desired
 state, scheduling, operation state, and reconciliation decisions. The agent
-owns bounded host-local execution, capability reporting, and observations.
+owns bounded host-local execution, artifact ownership, capability reporting, and
+observations.
 The agent is the only component allowed to access the host system libvirt
 socket. A remote libvirt URI, arbitrary URI, or user-supplied socket path is
 not a valid protocol value. This issue does not implement libvirt, scheduling,
@@ -54,6 +54,8 @@ Transport requirements:
   oversized commands, observations, capabilities, and console-log responses.
 - The protocol has no arbitrary file paths, shell commands, XML, libvirt URI,
   bridge name, TAP name, or credentials in its common messages.
+- Artifact transfer messages carry bounded bytes only after authenticated
+  registration; they do not carry source paths or source-store credentials.
 
 ## 3. Enrollment and identity
 
@@ -94,7 +96,11 @@ unknown enum values are treated as unsupported, not as a successful default.
 Behavior changes that alter identity, operation, or state meaning require a new
 wire revision or package. The agent must advertise capability names before the
 control plane uses optional operations. Version overlap failure leaves the
-agent unregistered and does not execute work.
+agent unregistered and does not execute work. Artifact transfer is an additive
+capability: it does not alter existing envelope meanings, so this contract
+remains at wire revision 1. A control plane must not offer artifacts to an
+agent that has not negotiated the artifact-transfer capability; an older peer
+may ignore the new oneof alternatives without changing legacy behavior.
 
 ## 5. Registration, heartbeat, and administrative state
 
@@ -244,7 +250,73 @@ unknown outcome. Console output is potentially sensitive guest data: it is
 access-controlled, size-limited, not written to control-plane logs, and not
 included in generic error messages.
 
-## 11. Failure, restart, and timeout rules
+## 11. Authenticated artifact transfer
+
+Artifact transfer is an optional, bounded prerequisite for a future agent-side
+create realization. It is not a replacement for the command protocol and does
+not by itself mean that a server was created. The only initial artifact kinds
+are `ARTIFACT_KIND_IMAGE_BASE` and `ARTIFACT_KIND_CONFIG_DRIVE_ISO`.
+
+The control plane sends `ArtifactOffer`, zero or more `ArtifactChunk` messages,
+and `ArtifactEnd` on `ControlResponse`. The agent returns `ArtifactAck` and
+`ArtifactStatus` on `ControlRequest`. Every transfer is correlated to a
+`transfer_id`, `command_id`, `operation_id`, and `resource_id`; the offer also
+binds the opaque artifact ID, kind, SHA-256 digest, exact byte size, format,
+chunk size, chunk count, and expiry. The authenticated stream identity must
+match the `agent_id` in the transfer messages, and agent replies must include
+the current `agent_epoch`.
+
+The initial limits are fixed contract values:
+
+- maximum artifact size: 64 MiB (67,108,864 bytes);
+- chunk payload: 256 KiB (262,144 bytes);
+- maximum chunk count: 256 for a maximum-sized artifact;
+- only contiguous, sequential writes are accepted;
+- each chunk declares its index, byte offset, and SHA-256 digest;
+- final commit requires the exact declared size and whole-artifact digest;
+- the final config-drive ISO is subject to the same 64 MiB limit;
+- implementations must bound concurrent transfers and in-flight chunks before
+  allocating; the initial target is two transfers per agent and four chunks
+  in flight per transfer.
+
+The transfer state is explicit: `ARTIFACT_TRANSFER_STATE_OFFERED`,
+`RECEIVING`, `COMMITTED`, `REJECTED`, or `EXPIRED`. An equivalent duplicate
+offer or chunk is idempotent. A duplicate with a different correlation,
+digest, size, offset, or bytes is rejected. A lost acknowledgement is
+transport uncertainty: the sender retries the same offer or chunk and does
+not create a new transfer identity.
+
+The command is sent only after every required artifact reports `COMMITTED` with
+matching digest and size. Artifact completion does not imply command acceptance,
+operation success, or guest boot.
+
+### Restart and ownership semantics
+
+The agent persists the transfer identity, command correlation, stable agent ID,
+artifact identity and kind, expected digest/size/format/chunk count, committed
+contiguous offset, and an ownership manifest before acknowledging progress. A
+restart creates a new `agent_epoch` but does not change stable artifact
+ownership. Valid partial transfers may resume when the same transfer and
+command identities are presented; malformed, foreign, symlinked, or tampered
+manifests and partial files fail closed and are not repaired by deleting a
+foreign object. The agent reports committed and incomplete transfer status
+after registration.
+
+The control plane persists delivery records keyed by `transfer_id`, including
+command/resource correlation, agent identity and last accepted epoch, artifact
+metadata, committed offset, state, retry count, and timestamps. After a
+control-plane restart it reuses the same transfer identity, observes the
+current agent epoch, resumes from the acknowledged contiguous offset, and
+sends the command only after durable delivery completion. Epoch fencing
+protects the stream and stale acknowledgements; it does not transfer
+ownership to a new process or authorize foreign cleanup.
+
+The protocol never exposes an agent-local path. Image bases may be shared by
+content digest only when durable resource references prevent premature cleanup;
+config-drive media is instance-owned and must be retained until the associated
+domain and network resources are safely removed.
+
+## 12. Failure, restart, and timeout rules
 
 - **Agent restart:** stable identity and durable operation records survive;
   epoch changes; reconnect registration precedes replay; no duplicate command
@@ -264,7 +336,7 @@ included in generic error messages.
   records for audit and reconciliation; never erase evidence to hide a stale
   outcome.
 
-## 12. Threat model and security requirements
+## 13. Threat model and security requirements
 
 | Threat | Required control |
 | --- | --- |
@@ -283,18 +355,24 @@ operations. It must not expose a general command runner or a remote libvirt
 proxy. Security-sensitive certificate, privilege, ownership, and cleanup code
 requires explicit human review.
 
-## 13. Compatibility, tests, and non-goals
+## 14. Compatibility, tests, and non-goals
 
 Compatibility is package-based: `o3k.compute.v1` is compatible only with an
 overlapping supported wire revision and capability set. Additive protobuf
 changes are allowed within the major version; semantic changes require a new
-revision or package. CI validates the committed draft with `protoc`; future
-agent work must add protocol, failure-path, restart, replay, and mTLS tests
+revision or package. CI compares the current schema against the checked-out
+default branch through the remote `origin/main` baseline and validates the
+committed draft with `protoc`. No checked-in descriptor baseline is maintained;
+ADR-0123 records why. This additive change therefore keeps wire revision 1 and
+preserves all existing field numbers and message meanings. Future agent work
+must add protocol, failure-path, restart, replay, ownership, and mTLS tests
 before claiming implementation.
 
 This issue does not implement the agent, libvirt adapter, qemu domain XML,
-ownership discovery, image cache, scheduler, placement, bridge/TAP, DHCP,
-config-drive, Nova wiring, CellHV models, or an OpenStack-facing API change.
+ownership discovery, image cache realization, scheduler, placement, bridge/TAP,
+DHCP, config-drive realization, Nova wiring, CellHV models, or an
+OpenStack-facing API change. Artifact ownership here is limited to transfer
+safety and does not claim host resource discovery.
 
 ## Public sources and provenance
 
@@ -305,5 +383,6 @@ config-drive, Nova wiring, CellHV models, or an OpenStack-facing API change.
 - TLS 1.3: RFC 8446, <https://www.rfc-editor.org/rfc/rfc8446> (accessed
   2026-07-31);
 - O3K ADR-0005 and SPEC-0003;
-- authored by an AI coding agent for issue #37; no private source, schema, or
+- authored by an AI coding agent for issue #37 and the artifact-transfer
+  contract follow-up; no private source, schema, or
   implementation was used.
