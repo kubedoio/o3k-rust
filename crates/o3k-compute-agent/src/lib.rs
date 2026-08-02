@@ -30,7 +30,7 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, broadcast, mpsc},
+    sync::{RwLock, Semaphore, broadcast, mpsc},
     time,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -62,6 +62,8 @@ pub const DEFAULT_LEASE: Duration = Duration::from_secs(15);
 const MAX_AGENT_ID: usize = 128;
 const MAX_HOST_LABEL: usize = 255;
 pub const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+pub const MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT: usize = 2;
+pub const MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER: usize = 4;
 const ADMINISTRATIVE_STATE_FILE_EXTENSION: &str = "state";
 const COMMAND_JOURNAL_FILE_EXTENSION: &str = "commands";
 const COMMAND_JOURNAL_TEMP_EXTENSION: &str = "commands.tmp";
@@ -277,6 +279,7 @@ pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
+    artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
     events: broadcast::Sender<AgentEvent>,
 }
 
@@ -287,6 +290,7 @@ impl Default for NodeRegistry {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             authorized_agents: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
+            artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
         }
     }
@@ -349,6 +353,33 @@ impl NodeRegistry {
             .is_some_and(|connection| connection.epoch == agent_epoch)
     }
 
+    async fn acquire_artifact_transfer_slot(
+        &self,
+        agent_id: &str,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, AgentError> {
+        let semaphore = if let Some(semaphore) = self
+            .artifact_transfer_slots
+            .read()
+            .await
+            .get(agent_id)
+            .cloned()
+        {
+            semaphore
+        } else {
+            let mut slots = self.artifact_transfer_slots.write().await;
+            slots
+                .entry(agent_id.to_owned())
+                .or_insert_with(|| {
+                    Arc::new(Semaphore::new(MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT))
+                })
+                .clone()
+        };
+        semaphore
+            .acquire_owned()
+            .await
+            .map_err(|_| AgentError::Protocol("artifact transfer limit is closed".to_owned()))
+    }
+
     pub async fn dispatch_command(&self, command: proto::Command) -> Result<(), AgentError> {
         validate_command(&command)?;
         let node = self
@@ -389,6 +420,15 @@ impl NodeRegistry {
     /// transfer state or wait for acknowledgements. The caller owns those
     /// coordination concerns.
     pub async fn dispatch_artifact(
+        &self,
+        offer: proto::ArtifactOffer,
+        bytes: impl AsRef<[u8]>,
+    ) -> Result<(), AgentError> {
+        let _transfer_slot = self.acquire_artifact_transfer_slot(&offer.agent_id).await?;
+        self.dispatch_artifact_sequence(offer, bytes).await
+    }
+
+    async fn dispatch_artifact_sequence(
         &self,
         offer: proto::ArtifactOffer,
         bytes: impl AsRef<[u8]>,
@@ -438,7 +478,16 @@ impl NodeRegistry {
             .map_err(|_| AgentError::Protocol("agent control stream is closed".to_owned()))?;
 
         let chunk_size = offer.chunk_size_bytes as usize;
+        // Chunks are deliberately emitted in index order because the agent
+        // commits only contiguous data. The semaphore makes the maximum
+        // in-flight chunk budget explicit for future pipelining without
+        // allowing an implementation change to exceed the contract.
+        let chunk_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER));
         for (chunk_index, chunk) in bytes.chunks(chunk_size).enumerate() {
+            let _chunk_slot = chunk_slots
+                .acquire()
+                .await
+                .map_err(|_| AgentError::Protocol("artifact chunk limit is closed".to_owned()))?;
             let chunk_index = u32::try_from(chunk_index)
                 .map_err(|_| AgentError::Protocol("artifact chunk index overflow".to_owned()))?;
             connection
@@ -493,7 +542,11 @@ impl NodeRegistry {
             .await
             .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?
             .agent_epoch;
-        self.dispatch_artifact(offer, bytes).await?;
+        // Keep the transfer slot until the authenticated terminal ack. A
+        // transfer remains in flight after ArtifactEnd until its outcome is
+        // known, including when the outcome later becomes unknown on timeout.
+        let _transfer_slot = self.acquire_artifact_transfer_slot(&agent_id).await?;
+        self.dispatch_artifact_sequence(offer, bytes).await?;
         time::timeout(timeout, async move {
             loop {
                 let event = events.recv().await.map_err(|error| match error {
@@ -3712,6 +3765,70 @@ mod tests {
                     && received.sha256 == offer.sha256
                     && received.size_bytes == offer.size_bytes
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_dispatch_allows_two_transfers_but_admits_no_third()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(MAX_CONCURRENT_ARTIFACT_TRANSFERS_PER_AGENT, 2);
+        assert_eq!(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER, 4);
+
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (mut first, data) = test_artifact_offer("node");
+        first.transfer_id = "transfer-first".to_owned();
+        let (mut second, _) = test_artifact_offer("node");
+        second.transfer_id = "transfer-second".to_owned();
+        let (mut third, _) = test_artifact_offer("node");
+        third.transfer_id = "transfer-third".to_owned();
+
+        let first_task = {
+            let registry = registry.clone();
+            let data = data.clone();
+            tokio::spawn(async move { registry.dispatch_artifact(first, data).await })
+        };
+        let second_task = {
+            let registry = registry.clone();
+            let data = data.clone();
+            tokio::spawn(async move { registry.dispatch_artifact(second, data).await })
+        };
+
+        let mut offers = 0;
+        while offers < 2 {
+            let response = receiver.recv().await.ok_or("artifact response")??;
+            if matches!(
+                response.body,
+                Some(proto::control_response::Body::ArtifactOffer(_))
+            ) {
+                offers += 1;
+            }
+        }
+
+        let third_result = tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.dispatch_artifact(third, data.clone()),
+        )
+        .await;
+        assert!(
+            third_result.is_err(),
+            "third transfer bypassed the per-agent bound"
+        );
+
+        let mut ends = 0;
+        while ends < 2 {
+            let response = receiver.recv().await.ok_or("artifact response")??;
+            if matches!(
+                response.body,
+                Some(proto::control_response::Body::ArtifactEnd(_))
+            ) {
+                ends += 1;
+            }
+        }
+        first_task.await??;
+        second_task.await??;
         Ok(())
     }
 
