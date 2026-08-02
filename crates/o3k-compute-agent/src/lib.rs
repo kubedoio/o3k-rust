@@ -1502,6 +1502,15 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         }
                         registry.publish_event(AgentEvent::Error(error));
                     }
+                    Some(proto::control_request::Body::ArtifactAck(_))
+                    | Some(proto::control_request::Body::ArtifactStatus(_)) => {
+                        let _ = tx
+                            .send(Err(Status::unimplemented(
+                                "artifact transfer is not enabled on this control plane",
+                            )))
+                            .await;
+                        break;
+                    }
                     Some(proto::control_request::Body::Register(_)) => {
                         let _ = tx
                             .send(Err(Status::invalid_argument("duplicate registration")))
@@ -2886,7 +2895,14 @@ impl AgentClient {
                         | Some(proto::control_response::Body::ObservationAck(_))
                         | Some(proto::control_response::Body::Resync(_))
                         | Some(proto::control_response::Body::Error(_))
-                        | None => {}
+                        | Some(proto::control_response::Body::ArtifactOffer(_))
+                        | Some(proto::control_response::Body::ArtifactChunk(_))
+                        | Some(proto::control_response::Body::ArtifactEnd(_)) => {
+                            return Err(AgentError::Protocol(
+                                "artifact transfer is not enabled on this compute agent".to_owned(),
+                            ));
+                        }
+                        None => {}
                     },
                     None => return Err(AgentError::Protocol("control stream ended".to_owned())),
                 }
