@@ -1122,6 +1122,11 @@ impl ComputeProvider for AgentComputeProvider {
         &self,
         request: CreateInstanceRequest,
     ) -> Result<Operation, ProviderError> {
+        tracing::warn!(
+            resource_id = %request.o3k_server_id,
+            operation_id = %request.operation_id,
+            "agent create provider entered"
+        );
         let provider_id = request.placement_provider_id.as_deref().ok_or_else(|| {
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
@@ -1129,7 +1134,14 @@ impl ComputeProvider for AgentComputeProvider {
             );
             ProviderError::InvalidRequest
         })?;
-        let agent = self.selected_agent(provider_id).await?;
+        let agent = self.selected_agent(provider_id).await.map_err(|error| {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                error = %error,
+                "agent create agent selection rejected"
+            );
+            error
+        })?;
         if request.config_drive.is_some()
             && !agent
                 .capabilities
@@ -1200,7 +1212,15 @@ impl ComputeProvider for AgentComputeProvider {
         })?;
         if let Some(existing) = self
             .persist_pending_command(&command, request.operation_id)
-            .await?
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    error = %error,
+                    "agent create pending command persistence rejected"
+                );
+                error
+            })?
             && matches!(
                 existing.state,
                 AgentCommandState::Succeeded | AgentCommandState::Failed
