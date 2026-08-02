@@ -67,6 +67,7 @@ jobs:
           O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
           GITHUB_SHA: ${{ github.sha }}
         run: bash scripts/real-host-capability-probe.sh
 
