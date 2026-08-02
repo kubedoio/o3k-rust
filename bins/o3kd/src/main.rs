@@ -4,6 +4,7 @@ use o3k_compute::{
 };
 use o3k_compute_agent::NodeSnapshot;
 use o3k_provider::{ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, ProviderError};
+use o3k_provider_contract::compute_proto as proto;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -54,12 +55,18 @@ impl DaemonCreateResolver {
                 .network
                 .get_port(&request.project_id, port_id)
                 .map_err(|_| ProviderError::InvalidRequest)?;
+            let subnet = self
+                .network
+                .get_subnet(&request.project_id, port.subnet_id)
+                .map_err(|_| ProviderError::InvalidRequest)?;
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
             attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
                 port_id: port_id.clone(),
                 mac: port.mac_address.clone(),
                 fixed_ipv4: fixed_ip.clone(),
+                subnet_cidr: subnet.cidr,
+                gateway_ipv4: subnet.gateway_ip.to_string(),
             });
             network_data.insert(format!("{port_id}.mac"), port.mac_address);
             network_data.insert(format!("{port_id}.ipv4"), fixed_ip);
@@ -366,6 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
+    let inspect_probe_task = agent_inspect_probe_from_env(&registry);
     let shutdown_state = state.clone();
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
@@ -378,6 +386,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             task.abort();
             let _ = task.await;
         }
+    }
+    if let Some(task) = inspect_probe_task {
+        task.abort();
+        let _ = task.await;
     }
     event_task.abort();
     let _ = event_task.await;
