@@ -492,12 +492,13 @@ impl NodeRegistry {
         // in-flight chunk budget explicit for future pipelining without
         // allowing an implementation change to exceed the contract.
         let chunk_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_ARTIFACT_CHUNKS_PER_TRANSFER));
-        for (chunk_index, chunk) in bytes
-            .chunks(chunk_size)
-            .enumerate()
-            .skip(usize::try_from(start_chunk_index).map_err(|_| {
-                AgentError::Protocol("artifact resume offset is invalid".to_owned())
-            })?)
+        for (chunk_index, chunk) in
+            bytes
+                .chunks(chunk_size)
+                .enumerate()
+                .skip(usize::try_from(start_chunk_index).map_err(|_| {
+                    AgentError::Protocol("artifact resume offset is invalid".to_owned())
+                })?)
         {
             let _chunk_slot = chunk_slots
                 .acquire()
