@@ -309,16 +309,18 @@ async fn run_agent_inspect_probe(
             break;
         }
     }
-    let operation = operation.ok_or("agent inspect probe produced no operation update")?;
-    let observation = observation.ok_or("agent inspect probe produced no observation")?;
-    let expected = operation.state == proto::OperationState::Failed as i32
-        && operation.error_category == proto::ErrorCategory::NotFound as i32
-        && observation.operation_state == proto::OperationState::Failed as i32
-        && observation.state == proto::ResourceState::Error as i32;
+    let operation_state = operation.as_ref().map(|value| value.state);
+    let error_category = operation.as_ref().map(|value| value.error_category);
+    let observation_operation_state = observation.as_ref().map(|value| value.operation_state);
+    let observation_state = observation.as_ref().map(|value| value.state);
+    let expected = operation_state == Some(proto::OperationState::Failed as i32)
+        && error_category == Some(proto::ErrorCategory::NotFound as i32)
+        && observation_operation_state == Some(proto::OperationState::Failed as i32)
+        && observation_state == Some(proto::ResourceState::Error as i32);
     if !accepted || !expected {
-        return Err(
-            "agent inspect probe did not produce the expected NotFound observation".to_owned(),
-        );
+        return Err(format!(
+            "agent inspect probe state mismatch: accepted={accepted} operation_state={operation_state:?} error_category={error_category:?} observation_operation_state={observation_operation_state:?} observation_state={observation_state:?}"
+        ));
     }
     Ok(serde_json::json!({
         "artifact_type": "compute-agent-process-mtls",
