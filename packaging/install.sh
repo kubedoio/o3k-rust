@@ -158,12 +158,15 @@ INSTALLED_FILES=(
   share/o3k/diagnose.sh
   share/o3k/preflight.sh
   share/o3k/bootstrap-certs.sh
+  share/o3k/generate-passwords.sh
 )
 install_owned_file "$BINARY" "$PREFIX/bin/o3kd" bin/o3kd 0755
 install_owned_file "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service" share/o3k/o3kd.service 0644
 for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh; do
   install_owned_file "$ROOT_DIR/packaging/$file" "$PREFIX/share/o3k/$file" "share/o3k/$file" 0755
 done
+install_owned_file "$ROOT_DIR/scripts/generate-passwords.sh" \
+  "$PREFIX/share/o3k/generate-passwords.sh" share/o3k/generate-passwords.sh 0755
 if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
@@ -177,16 +180,12 @@ MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
 mv -f -- "$MANIFEST_TEMP" "$INSTALL_MANIFEST"
 chmod 0644 "$INSTALL_MANIFEST"
 ENV_FILE="$CONFIG_DIR/o3kd.env"
-if [[ ! -e "$ENV_FILE" ]]; then
+O3K_PASSWORD_FILE="$ENV_FILE" \
+  O3K_KOLLA_PASSWORD_FILE="${O3K_KOLLA_PASSWORD_FILE:-/etc/kolla/passwords.yml}" \
+  bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$ENV_FILE"
+if ! grep -q '^O3K_DATA_DIR=' "$ENV_FILE"; then
   umask 077
-  if [[ $NONINTERACTIVE -eq 1 ]]; then PASSWORD="$(od -An -N24 -tx1 /dev/urandom | tr -d ' 
-')"; else read -r -s -p "Bootstrap password (empty disables identity): " PASSWORD; echo; fi
-  SIGNING_KEY="$(od -An -N48 -tx1 /dev/urandom | tr -d ' 
-')"
-  { printf 'O3K_DATA_DIR=%q
-' "$DATA_DIR"; printf 'O3K_BOOTSTRAP_PASSWORD=%q
-' "$PASSWORD"; printf 'O3K_TOKEN_SIGNING_KEY=%q
-' "$SIGNING_KEY"; } >"$ENV_FILE"
+  printf 'O3K_DATA_DIR=%q\n' "$DATA_DIR" >>"$ENV_FILE"
   chmod 0600 "$ENV_FILE"
 fi
 if [[ "$PROFILE" == libvirt ]]; then
