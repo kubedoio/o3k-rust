@@ -20,7 +20,7 @@ use o3k_console::{ConsoleError, ConsoleService};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
-use o3k_provider::InstanceAction;
+use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
@@ -1145,8 +1145,10 @@ struct CreateServerRequest {
     image: Option<IdReference>,
     flavor: Option<IdReference>,
     networks: Option<Vec<NetworkReference>>,
-    /// Recognized so an unsupported request cannot be silently dropped.
     config_drive: Option<bool>,
+    user_data: Option<String>,
+    vendor_data: Option<String>,
+    ssh_public_key: Option<String>,
     key_name: Option<String>,
 }
 #[derive(serde::Deserialize)]
@@ -1620,13 +1622,27 @@ async fn create_server(
             "invalid server request",
         );
     };
-    if body.server.config_drive == Some(true) {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "config-drive attachment is not supported by this profile",
-        );
-    }
+    let config_drive = if body.server.config_drive == Some(true) {
+        let Some(ssh_public_key) = body.server.ssh_public_key.clone() else {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "ssh_public_key is required when config_drive is enabled",
+            );
+        };
+        Some(ConfigDriveRequest {
+            user_data: body
+                .server
+                .user_data
+                .clone()
+                .unwrap_or_default()
+                .into_bytes(),
+            vendor_data: body.server.vendor_data.clone().map(String::into_bytes),
+            ssh_public_key,
+        })
+    } else {
+        None
+    };
     let Some(image) = body
         .server
         .image
@@ -1714,7 +1730,7 @@ async fn create_server(
             flavor_id: flavor,
             network_ids,
             key_name: body.server.key_name,
-            config_drive: None,
+            config_drive,
             idempotency_key: idempotency,
         })
         .await
