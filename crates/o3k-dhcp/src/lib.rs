@@ -205,6 +205,11 @@ impl DhcpService {
         self.state.bindings.values()
     }
 
+    /// Returns the persisted network configuration for restart reconciliation.
+    pub fn configuration(&self) -> Option<&DhcpConfig> {
+        self.state.config.as_ref()
+    }
+
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
@@ -410,6 +415,18 @@ mod tests {
                 .managed_config_path()
                 .ends_with("o3k-dhcp-tests/dnsmasq.conf")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_survives_reopen() -> Result<(), DhcpError> {
+        let root = std::env::temp_dir().join(format!("o3k-dhcp-reopen-{}", uuid::Uuid::now_v7()));
+        let mut service = DhcpService::open(&root)?;
+        let expected = config()?;
+        service.configure(expected.clone())?;
+        let reopened = DhcpService::open(&root)?;
+        assert_eq!(reopened.configuration(), Some(&expected));
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
         Ok(())
     }
 
