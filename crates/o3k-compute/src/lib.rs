@@ -1136,7 +1136,18 @@ impl ComputeProvider for AgentComputeProvider {
         {
             return Err(ProviderError::InvalidRequest);
         }
-        let resolved = self.resolver.resolve(&request, &agent).await?;
+        let resolved = self
+            .resolver
+            .resolve(&request, &agent)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    error = %error,
+                    "create resolver rejected request"
+                );
+                error
+            })?;
         let image_id = request
             .image_id
             .as_deref()
@@ -1162,7 +1173,14 @@ impl ComputeProvider for AgentComputeProvider {
             config_drive_sha256: resolved.config_drive_sha256,
             network_attachments: resolved.network_attachments.clone(),
         })
-        .map_err(map_agent_error)?;
+        .map_err(|error| {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                error = %error,
+                "create command construction rejected request"
+            );
+            map_agent_error(error)
+        })?;
         if let Some(existing) = self
             .persist_pending_command(&command, request.operation_id)
             .await?
@@ -1176,8 +1194,21 @@ impl ComputeProvider for AgentComputeProvider {
         let artifacts = self
             .artifact_resolver
             .resolve_artifacts(&request, &agent, &artifact_inputs)
-            .await?;
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    error = %error,
+                    "create artifact resolver rejected request"
+                );
+                error
+            })?;
         if artifacts.len() != 2 {
+            tracing::warn!(
+                resource_id = %request.o3k_server_id,
+                artifact_count = artifacts.len(),
+                "create artifact resolver returned an unexpected artifact count"
+            );
             return Err(ProviderError::InvalidRequest);
         }
         let required = [
@@ -1201,14 +1232,27 @@ impl ComputeProvider for AgentComputeProvider {
                 .position(|(kind, artifact_id, _, _)| {
                     *kind == artifact.kind && artifact_id.as_str() == artifact.artifact_id
                 })
-                .ok_or(ProviderError::InvalidRequest)?;
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        resource_id = %request.o3k_server_id,
+                        artifact_kind = artifact_kind_name(artifact.kind),
+                        "create artifact did not match a required reference"
+                    );
+                    ProviderError::InvalidRequest
+                })?;
             if seen[expected_index] {
                 return Err(ProviderError::InvalidRequest);
             }
             seen[expected_index] = true;
             let expected = &required[expected_index];
-            let size_bytes =
-                u64::try_from(artifact.bytes.len()).map_err(|_| ProviderError::InvalidRequest)?;
+            let size_bytes = u64::try_from(artifact.bytes.len()).map_err(|_| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    artifact_kind = artifact_kind_name(artifact.kind),
+                    "create artifact size could not be represented"
+                );
+                ProviderError::InvalidRequest
+            })?;
             if size_bytes == 0
                 || artifact.artifact_id.trim().is_empty()
                 || artifact.sha256.len() != 64
@@ -1217,6 +1261,11 @@ impl ComputeProvider for AgentComputeProvider {
                 || artifact.sha256 != *expected.2
                 || artifact.format != expected.3
             {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    artifact_kind = artifact_kind_name(artifact.kind),
+                    "create artifact metadata or digest validation failed"
+                );
                 return Err(ProviderError::InvalidRequest);
             }
             let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
@@ -1321,7 +1370,15 @@ impl ComputeProvider for AgentComputeProvider {
             self.registry
                 .dispatch_artifact_and_wait(offer.clone(), artifact.bytes, self.command_timeout)
                 .await
-                .map_err(map_agent_error)?;
+                .map_err(|error| {
+                    tracing::warn!(
+                        resource_id = %request.o3k_server_id,
+                        artifact_kind = artifact_kind_name(artifact.kind),
+                        error = %error,
+                        "create artifact transfer was rejected"
+                    );
+                    map_agent_error(error)
+                })?;
             if let Some(store) = &self.store {
                 store
                     .update_artifact_transfer(
@@ -1351,7 +1408,15 @@ impl ComputeProvider for AgentComputeProvider {
         }
         let operation = self
             .dispatch_recorded(command, request.operation_id)
-            .await?;
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    error = %error,
+                    "create command dispatch was rejected"
+                );
+                error
+            })?;
         self.state.write().await.bindings.insert(
             request.o3k_server_id.to_string(),
             AgentBinding {
