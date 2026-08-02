@@ -44,6 +44,8 @@ pub enum ConfigDriveError {
     Storage(#[source] io::Error),
     #[error("config-drive serialization failed")]
     Serialization(#[source] serde_json::Error),
+    #[error("config-drive ownership manifest is corrupt")]
+    CorruptManifest(#[source] serde_json::Error),
     #[error("config-drive path is not owned by o3k")]
     UnownedPath,
     #[error("config-drive ISO command failed")]
@@ -146,6 +148,35 @@ impl ConfigDriveStore {
         output_path: impl AsRef<Path>,
     ) -> Result<ConfigDriveIsoResult, ConfigDriveError> {
         materialize_iso_with_runner(source_directory, output_path, &SystemIsoCommandRunner)
+    }
+
+    /// Reads an ISO only after revalidating its O3K ownership manifest and
+    /// whole-file digest. This is the byte-oriented boundary used when an ISO
+    /// must cross into an authenticated compute agent.
+    pub fn read_verified_iso(
+        &self,
+        result: &ConfigDriveIsoResult,
+    ) -> Result<Vec<u8>, ConfigDriveError> {
+        let manifest_path = iso_manifest_path(&result.path)?;
+        let manifest: IsoOwnershipManifest =
+            serde_json::from_slice(&read_owned_file(&manifest_path)?)
+                .map_err(ConfigDriveError::CorruptManifest)?;
+        let output_name = result
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or(ConfigDriveError::InvalidInput)?;
+        let verified = validate_owned_iso(
+            &result.path,
+            &manifest_path,
+            &manifest.instance_id,
+            &result.source_fingerprint_sha256,
+            output_name,
+        )?;
+        if verified.fingerprint_sha256 != result.fingerprint_sha256 {
+            return Err(ConfigDriveError::InvalidIsoOutput);
+        }
+        fs::read(&result.path).map_err(ConfigDriveError::Storage)
     }
 }
 
@@ -877,6 +908,7 @@ mod tests {
         let output = root.join("instance-1.iso");
         let runner = FakeRunner::successful(b"deterministic-iso");
         let first = materialize_iso_with_runner(&source, &output, &runner)?;
+        assert_eq!(store.read_verified_iso(&first)?, b"deterministic-iso");
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0][0], OsStr::new("-as"));
