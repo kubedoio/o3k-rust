@@ -11,6 +11,7 @@ use o3k_provider::{
     Capabilities, ComputeProvider, CreateInstanceRequest, DeleteInstanceRequest, Instance,
     InstanceAction, Operation, ProviderError,
 };
+use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{AgentCommandRecord, AgentCommandState, DurableStore, SqliteStore, StoreError};
@@ -115,6 +116,28 @@ pub struct ResolvedCreateInputs {
     pub network_attachments: Vec<NetworkAttachmentSpec>,
 }
 
+/// Verified bytes that must be present on the agent before a create command
+/// is dispatched. Implementations must source these bytes from managed,
+/// digest-checked stores; paths are intentionally not part of this contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedCreateArtifact {
+    pub artifact_id: String,
+    pub kind: agent_proto::ArtifactKind,
+    pub sha256: String,
+    pub format: String,
+    pub bytes: Vec<u8>,
+}
+
+#[async_trait]
+pub trait CreateArtifactResolver: Send + Sync {
+    async fn resolve_artifacts(
+        &self,
+        request: &CreateInstanceRequest,
+        agent: &NodeSnapshot,
+        inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError>;
+}
+
 /// Resolves control-plane-owned resources into the bounded protocol inputs
 /// required by an agent. Implementations must return verified references and
 /// digests; returning placeholder values is intentionally not supported.
@@ -168,6 +191,7 @@ struct AgentProviderState {
 pub struct AgentComputeProvider {
     registry: NodeRegistry,
     resolver: Arc<dyn ResolvedCreateResolver>,
+    artifact_resolver: Option<Arc<dyn CreateArtifactResolver>>,
     state: Arc<RwLock<AgentProviderState>>,
     store: Option<Arc<SqliteStore>>,
     command_timeout: Duration,
@@ -207,6 +231,7 @@ impl AgentComputeProvider {
         Self {
             registry,
             resolver,
+            artifact_resolver: None,
             state,
             store,
             command_timeout: Duration::from_secs(30),
@@ -216,6 +241,12 @@ impl AgentComputeProvider {
     #[must_use]
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_artifact_resolver(mut self, resolver: Arc<dyn CreateArtifactResolver>) -> Self {
+        self.artifact_resolver = Some(resolver);
         self
     }
 
@@ -680,6 +711,7 @@ impl ComputeProvider for AgentComputeProvider {
             .image_id
             .as_deref()
             .ok_or(ProviderError::InvalidRequest)?;
+        let artifact_inputs = resolved.clone();
         let command = build_create_command(CreateCommandSpec {
             agent_id: agent.agent_id.clone(),
             agent_epoch: agent.agent_epoch.clone(),
@@ -697,9 +729,53 @@ impl ComputeProvider for AgentComputeProvider {
             disk_gib: resolved.disk_gib,
             config_drive_artifact_id: resolved.config_drive_artifact_id,
             config_drive_sha256: resolved.config_drive_sha256,
-            network_attachments: resolved.network_attachments,
+            network_attachments: resolved.network_attachments.clone(),
         })
         .map_err(map_agent_error)?;
+        if let Some(artifact_resolver) = &self.artifact_resolver {
+            let artifacts = artifact_resolver
+                .resolve_artifacts(&request, &agent, &artifact_inputs)
+                .await?;
+            for (index, artifact) in artifacts.into_iter().enumerate() {
+                let size_bytes = u64::try_from(artifact.bytes.len())
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                if size_bytes == 0
+                    || artifact.artifact_id.trim().is_empty()
+                    || artifact.sha256.len() != 64
+                    || artifact.format.trim().is_empty()
+                    || artifact.kind == agent_proto::ArtifactKind::Unspecified
+                {
+                    return Err(ProviderError::InvalidRequest);
+                }
+                let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
+                let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
+                    .map_err(|_| ProviderError::InvalidRequest)?;
+                let transfer_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
+                )
+                .to_string();
+                let offer = agent_proto::ArtifactOffer {
+                    transfer_id,
+                    command_id: command.command_id.clone(),
+                    operation_id: command.operation_id.clone(),
+                    resource_id: command.resource_id.clone(),
+                    agent_id: agent.agent_id.clone(),
+                    artifact_id: artifact.artifact_id,
+                    kind: artifact.kind as i32,
+                    sha256: artifact.sha256,
+                    size_bytes,
+                    format: artifact.format,
+                    chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
+                    chunk_count,
+                    expires_at_unix_ms: unix_ms_after(self.command_timeout),
+                };
+                self.registry
+                    .dispatch_artifact_and_wait(offer, artifact.bytes, self.command_timeout)
+                    .await
+                    .map_err(map_agent_error)?;
+            }
+        }
         let operation = self
             .dispatch_recorded(command, request.operation_id)
             .await?;
@@ -2986,6 +3062,7 @@ mod tests {
             resolver: Arc::new(UnconfiguredResolvedCreateResolver),
             state: state.clone(),
             store: None,
+            artifact_resolver: None,
             command_timeout: Duration::from_secs(30),
         };
         assert_eq!(
