@@ -30,6 +30,7 @@ assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'O3K_PROVIDER=agent' in bootstrap
 assert 'O3K_PROVIDER=fake' not in bootstrap
+assert 'dnsmasq-base' in bootstrap
 assert 'userdel o3k' in cleanup
 assert 'OS_PASSWORD:' not in workflow
 assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1

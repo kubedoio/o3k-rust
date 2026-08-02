@@ -205,6 +205,11 @@ impl DhcpService {
         self.state.bindings.values()
     }
 
+    /// Returns the persisted network configuration for restart reconciliation.
+    pub fn configuration(&self) -> Option<&DhcpConfig> {
+        self.state.config.as_ref()
+    }
+
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;

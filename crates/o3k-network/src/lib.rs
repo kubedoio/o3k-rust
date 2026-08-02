@@ -496,6 +496,51 @@ mod host_network_tests {
     }
 
     #[test]
+    fn manifest_accepts_multiple_taps_for_one_instance() -> Result<(), HostNetworkError> {
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                gateway: None,
+            }),
+            taps: [
+                (
+                    "o3ktap-a".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-a".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-a".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+                (
+                    "o3ktap-b".to_owned(),
+                    TapOwnership {
+                        interface: "o3ktap-b".to_owned(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-b".to_owned(),
+                        mac: "02:00:00:00:00:02".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        validate_manifest(
+            &HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            &manifest,
+        )
+    }
+
+    #[test]
     fn deletes_only_owned_taps_for_the_requested_instance() -> Result<(), HostNetworkError> {
         let root = std::env::temp_dir().join(format!("o3k-network-delete-{}", Uuid::now_v7()));
         let command = FakeNetworkCommand::new([Response::output(false, "")]);
@@ -993,6 +1038,29 @@ impl HostNetworkManager {
         }
         first_error.map_or(Ok(()), Err)
     }
+
+    /// Returns durable port identities owned by an instance before its TAP
+    /// records are removed. Coupled host services use these identities for
+    /// fixed-lease cleanup.
+    pub fn owned_port_ids_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<String>, HostNetworkError> {
+        validate_reference(instance_id)?;
+        let Some(ownership) = &self.ownership else {
+            return Ok(Vec::new());
+        };
+        let store = ownership.lock().map_err(|_| {
+            HostNetworkError::OwnershipStorage(io::Error::other("ownership lock poisoned"))
+        })?;
+        Ok(store
+            .manifest
+            .taps
+            .values()
+            .filter(|record| record.instance_id == instance_id)
+            .map(|record| record.port_id.clone())
+            .collect())
+    }
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
         let output = self.command_output(["-d", "link", "show"])?;
         if !output.success {
@@ -1335,7 +1403,6 @@ fn validate_manifest(
         }
     }
     let mut ports = HashSet::new();
-    let mut instances = HashSet::new();
     for (interface, tap) in &manifest.taps {
         validate_ifname(interface)?;
         validate_ifname(&tap.interface)?;
@@ -1346,7 +1413,6 @@ fn validate_manifest(
             || tap.bridge != config.bridge_name
             || !tap.created_by_o3k
             || !ports.insert(tap.port_id.clone())
-            || !instances.insert(tap.instance_id.clone())
         {
             return Err(HostNetworkError::OwnershipConflict);
         }

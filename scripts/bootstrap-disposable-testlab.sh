@@ -231,6 +231,7 @@ command -v ssh-keygen >/dev/null 2>&1 || need_packages=true
 python3 -m venv --help >/dev/null 2>&1 || need_packages=true
 command -v pkg-config >/dev/null 2>&1 || need_packages=true
 command -v protoc >/dev/null 2>&1 || need_packages=true
+command -v dnsmasq >/dev/null 2>&1 || need_packages=true
 if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; then
   command -v apt-get >/dev/null 2>&1 || fail "required host packages are missing and apt-get is unavailable"
   sudo -n test -d "$(dirname "$APT_LOCK")" || fail "package-manager lock directory is unavailable"
@@ -240,7 +241,7 @@ if [[ "$need_packages" == true ]] || ! pkg-config --exists libvirt 2>/dev/null; 
       apt-get -o DPkg::Lock::Timeout=300 update -qq
     timeout --signal=TERM --kill-after=30s 300s env DEBIAN_FRONTEND=noninteractive \
       apt-get -o DPkg::Lock::Timeout=300 install -y --no-install-recommends \
-        genisoimage openssh-client python3-venv pkg-config libvirt-dev protobuf-compiler
+        genisoimage openssh-client python3-venv pkg-config libvirt-dev protobuf-compiler dnsmasq-base
   ' || fail "cannot install required host packages within the bounded package-manager timeout"
 fi
 sudo -n install -d -o root -g root -m 0755 "$SERVICE_STATE_BASE"
@@ -313,6 +314,7 @@ python3 -m venv --help >/dev/null 2>&1 || fail "python3-venv is unavailable afte
 command -v pkg-config >/dev/null 2>&1 || fail "pkg-config is unavailable after dependency setup"
 pkg-config --exists libvirt 2>/dev/null || fail "libvirt development files are unavailable after dependency setup"
 command -v protoc >/dev/null 2>&1 || fail "protobuf compiler is unavailable after dependency setup"
+command -v dnsmasq >/dev/null 2>&1 || fail "dnsmasq is unavailable after dependency setup"
 cargo build --locked --release --bin o3kd
 # virt-sys deliberately tolerates a missing pkg-config probe for docs builds;
 # make the runtime link explicit after the host preflight proves libvirt exists.

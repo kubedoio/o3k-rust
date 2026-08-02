@@ -248,4 +248,6 @@ grep -q 'URI:urn:o3k:compute:agent:compute-agent' <(openssl x509 -in "$TLS_DIR/a
 [[ "$(wc -c <"$TLS_DIR/agent-fingerprint")" -ge 64 ]]
 
 grep -Fq '"O3K_PROVIDER=libvirt"' "$ROOT_DIR/packaging/install.sh"
+grep -Fq 'AmbientCapabilities=CAP_NET_ADMIN' "$ROOT_DIR/packaging/o3k-compute.service"
+grep -Fq 'CapabilityBoundingSet=CAP_NET_ADMIN' "$ROOT_DIR/packaging/o3k-compute.service"
 echo "packaging safety tests passed"

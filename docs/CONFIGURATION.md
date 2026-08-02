@@ -45,6 +45,13 @@ explicit, operator-declared Placement disk-capacity bound. Its default is
 `0`, which intentionally keeps the agent unschedulable until the operator
 provides a trusted value; disk format support is not capacity evidence.
 
+The host-local agent also accepts `O3K_COMPUTE_BRIDGE_NAME` (default
+`o3k-br0`) and `O3K_COMPUTE_DHCP_BINARY` (default `dnsmasq`). The compute
+service unit grants only `CAP_NET_ADMIN`, which is required for its owned
+bridge, gateway, TAP, and managed DHCP operations; it does not grant
+`CAP_SYS_ADMIN`. DHCP state and configuration remain below the agent's
+operator-owned data root.
+
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`, or
 `agent`. The `agent` provider requires complete compute TLS configuration and
 an authorized-agent mapping. TLS can also be enabled independently while the
