@@ -278,23 +278,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let inventory_task = agent_control_enabled
         .then(|| o3k_compute::spawn_agent_inventory_publisher(registry.clone(), placement.clone()));
-    let compute_ready = match tokio::time::timeout(
-        Duration::from_secs(5),
-        compute_service.provider().capabilities(),
-    )
-    .await
-    {
-        Ok(Ok(capabilities)) => {
-            info!(provider = %capabilities.provider_name, "compute provider is ready");
-            true
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "compute provider is not ready");
-            false
-        }
-        Err(_) => {
-            tracing::warn!("compute provider readiness probe timed out");
-            false
+    let compute_ready = if config.provider == o3k_config::Provider::Agent && agent_control_enabled {
+        // The authenticated agent is deliberately started after o3kd's health
+        // endpoint.  A capability probe before registration would permanently
+        // publish `not_ready`, deadlocking the agent bootstrap.  The compute
+        // process owns the agent-registration/libvirt readiness gate; o3kd's
+        // readyz here means that its authenticated control endpoint can accept
+        // that registration.  If the control task later stops, the task below
+        // clears readiness again.
+        info!("agent control plane is ready for authenticated registration");
+        true
+    } else {
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            compute_service.provider().capabilities(),
+        )
+        .await
+        {
+            Ok(Ok(capabilities)) => {
+                info!(provider = %capabilities.provider_name, "compute provider is ready");
+                true
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "compute provider is not ready");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("compute provider readiness probe timed out");
+                false
+            }
         }
     };
     let event_task = compute_service.spawn_agent_event_consumer(registry.clone());
