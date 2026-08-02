@@ -15,6 +15,13 @@ use sqlx::{
 use thiserror::Error;
 use uuid::Uuid;
 
+mod artifact_transfer;
+
+pub use artifact_transfer::{
+    ArtifactTransferRecord, ArtifactTransferState, ArtifactTransferUpdate,
+    MAX_ARTIFACT_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_ARTIFACT_TRANSFER_RETRIES,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeypairRecord {
     pub id: Uuid,
@@ -198,6 +205,14 @@ pub enum StoreError {
     KeypairInUse,
     #[error("keypair and server ownership do not match")]
     KeypairOwnershipConflict,
+    #[error("artifact transfer not found")]
+    ArtifactTransferNotFound,
+    #[error("artifact transfer epoch does not match durable state")]
+    ArtifactTransferEpochConflict,
+    #[error("artifact transfer conflict: {0}")]
+    ArtifactTransferConflict(String),
+    #[error("invalid artifact transfer: {0}")]
+    InvalidArtifactTransfer(String),
 }
 
 #[async_trait]
@@ -265,6 +280,23 @@ pub trait DurableStore: Send + Sync {
         provider_resource_id: Option<&str>,
     ) -> Result<AgentCommandRecord, StoreError>;
     async fn list_recoverable_agent_commands(&self) -> Result<Vec<AgentCommandRecord>, StoreError>;
+    async fn insert_artifact_transfer(
+        &self,
+        transfer: &ArtifactTransferRecord,
+    ) -> Result<ArtifactTransferRecord, StoreError>;
+    async fn get_artifact_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError>;
+    async fn update_artifact_transfer(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        update: ArtifactTransferUpdate,
+    ) -> Result<ArtifactTransferRecord, StoreError>;
+    async fn list_recoverable_artifact_transfers(
+        &self,
+    ) -> Result<Vec<ArtifactTransferRecord>, StoreError>;
     async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError>;
     async fn insert_resource_and_operation(
         &self,
@@ -329,12 +361,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 7 {
+        if table_count != 8 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
@@ -975,6 +1007,35 @@ impl DurableStore for SqliteStore {
             .await
             .map_err(StoreError::Database)?;
         rows.iter().map(agent_command_from_row).collect()
+    }
+
+    async fn insert_artifact_transfer(
+        &self,
+        transfer: &ArtifactTransferRecord,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        artifact_transfer::insert(&self.pool, transfer).await
+    }
+
+    async fn get_artifact_transfer(
+        &self,
+        transfer_id: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        artifact_transfer::get(&self.pool, transfer_id).await
+    }
+
+    async fn update_artifact_transfer(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        update: ArtifactTransferUpdate,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        artifact_transfer::update(&self.pool, transfer_id, expected_agent_epoch, update).await
+    }
+
+    async fn list_recoverable_artifact_transfers(
+        &self,
+    ) -> Result<Vec<ArtifactTransferRecord>, StoreError> {
+        artifact_transfer::list_recoverable(&self.pool).await
     }
 
     async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
