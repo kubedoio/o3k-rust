@@ -32,11 +32,25 @@ if bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$WORK_DIR/weak.env" 
   exit 1
 fi
 
+printf 'O3K_TOKEN_SIGNING_KEY=%s\n' "$(printf 'a%.0s' {1..65})" >"$WORK_DIR/odd.env"
+if bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$WORK_DIR/odd.env" >/dev/null 2>&1; then
+  echo "generator accepted an odd-length signing key" >&2
+  exit 1
+fi
+
 ln -s "$output" "$WORK_DIR/output-link"
 if bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$WORK_DIR/output-link" >/dev/null 2>&1; then
   echo "generator accepted a symlink output" >&2
   exit 1
 fi
+
+printf 'sentinel\n' >"$WORK_DIR/lock-target"
+ln -s "$WORK_DIR/lock-target" "$output.lock"
+if bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$output" >/dev/null 2>&1; then
+  echo "generator followed a lock symlink" >&2
+  exit 1
+fi
+grep -Fqx 'sentinel' "$WORK_DIR/lock-target"
 
 mkdir "$WORK_DIR/parent-target"
 ln -s "$WORK_DIR/parent-target" "$WORK_DIR/parent-link"

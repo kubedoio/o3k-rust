@@ -110,6 +110,17 @@ if [[ -z "$password" ]]; then
   password="$(normalize_password_scalar "$password")"
   password_source="kolla-admin-openrc"
 fi
+if [[ -z "$password" ]]; then
+  generated_password_file="$(mktemp "$RUNNER_TEMP/.o3k-passwords.XXXXXX")"
+  trap 'rm -f -- "$generated_password_file"' EXIT
+  bash "$ROOT_DIR/scripts/generate-passwords.sh" \
+    --output "$generated_password_file" --kolla-password-file "$KOLLA_PASSWORD_FILE" \
+    >/dev/null || fail "credential generation failed"
+  password="$(read_password_file "$generated_password_file" \
+    '-F= $1 == "O3K_BOOTSTRAP_PASSWORD" {sub(/^[^=]*=/, ""); print; exit}')"
+  password="$(normalize_password_scalar "$password")"
+  password_source="generated-passwords"
+fi
 [[ -n "$password" ]] || fail "no existing O3K bootstrap password or protected OS_PASSWORD secret"
 [[ "$password" != *$'\n'* && "$password" != *$'\r'* ]] || fail "bootstrap password contains a newline"
 printf '::add-mask::%s\n' "$password"

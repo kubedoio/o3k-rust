@@ -22,6 +22,7 @@ struct HealthState {
 struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
     artifact_root: PathBuf,
+    image_cache: o3k_image::ImageCache,
     network: o3k_network::HostNetworkManager,
 }
 
@@ -326,6 +327,10 @@ fn rollback_owned_taps(network: &o3k_network::HostNetworkManager, taps: &[o3k_ne
     }
 }
 
+fn rollback_overlay(cache: &o3k_image::ImageCache, instance_id: &str) {
+    let _ = cache.delete_overlay(instance_id);
+}
+
 #[async_trait]
 impl CommandExecutor for LibvirtCommandExecutor {
     async fn execute(
@@ -428,6 +433,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             .map_err(|_| {
                                 AgentError::Protocol("owned TAP cleanup failed".to_owned())
                             })?;
+                        self.image_cache
+                            .delete_overlay(&command.resource_id)
+                            .map_err(|_| {
+                                AgentError::Protocol(
+                                    "owned image overlay cleanup failed".to_owned(),
+                                )
+                            })?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
                     Err(error) => return Err(agent_error(error)),
@@ -446,6 +458,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 self.network
                     .delete_taps_for_instance(&command.resource_id)
                     .map_err(|_| AgentError::Protocol("owned TAP cleanup failed".to_owned()))?;
+                self.image_cache
+                    .delete_overlay(&command.resource_id)
+                    .map_err(|_| {
+                        AgentError::Protocol("owned image overlay cleanup failed".to_owned())
+                    })?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
@@ -469,9 +486,60 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         return Err(error);
                     }
                 };
-                let spec = match resolve_create_domain_spec(command, Some(&committed)) {
+                let base = match self.image_cache.cache_base_path(
+                    &committed.image.sha256,
+                    &committed.image.format,
+                    &committed.image.path,
+                ) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(AgentError::Protocol(
+                            "verified image cache publication failed".to_owned(),
+                        ));
+                    }
+                };
+                let overlay = match self.image_cache.create_overlay(&command.resource_id, &base) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        rollback_owned_taps(&self.network, &taps);
+                        return Err(AgentError::Protocol(
+                            "image overlay creation failed".to_owned(),
+                        ));
+                    }
+                };
+                let disk_gib = match command.action.as_ref() {
+                    Some(proto::command::Action::Create(create)) => create
+                        .resolved
+                        .as_ref()
+                        .map(|resolved| resolved.disk_gib)
+                        .filter(|value| *value > 0),
+                    _ => None,
+                };
+                let Some(disk_gib) = disk_gib else {
+                    rollback_overlay(&self.image_cache, &command.resource_id);
+                    rollback_owned_taps(&self.network, &taps);
+                    return Err(AgentError::Protocol(
+                        "create command disk capacity is invalid".to_owned(),
+                    ));
+                };
+                if self
+                    .image_cache
+                    .resize_overlay(&command.resource_id, &overlay, disk_gib)
+                    .is_err()
+                {
+                    rollback_overlay(&self.image_cache, &command.resource_id);
+                    rollback_owned_taps(&self.network, &taps);
+                    return Err(AgentError::Protocol(
+                        "image overlay resize failed".to_owned(),
+                    ));
+                }
+                let mut realized = committed.clone();
+                realized.image.path = overlay;
+                let spec = match resolve_create_domain_spec(command, Some(&realized)) {
                     Ok(value) => value,
                     Err(error) => {
+                        rollback_overlay(&self.image_cache, &command.resource_id);
                         rollback_owned_taps(&self.network, &taps);
                         return Err(error);
                     }
@@ -479,6 +547,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let definition = match o3k_libvirt::build_domain_xml(&spec) {
                     Ok(value) => value,
                     Err(_) => {
+                        rollback_overlay(&self.image_cache, &command.resource_id);
                         rollback_owned_taps(&self.network, &taps);
                         return Err(AgentError::Protocol("domain XML is invalid".to_owned()));
                     }
@@ -492,11 +561,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     })
                     .await
                 {
+                    rollback_overlay(&self.image_cache, &command.resource_id);
                     rollback_owned_taps(&self.network, &taps);
                     return Err(agent_error(error));
                 }
                 if let Err(error) = self.adapter.start(definition_name.clone()).await {
                     let _ = self.adapter.undefine(definition_name.clone()).await;
+                    rollback_overlay(&self.image_cache, &command.resource_id);
                     rollback_owned_taps(&self.network, &taps);
                     return Err(agent_error(error));
                 }
@@ -504,12 +575,14 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     Ok(value) => value,
                     Err(error) => {
                         let _ = self.adapter.undefine(name.clone()).await;
+                        rollback_overlay(&self.image_cache, &command.resource_id);
                         rollback_owned_taps(&self.network, &taps);
                         return Err(agent_error(error));
                     }
                 };
                 if let Err(error) = verify_owned_domain(&inspection, &command.resource_id) {
                     let _ = self.adapter.undefine(name.clone()).await;
+                    rollback_overlay(&self.image_cache, &command.resource_id);
                     rollback_owned_taps(&self.network, &taps);
                     return Err(error);
                 }
@@ -629,6 +702,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("network");
+    let image_cache = o3k_image::ImageCache::open(
+        artifact_root.join("image-cache"),
+        o3k_image::DEFAULT_MAX_CACHE_BYTES,
+    )?;
     let network = o3k_network::HostNetworkManager::with_ownership_root(
         o3k_network::HostNetworkConfig {
             bridge_name: env::var("O3K_COMPUTE_BRIDGE_NAME")
@@ -640,6 +717,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
+        image_cache,
         network,
     });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");

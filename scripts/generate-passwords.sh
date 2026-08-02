@@ -23,6 +23,13 @@ done
 die() { printf 'password generation failed: %s\n' "$1" >&2; exit 2; }
 [[ "$OUTPUT_FILE" = /* && "$KOLLA_PASSWORD_FILE" = /* ]] || die "paths must be absolute"
 
+if [[ -e "$KOLLA_PASSWORD_FILE" || -L "$KOLLA_PASSWORD_FILE" ]]; then
+  kolla_parent="${KOLLA_PASSWORD_FILE%/*}"
+  [[ -d "$kolla_parent" && ! -L "$kolla_parent" ]] || die "Kolla password parent is missing or symlinked"
+  kolla_canonical_parent="$(realpath -e -- "$kolla_parent")" || die "cannot resolve Kolla password parent"
+  [[ "$kolla_canonical_parent" == "$kolla_parent" ]] || die "Kolla password parent must not contain symlink or dot components"
+fi
+
 parent="${OUTPUT_FILE%/*}"
 [[ -n "$parent" && -d "$parent" && ! -L "$parent" ]] || die "output parent is missing or symlinked"
 canonical_parent="$(realpath -e -- "$parent")" || die "cannot resolve output parent"
@@ -34,10 +41,10 @@ if [[ -e "$OUTPUT_FILE" || -L "$OUTPUT_FILE" ]]; then
   [[ "$owner" == "$EUID" || ( "$EUID" == 0 && "$owner" == 0 ) ]] || die "output is not owned by the invoking account"
 fi
 
-lock_file="${OUTPUT_FILE}.lock"
+lock_dir="${OUTPUT_FILE}.lock"
 umask 077
-exec 9>"$lock_file"
-flock -n 9 || die "another password generation is in progress"
+mkdir "$lock_dir" 2>/dev/null || die "another password generation is in progress"
+trap 'rmdir -- "$lock_dir" 2>/dev/null || true' EXIT
 
 normalize_scalar() {
   python3 -c '
@@ -79,7 +86,7 @@ read_kolla_admin_password() {
   else
     return 0
   fi
-  [[ -r "$KOLLA_PASSWORD_FILE" ]] || return 0
+  [[ -r "$KOLLA_PASSWORD_FILE" ]] || die "Kolla password file is unreadable"
   awk '$1 == "keystone_admin_password:" {sub(/^[^:]*:[[:space:]]*/, ""); print; exit}' \
     "$KOLLA_PASSWORD_FILE" | normalize_scalar
 }
@@ -91,10 +98,13 @@ signing_key="$(read_env_value O3K_TOKEN_SIGNING_KEY)"
 if [[ -z "$signing_key" ]]; then signing_key="$(openssl rand -hex 48)"; fi
 
 [[ "$bootstrap" != *$'\n'* && "$bootstrap" != *$'\r'* ]] || die "bootstrap password contains a newline"
-[[ "$signing_key" =~ ^[[:xdigit:]]{64,}$ ]] || die "token signing key must be at least 32 bytes of hex"
+[[ "$signing_key" =~ ^[[:xdigit:]]{64}([[:xdigit:]]{2})*$ ]] || die "token signing key must be at least 32 bytes of hex"
 
-tmp="${OUTPUT_FILE}.tmp.$$"
-trap 'rm -f -- "$tmp"' EXIT
+tmp="$(mktemp "$parent/.o3k-passwords.XXXXXX")" || die "cannot create an atomic temporary file"
+[[ -f "$tmp" && ! -L "$tmp" ]] || die "temporary output is not a regular file"
+tmp_owner="$(stat -c '%u' -- "$tmp")"
+[[ "$tmp_owner" == "$EUID" || ( "$EUID" == 0 && "$tmp_owner" == 0 ) ]] || die "temporary output ownership is unsafe"
+trap 'rm -f -- "$tmp"; rmdir -- "$lock_dir" 2>/dev/null || true' EXIT
 {
   if [[ -f "$OUTPUT_FILE" ]]; then
     awk '!/^(O3K_BOOTSTRAP_PASSWORD|O3K_TOKEN_SIGNING_KEY)=/' "$OUTPUT_FILE"
@@ -104,5 +114,6 @@ trap 'rm -f -- "$tmp"' EXIT
 } >"$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$OUTPUT_FILE"
+rmdir -- "$lock_dir" 2>/dev/null || die "could not release password generation lock"
 trap - EXIT
 printf 'generated O3K credentials at %s\n' "$OUTPUT_FILE"

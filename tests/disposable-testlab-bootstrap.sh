@@ -12,9 +12,9 @@ import sys
 bootstrap = Path(sys.argv[1]).read_text(encoding="utf-8")
 cleanup = Path(sys.argv[2]).read_text(encoding="utf-8")
 workflow = Path(sys.argv[3]).read_text(encoding="utf-8")
-assert 'PASSWORD="$(openssl rand -hex 32)"' in bootstrap
+assert 'scripts/generate-passwords.sh' in bootstrap
 assert 'echo "::add-mask::${PASSWORD}"' in bootstrap
-assert bootstrap.index('echo "::add-mask::${PASSWORD}"') < bootstrap.index('O3K_BOOTSTRAP_PASSWORD=')
+assert bootstrap.rindex('scripts/generate-passwords.sh') < bootstrap.rindex('echo "::add-mask::${PASSWORD}"')
 assert 'OS_PASSWORD=%s\\n' in bootstrap
 assert 'OS_PROJECT_NAME=admin' in bootstrap
 assert '--no-create-home' in bootstrap

@@ -326,24 +326,30 @@ sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/data/agent-id"
 AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
   || fail "cannot read generated agent fingerprint"
 
-PASSWORD="$(openssl rand -hex 32)"
+generated_env="$(mktemp "$STATE_ROOT/.o3kd-generated.XXXXXX")"
+O3K_PASSWORD_FILE="$generated_env" \
+  O3K_KOLLA_PASSWORD_FILE="${O3K_KOLLA_PASSWORD_FILE:-/etc/kolla/passwords.yml}" \
+  bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$generated_env" \
+  || fail "credential generation failed"
+PASSWORD="$(awk -F= '$1 == "O3K_BOOTSTRAP_PASSWORD" {sub(/^[^=]*=/, ""); print; exit}' "$generated_env")"
+SIGNING_KEY="$(awk -F= '$1 == "O3K_TOKEN_SIGNING_KEY" {sub(/^[^=]*=/, ""); print; exit}' "$generated_env")"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
+[[ "$SIGNING_KEY" =~ ^[0-9a-f]{96}$ ]] || fail "generated signing key format is unsafe"
 echo "::add-mask::${PASSWORD}"
-SIGNING_KEY="$(openssl rand -hex 48)"
 password_tmp="$STATE_ROOT/.password.tmp.$$"
 printf '%s\n' "$PASSWORD" >"$password_tmp"
 chmod 0600 "$password_tmp"
 mv -f -- "$password_tmp" "$STATE_ROOT/.password"
 o3kd_env_tmp="$STATE_ROOT/o3kd.env.tmp.$$"
 compute_env_tmp="$STATE_ROOT/o3k-compute.env.tmp.$$"
-cat >"$o3kd_env_tmp" <<EOF
+cp -- "$generated_env" "$o3kd_env_tmp"
+rm -f -- "$generated_env"
+cat >>"$o3kd_env_tmp" <<EOF
 O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
 O3K_PROVIDER=fake
 O3K_LOG_FORMAT=json
 O3K_LOG_FILTER=warn
-O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
-O3K_TOKEN_SIGNING_KEY=$(printf '%q' "$SIGNING_KEY")
 O3K_COMPUTE_CONTROL_ADDR=$(printf '%q' "127.0.0.1:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_CERTIFICATE=$(printf '%q' "$STATE_ROOT/tls/server.pem")
 O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
