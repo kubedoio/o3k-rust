@@ -1,0 +1,37 @@
+name: Runner 2404 current exact cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/runner-2404-current-cleanup'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Remove exact owned resources
+        run: |
+          set -euo pipefail
+          state=/var/lib/o3k-testlab/30771530796
+          venv_path=$(find /home/ubuntu/actions-runner/_work/_temp -maxdepth 1 -type d -name 'o3k-openstack-venv.*' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$venv_path"
+          export PATH="$venv_path/bin:$PATH" OS_AUTH_URL=http://127.0.0.1:18080/v3 OS_USERNAME=admin OS_PROJECT_NAME=admin OS_REGION_NAME=RegionOne
+          export OS_PASSWORD="$(sudo -n cat "$state/.password")"
+          server=0da21dac-20ce-5208-b988-38dc6b80616c
+          flavor=019fc4bd-5bf5-7221-899a-c0cb5bc09538
+          for _ in {1..12}; do openstack server delete --wait "$server" >/dev/null 2>&1 || true; openstack server show "$server" >/dev/null 2>&1 || break; sleep 2; done
+          openstack flavor delete "$flavor" >/dev/null 2>&1 || true
+          domain=o3k-e84d69cce2c47ce8be64
+          if sudo -n virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then
+            xml="$(sudo -n virsh -c qemu:///system dumpxml "$domain")"
+            grep -Fq '<o3k:domain' <<<"$xml"
+            grep -Fq 'managed_by="o3k-compute"' <<<"$xml"
+            sudo -n virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
+            sudo -n virsh -c qemu:///system undefine "$domain"
+          fi
+          if ip link show dev o3k-br0 >/dev/null 2>&1; then
+            while IFS= read -r line; do name="${line#*: }"; name="${name%%@*}"; name="${name%%:*}"; [[ "$name" == o3k-* || "$name" == o3ktap-* ]] || exit 1; done < <(ip -o link show master o3k-br0)
+            sudo -n ip link delete dev o3k-br0
+          fi
