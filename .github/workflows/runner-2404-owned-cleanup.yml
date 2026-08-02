@@ -27,7 +27,8 @@ jobs:
               name="${line#*: }"
               name="${name%%@*}"
               name="${name%%:*}"
-              [[ "$name" == o3k-* ]] || { echo "foreign bridge member: $name" >&2; exit 1; }
+              [[ "$name" == o3k-* || "$name" == o3ktap-* ]] \
+                || { echo "foreign bridge member: $name" >&2; exit 1; }
             done < <(ip -o link show master o3k-br0)
             sudo -n ip link delete dev o3k-br0
           fi
