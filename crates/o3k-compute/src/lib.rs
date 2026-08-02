@@ -1077,6 +1077,15 @@ impl ComputeProvider for AgentComputeProvider {
             .as_deref()
             .ok_or(ProviderError::InvalidRequest)?;
         let agent = self.selected_agent(provider_id).await?;
+        if request.config_drive.is_some()
+            && !agent
+                .capabilities
+                .flags
+                .iter()
+                .any(|flag| flag.name == "config_drive" && flag.supported)
+        {
+            return Err(ProviderError::InvalidRequest);
+        }
         let resolved = self.resolver.resolve(&request, &agent).await?;
         let image_id = request
             .image_id
@@ -3586,6 +3595,46 @@ mod tests {
             placement_provider_id: Some("node-a".to_owned()),
             placement_allocation_id: Some("allocation-a".to_owned()),
             config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        assert_eq!(
+            provider.create_instance(request).await,
+            Err(ProviderError::InvalidRequest)
+        );
+        assert_eq!(
+            provider.get_operation(operation_id).await,
+            Err(ProviderError::NotFound)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_provider_rejects_config_drive_without_backend_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&registered_agent("node-a")).await?;
+        let provider = AgentComputeProvider::new(registry, Arc::new(TestResolvedCreateResolver));
+        let operation_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: Some(ConfigDriveRequest {
+                user_data: b"#cloud-config\n".to_vec(),
+                vendor_data: None,
+                ssh_public_key: "ssh-ed25519 AAAA".to_owned(),
+            }),
             idempotency_key: "request-a".to_owned(),
         };
         assert_eq!(
