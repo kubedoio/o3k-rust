@@ -1202,8 +1202,12 @@ mod tests {
             network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
-        assert!(xml.contains("device=\"cdrom\""));
-        assert!(xml.contains(&format!("source file=\"{}\"", path.display())));
+        assert_eq!(xml.matches("device=\"cdrom\"").count(), 1);
+        assert_eq!(
+            xml.matches(&format!("source file=\"{}\"", path.display()))
+                .count(),
+            1
+        );
         assert!(xml.contains("<target dev=\"sda\" bus=\"sata\" /><readonly />"));
         let mut mismatched = spec.clone();
         if let Some(image) = mismatched.config_drive_image.as_mut() {
