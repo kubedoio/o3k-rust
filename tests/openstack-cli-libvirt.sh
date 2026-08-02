@@ -412,6 +412,26 @@ SERVER_ACTIVE=true
 SERVER_CONFIG_DRIVE="${CONFIG_DRIVE_ENABLED}"
 SERVER_FIXED_IP="${EXPECTED_FIXED_IP}"
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
+python3 - "${ARTIFACT_DIR}/server-list.json" "${ARTIFACT_DIR}/server-list-evidence.json" <<'PY'
+import json
+import sys
+
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as stream:
+    value = json.load(stream)
+rows = value if isinstance(value, list) else value.get("servers", [])
+evidence = {
+    "rows": [
+        {key: row.get(key) for key in ("id", "name", "status")}
+        for row in rows
+        if isinstance(row, dict)
+    ],
+    "redacted": True,
+}
+with open(destination, "w", encoding="utf-8") as stream:
+    json.dump(evidence, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
