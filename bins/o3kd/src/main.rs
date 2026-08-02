@@ -67,7 +67,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
     };
-    if agent_control_enabled {
+    // TLS enables the control plane for an agent to register, but it must not
+    // force unrelated providers through the agent scheduler.  The disposable
+    // fake profile intentionally starts the control plane for protocol tests;
+    // only the agent provider may require an authenticated agent placement.
+    let agent_routing_enabled =
+        agent_control_enabled && config.provider == o3k_config::Provider::Agent;
+    if agent_routing_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
             .with_agent_registry(registry.clone());
