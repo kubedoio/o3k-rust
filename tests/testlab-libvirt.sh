@@ -103,6 +103,17 @@ if value.get("redacted") is not True or value.get("read_only") is not True or va
     raise SystemExit("config-drive evidence is not safely redacted or owned")
 PY
 fi
+if [[ -n "${O3K_TESTLAB_STATE_ROOT:-}" ]]; then
+    python3 - "${ARTIFACT_DIR}/dhcp-lease-evidence.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    value = json.load(stream)
+if value.get("artifact_type") != "dhcp-lease" or value.get("status") != "passed":
+    raise SystemExit("protected DHCP evidence did not prove the expected fixed lease")
+if value.get("redacted") is not True or value.get("managed_lease_file") is not True:
+    raise SystemExit("DHCP evidence is not safely redacted or managed")
+PY
+fi
 cp "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/libvirt-result.json"
 if [[ ${status} -ne 0 ]]; then
     echo "real-libvirt lifecycle harness failed; see ${ARTIFACT_DIR}/libvirt-result.json" >&2

@@ -9,7 +9,8 @@ rm -f "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}/openstack-cli
     "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-list.json" \
     "${ARTIFACT_DIR}/server-show-after-reboot.json" \
     "${ARTIFACT_DIR}/console.log" "${ARTIFACT_DIR}/console-error.log" \
-    "${ARTIFACT_DIR}/config-drive-evidence.json"
+    "${ARTIFACT_DIR}/config-drive-evidence.json" \
+    "${ARTIFACT_DIR}/dhcp-lease-evidence.json"
 IMAGE_ID=
 KEYPAIR_ID=
 NETWORK_ID=
@@ -182,6 +183,45 @@ with open(path, "w", encoding="utf-8") as stream:
         "source_basename": source_name,
         "source_sha256": source_sha,
         "source_under_owned_state": True,
+    }, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+}
+
+verify_real_dhcp_lease() {
+    local evidence_path="${ARTIFACT_DIR}/dhcp-lease-evidence.json"
+    if [[ -z "${O3K_TESTLAB_STATE_ROOT:-}" ]]; then
+        python3 - "${evidence_path}" <<'PY'
+import json, sys
+with open(sys.argv[1], "w", encoding="utf-8") as stream:
+    json.dump({"artifact_type": "dhcp-lease", "status": "skipped", "reason": "protected state root is unavailable", "redacted": True}, stream, indent=2, sort_keys=True)
+    stream.write("\n")
+PY
+        return 0
+    fi
+    local lease_path="${O3K_TESTLAB_STATE_ROOT}/data/dhcp/dnsmasq.leases"
+    local lease_line=
+    for _ in $(seq 1 "${O3K_TESTLAB_DHCP_ATTEMPTS:-30}"); do
+        if sudo -n test -f "${lease_path}" 2>/dev/null; then
+            lease_line="$(sudo -n awk -v address="${EXPECTED_FIXED_IP}" '$3 == address {print; exit}' "${lease_path}")"
+            [[ -n "${lease_line}" ]] && break
+        fi
+        sleep "${O3K_TESTLAB_DHCP_INTERVAL_SECONDS:-1}"
+    done
+    [[ -n "${lease_line}" ]] || {
+        write_result failed "managed DHCP produced no lease for the expected fixed IP"
+        return 1
+    }
+    python3 - "${evidence_path}" "${EXPECTED_FIXED_IP}" <<'PY'
+import json, sys
+path, address = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({
+        "artifact_type": "dhcp-lease",
+        "status": "passed",
+        "redacted": True,
+        "address": address,
+        "managed_lease_file": True,
     }, stream, indent=2, sort_keys=True)
     stream.write("\n")
 PY
@@ -490,6 +530,7 @@ SERVER_FIXED_IP="${EXPECTED_FIXED_IP}"
 if [[ "${CONFIG_DRIVE_ENABLED}" == true ]]; then
     verify_real_config_drive_attachment "${SERVER_ID}"
 fi
+verify_real_dhcp_lease
 openstack server list --name "${SERVER_NAME}" -f json >"${ARTIFACT_DIR}/server-list.json"
 python3 - "${ARTIFACT_DIR}/server-list.json" "${ARTIFACT_DIR}/server-list-evidence.json" <<'PY'
 import json

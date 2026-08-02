@@ -143,6 +143,7 @@ jobs:
             target/real-host-workflow-artifacts/server-show-evidence.json
             target/real-host-workflow-artifacts/server-list-evidence.json
             target/real-host-workflow-artifacts/config-drive-evidence.json
+            target/real-host-workflow-artifacts/dhcp-lease-evidence.json
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
           if-no-files-found: warn
