@@ -13,7 +13,7 @@ concurrency:
 jobs:
   real-host:
     name: Protected TestLab real-host validation
-    if: github.repository == 'kubedoio/o3k-rust' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/issue-79-artifact-realization')
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'
     timeout-minutes: 60
     # Configure this environment to require maintainer approval.
     environment: o3k-real-host-validation
