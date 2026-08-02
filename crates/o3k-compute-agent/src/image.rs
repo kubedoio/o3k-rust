@@ -342,18 +342,18 @@ mod tests {
             sha256: checksum.clone(),
             size_bytes: content.len() as u64,
             format: "raw".to_owned(),
-            chunk_size_bytes: 256,
-            chunk_count: content.len().div_ceil(256) as u32,
+            chunk_size_bytes: 256 * 1024,
+            chunk_count: content.len().div_ceil(256 * 1024) as u32,
             expires_at_unix_ms: i64::MAX,
         };
         store.begin(&offer)?;
-        for (index, chunk) in content.chunks(256).enumerate() {
+        for (index, chunk) in content.chunks(256 * 1024).enumerate() {
             store.accept_chunk(
                 &offer,
                 &proto::ArtifactChunk {
                     transfer_id: offer.transfer_id.clone(),
                     chunk_index: index as u32,
-                    offset_bytes: index as u64 * 256,
+                    offset_bytes: index as u64 * 256 * 1024,
                     data: chunk.to_vec(),
                     chunk_sha256: format!("{:x}", Sha256::digest(chunk)),
                 },
