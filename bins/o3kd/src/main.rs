@@ -325,9 +325,14 @@ async fn run_agent_inspect_probe(
     Ok(serde_json::json!({
         "artifact_type": "compute-agent-process-mtls",
         "evidence": {
+            "command": "inspect",
             "command_state": "accepted",
+            "error_category": "not_found",
+            "operation_state": "failed",
             "observation_state": "failed_not_found",
+            "observation_operation_state": "failed",
             "redacted": true,
+            "transitions": ["accepted", "operation_failed", "observation_failed"],
             "transport": "mutual_tls"
         },
         "redacted": true,

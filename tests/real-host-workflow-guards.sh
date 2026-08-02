@@ -198,7 +198,23 @@ json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encodin
 PY
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/compute-agent-process-mtls-result.json" <<'PY'
 import json, sys
-json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))
+json.dump({
+    "artifact_type": "compute-agent-process-mtls",
+    "status": "passed",
+    "redacted": True,
+    "scope": "o3kd-to-o3k-compute-to-libvirt",
+    "evidence": {
+        "command": "inspect",
+        "command_state": "accepted",
+        "error_category": "not_found",
+        "operation_state": "failed",
+        "observation_state": "failed_not_found",
+        "observation_operation_state": "failed",
+        "redacted": True,
+        "transitions": ["accepted", "operation_failed", "observation_failed"],
+        "transport": "mutual_tls",
+    },
+}, open(sys.argv[1], "w", encoding="utf-8"))
 PY
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"

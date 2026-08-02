@@ -64,10 +64,18 @@ if document.get("scope") != "o3kd-to-o3k-compute-to-libvirt":
     raise SystemExit("probe scope is not the real process boundary")
 if evidence.get("transport") != "mutual_tls":
     raise SystemExit("probe did not prove mutual TLS")
+if evidence.get("command") != "inspect":
+    raise SystemExit("probe command kind is missing")
 if evidence.get("command_state") != "accepted":
     raise SystemExit("probe command was not accepted")
+if evidence.get("operation_state") != "failed" or evidence.get("error_category") != "not_found":
+    raise SystemExit("probe operation result is incomplete")
 if evidence.get("observation_state") != "failed_not_found":
     raise SystemExit("probe did not observe the expected absent-domain result")
+if evidence.get("observation_operation_state") != "failed":
+    raise SystemExit("probe observation operation state is incomplete")
+if evidence.get("transitions") != ["accepted", "operation_failed", "observation_failed"]:
+    raise SystemExit("probe transition sequence is incomplete")
 PY
 then
   mv -f -- "$temporary" "$RESULT_FILE"
