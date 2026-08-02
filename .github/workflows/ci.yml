@@ -48,10 +48,16 @@ jobs:
         run: bash tests/real-host-workflow-guards.sh
       - name: Test CI workflow contracts
         run: bash tests/ci-workflow.sh
+      - name: Test OpenAPI contract governance
+        run: bash tests/openapi-governance.sh
       - name: Test static compatibility target
         run: bash tests/compatibility-target.sh
       - name: Test requirements-to-evidence traceability
         run: bash tests/traceability.sh
+      - name: Test ADR governance metadata
+        run: bash tests/adr-governance.sh
+      - name: Test ADR governance
+        run: bash tests/adr-governance.sh
       - name: Test real-host capability probe
         run: bash tests/real-host-capability-probe.sh
       - name: Test release evidence gate
