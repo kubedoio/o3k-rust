@@ -21,6 +21,48 @@ struct HealthState {
 
 struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
+    artifact_root: PathBuf,
+    network: o3k_network::HostNetworkManager,
+}
+
+/// Host-local evidence required to turn a create request into a libvirt
+/// definition.  The path is supplied by the agent's committed artifact store;
+/// it is never derived from an artifact id or digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommittedArtifact {
+    artifact_id: String,
+    kind: proto::ArtifactKind,
+    format: String,
+    sha256: String,
+    path: PathBuf,
+}
+
+/// A TAP name is usable only together with the network subsystem's ownership
+/// evidence.  A port id and MAC address alone are not sufficient proof that a
+/// host device may be attached to a domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnedTap {
+    port_id: String,
+    tap_name: String,
+    mac_address: String,
+    ownership_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CreateDomainIdentity {
+    server_id: String,
+    project_id: String,
+    generation: u64,
+    operation_id: String,
+    managed_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommittedCreateInputs {
+    image: CommittedArtifact,
+    config_drive: CommittedArtifact,
+    owned_taps: Vec<OwnedTap>,
+    identity: CreateDomainIdentity,
 }
 
 /// Resolve the host-local inputs for a create command before touching
@@ -40,6 +82,7 @@ struct LibvirtCommandExecutor {
 /// command/executor contract.
 fn resolve_create_domain_spec(
     command: &proto::Command,
+    committed: Option<&CommittedCreateInputs>,
 ) -> Result<o3k_libvirt::DomainSpec, AgentError> {
     let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
         return Err(AgentError::Protocol(
@@ -62,9 +105,182 @@ fn resolve_create_domain_spec(
         ));
     }
 
-    Err(AgentError::Protocol(
-        "create is fail-closed: authenticated artifact transfer metadata (transfer_id and expiry) and owned TAP names are not present in the create command".to_owned(),
-    ))
+    let Some(committed) = committed else {
+        return Err(AgentError::Protocol(
+            "create is fail-closed: committed artifact bytes and owned TAP names are not available"
+                .to_owned(),
+        ));
+    };
+
+    if committed.image.artifact_id != resolved.image_artifact_id
+        || committed.image.kind != proto::ArtifactKind::ImageBase
+        || committed.image.sha256 != resolved.image_sha256
+        || committed.image.format != resolved.image_format
+        || committed.config_drive.artifact_id != resolved.config_drive_artifact_id
+        || committed.config_drive.kind != proto::ArtifactKind::ConfigDriveIso
+        || committed.config_drive.sha256 != resolved.config_drive_sha256
+        || committed.config_drive.format != "iso"
+    {
+        return Err(AgentError::Protocol(
+            "committed artifact evidence does not match create references".to_owned(),
+        ));
+    }
+    if committed.identity.server_id != command.resource_id
+        || committed.identity.project_id.trim().is_empty()
+        || committed.identity.operation_id != command.operation_id
+        || committed.identity.managed_by.trim().is_empty()
+    {
+        return Err(AgentError::Protocol(
+            "create domain ownership identity is incomplete or mismatched".to_owned(),
+        ));
+    }
+    if committed.image.path.as_os_str().is_empty()
+        || !committed.image.path.is_absolute()
+        || committed.config_drive.path.as_os_str().is_empty()
+        || !committed.config_drive.path.is_absolute()
+    {
+        return Err(AgentError::Protocol(
+            "committed artifact paths must be absolute host-local paths".to_owned(),
+        ));
+    }
+    if committed.owned_taps.len() != resolved.network_attachments.len()
+        || committed
+            .owned_taps
+            .iter()
+            .any(|tap| tap.ownership_token.trim().is_empty())
+    {
+        return Err(AgentError::Protocol(
+            "owned TAP evidence is incomplete or does not cover network attachments".to_owned(),
+        ));
+    }
+    let network_interfaces = resolved
+        .network_attachments
+        .iter()
+        .map(|attachment| {
+            let tap = committed
+                .owned_taps
+                .iter()
+                .find(|tap| tap.port_id == attachment.port_id);
+            let Some(tap) = tap else {
+                return Err(AgentError::Protocol(
+                    "network attachment has no matching owned TAP".to_owned(),
+                ));
+            };
+            if tap.mac_address != attachment.mac || tap.tap_name.trim().is_empty() {
+                return Err(AgentError::Protocol(
+                    "owned TAP evidence does not match network attachment".to_owned(),
+                ));
+            }
+            Ok(o3k_libvirt::DomainNetworkInterface {
+                tap_name: tap.tap_name.clone(),
+                mac_address: tap.mac_address.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let spec = o3k_libvirt::DomainSpec {
+        metadata: o3k_libvirt::DomainMetadata {
+            server_id: committed.identity.server_id.clone(),
+            project_id: committed.identity.project_id.clone(),
+            generation: committed.identity.generation,
+            operation_id: committed.identity.operation_id.clone(),
+            managed_by: committed.identity.managed_by.clone(),
+        },
+        vcpus: resolved.vcpus,
+        memory_mib: resolved.memory_mib,
+        image_id: committed.image.path.to_string_lossy().into_owned(),
+        config_drive_image: Some(o3k_libvirt::ConfigDriveImage {
+            path: committed.config_drive.path.to_string_lossy().into_owned(),
+            sha256: committed.config_drive.sha256.clone(),
+        }),
+        network_interfaces,
+    };
+    o3k_libvirt::build_domain_xml(&spec)
+        .map(|_| spec)
+        .map_err(|_| {
+            AgentError::Protocol("resolved domain inputs failed libvirt validation".to_owned())
+        })
+}
+
+fn resolve_committed_create_inputs(
+    command: &proto::Command,
+    artifact_root: &std::path::Path,
+    network: &o3k_network::HostNetworkManager,
+) -> Result<CommittedCreateInputs, AgentError> {
+    let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+        return Err(AgentError::Protocol("create action is missing".to_owned()));
+    };
+    let Some(resolved) = create.resolved.as_ref() else {
+        return Err(AgentError::Protocol(
+            "resolved create inputs are missing".to_owned(),
+        ));
+    };
+    let store = o3k_compute_agent::ArtifactStore::open(artifact_root, &command.agent_id)
+        .map_err(|_| AgentError::Protocol("agent artifact store is unavailable".to_owned()))?;
+    let image_path = store
+        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+            command_id: command.command_id.clone(),
+            operation_id: command.operation_id.clone(),
+            resource_id: command.resource_id.clone(),
+            artifact_id: resolved.image_artifact_id.clone(),
+            kind: proto::ArtifactKind::ImageBase,
+            sha256: resolved.image_sha256.clone(),
+            format: resolved.image_format.clone(),
+        })
+        .map_err(|_| AgentError::Protocol("committed image artifact is unavailable".to_owned()))?;
+    let config_path = store
+        .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
+            command_id: command.command_id.clone(),
+            operation_id: command.operation_id.clone(),
+            resource_id: command.resource_id.clone(),
+            artifact_id: resolved.config_drive_artifact_id.clone(),
+            kind: proto::ArtifactKind::ConfigDriveIso,
+            sha256: resolved.config_drive_sha256.clone(),
+            format: "iso".to_owned(),
+        })
+        .map_err(|_| {
+            AgentError::Protocol("committed config-drive artifact is unavailable".to_owned())
+        })?;
+    let mut owned_taps = Vec::with_capacity(resolved.network_attachments.len());
+    for attachment in &resolved.network_attachments {
+        let tap_name = network
+            .resolve_owned_tap(&o3k_network::TapSpec {
+                instance_id: command.resource_id.clone(),
+                port_id: attachment.port_id.clone(),
+                mac: attachment.mac.clone(),
+            })
+            .map_err(|_| AgentError::Protocol("owned TAP is unavailable".to_owned()))?;
+        owned_taps.push(OwnedTap {
+            port_id: attachment.port_id.clone(),
+            tap_name,
+            mac_address: attachment.mac.clone(),
+            ownership_token: "durable-network-manifest".to_owned(),
+        });
+    }
+    Ok(CommittedCreateInputs {
+        image: CommittedArtifact {
+            artifact_id: resolved.image_artifact_id.clone(),
+            kind: proto::ArtifactKind::ImageBase,
+            format: resolved.image_format.clone(),
+            sha256: resolved.image_sha256.clone(),
+            path: image_path,
+        },
+        config_drive: CommittedArtifact {
+            artifact_id: resolved.config_drive_artifact_id.clone(),
+            kind: proto::ArtifactKind::ConfigDriveIso,
+            format: "iso".to_owned(),
+            sha256: resolved.config_drive_sha256.clone(),
+            path: config_path,
+        },
+        owned_taps,
+        identity: CreateDomainIdentity {
+            server_id: command.resource_id.clone(),
+            project_id: resolved.project_id.clone(),
+            generation: 1,
+            operation_id: command.operation_id.clone(),
+            managed_by: "o3k-compute".to_owned(),
+        },
+    })
 }
 
 #[async_trait]
@@ -179,12 +395,36 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .map_err(agent_error)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
-            Some(proto::command::Action::Create(_)) => match resolve_create_domain_spec(command) {
-                Ok(_) => Err(AgentError::Protocol(
-                    "create domain resolution produced no executable definition".to_owned(),
-                )),
-                Err(error) => Err(error),
-            },
+            Some(proto::command::Action::Create(_)) => {
+                let committed =
+                    resolve_committed_create_inputs(command, &self.artifact_root, &self.network)?;
+                let spec = resolve_create_domain_spec(command, Some(&committed))?;
+                let definition = o3k_libvirt::build_domain_xml(&spec)
+                    .map_err(|_| AgentError::Protocol("domain XML is invalid".to_owned()))?;
+                let definition_name = definition.name.clone();
+                if let Ok(existing) = self.adapter.inspect(definition_name.clone()).await {
+                    verify_owned_domain(&existing, &command.resource_id)?;
+                    return success("domain already exists", resource_state(&existing));
+                }
+                self.adapter
+                    .define(o3k_libvirt::DomainDefinition {
+                        name: definition_name.clone(),
+                        xml: definition.xml,
+                    })
+                    .await
+                    .map_err(agent_error)?;
+                if let Err(error) = self.adapter.start(definition_name.clone()).await {
+                    let _ = self.adapter.undefine(definition_name.clone()).await;
+                    return Err(agent_error(error));
+                }
+                let inspection = self
+                    .adapter
+                    .inspect(definition_name)
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                success("domain created", resource_state(&inspection))
+            }
             Some(proto::command::Action::ConsoleLog(request)) => {
                 if request.offset > 0 {
                     return Err(AgentError::Protocol(
@@ -293,8 +533,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let agent = AgentClient::new(config.clone())?;
+    let artifact_root = agent.identity_file().with_extension("artifacts");
+    let network_root = agent
+        .identity_file()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("network");
+    let network = o3k_network::HostNetworkManager::with_ownership_root(
+        o3k_network::HostNetworkConfig {
+            bridge_name: env::var("O3K_COMPUTE_BRIDGE_NAME")
+                .unwrap_or_else(|_| "o3k-br0".to_owned()),
+            uplink: env::var("O3K_COMPUTE_UPLINK").ok(),
+        },
+        network_root,
+    )?;
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
+        artifact_root,
+        network,
     });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
@@ -471,22 +727,21 @@ mod tests {
                     disk_gib: 1,
                     config_drive_artifact_id: "config-artifact".to_owned(),
                     config_drive_sha256: "b".repeat(64),
+                    project_id: "project-1".to_owned(),
                     network_attachments: vec![proto::NetworkAttachment {
                         port_id: "port-1".to_owned(),
                         mac: "02:00:00:00:00:01".to_owned(),
                         fixed_ipv4: "192.0.2.10".to_owned(),
-                        subnet_cidr: "192.0.2.0/24".to_owned(),
-                        gateway_ipv4: "192.0.2.1".to_owned(),
                     }],
                 }),
             })),
             ..Default::default()
         };
 
-        let result = resolve_create_domain_spec(&command);
+        let result = resolve_create_domain_spec(&command, None);
         assert!(result.is_err());
         if let Err(error) = result {
-            assert!(error.to_string().contains("transfer_id and expiry"));
+            assert!(error.to_string().contains("committed artifact bytes"));
             assert!(error.to_string().contains("owned TAP names"));
         }
     }
@@ -504,7 +759,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = resolve_create_domain_spec(&command);
+        let result = resolve_create_domain_spec(&command, None);
         assert!(result.is_err());
         if let Err(error) = result {
             assert!(
@@ -512,6 +767,122 @@ mod tests {
                     .to_string()
                     .contains("artifact references are incomplete")
             );
+        }
+    }
+
+    #[test]
+    fn typed_contract_rejects_artifact_identity_mismatch() {
+        let command = proto::Command {
+            command_id: "command-1".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "server-1".to_owned(),
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: "image-artifact".to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "qcow2".to_owned(),
+                    vcpus: 1,
+                    memory_mib: 512,
+                    config_drive_artifact_id: "config-artifact".to_owned(),
+                    config_drive_sha256: "b".repeat(64),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let committed = CommittedCreateInputs {
+            image: CommittedArtifact {
+                artifact_id: "different-image".to_owned(),
+                kind: proto::ArtifactKind::ImageBase,
+                format: "qcow2".to_owned(),
+                sha256: "a".repeat(64),
+                path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
+            },
+            config_drive: CommittedArtifact {
+                artifact_id: "config-artifact".to_owned(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                format: "iso".to_owned(),
+                sha256: "b".repeat(64),
+                path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
+            },
+            owned_taps: Vec::new(),
+            identity: CreateDomainIdentity {
+                server_id: "server-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                generation: 1,
+                operation_id: "operation-1".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+        };
+
+        let result = resolve_create_domain_spec(&command, Some(&committed));
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("does not match"));
+        }
+    }
+
+    #[test]
+    fn typed_contract_rejects_unowned_tap_even_with_matching_port_data() {
+        let command = proto::Command {
+            command_id: "command-1".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "server-1".to_owned(),
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: "image-artifact".to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "qcow2".to_owned(),
+                    vcpus: 1,
+                    memory_mib: 512,
+                    config_drive_artifact_id: "config-artifact".to_owned(),
+                    config_drive_sha256: "b".repeat(64),
+                    network_attachments: vec![proto::NetworkAttachment {
+                        port_id: "port-1".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        fixed_ipv4: "192.0.2.10".to_owned(),
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let committed = CommittedCreateInputs {
+            image: CommittedArtifact {
+                artifact_id: "image-artifact".to_owned(),
+                kind: proto::ArtifactKind::ImageBase,
+                format: "qcow2".to_owned(),
+                sha256: "a".repeat(64),
+                path: PathBuf::from("/var/lib/o3k/artifacts/image.qcow2"),
+            },
+            config_drive: CommittedArtifact {
+                artifact_id: "config-artifact".to_owned(),
+                kind: proto::ArtifactKind::ConfigDriveIso,
+                format: "iso".to_owned(),
+                sha256: "b".repeat(64),
+                path: PathBuf::from("/var/lib/o3k/artifacts/config.iso"),
+            },
+            owned_taps: vec![OwnedTap {
+                port_id: "port-1".to_owned(),
+                tap_name: "o3ktap-port1".to_owned(),
+                mac_address: "02:00:00:00:00:01".to_owned(),
+                ownership_token: String::new(),
+            }],
+            identity: CreateDomainIdentity {
+                server_id: "server-1".to_owned(),
+                project_id: "project-1".to_owned(),
+                generation: 1,
+                operation_id: "operation-1".to_owned(),
+                managed_by: "o3k-compute".to_owned(),
+            },
+        };
+
+        let result = resolve_create_domain_spec(&command, Some(&committed));
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert!(error.to_string().contains("owned TAP evidence"));
         }
     }
 }
