@@ -101,12 +101,19 @@ jobs:
         run: bash tests/measure-process-ownership.sh
       - name: Generate candidate SBOM
         run: bash packaging/make-sbom.sh target/testlab-artifacts/sbom.spdx.json
+      - name: Generate TestLab artifact checksums
+        run: |
+          (cd target/testlab-artifacts && sha256sum result.json sbom.spdx.json > SHA256SUMS)
       - name: Upload TestLab artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: testlab-artifacts
-          path: target/testlab-artifacts/
+          if-no-files-found: warn
+          path: |
+            target/testlab-artifacts/result.json
+            target/testlab-artifacts/sbom.spdx.json
+            target/testlab-artifacts/SHA256SUMS
   supply-chain:
     runs-on: ubuntu-latest
     steps:
