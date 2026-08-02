@@ -1171,6 +1171,17 @@ struct CreateServerRequest {
     ssh_public_key: Option<String>,
     key_name: Option<String>,
 }
+
+fn config_drive_ssh_public_key(
+    explicit: Option<String>,
+    keypair: Option<String>,
+) -> Result<String, &'static str> {
+    explicit
+        .or(keypair)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or("key_name or ssh_public_key is required when config_drive is enabled")
+}
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum IdReference {
@@ -1677,12 +1688,27 @@ async fn create_server(
         );
     };
     let config_drive = if body.server.config_drive == Some(true) {
-        let Some(ssh_public_key) = body.server.ssh_public_key.clone() else {
-            return keystone_error(
-                StatusCode::BAD_REQUEST,
-                "Bad Request",
-                "ssh_public_key is required when config_drive is enabled",
-            );
+        let keypair_public_key = if body.server.ssh_public_key.is_none() {
+            if let Some(key_name) = body.server.key_name.as_deref() {
+                match service
+                    .show_keypair(&token.user_id, &token.project_id, key_name)
+                    .await
+                {
+                    Ok(keypair) => Some(keypair.public_key),
+                    Err(error) => return compute_error(error),
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let ssh_public_key = match config_drive_ssh_public_key(
+            body.server.ssh_public_key.clone(),
+            keypair_public_key,
+        ) {
+            Ok(value) => value,
+            Err(message) => return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", message),
         };
         Some(ConfigDriveRequest {
             user_data: body
@@ -2116,5 +2142,18 @@ mod tests {
             Some("550e8400-e29b-41d4-a716-446655440001")
         );
         Ok(())
+    }
+
+    #[test]
+    fn config_drive_key_name_falls_back_to_the_project_keypair() {
+        assert_eq!(
+            super::config_drive_ssh_public_key(
+                None,
+                Some("ssh-ed25519 AAAA generated-by-keypair".to_owned())
+            )
+            .as_deref(),
+            Ok("ssh-ed25519 AAAA generated-by-keypair")
+        );
+        assert!(super::config_drive_ssh_public_key(None, None).is_err());
     }
 }
