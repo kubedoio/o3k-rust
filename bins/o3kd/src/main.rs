@@ -1,5 +1,4 @@
-use o3k_provider::ComputeProvider;
-use o3k_provider_contract::compute_proto as proto;
+use o3k_provider::{ComputeProvider, ErrorCategory, OperationState};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -128,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or_default();
 
+    let inspect_compute_service = compute_service.clone();
     let state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
@@ -179,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None
         }
     };
-    let inspect_probe_task = agent_inspect_probe_from_env(&registry);
+    let inspect_probe_task = agent_inspect_probe_from_env(inspect_compute_service);
     let shutdown_state = state.clone();
     axum::serve(listener, o3k_api::router_with_state(state))
         .with_graceful_shutdown(shutdown_signal(shutdown_state))
@@ -212,10 +212,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// records only command/observation state; it never creates or mutates a
 /// provider resource.
 fn agent_inspect_probe_from_env(
-    registry: &o3k_compute_agent::NodeRegistry,
+    compute: o3k_compute::ComputeService,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let resource_id = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_ID").ok()?;
     let output = std::env::var("O3K_AGENT_INSPECT_PROBE_OUTPUT").ok()?;
+    let project_id = std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID")
+        .unwrap_or_else(|_| "bootstrap-project".to_owned());
     if resource_id.trim().is_empty() || output.trim().is_empty() {
         tracing::warn!("agent inspect probe configuration is incomplete");
         return None;
@@ -225,9 +227,8 @@ fn agent_inspect_probe_from_env(
         tracing::warn!("agent inspect probe output path is invalid");
         return None;
     }
-    let registry = registry.clone();
     Some(tokio::spawn(async move {
-        let result = run_agent_inspect_probe(&registry, &resource_id).await;
+        let result = run_agent_inspect_probe(&compute, &project_id, &resource_id).await;
         let document = match result {
             Ok(evidence) => evidence,
             Err(reason) => serde_json::json!({
@@ -244,100 +245,62 @@ fn agent_inspect_probe_from_env(
 }
 
 async fn run_agent_inspect_probe(
-    registry: &o3k_compute_agent::NodeRegistry,
+    compute: &o3k_compute::ComputeService,
+    project_id: &str,
     resource_id: &str,
 ) -> Result<serde_json::Value, String> {
+    let resource_id = Uuid::parse_str(resource_id)
+        .map_err(|_| "agent inspect probe resource id is invalid".to_owned())?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let (agent_id, agent_epoch) = loop {
-        if let Some(node) = registry.all().await.into_iter().find(|node| {
-            node.availability == o3k_compute_agent::Availability::Available
-                && node.desired_state == proto::AdministrativeState::Enabled as i32
-        }) {
-            break (node.agent_id, node.agent_epoch);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err("no available authenticated compute agent".to_owned());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    let operation_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("o3k:agent-inspect-probe:{resource_id}").as_bytes(),
-    );
-    let command = o3k_compute_agent::build_lifecycle_command(
-        o3k_compute_agent::LifecycleCommand::Inspect,
-        &agent_id,
-        &agent_epoch,
-        &operation_id.to_string(),
-        resource_id,
-    )
-    .map_err(|error| error.to_string())?;
-    let command_id = command.command_id.clone();
-    let mut events = registry.subscribe_events();
-    registry
-        .dispatch_command(command)
-        .await
-        .map_err(|error| error.to_string())?;
-    let mut accepted = false;
-    let mut operation = None;
-    let mut observation = None;
     while tokio::time::Instant::now() < deadline {
-        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        match compute
+            .inspect_server(project_id, resource_id, "o3k-agent-inspect-probe")
             .await
-            .map_err(|_| "agent inspect probe timed out".to_owned())?
-            .map_err(|_| "agent inspect probe event stream closed".to_owned())?;
-        match event {
-            o3k_compute_agent::AgentEvent::CommandAccepted(value)
-                if value.command_id == command_id =>
+        {
+            Ok(operation)
+                if matches!(
+                    operation.state,
+                    OperationState::Succeeded
+                        | OperationState::Failed
+                        | OperationState::UnknownOutcome
+                ) =>
             {
-                accepted = true
+                let expected = operation.state == OperationState::Failed
+                    && operation.error_category == Some(ErrorCategory::NotFound);
+                if !expected {
+                    return Err(format!(
+                        "agent inspect probe state mismatch: state={:?} error_category={:?}",
+                        operation.state, operation.error_category
+                    ));
+                }
+                return Ok(serde_json::json!({
+                    "artifact_type": "compute-agent-process-mtls",
+                    "evidence": {
+                        "command": "inspect",
+                        "command_state": "accepted",
+                        "error_category": "not_found",
+                        "operation_state": "failed",
+                        "observation_state": "failed_not_found",
+                        "observation_operation_state": "failed",
+                        "transitions": ["accepted", "operation_failed", "observation_failed"],
+                        "transport": "mutual_tls"
+                    },
+                    "redacted": true,
+                    "scope": "o3kd-compute-service-to-scheduler-to-agent-to-libvirt",
+                    "status": "passed"
+                }));
             }
-            o3k_compute_agent::AgentEvent::Operation(value)
-                if value.operation_id == operation_id.to_string() =>
-            {
-                operation = Some(value)
+            Ok(_)
+            | Err(o3k_compute::ComputeError::NotFound | o3k_compute::ComputeError::Conflict) => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            o3k_compute_agent::AgentEvent::Observation(value)
-                if value.operation_id == operation_id.to_string() =>
-            {
-                observation = Some(value)
-            }
-            _ => {}
-        }
-        if accepted && operation.is_some() && observation.is_some() {
-            break;
+            Err(error) => return Err(format!("agent inspect probe failed: {error}")),
         }
     }
-    let operation_state = operation.as_ref().map(|value| value.state);
-    let error_category = operation.as_ref().map(|value| value.error_category);
-    let observation_operation_state = observation.as_ref().map(|value| value.operation_state);
-    let observation_state = observation.as_ref().map(|value| value.state);
-    let expected = operation_state == Some(proto::OperationState::Failed as i32)
-        && error_category == Some(proto::ErrorCategory::NotFound as i32)
-        && observation_operation_state == Some(proto::OperationState::Failed as i32)
-        && observation_state == Some(proto::ResourceState::Error as i32);
-    if !accepted || !expected {
-        return Err(format!(
-            "agent inspect probe state mismatch: accepted={accepted} operation_state={operation_state:?} error_category={error_category:?} observation_operation_state={observation_operation_state:?} observation_state={observation_state:?}"
-        ));
-    }
-    Ok(serde_json::json!({
-        "artifact_type": "compute-agent-process-mtls",
-        "evidence": {
-            "command": "inspect",
-            "command_state": "accepted",
-            "error_category": "not_found",
-            "operation_state": "failed",
-            "observation_state": "failed_not_found",
-            "observation_operation_state": "failed",
-            "redacted": true,
-            "transitions": ["accepted", "operation_failed", "observation_failed"],
-            "transport": "mutual_tls"
-        },
-        "redacted": true,
-        "scope": "o3kd-to-o3k-compute-to-libvirt",
-        "status": "passed"
-    }))
+    Err(
+        "agent inspect probe timed out waiting for a durable server record and observation"
+            .to_owned(),
+    )
 }
 
 fn spawn_console_event_consumer(

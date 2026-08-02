@@ -1123,12 +1123,11 @@ impl ComputeProvider for AgentComputeProvider {
                     .cloned()
             })
         };
-        if let Some(binding) = binding.as_ref() {
-            if let Some(expected) = binding.provider_resource_id.as_deref()
-                && expected != provider_instance_id
-            {
-                return Err(ProviderError::Conflict);
-            }
+        if let Some(binding) = binding.as_ref()
+            && let Some(expected) = binding.provider_resource_id.as_deref()
+            && expected != provider_instance_id
+        {
+            return Err(ProviderError::Conflict);
         }
         let agent = self.selected_agent(provider_id).await?;
         if let Some(binding) = binding.as_ref()
