@@ -422,7 +422,9 @@ fi
 # The remainder deliberately uses only OpenStack CLI calls. Resource IDs are
 # captured in the redacted artifact; credentials and response bodies are not
 # uploaded. The public CLI does not expose operation IDs here.
-IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --disk-format raw --container-format bare -f value -c id)"
+# CirrOS publishes this disk as qcow2. Preserve that format in Glance so the
+# compute agent can build a qcow2 overlay with the correct backing format.
+IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --disk-format qcow2 --container-format bare -f value -c id)"
 CREATED_IMAGE_ID="${IMAGE_ID}"
 CLEANUP_IMAGE_STATUS=pending
 KEYPAIR_PUBLIC_KEY="${DATA_DIR}/o3k-testlab-keypair.pub"
