@@ -400,6 +400,35 @@ mod tests {
     }
 
     #[test]
+    fn distinct_instances_share_base_but_own_independent_overlays()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let content = vec![0_u8; 1024 * 1024];
+        let (store, first_request) = request(&content)?;
+        let second_request = ImageMaterializationRequest {
+            instance_id: "instance-2".to_owned(),
+            ..first_request.clone()
+        };
+        let root = std::env::temp_dir().join(format!("o3k-image-cache-{}", uuid::Uuid::now_v7()));
+        let materializer = ImageMaterializer::open(store, &root, 2 * 1024 * 1024 * 1024)?;
+
+        let first = materializer.materialize(&first_request)?;
+        let second = materializer.materialize(&second_request)?;
+        assert_eq!(first.base_path, second.base_path);
+        assert_ne!(first.overlay_path, second.overlay_path);
+        assert!(first.base_path.is_file());
+        assert!(first.overlay_path.is_file());
+        assert!(second.overlay_path.is_file());
+
+        materializer.delete(&first_request)?;
+        assert!(!first.overlay_path.exists());
+        assert!(first.base_path.is_file());
+        assert!(second.overlay_path.is_file());
+
+        std::fs::remove_dir_all(root).ok();
+        Ok(())
+    }
+
+    #[test]
     fn image_request_requires_command_bound_transfer_identity() -> Result<(), ImageMaterializerError>
     {
         let command_id = "command-1";
