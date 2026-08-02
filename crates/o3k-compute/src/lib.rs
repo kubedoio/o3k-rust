@@ -598,6 +598,19 @@ fn error_category_from_proto(category: i32) -> Option<o3k_provider::ErrorCategor
     }
 }
 
+fn provider_error_category_from_name(name: &str) -> Option<o3k_provider::ErrorCategory> {
+    match name {
+        "invalid_request" => Some(o3k_provider::ErrorCategory::InvalidRequest),
+        "conflict" => Some(o3k_provider::ErrorCategory::Conflict),
+        "capacity" => Some(o3k_provider::ErrorCategory::Capacity),
+        "not_found" => Some(o3k_provider::ErrorCategory::NotFound),
+        "retryable" => Some(o3k_provider::ErrorCategory::Retryable),
+        "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
+        "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
+        _ => None,
+    }
+}
+
 fn instance_state_from_proto(state: i32) -> Option<o3k_provider::InstanceState> {
     use o3k_provider_contract::compute_proto::ResourceState as WireState;
     match state {
@@ -2034,7 +2047,10 @@ impl ComputeService {
                     .unwrap_or(operation_id),
                 o3k_operation_id: operation_id,
                 state,
-                error_category: None,
+                error_category: existing
+                    .error_category
+                    .as_deref()
+                    .and_then(provider_error_category_from_name),
                 provider_resource_id: Some(_reference.provider_resource_id.clone()),
             });
         }

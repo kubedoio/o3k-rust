@@ -234,7 +234,7 @@ json.dump({
     "artifact_type": "compute-agent-process-mtls",
     "status": "passed",
     "redacted": True,
-    "scope": "o3kd-to-o3k-compute-to-libvirt",
+    "scope": "o3kd-compute-service-to-scheduler-to-agent-to-libvirt",
     "evidence": {
         "command": "inspect",
         "command_state": "accepted",
