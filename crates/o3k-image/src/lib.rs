@@ -202,6 +202,76 @@ impl ImageCache {
         })
     }
 
+    /// Publishes a verified artifact from a host-local file without loading
+    /// the complete image into memory. This is the agent-side bridge from the
+    /// authenticated artifact store to the managed image cache.
+    pub fn cache_base_path(
+        &self,
+        checksum: &str,
+        format: &str,
+        source: &Path,
+    ) -> Result<PathBuf, ImageError> {
+        if !is_checksum(checksum) {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        if !matches!(format, "qcow2" | "raw") {
+            return Err(ImageError::UnsupportedFormat);
+        }
+        let source_metadata = fs::symlink_metadata(source).map_err(ImageError::Storage)?;
+        if !source_metadata.file_type().is_file() || source_metadata.len() > self.max_bytes {
+            return Err(ImageError::InvalidPath);
+        }
+        let mut file = fs::File::open(source).map_err(ImageError::Storage)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(ImageError::Storage)?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        if format!("{:x}", hasher.finalize()) != checksum {
+            return Err(ImageError::ChecksumMismatch);
+        }
+        if format == "qcow2" {
+            verify_image_format(&self.qemu_img, source, format)?;
+        }
+
+        if let Ok(path) = self.resolve_base(checksum, format, source_metadata.len()) {
+            return Ok(path);
+        }
+
+        let _guard = self.lock.lock().map_err(|_| ImageError::Conflict)?;
+        let target = self.root.join("base").join(format!("{checksum}.{format}"));
+        if let Ok(metadata) = fs::symlink_metadata(&target) {
+            if !metadata.file_type().is_file() {
+                return Err(ImageError::InvalidPath);
+            }
+            fs::remove_file(&target).map_err(ImageError::Storage)?;
+        }
+        let temporary = self
+            .root
+            .join("base")
+            .join(format!("base-{checksum}.tmp-{}", Uuid::now_v7()));
+        if let Err(error) = fs::copy(source, &temporary) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ImageError::Storage(error));
+        }
+        if let Err(error) = fs::rename(&temporary, &target) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ImageError::Storage(error));
+        }
+        drop(_guard);
+        match self.resolve_base(checksum, format, source_metadata.len()) {
+            Ok(path) => Ok(path),
+            Err(error) => {
+                let _ = fs::remove_file(&target);
+                Err(error)
+            }
+        }
+    }
+
     /// Resolve a previously published base image without accepting a host
     /// path from the caller.
     ///
@@ -298,10 +368,15 @@ impl ImageCache {
             .root
             .join("overlays")
             .join(format!(".{instance_id}.tmp-{}", Uuid::now_v7()));
+        let backing_format = base
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.rsplit_once('.').map(|(_, format)| format))
+            .ok_or(ImageError::InvalidPath)?;
         let status = std::process::Command::new(&self.qemu_img)
             .args(["create", "-f", "qcow2", "-b"])
             .arg(base)
-            .args(["-F", "qcow2"])
+            .args(["-F", backing_format])
             .arg(&temporary)
             .status()
             .map_err(|_| {
@@ -352,6 +427,54 @@ impl ImageCache {
             Ok(_) => return Err(ImageError::InvalidPath),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(ImageError::Storage(error)),
+        }
+        Ok(())
+    }
+
+    /// Expands an owned qcow2 overlay to the selected flavor capacity. Shrink
+    /// requests are rejected so a retry cannot destroy guest data.
+    pub fn resize_overlay(
+        &self,
+        instance_id: &str,
+        overlay: &Path,
+        disk_gib: u64,
+    ) -> Result<(), ImageError> {
+        if instance_id.is_empty()
+            || instance_id
+                != Path::new(instance_id)
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or_default()
+            || disk_gib == 0
+            || overlay.parent() != Some(self.root.join("overlays").as_path())
+        {
+            return Err(ImageError::InvalidPath);
+        }
+        let expected = self
+            .root
+            .join("overlays")
+            .join(format!("{instance_id}.qcow2"));
+        if overlay != expected {
+            return Err(ImageError::InvalidPath);
+        }
+        let target = disk_gib
+            .checked_mul(1024 * 1024 * 1024)
+            .ok_or(ImageError::TooLarge)?;
+        let current = overlay_virtual_size(&self.qemu_img, overlay)?;
+        if target < current {
+            return Err(ImageError::Conflict);
+        }
+        if target == current {
+            return Ok(());
+        }
+        let status = std::process::Command::new(&self.qemu_img)
+            .args(["resize"])
+            .arg(overlay)
+            .arg(target.to_string())
+            .status()
+            .map_err(|_| ImageError::OverlayFailed)?;
+        if !status.success() || overlay_virtual_size(&self.qemu_img, overlay)? < target {
+            return Err(ImageError::OverlayFailed);
         }
         Ok(())
     }
@@ -499,6 +622,25 @@ fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), Im
         }
     }
     Ok(())
+}
+
+fn overlay_virtual_size(qemu_img: &Path, overlay: &Path) -> Result<u64, ImageError> {
+    let output = std::process::Command::new(qemu_img)
+        .args(["info", "--output=json"])
+        .arg(overlay)
+        .output()
+        .map_err(|_| ImageError::OverlayFailed)?;
+    if !output.status.success() {
+        return Err(ImageError::OverlayFailed);
+    }
+    let info: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| ImageError::OverlayFailed)?;
+    if info.get("format").and_then(serde_json::Value::as_str) != Some("qcow2") {
+        return Err(ImageError::OverlayFailed);
+    }
+    info.get("virtual-size")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(ImageError::OverlayFailed)
 }
 
 fn verify_image_format(qemu_img: &Path, image: &Path, expected: &str) -> Result<(), ImageError> {
@@ -873,6 +1015,25 @@ mod tests {
         ));
 
         fs::remove_dir_all(service_path)?;
+        fs::remove_dir_all(cache_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn verified_path_publication_is_streamed_and_content_addressed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("cache-path-publication");
+        let source = path.join("artifact.raw");
+        let cache_path = root("cache-path-publication-cache");
+        fs::create_dir_all(&path)?;
+        let content = vec![b'x'; 128 * 1024];
+        let checksum = format!("{:x}", Sha256::digest(&content));
+        fs::write(&source, &content)?;
+        let cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
+        let published = cache.cache_base_path(&checksum, "raw", &source)?;
+        assert_eq!(fs::read(&published)?, content);
+        assert_eq!(cache.cache_base_path(&checksum, "raw", &source)?, published);
+        fs::remove_dir_all(path)?;
         fs::remove_dir_all(cache_path)?;
         Ok(())
     }
