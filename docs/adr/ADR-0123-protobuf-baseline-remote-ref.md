@@ -1,5 +1,7 @@
 # ADR-0123 — Keep the protobuf compatibility baseline off the checkout branch
 
+Status: Accepted
+
 ## Context
 
 The CI checkout is already on the pull-request or `main` commit. Fetching the

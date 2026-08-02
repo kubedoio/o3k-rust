@@ -1,5 +1,7 @@
 # ADR-0069 — Reconcile usage during placement inventory refresh
 
+Status: Accepted
+
 ## Context
 
 Placement allocations are durable, while inventory reports are refresh input.

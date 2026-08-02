@@ -1,5 +1,7 @@
 # ADR-0126 — Revalidate domain ownership before opening a console
 
+Status: Accepted
+
 ## Context
 
 The compute agent already validates the requested resource ID before issuing a

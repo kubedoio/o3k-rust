@@ -1,5 +1,7 @@
 # ADR-0079 — Enforce release-evidence freshness
 
+Status: Accepted
+
 ## Context
 
 The release gate checked only that each artifact's `finished_at` field was an

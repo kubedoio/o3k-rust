@@ -20,6 +20,7 @@ assert "sha256sum --check --status" in text
 assert "run: bash scripts/validate-workflows.sh actionlint" in text
 assert "run: bash tests/workflow-validation.sh actionlint" in text
 assert "run: bash tests/real-libvirt-harness.sh" in text
+assert "run: bash tests/openapi-governance.sh" in text
 assert "run: cargo test --workspace --all-features" in text
 assert "run: cargo test --workspace\n" not in text
 assert "protobuf-compiler libvirt-dev pkg-config" in text

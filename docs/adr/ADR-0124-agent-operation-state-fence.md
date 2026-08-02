@@ -1,5 +1,7 @@
 # ADR-0124 — Keep agent operation updates separate from resource observations
 
+Status: Accepted
+
 ## Context
 
 An authenticated compute-agent `OperationUpdate` reports command progress and

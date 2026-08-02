@@ -1,5 +1,7 @@
 # ADR-0064 — Require benchmark evidence for release readiness
 
+Status: Accepted
+
 ## Context
 
 The release gate validated benchmark artifacts when supplied, but classified

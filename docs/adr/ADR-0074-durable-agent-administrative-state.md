@@ -1,5 +1,7 @@
 # ADR-0074 — Durably apply compute-agent administrative state
 
+Status: Accepted
+
 ## Context
 
 The compute agent previously initialized every connection as `ENABLED`, sent

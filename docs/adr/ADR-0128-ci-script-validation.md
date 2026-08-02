@@ -1,5 +1,7 @@
 # ADR-0128 — Validate scripts used by protected workflows in normal CI
 
+Status: Accepted
+
 ## Context
 
 The normal Rust CI job checked shell syntax only for packaging and test

@@ -1,5 +1,7 @@
 # ADR-0063 — Stop both services before reset cleanup
 
+Status: Accepted
+
 ## Context
 
 The libvirt profile runs `o3kd` and `o3k-compute` against shared state. Reset

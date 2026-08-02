@@ -1,5 +1,7 @@
 # ADR-0076 — Reconcile usage during provider registration
 
+Status: Accepted
+
 ## Context
 
 Placement allocations are durable, but provider registration receives a fresh

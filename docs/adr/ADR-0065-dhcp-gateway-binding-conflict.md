@@ -1,5 +1,7 @@
 # ADR-0065 — Reject DHCP gateway and fixed-binding conflicts
 
+Status: Accepted
+
 ## Context
 
 DHCP state can be reconfigured after fixed bindings have been published. A

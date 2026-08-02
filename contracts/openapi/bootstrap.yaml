@@ -1,4 +1,11 @@
 openapi: 3.1.0
+x-o3k-openapi-policy:
+  target: "3.1.2"
+  status: transitional
+x-o3k-baseline:
+  path: docs/specs/testlab-api-baseline.json
+  status: partial
+  coverage: bootstrap
 info:
   title: O3K Bootstrap API
   version: 0.1.0-alpha.0
