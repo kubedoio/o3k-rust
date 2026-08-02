@@ -534,6 +534,8 @@ async fn apply_agent_provider_event(
                 }
             }
         }
+        o3k_compute_agent::AgentEvent::ArtifactAck(_)
+        | o3k_compute_agent::AgentEvent::ArtifactStatus(_) => {}
     }
 }
 
