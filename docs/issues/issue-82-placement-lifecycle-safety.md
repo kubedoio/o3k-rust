@@ -6,6 +6,16 @@ evidence, and a trusted real-host scheduling artifact.
 
 ## Bounded repository slice
 
+This change adds a typed, placement-local allocation-intent journal. Callers
+record an `AllocationIntent` before reserving capacity, commit it idempotently
+after the allocation succeeds, and can reopen the ledger without losing the
+intent. `reconcile_consumers` accepts the current durable control-plane
+consumer IDs and returns deterministic orphan and abandoned-intent records
+while releasing only allocations whose consumer is absent. The intent journal
+uses the same unique temporary-file and atomic-rename publication rule as the
+placement ledger. It is a library boundary only: compute lifecycle, agent
+dispatch, network, image, libvirt, and protected workflows remain untouched.
+
 The persistent Placement ledger now treats state publication as a transaction
 from the caller's perspective. Registration, refresh, synchronization,
 allocation, release, and provider-state mutations restore the prior in-memory
@@ -55,6 +65,9 @@ agent lifecycle dispatch or real-host evidence.
   leave the provider generation and allocation set unchanged.
 - The normal workspace tests continue to cover idempotency, stale-generation
   fencing, rollback, restart persistence, and reported-usage reconciliation.
+- `o3k-placement` coverage verifies intent persistence across reopen, exact
+  idempotent commit, orphan allocation release, pending-intent abandonment,
+  and retained capacity after restart.
 - `cargo check -p o3kd` verifies the daemon wiring and dependency boundary.
 - `o3k-compute` regression coverage verifies explicit disk-capacity mapping,
   durable allocation retention, and draining-state projection.
