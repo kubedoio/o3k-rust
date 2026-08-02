@@ -137,6 +137,21 @@ pub trait CreateArtifactResolver: Send + Sync {
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError>;
 }
 
+#[derive(Debug, Default)]
+pub struct UnconfiguredCreateArtifactResolver;
+
+#[async_trait]
+impl CreateArtifactResolver for UnconfiguredCreateArtifactResolver {
+    async fn resolve_artifacts(
+        &self,
+        _request: &CreateInstanceRequest,
+        _agent: &NodeSnapshot,
+        _inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+        Err(ProviderError::InvalidRequest)
+    }
+}
+
 /// Resolves control-plane-owned resources into the bounded protocol inputs
 /// required by an agent. Implementations must return verified references and
 /// digests; returning placeholder values is intentionally not supported.
@@ -190,7 +205,7 @@ struct AgentProviderState {
 pub struct AgentComputeProvider {
     registry: NodeRegistry,
     resolver: Arc<dyn ResolvedCreateResolver>,
-    artifact_resolver: Option<Arc<dyn CreateArtifactResolver>>,
+    artifact_resolver: Arc<dyn CreateArtifactResolver>,
     state: Arc<RwLock<AgentProviderState>>,
     store: Option<Arc<SqliteStore>>,
     command_timeout: Duration,
@@ -230,7 +245,7 @@ impl AgentComputeProvider {
         Self {
             registry,
             resolver,
-            artifact_resolver: None,
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
             state,
             store,
             command_timeout: Duration::from_secs(30),
@@ -245,7 +260,7 @@ impl AgentComputeProvider {
 
     #[must_use]
     pub fn with_artifact_resolver(mut self, resolver: Arc<dyn CreateArtifactResolver>) -> Self {
-        self.artifact_resolver = Some(resolver);
+        self.artifact_resolver = resolver;
         self
     }
 
@@ -331,6 +346,37 @@ impl AgentComputeProvider {
             return Err(error);
         }
         Ok(operation)
+    }
+
+    async fn persist_pending_command(
+        &self,
+        command: &o3k_provider_contract::compute_proto::Command,
+        operation_id: Uuid,
+    ) -> Result<Option<AgentCommandRecord>, ProviderError> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let record = AgentCommandRecord {
+            command_id: command.command_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            operation_id,
+            resource_id: Uuid::parse_str(&command.resource_id)
+                .map_err(|_| ProviderError::InvalidRequest)?,
+            agent_id: command.agent_id.clone(),
+            agent_epoch: command.agent_epoch.clone(),
+            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+            payload: command.encode_to_vec(),
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: Some(operation_id.to_string()),
+            provider_resource_id: None,
+        };
+        let existing = store
+            .insert_agent_command(&record)
+            .await
+            .map_err(|_| ProviderError::Conflict)?;
+        Ok(Some(existing))
     }
 }
 
@@ -731,49 +777,93 @@ impl ComputeProvider for AgentComputeProvider {
             network_attachments: resolved.network_attachments.clone(),
         })
         .map_err(map_agent_error)?;
-        if let Some(artifact_resolver) = &self.artifact_resolver {
-            let artifacts = artifact_resolver
-                .resolve_artifacts(&request, &agent, &artifact_inputs)
-                .await?;
-            for (index, artifact) in artifacts.into_iter().enumerate() {
-                let size_bytes = u64::try_from(artifact.bytes.len())
-                    .map_err(|_| ProviderError::InvalidRequest)?;
-                if size_bytes == 0
-                    || artifact.artifact_id.trim().is_empty()
-                    || artifact.sha256.len() != 64
-                    || artifact.format.trim().is_empty()
-                    || artifact.kind == agent_proto::ArtifactKind::Unspecified
-                {
-                    return Err(ProviderError::InvalidRequest);
-                }
-                let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
-                let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
-                    .map_err(|_| ProviderError::InvalidRequest)?;
-                let transfer_id = Uuid::new_v5(
-                    &Uuid::NAMESPACE_URL,
-                    format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
-                )
-                .to_string();
-                let offer = agent_proto::ArtifactOffer {
-                    transfer_id,
-                    command_id: command.command_id.clone(),
-                    operation_id: command.operation_id.clone(),
-                    resource_id: command.resource_id.clone(),
-                    agent_id: agent.agent_id.clone(),
-                    artifact_id: artifact.artifact_id,
-                    kind: artifact.kind as i32,
-                    sha256: artifact.sha256,
-                    size_bytes,
-                    format: artifact.format,
-                    chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
-                    chunk_count,
-                    expires_at_unix_ms: unix_ms_after(self.command_timeout),
-                };
-                self.registry
-                    .dispatch_artifact_and_wait(offer, artifact.bytes, self.command_timeout)
-                    .await
-                    .map_err(map_agent_error)?;
+        if let Some(existing) = self
+            .persist_pending_command(&command, request.operation_id)
+            .await?
+        {
+            if matches!(
+                existing.state,
+                AgentCommandState::Succeeded | AgentCommandState::Failed
+            ) {
+                return self.accepted_operation(request.operation_id).await;
             }
+        }
+        let artifacts = self
+            .artifact_resolver
+            .resolve_artifacts(&request, &agent, &artifact_inputs)
+            .await?;
+        if artifacts.len() != 2 {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let required = [
+            (
+                agent_proto::ArtifactKind::ImageBase,
+                &artifact_inputs.image_artifact_id,
+                &artifact_inputs.image_sha256,
+                artifact_inputs.image_format.as_str(),
+            ),
+            (
+                agent_proto::ArtifactKind::ConfigDriveIso,
+                &artifact_inputs.config_drive_artifact_id,
+                &artifact_inputs.config_drive_sha256,
+                "iso",
+            ),
+        ];
+        let mut seen = [false; 2];
+        for (index, artifact) in artifacts.into_iter().enumerate() {
+            let expected_index = required
+                .iter()
+                .position(|(kind, artifact_id, _, _)| {
+                    *kind == artifact.kind && artifact_id.as_str() == artifact.artifact_id
+                })
+                .ok_or(ProviderError::InvalidRequest)?;
+            if seen[expected_index] {
+                return Err(ProviderError::InvalidRequest);
+            }
+            seen[expected_index] = true;
+            let expected = &required[expected_index];
+            let size_bytes =
+                u64::try_from(artifact.bytes.len()).map_err(|_| ProviderError::InvalidRequest)?;
+            if size_bytes == 0
+                || artifact.artifact_id.trim().is_empty()
+                || artifact.sha256.len() != 64
+                || artifact.format.trim().is_empty()
+                || artifact.kind == agent_proto::ArtifactKind::Unspecified
+                || artifact.sha256 != *expected.2
+                || artifact.format != expected.3
+            {
+                return Err(ProviderError::InvalidRequest);
+            }
+            let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
+            let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let transfer_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
+            )
+            .to_string();
+            let offer = agent_proto::ArtifactOffer {
+                transfer_id,
+                command_id: command.command_id.clone(),
+                operation_id: command.operation_id.clone(),
+                resource_id: command.resource_id.clone(),
+                agent_id: agent.agent_id.clone(),
+                artifact_id: artifact.artifact_id,
+                kind: artifact.kind as i32,
+                sha256: artifact.sha256,
+                size_bytes,
+                format: artifact.format,
+                chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
+                chunk_count,
+                expires_at_unix_ms: unix_ms_after(self.command_timeout),
+            };
+            self.registry
+                .dispatch_artifact_and_wait(offer, artifact.bytes, self.command_timeout)
+                .await
+                .map_err(map_agent_error)?;
+        }
+        if seen != [true, true] {
+            return Err(ProviderError::InvalidRequest);
         }
         let operation = self
             .dispatch_recorded(command, request.operation_id)
@@ -2976,7 +3066,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_provider_maps_unavailable_registry_dispatch_to_retryable()
+    async fn agent_provider_rejects_create_without_verified_artifacts()
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
         registry.register(&registered_agent("node-a")).await?;
@@ -2999,7 +3089,7 @@ mod tests {
         };
         assert_eq!(
             provider.create_instance(request).await,
-            Err(ProviderError::Retryable)
+            Err(ProviderError::InvalidRequest)
         );
         assert_eq!(
             provider.get_operation(operation_id).await,
@@ -3060,7 +3150,7 @@ mod tests {
             resolver: Arc::new(UnconfiguredResolvedCreateResolver),
             state: state.clone(),
             store: None,
-            artifact_resolver: None,
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
             command_timeout: Duration::from_secs(30),
         };
         assert_eq!(
