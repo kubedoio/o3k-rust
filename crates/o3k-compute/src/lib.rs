@@ -1998,7 +1998,7 @@ impl ComputeService {
         }
         let _reference = self
             .store
-            .get_provider_reference(id, "agent")
+            .get_provider_reference(id, "compute")
             .await
             .map_err(|error| match error {
                 StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
@@ -2319,6 +2319,79 @@ mod tests {
             Arc::new(SqliteStore::connect_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
+    }
+
+    #[tokio::test]
+    async fn inspect_server_validates_existing_placement_without_reallocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-inspect-service-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-inspect-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let placement = o3k_placement::PlacementLedger::open(&placement_path)
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement.register_provider(
+            "node-a",
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4096,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )?;
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let server = service
+            .create_server(
+                "project-a",
+                "inspectable".to_owned(),
+                "image-1".to_owned(),
+                Uuid::from_u128(1),
+                vec!["port-1".to_owned()],
+                "inspectable-request".to_owned(),
+            )
+            .await?;
+        let before = placement.provider("node-a")?;
+        let inspected = service.inspect_server("project-a", server.id).await?;
+        assert_eq!(inspected.state, o3k_provider::OperationState::Succeeded);
+        assert_eq!(before, placement.provider("node-a")?);
+        assert!(matches!(
+            service.inspect_server("project-b", server.id).await,
+            Err(ComputeError::NotFound)
+        ));
+        std::fs::remove_file(database_path)?;
+        std::fs::remove_dir_all(placement_path)?;
+        Ok(())
     }
 
     #[tokio::test]
