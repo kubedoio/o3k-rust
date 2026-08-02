@@ -10,10 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
 o3k-api = { path = "../../crates/o3k-api" }
 o3k-compute = { path = "../../crates/o3k-compute" }
 o3k-console = { path = "../../crates/o3k-console" }
+o3k-config-drive = { path = "../../crates/o3k-config-drive" }
 o3k-cellhv = { path = "../../crates/o3k-cellhv" }
 o3k-compute-agent = { path = "../../crates/o3k-compute-agent" }
 o3k-config = { path = "../../crates/o3k-config" }

@@ -1,9 +1,193 @@
-use o3k_provider::{ComputeProvider, ErrorCategory, OperationState};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use async_trait::async_trait;
+use o3k_compute::{
+    CreateArtifactResolver, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
+};
+use o3k_compute_agent::NodeSnapshot;
+use o3k_provider::{
+    ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, ErrorCategory, OperationState,
+    ProviderError,
+};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+#[derive(Clone)]
+struct DaemonCreateResolver {
+    image: o3k_image::ImageService,
+    network: o3k_network::NetworkService,
+    config_drive: o3k_config_drive::ConfigDriveStore,
+    iso_root: PathBuf,
+}
+
+impl DaemonCreateResolver {
+    fn resolve_image(
+        &self,
+        request: &CreateInstanceRequest,
+    ) -> Result<o3k_image::ImageArtifact, ProviderError> {
+        let image_id = request
+            .image_id
+            .as_deref()
+            .ok_or(ProviderError::InvalidRequest)?
+            .parse::<Uuid>()
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        self.image
+            .resolve_artifact(&request.project_id, image_id)
+            .map_err(|_| ProviderError::InvalidRequest)
+    }
+
+    fn resolve_network(
+        &self,
+        request: &CreateInstanceRequest,
+    ) -> Result<
+        (
+            Vec<o3k_compute_agent::NetworkAttachmentSpec>,
+            BTreeMap<String, String>,
+        ),
+        ProviderError,
+    > {
+        let mut attachments = Vec::with_capacity(request.network_ids.len());
+        let mut network_data = BTreeMap::new();
+        for network_id in &request.network_ids {
+            let port_id = network_id
+                .parse::<Uuid>()
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let port = self
+                .network
+                .get_port(&request.project_id, port_id)
+                .map_err(|_| ProviderError::InvalidRequest)?;
+            let port_id = port.id.to_string();
+            let fixed_ip = port.fixed_ip.to_string();
+            attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
+                port_id: port_id.clone(),
+                mac: port.mac_address.clone(),
+                fixed_ipv4: fixed_ip.clone(),
+            });
+            network_data.insert(format!("{port_id}.mac"), port.mac_address);
+            network_data.insert(format!("{port_id}.ipv4"), fixed_ip);
+        }
+        Ok((attachments, network_data))
+    }
+
+    fn config_drive_input(
+        request: &CreateInstanceRequest,
+        config: &ConfigDriveRequest,
+        network_data: BTreeMap<String, String>,
+    ) -> o3k_config_drive::ConfigDriveInput {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("project_id".to_owned(), request.project_id.clone());
+        metadata.insert("server_id".to_owned(), request.o3k_server_id.to_string());
+        o3k_config_drive::ConfigDriveInput {
+            instance_id: request.o3k_server_id.to_string(),
+            hostname: request.name.clone(),
+            ssh_public_key: config.ssh_public_key.clone(),
+            user_data: config.user_data.clone(),
+            metadata,
+            network_data,
+            vendor_data: config.vendor_data.clone(),
+        }
+    }
+
+    fn materialize_config_drive(
+        &self,
+        request: &CreateInstanceRequest,
+        network_data: BTreeMap<String, String>,
+    ) -> Result<(o3k_config_drive::ConfigDriveIsoResult, Vec<u8>), ProviderError> {
+        let config = request
+            .config_drive
+            .as_ref()
+            .ok_or(ProviderError::InvalidRequest)?;
+        let input = Self::config_drive_input(request, config, network_data);
+        let generated = self
+            .config_drive
+            .generate(&input)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        let output = self.iso_root.join(format!("{}.iso", request.o3k_server_id));
+        let iso = self
+            .config_drive
+            .materialize_iso(&generated.directory, output)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        let bytes = self
+            .config_drive
+            .read_verified_iso(&iso)
+            .map_err(|_| ProviderError::InvalidRequest)?;
+        Ok((iso, bytes))
+    }
+}
+
+#[async_trait]
+impl ResolvedCreateResolver for DaemonCreateResolver {
+    async fn resolve(
+        &self,
+        request: &CreateInstanceRequest,
+        _agent: &NodeSnapshot,
+    ) -> Result<ResolvedCreateInputs, ProviderError> {
+        let image = self.resolve_image(request)?;
+        let (network_attachments, network_data) = self.resolve_network(request)?;
+        let (iso, _) = self.materialize_config_drive(request, network_data)?;
+        let flavor_id = request
+            .flavor_id
+            .map(|id| id.to_string())
+            .ok_or(ProviderError::InvalidRequest)?;
+        let disk_gib = request.disk_gib.ok_or(ProviderError::InvalidRequest)?;
+        let config_artifact_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:config-drive:{}:{}",
+                request.o3k_server_id, iso.fingerprint_sha256
+            )
+            .as_bytes(),
+        )
+        .to_string();
+        Ok(ResolvedCreateInputs {
+            flavor_id,
+            image_artifact_id: image.id.to_string(),
+            image_sha256: image.checksum,
+            image_format: image.format,
+            disk_gib,
+            config_drive_artifact_id: config_artifact_id,
+            config_drive_sha256: iso.fingerprint_sha256,
+            network_attachments,
+        })
+    }
+}
+
+#[async_trait]
+impl CreateArtifactResolver for DaemonCreateResolver {
+    async fn resolve_artifacts(
+        &self,
+        request: &CreateInstanceRequest,
+        _agent: &NodeSnapshot,
+        inputs: &ResolvedCreateInputs,
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+        let image = self.resolve_image(request)?;
+        if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
+            return Err(ProviderError::Conflict);
+        }
+        let (_, network_data) = self.resolve_network(request)?;
+        let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
+        if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
+            return Err(ProviderError::Conflict);
+        }
+        Ok(vec![
+            ResolvedCreateArtifact {
+                artifact_id: inputs.image_artifact_id.clone(),
+                kind: o3k_provider_contract::compute_proto::ArtifactKind::ImageBase,
+                sha256: image.checksum,
+                format: image.format,
+                bytes: image.content,
+            },
+            ResolvedCreateArtifact {
+                artifact_id: inputs.config_drive_artifact_id.clone(),
+                kind: o3k_provider_contract::compute_proto::ArtifactKind::ConfigDriveIso,
+                sha256: iso.fingerprint_sha256,
+                format: "iso".to_owned(),
+                bytes: iso_bytes,
+            },
+        ])
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,6 +206,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
     )?;
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
+    let config_drive_root = config.data_dir.join("config-drive");
+    let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
+    let config_drive_iso_root = config.data_dir.join("config-drive-iso");
+    std::fs::create_dir_all(&config_drive_iso_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
     let registry = o3k_compute_agent::NodeRegistry::default();
     let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
@@ -31,13 +219,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
     let mut compute_service = if config.provider == o3k_config::Provider::Agent {
+        let resolver = Arc::new(DaemonCreateResolver {
+            image: image_service.clone(),
+            network: network_service.clone(),
+            config_drive: config_drive_store.clone(),
+            iso_root: config_drive_iso_root,
+        });
         o3k_compute::ComputeService::new(
             store.clone(),
-            Arc::new(o3k_compute::AgentComputeProvider::new_with_store(
-                registry.clone(),
-                Arc::new(o3k_compute::UnconfiguredResolvedCreateResolver),
-                Some(store.clone()),
-            )),
+            Arc::new(
+                o3k_compute::AgentComputeProvider::new_with_store(
+                    registry.clone(),
+                    resolver.clone(),
+                    Some(store.clone()),
+                )
+                .with_artifact_resolver(resolver),
+            ),
         )
     } else {
         match config.provider {
@@ -68,13 +265,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
     };
-    // TLS enables the control plane for an agent to register, but it must not
-    // force unrelated providers through the agent scheduler.  The disposable
-    // fake profile intentionally starts the control plane for protocol tests;
-    // only the agent provider may require an authenticated agent placement.
-    let agent_routing_enabled =
-        agent_control_enabled && config.provider == o3k_config::Provider::Agent;
-    if agent_routing_enabled {
+    if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
             .with_agent_registry(registry.clone());
@@ -189,10 +380,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .is_err()
     {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(task) = inspect_probe_task {
         task.abort();
         let _ = task.await;
     }

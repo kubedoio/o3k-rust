@@ -20,7 +20,7 @@ use o3k_console::{ConsoleError, ConsoleService};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
-use o3k_provider::InstanceAction;
+use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
@@ -113,7 +113,6 @@ pub fn router_with_state(state: AppState) -> Router {
             "/v2/images/{id}/file",
             get(download_image).put(upload_image),
         )
-        .route("/v2.0/extensions", get(list_extensions))
         .route("/v2.0/networks", get(list_networks).post(create_network))
         .route(
             "/v2.0/networks/{id}",
@@ -806,19 +805,6 @@ fn network_service(state: &AppState) -> Result<&Arc<NetworkService>, axum::respo
     })
 }
 
-async fn list_extensions(
-    State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    if let Err(response) = require_token(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = network_service(&state) {
-        return response;
-    }
-    Json(serde_json::json!({"extensions": []})).into_response()
-}
-
 async fn create_network(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -1160,35 +1146,23 @@ struct CreateServerEnvelope {
 #[derive(serde::Deserialize)]
 struct CreateServerRequest {
     name: String,
-    #[serde(alias = "imageRef")]
     image: Option<IdReference>,
-    #[serde(alias = "flavorRef")]
     flavor: Option<IdReference>,
     networks: Option<Vec<NetworkReference>>,
-    /// Recognized so an unsupported request cannot be silently dropped.
     config_drive: Option<bool>,
+    user_data: Option<String>,
+    vendor_data: Option<String>,
+    ssh_public_key: Option<String>,
     key_name: Option<String>,
 }
 #[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum IdReference {
-    Object { id: String },
-    String(String),
-}
-
-impl IdReference {
-    fn into_id(self) -> String {
-        match self {
-            Self::Object { id } | Self::String(id) => id,
-        }
-    }
+struct IdReference {
+    id: String,
 }
 #[derive(serde::Deserialize)]
 struct NetworkReference {
     uuid: Option<String>,
-    port: Option<String>,
 }
-
 #[derive(Serialize)]
 struct ServerEnvelope {
     server: ServerResponse,
@@ -1214,28 +1188,7 @@ struct IdResponse {
     id: String,
 }
 
-fn server_response(server: Server, network_service: Option<&NetworkService>) -> ServerResponse {
-    let mut addresses = serde_json::Map::new();
-    if let Some(network_service) = network_service {
-        for port_id in &server.network_ids {
-            let Ok(port_id) = port_id.parse::<uuid::Uuid>() else {
-                continue;
-            };
-            let Ok(port) = network_service.get_port(&server.project_id, port_id) else {
-                continue;
-            };
-            let address_list = addresses
-                .entry(port.network_id.to_string())
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            if let Some(address_list) = address_list.as_array_mut() {
-                address_list.push(serde_json::json!({
-                    "version": 4,
-                    "addr": port.fixed_ip.to_string(),
-                    "OS-EXT-IPS:type": "fixed"
-                }));
-            }
-        }
-    }
+fn server_response(server: Server) -> ServerResponse {
     ServerResponse {
         id: server.id.to_string(),
         name: server.name,
@@ -1248,7 +1201,7 @@ fn server_response(server: Server, network_service: Option<&NetworkService>) -> 
         flavor: IdResponse {
             id: server.flavor_id.to_string(),
         },
-        addresses: serde_json::Value::Object(addresses),
+        addresses: serde_json::json!({}),
         key_name: server.key_name,
     }
 }
@@ -1675,26 +1628,38 @@ async fn create_server(
             "invalid server request",
         );
     };
-    if body.server.config_drive == Some(true) {
-        return keystone_error(
-            StatusCode::BAD_REQUEST,
-            "Bad Request",
-            "config-drive attachment is not supported by this profile",
-        );
-    }
+    let config_drive = if body.server.config_drive == Some(true) {
+        let Some(ssh_public_key) = body.server.ssh_public_key.clone() else {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "ssh_public_key is required when config_drive is enabled",
+            );
+        };
+        Some(ConfigDriveRequest {
+            user_data: body
+                .server
+                .user_data
+                .clone()
+                .unwrap_or_default()
+                .into_bytes(),
+            vendor_data: body.server.vendor_data.clone().map(String::into_bytes),
+            ssh_public_key,
+        })
+    } else {
+        None
+    };
     let Some(image) = body
         .server
         .image
-        .map(IdReference::into_id)
-        .filter(|reference| !reference.trim().is_empty())
+        .and_then(|reference| (!reference.id.trim().is_empty()).then_some(reference.id))
     else {
         return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "image is required");
     };
     let Some(flavor) = body
         .server
         .flavor
-        .map(IdReference::into_id)
-        .and_then(|reference| reference.parse::<uuid::Uuid>().ok())
+        .and_then(|reference| reference.id.parse().ok())
     else {
         return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "flavor is required");
     };
@@ -1706,13 +1671,9 @@ async fn create_server(
         );
     };
     if networks.is_empty()
-        || networks.iter().any(|network| {
-            network
-                .port
-                .as_deref()
-                .or(network.uuid.as_deref())
-                .is_none_or(str::is_empty)
-        })
+        || networks
+            .iter()
+            .any(|network| network.uuid.as_deref().is_none_or(str::is_empty))
     {
         return keystone_error(
             StatusCode::BAD_REQUEST,
@@ -1741,7 +1702,7 @@ async fn create_server(
     }
     let network_ids = networks
         .iter()
-        .filter_map(|network| network.port.as_deref().or(network.uuid.as_deref()))
+        .filter_map(|network| network.uuid.as_deref())
         .map(str::to_owned)
         .collect::<Vec<_>>();
     if let Some(network_service) = state.network.as_ref() {
@@ -1775,6 +1736,7 @@ async fn create_server(
             flavor_id: flavor,
             network_ids,
             key_name: body.server.key_name,
+            config_drive,
             idempotency_key: idempotency,
         })
         .await
@@ -1782,7 +1744,7 @@ async fn create_server(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server, state.network.as_deref()),
+                server: server_response(server),
             }),
         )
             .into_response(),
@@ -1805,10 +1767,7 @@ async fn list_servers(
     };
     match service.list_servers(&token.project_id).await {
         Ok(servers) => Json(ServerListResponse {
-            servers: servers
-                .into_iter()
-                .map(|server| server_response(server, state.network.as_deref()))
-                .collect(),
+            servers: servers.into_iter().map(server_response).collect(),
         })
         .into_response(),
         Err(error) => compute_error(error),
@@ -1830,7 +1789,7 @@ async fn show_server(
     };
     match service.show_server(&token.project_id, id).await {
         Ok(server) => Json(ServerEnvelope {
-            server: server_response(server, state.network.as_deref()),
+            server: server_response(server),
         })
         .into_response(),
         Err(error) => compute_error(error),
@@ -2041,7 +2000,7 @@ async fn server_action(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server, state.network.as_deref()),
+                server: server_response(server),
             }),
         )
             .into_response(),
@@ -2072,34 +2031,6 @@ mod tests {
         });
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
         assert_eq!(parsed.config_drive, Some(true));
-        Ok(())
-    }
-
-    #[test]
-    fn nova_server_reference_aliases_accept_standard_cli_wire_fields()
-    -> Result<(), serde_json::Error> {
-        let request = serde_json::json!({
-            "name": "server",
-            "imageRef": "image-id",
-            "flavorRef": "550e8400-e29b-41d4-a716-446655440000",
-            "networks": [{"port": "550e8400-e29b-41d4-a716-446655440001"}]
-        });
-        let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
-        assert_eq!(
-            parsed.image.map(super::IdReference::into_id).as_deref(),
-            Some("image-id")
-        );
-        assert_eq!(
-            parsed.flavor.map(super::IdReference::into_id).as_deref(),
-            Some("550e8400-e29b-41d4-a716-446655440000")
-        );
-        assert_eq!(
-            parsed
-                .networks
-                .as_ref()
-                .and_then(|networks| networks[0].port.as_deref()),
-            Some("550e8400-e29b-41d4-a716-446655440001")
-        );
         Ok(())
     }
 }
