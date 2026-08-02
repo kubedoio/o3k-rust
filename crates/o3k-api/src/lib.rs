@@ -1142,7 +1142,9 @@ struct CreateServerEnvelope {
 #[derive(serde::Deserialize)]
 struct CreateServerRequest {
     name: String,
+    #[serde(alias = "imageRef")]
     image: Option<IdReference>,
+    #[serde(alias = "flavorRef")]
     flavor: Option<IdReference>,
     networks: Option<Vec<NetworkReference>>,
     /// Recognized so an unsupported request cannot be silently dropped.
@@ -1150,8 +1152,18 @@ struct CreateServerRequest {
     key_name: Option<String>,
 }
 #[derive(serde::Deserialize)]
-struct IdReference {
-    id: String,
+#[serde(untagged)]
+enum IdReference {
+    Object { id: String },
+    String(String),
+}
+
+impl IdReference {
+    fn into_id(self) -> String {
+        match self {
+            Self::Object { id } | Self::String(id) => id,
+        }
+    }
 }
 #[derive(serde::Deserialize)]
 struct NetworkReference {
@@ -1630,14 +1642,16 @@ async fn create_server(
     let Some(image) = body
         .server
         .image
-        .and_then(|reference| (!reference.id.trim().is_empty()).then_some(reference.id))
+        .map(IdReference::into_id)
+        .filter(|reference| !reference.trim().is_empty())
     else {
         return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "image is required");
     };
     let Some(flavor) = body
         .server
         .flavor
-        .and_then(|reference| reference.id.parse().ok())
+        .map(IdReference::into_id)
+        .and_then(|reference| reference.parse::<uuid::Uuid>().ok())
     else {
         return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", "flavor is required");
     };
@@ -2009,6 +2023,27 @@ mod tests {
         });
         let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
         assert_eq!(parsed.config_drive, Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn nova_server_reference_aliases_accept_standard_cli_wire_fields()
+    -> Result<(), serde_json::Error> {
+        let request = serde_json::json!({
+            "name": "server",
+            "imageRef": "image-id",
+            "flavorRef": "550e8400-e29b-41d4-a716-446655440000",
+            "networks": [{"uuid": "network"}]
+        });
+        let parsed: super::CreateServerRequest = serde_json::from_value(request)?;
+        assert_eq!(
+            parsed.image.map(super::IdReference::into_id).as_deref(),
+            Some("image-id")
+        );
+        assert_eq!(
+            parsed.flavor.map(super::IdReference::into_id).as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         Ok(())
     }
 }
