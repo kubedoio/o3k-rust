@@ -33,6 +33,7 @@ jobs:
         continue-on-error: true
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
+          O3K_PROVIDER: agent
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
           O3K_AGENT_INSPECT_PROBE_RESOURCE_ID: 00000000-0000-4000-8000-000000000078
         run: bash scripts/bootstrap-disposable-testlab.sh

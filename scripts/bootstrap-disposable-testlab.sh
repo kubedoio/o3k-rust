@@ -27,6 +27,11 @@ APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
 COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
+O3K_PROVIDER="${O3K_PROVIDER:-fake}"
+case "${O3K_PROVIDER}" in
+  fake|agent) ;;
+  *) echo "disposable TestLab bootstrap failed: unsupported provider ${O3K_PROVIDER}" >&2; exit 1 ;;
+esac
 O3KD_PID=
 COMPUTE_PID=
 OPENSTACK_VENV="${O3K_OPENSTACK_VENV:-}"
@@ -112,9 +117,9 @@ write_result() {
   mkdir -p "$ARTIFACT_DIR"
   python3 - "$ARTIFACT_DIR/disposable-testlab-bootstrap.json" "$status" "$reason" \
     "$SOURCE_COMMIT" "$STATE_ROOT" "$SERVICE_ACCOUNT" "$AUTH_PORT" \
-    "${O3KD_PID:-}" "${COMPUTE_PID:-}" "$O3KD_READY" "$COMPUTE_READY" <<'PY'
+    "${O3KD_PID:-}" "${COMPUTE_PID:-}" "$O3KD_READY" "$COMPUTE_READY" "$O3K_PROVIDER" <<'PY'
 import json, sys, time
-path, status, reason, commit, state, account, port, o3kd_pid, compute_pid, o3kd_ready, compute_ready = sys.argv[1:]
+path, status, reason, commit, state, account, port, o3kd_pid, compute_pid, o3kd_ready, compute_ready, provider = sys.argv[1:]
 with open(path, "w", encoding="utf-8") as stream:
     json.dump({"artifact_type": "disposable-testlab-bootstrap", "status": status,
                "reason": reason, "redacted": True, "source_commit": commit,
@@ -123,6 +128,7 @@ with open(path, "w", encoding="utf-8") as stream:
                "project": "admin", "project_id": "bootstrap-project",
                "region": "RegionOne", "o3kd_pid": o3kd_pid or None,
                "compute_pid": compute_pid or None,
+               "provider": provider,
                "readiness": {"o3kd": o3kd_ready == "true", "compute": compute_ready == "true"},
                "finished_at": int(time.time())}, stream, indent=2, sort_keys=True)
     stream.write("\n")
@@ -339,7 +345,7 @@ compute_env_tmp="$STATE_ROOT/o3k-compute.env.tmp.$$"
 cat >"$o3kd_env_tmp" <<EOF
 O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
-O3K_PROVIDER=fake
+O3K_PROVIDER=$(printf '%q' "$O3K_PROVIDER")
 O3K_LOG_FORMAT=json
 O3K_LOG_FILTER=warn
 O3K_BOOTSTRAP_PASSWORD=$(printf '%q' "$PASSWORD")
