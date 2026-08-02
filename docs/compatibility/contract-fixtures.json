@@ -104,11 +104,6 @@
       },
       "expected_status": [200, 201],
       "required_json_keys": ["keypair"],
-      "cleanup": {
-        "method": "DELETE",
-        "path": "/v2.1/{project_id}/os-keypairs/{keypair_name}",
-        "expected_status": [204]
-      },
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#import-keypair", "https://docs.openstack.org/api-ref/compute/#delete-keypair"]
     },
     {
@@ -117,7 +112,7 @@
       "service": "identity",
       "method": "POST",
       "path": "/v3/auth/tokens",
-      "request_json": {"auth": {"identity": {"methods": ["password"]}, "scope": {"project": {"id": "{project_id}"}}}},
+      "request_json": {"auth": {"identity": {"methods": ["password"], "password": {"user": {"name": "admin", "password": "{auth_password}"}}}, "scope": {"project": {"id": "{project_id}"}}}},
       "expected_status": [201],
       "required_json_keys": ["token"],
       "official_sources": ["https://docs.openstack.org/api-ref/identity/v3/index.html#password-authentication-with-scoped-token"]
@@ -128,7 +123,7 @@
       "service": "image",
       "method": "POST",
       "path": "/v2/images",
-      "request_json": {"name": "contract-harness-image", "disk_format": "qcow2", "container_format": "bare"},
+      "request_json": {"name": "contract-harness-image", "disk_format": "raw", "container_format": "bare"},
       "expected_status": [201],
       "required_json_keys": ["id"],
       "official_sources": ["https://docs.openstack.org/api-ref/image/v2/index.html#create-image"]
@@ -138,7 +133,8 @@
       "name": "image-upload",
       "service": "image",
       "method": "PUT",
-      "path": "/v2/images/image-id/file",
+      "path": "/v2/images/{image_id}/file",
+      "request_bytes": "contract-image-bytes",
       "expected_status": [204],
       "official_sources": ["https://docs.openstack.org/api-ref/image/v2/index.html#upload-binary-image-data"]
     },
@@ -157,18 +153,9 @@
       "name": "image-download",
       "service": "image",
       "method": "GET",
-      "path": "/v2/images/image-id/file",
+      "path": "/v2/images/{image_id}/file",
       "expected_status": [200],
       "official_sources": ["https://docs.openstack.org/api-ref/image/v2/index.html#download-binary-image-data"]
-    },
-    {
-      "id": "image.member_delete",
-      "name": "image-delete",
-      "service": "image",
-      "method": "DELETE",
-      "path": "/v2/images/image-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/image/v2/index.html#delete-image"]
     },
     {
       "id": "network.network_collection_create",
@@ -186,7 +173,7 @@
       "name": "network-show",
       "service": "network",
       "method": "GET",
-      "path": "/v2.0/networks/network-id",
+      "path": "/v2.0/networks/{network_id}",
       "expected_status": [200],
       "required_json_keys": ["network"],
       "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#show-network-details"]
@@ -197,7 +184,7 @@
       "service": "network",
       "method": "POST",
       "path": "/v2.0/subnets",
-      "request_json": {"subnet": {"network_id": "network-id", "cidr": "192.0.2.0/24", "ip_version": 4}},
+      "request_json": {"subnet": {"name": "contract-harness-subnet", "network_id": "{network_id}", "cidr": "192.0.2.0/29", "ip_version": 4}},
       "expected_status": [201],
       "required_json_keys": ["subnet"],
       "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet"]
@@ -207,7 +194,7 @@
       "name": "subnet-show",
       "service": "network",
       "method": "GET",
-      "path": "/v2.0/subnets/subnet-id",
+      "path": "/v2.0/subnets/{subnet_id}",
       "expected_status": [200],
       "required_json_keys": ["subnet"],
       "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#show-subnet-details"]
@@ -218,7 +205,7 @@
       "service": "network",
       "method": "POST",
       "path": "/v2.0/ports",
-      "request_json": {"port": {"network_id": "network-id"}},
+      "request_json": {"port": {"name": "contract-harness-port", "network_id": "{network_id}"}},
       "expected_status": [201],
       "required_json_keys": ["port"],
       "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#create-port"]
@@ -228,47 +215,10 @@
       "name": "port-show",
       "service": "network",
       "method": "GET",
-      "path": "/v2.0/ports/port-id",
+      "path": "/v2.0/ports/{port_id}",
       "expected_status": [200],
       "required_json_keys": ["port"],
       "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#show-port-details"]
-    },
-    {
-      "id": "network.port_member_delete",
-      "name": "port-delete",
-      "service": "network",
-      "method": "DELETE",
-      "path": "/v2.0/ports/port-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-port"]
-    },
-    {
-      "id": "network.subnet_member_delete",
-      "name": "subnet-delete",
-      "service": "network",
-      "method": "DELETE",
-      "path": "/v2.0/subnets/subnet-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-subnet"]
-    },
-    {
-      "id": "network.network_member_delete",
-      "name": "network-delete",
-      "service": "network",
-      "method": "DELETE",
-      "path": "/v2.0/networks/network-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-network"]
-    },
-    {
-      "id": "compute.flavor_member_show",
-      "name": "flavor-show",
-      "service": "compute",
-      "method": "GET",
-      "path": "/v2.1/{project_id}/flavors/flavor-id",
-      "expected_status": [200],
-      "required_json_keys": ["flavor"],
-      "official_sources": ["https://docs.openstack.org/api-ref/compute/#show-flavor-details"]
     },
     {
       "id": "compute.flavor_collection_create",
@@ -282,13 +232,14 @@
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#create-flavor"]
     },
     {
-      "id": "compute.flavor_member_delete",
-      "name": "flavor-delete",
+      "id": "compute.flavor_member_show",
+      "name": "flavor-show",
       "service": "compute",
-      "method": "DELETE",
-      "path": "/v2.1/{project_id}/flavors/flavor-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/compute/#delete-flavor"]
+      "method": "GET",
+      "path": "/v2.1/{project_id}/flavors/{flavor_id}",
+      "expected_status": [200],
+      "required_json_keys": ["flavor"],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#show-flavor-details"]
     },
     {
       "id": "compute.keypair_member_show",
@@ -315,7 +266,7 @@
       "service": "compute",
       "method": "POST",
       "path": "/v2.1/{project_id}/servers",
-      "request_json": {"server": {"name": "contract-harness-server", "imageRef": "image-id", "flavorRef": "flavor-id"}},
+      "request_json": {"server": {"name": "contract-harness-server", "imageRef": "{image_id}", "flavorRef": "{flavor_id}", "networks": [{"uuid": "{port_id}"}]}},
       "expected_status": [202],
       "required_json_keys": ["server"],
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#create-server"]
@@ -335,29 +286,74 @@
       "name": "server-show",
       "service": "compute",
       "method": "GET",
-      "path": "/v2.1/{project_id}/servers/server-id",
+      "path": "/v2.1/{project_id}/servers/{server_id}",
       "expected_status": [200],
       "required_json_keys": ["server"],
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#show-server-details"]
-    },
-    {
-      "id": "compute.server_member_delete",
-      "name": "server-delete",
-      "service": "compute",
-      "method": "DELETE",
-      "path": "/v2.1/{project_id}/servers/server-id",
-      "expected_status": [204],
-      "official_sources": ["https://docs.openstack.org/api-ref/compute/#delete-server"]
     },
     {
       "id": "compute.server_member_actions",
       "name": "server-actions",
       "service": "compute",
       "method": "POST",
-      "path": "/v2.1/{project_id}/servers/server-id/action",
-      "request_json": {"os-start": null},
+      "path": "/v2.1/{project_id}/servers/{server_id}/action",
+      "request_json": {"os-stop": null},
       "expected_status": [202],
       "official_sources": ["https://docs.openstack.org/api-ref/compute/#server-actions"]
+    },
+    {
+      "id": "compute.server_member_delete",
+      "name": "server-delete",
+      "service": "compute",
+      "method": "DELETE",
+      "path": "/v2.1/{project_id}/servers/{server_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#delete-server"]
+    },
+    {
+      "id": "network.port_member_delete",
+      "name": "port-delete",
+      "service": "network",
+      "method": "DELETE",
+      "path": "/v2.0/ports/{port_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-port"]
+    },
+    {
+      "id": "network.subnet_member_delete",
+      "name": "subnet-delete",
+      "service": "network",
+      "method": "DELETE",
+      "path": "/v2.0/subnets/{subnet_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-subnet"]
+    },
+    {
+      "id": "network.network_member_delete",
+      "name": "network-delete",
+      "service": "network",
+      "method": "DELETE",
+      "path": "/v2.0/networks/{network_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/network/v2/index.html#delete-network"]
+    },
+    {
+      "id": "compute.flavor_member_delete",
+      "name": "flavor-delete",
+      "service": "compute",
+      "method": "DELETE",
+      "path": "/v2.1/{project_id}/flavors/{flavor_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/compute/#delete-flavor"]
+    },
+    {
+      "id": "image.member_delete",
+      "name": "image-delete",
+      "service": "image",
+      "method": "DELETE",
+      "path": "/v2/images/{image_id}",
+      "expected_status": [204],
+      "official_sources": ["https://docs.openstack.org/api-ref/image/v2/index.html#delete-image"]
     }
   ]
 }

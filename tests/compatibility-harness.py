@@ -101,10 +101,15 @@ def make_request(
     path: str,
     body: dict[str, Any] | None,
     token: str | None,
+    raw_body: bytes | None = None,
 ) -> tuple[int, dict[str, str], bytes, dict[str, Any]]:
-    encoded = None if body is None else json.dumps(body, sort_keys=True).encode("utf-8")
+    encoded = raw_body if raw_body is not None else (
+        None if body is None else json.dumps(body, sort_keys=True).encode("utf-8")
+    )
     headers = {"Accept": "application/json"}
-    if encoded is not None:
+    if raw_body is not None:
+        headers["Content-Type"] = "application/octet-stream"
+    elif encoded is not None:
         headers["Content-Type"] = "application/json"
     if token:
         headers["X-Auth-Token"] = token
@@ -113,7 +118,7 @@ def make_request(
         "method": method,
         "path": path,
         "headers": redact_headers(headers),
-        "body": "<redacted>" if body is not None else None,
+        "body": "<redacted>" if encoded is not None else None,
     }
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -138,13 +143,16 @@ def check_json_keys(body: bytes, required: list[str]) -> list[str]:
     return [f"missing JSON key: {key}" for key in required if key not in decoded]
 
 
-def render(value: Any, project_id: str, keypair_name: str) -> Any:
+def render(value: Any, project_id: str, keypair_name: str, variables: dict[str, str] | None = None) -> Any:
+    replacements = {"project_id": project_id, "keypair_name": keypair_name}
+    if variables:
+        replacements.update(variables)
     if isinstance(value, str):
-        return value.format(project_id=project_id, keypair_name=keypair_name)
+        return value.format(**replacements)
     if isinstance(value, dict):
-        return {key: render(item, project_id, keypair_name) for key, item in value.items()}
+        return {key: render(item, project_id, keypair_name, variables) for key, item in value.items()}
     if isinstance(value, list):
-        return [render(item, project_id, keypair_name) for item in value]
+        return [render(item, project_id, keypair_name, variables) for item in value]
     return value
 
 
@@ -158,8 +166,24 @@ def run_target(
     token: str | None,
 ) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
+    variables: dict[str, str] = {
+        "auth_password": os.environ.get("O3K_COMPATIBILITY_PASSWORD", "password")
+    }
     for fixture in fixtures:
-        path = render(fixture["path"], project_id, keypair_name)
+        try:
+            path = render(fixture["path"], project_id, keypair_name, variables)
+        except (KeyError, ValueError) as error:
+            results.append(
+                {
+                    "fixture": fixture["id"],
+                    "name": fixture["name"],
+                    "source": fixture["official_sources"],
+                    "request": {"method": fixture["method"], "path": fixture["path"]},
+                    "status": "error",
+                    "failures": [f"fixture variable resolution failed: {error}"],
+                }
+            )
+            continue
         record: dict[str, Any] = {
             "fixture": fixture["id"],
             "name": fixture["name"],
@@ -168,7 +192,12 @@ def run_target(
         }
         try:
             status, headers, body, request_record = make_request(
-                base_url, fixture["method"], path, render(fixture.get("request_json"), project_id, keypair_name), token
+                base_url,
+                fixture["method"],
+                path,
+                render(fixture.get("request_json"), project_id, keypair_name, variables),
+                token,
+                fixture.get("request_bytes", "").encode("utf-8") if "request_bytes" in fixture else None,
             )
             record["request"] = request_record
             record["response"] = {
@@ -180,9 +209,29 @@ def run_target(
             if status not in fixture["expected_status"]:
                 failures.append(f"expected status {fixture['expected_status']}, got {status}")
             failures.extend(check_json_keys(body, fixture.get("required_json_keys", [])))
+            if not failures:
+                try:
+                    decoded = json.loads(body)
+                except json.JSONDecodeError:
+                    decoded = None
+                captures = {
+                    "image.collection_create": ("image_id", ("id",)),
+                    "network.network_collection_create": ("network_id", ("network", "id")),
+                    "network.subnet_collection_create": ("subnet_id", ("subnet", "id")),
+                    "network.port_collection_create": ("port_id", ("port", "id")),
+                    "compute.flavor_collection_create": ("flavor_id", ("flavor", "id")),
+                    "compute.server_collection_create": ("server_id", ("server", "id")),
+                }
+                if fixture["id"] in captures and isinstance(decoded, dict):
+                    name, path_parts = captures[fixture["id"]]
+                    captured: Any = decoded
+                    for part in path_parts:
+                        captured = captured.get(part) if isinstance(captured, dict) else None
+                    if isinstance(captured, str) and captured:
+                        variables[name] = captured
             cleanup = fixture.get("cleanup")
             if cleanup:
-                cleanup_path = render(cleanup["path"], project_id, keypair_name)
+                cleanup_path = render(cleanup["path"], project_id, keypair_name, variables)
                 cleanup_status, cleanup_headers, cleanup_body, cleanup_request = make_request(
                     base_url, cleanup["method"], cleanup_path, None, token
                 )
@@ -202,6 +251,9 @@ def run_target(
         except RuntimeError as error:
             record["status"] = "error"
             record["failures"] = [str(error)]
+        except (KeyError, ValueError) as error:
+            record["status"] = "error"
+            record["failures"] = [f"fixture variable resolution failed: {error}"]
         results.append(record)
     return {
         "schema_version": 1,
