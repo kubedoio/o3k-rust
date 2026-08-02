@@ -139,6 +139,8 @@ paths:
       operationId: createNetwork
       requestBody: {required: true, content: {application/json: {schema: {type: object}}}}
       responses: {'201': {description: Network created.}, '400': {description: Invalid request.}, '401': {description: Unauthorized.}}
+  /v2.0/extensions:
+    get: {operationId: listNetworkExtensions, responses: {'200': {description: TestLab Neutron extension catalog.}, '401': {description: Authentication required.}}}
   /v2.0/networks/{id}:
     parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
     get: {operationId: showNetwork, responses: {'200': {description: Network details.}, '404': {description: Not found.}}}
