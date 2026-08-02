@@ -6,7 +6,7 @@ WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-capability-probe.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 FAKE_BIN="${WORK_DIR}/bin"
 mkdir -p "${FAKE_BIN}"
-for command in virsh qemu-img ip dnsmasq openstack cloud-localds; do
+for command in virsh qemu-img ip dnsmasq openstack xorriso; do
     printf '#!/usr/bin/env bash\n[[ "$*" == *qemu:///system* ]] && echo qemu:///system\nexit 0\n' >"${FAKE_BIN}/${command}"
     chmod +x "${FAKE_BIN}/${command}"
 done
