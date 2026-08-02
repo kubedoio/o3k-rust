@@ -1714,6 +1714,7 @@ async fn create_server(
             flavor_id: flavor,
             network_ids,
             key_name: body.server.key_name,
+            config_drive: None,
             idempotency_key: idempotency,
         })
         .await
