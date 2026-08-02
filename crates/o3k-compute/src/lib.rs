@@ -416,6 +416,28 @@ async fn recover_artifact_transfers(
         }
     };
     for transfer in transfers {
+        if transfer.expires_at_unix_ms <= unix_ms() {
+            if let Err(error) = store
+                .update_artifact_transfer(
+                    &transfer.transfer_id,
+                    &transfer.agent_epoch,
+                    ArtifactTransferUpdate {
+                        state: ArtifactTransferState::Expired,
+                        contiguous_bytes: transfer.contiguous_bytes,
+                        next_chunk_index: transfer.next_chunk_index,
+                        retry_count: transfer.retry_count,
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    transfer_id = %transfer.transfer_id,
+                    %error,
+                    "expired artifact transfer could not be fenced"
+                );
+            }
+            continue;
+        }
         let Some(agent) = registry.snapshot(&transfer.agent_id).await else {
             continue;
         };
@@ -484,7 +506,7 @@ async fn recover_artifact_transfers(
             format: transfer.format.clone(),
             chunk_size_bytes: transfer.chunk_size_bytes as u32,
             chunk_count: transfer.chunk_count as u32,
-            expires_at_unix_ms: unix_ms_after(timeout),
+            expires_at_unix_ms: transfer.expires_at_unix_ms,
         };
         match registry
             .dispatch_artifact_and_wait(offer, artifact.bytes, timeout)
@@ -542,14 +564,14 @@ fn artifact_kind_name(kind: agent_proto::ArtifactKind) -> &'static str {
 }
 
 fn unix_ms_after(duration: Duration) -> i64 {
+    unix_ms().saturating_add(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+fn unix_ms() -> i64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let millis = duration.as_millis().min(i64::MAX as u128) as i64;
-    now.as_millis()
-        .min(i64::MAX as u128)
-        .saturating_add(millis as u128)
-        .min(i64::MAX as u128) as i64
+    now.as_millis().min(i64::MAX as u128) as i64
 }
 
 fn operation_state_from_proto(state: i32) -> Option<o3k_provider::OperationState> {
@@ -972,7 +994,7 @@ impl ComputeProvider for AgentComputeProvider {
             ),
         ];
         let mut seen = [false; 2];
-        for (index, artifact) in artifacts.into_iter().enumerate() {
+        for artifact in artifacts {
             let expected_index = required
                 .iter()
                 .position(|(kind, artifact_id, _, _)| {
@@ -999,11 +1021,11 @@ impl ComputeProvider for AgentComputeProvider {
             let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
             let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size))
                 .map_err(|_| ProviderError::InvalidRequest)?;
-            let transfer_id = Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("{}:{}:{}", command.command_id, index, artifact.artifact_id).as_bytes(),
-            )
-            .to_string();
+            let transfer_id = o3k_compute_agent::deterministic_artifact_transfer_id(
+                &command.command_id,
+                artifact.kind,
+                &artifact.artifact_id,
+            );
             let offer = agent_proto::ArtifactOffer {
                 transfer_id,
                 command_id: command.command_id.clone(),
@@ -1017,7 +1039,7 @@ impl ComputeProvider for AgentComputeProvider {
                 format: artifact.format,
                 chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
                 chunk_count,
-                expires_at_unix_ms: unix_ms_after(self.command_timeout),
+                expires_at_unix_ms: command.deadline_unix_ms,
             };
             if let Some(store) = &self.store {
                 let transfer = ArtifactTransferRecord {
@@ -1031,6 +1053,7 @@ impl ComputeProvider for AgentComputeProvider {
                     artifact_kind: artifact_kind_name(artifact.kind).to_owned(),
                     sha256: offer.sha256.clone(),
                     size_bytes: offer.size_bytes,
+                    expires_at_unix_ms: offer.expires_at_unix_ms,
                     format: offer.format.clone(),
                     chunk_size_bytes: offer.chunk_size_bytes as u64,
                     chunk_count: offer.chunk_count as u64,

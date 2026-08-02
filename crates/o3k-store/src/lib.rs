@@ -111,6 +111,73 @@ pub struct ProviderReference {
     pub provider_resource_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageOverlayIdentity {
+    pub resource_id: Uuid,
+    pub operation_id: Uuid,
+    pub command_id: String,
+    pub agent_id: String,
+    pub agent_epoch: String,
+    pub base_sha256: String,
+    pub base_format: String,
+    pub overlay_format: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageOverlayState {
+    Pending,
+    Materializing,
+    Ready,
+    Deleting,
+    Deleted,
+    Failed,
+}
+
+impl ImageOverlayState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Materializing => "materializing",
+            Self::Ready => "ready",
+            Self::Deleting => "deleting",
+            Self::Deleted => "deleted",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "materializing" => Ok(Self::Materializing),
+            "ready" => Ok(Self::Ready),
+            "deleting" => Ok(Self::Deleting),
+            "deleted" => Ok(Self::Deleted),
+            "failed" => Ok(Self::Failed),
+            _ => Err(StoreError::Corrupt(format!(
+                "unknown image overlay state `{value}`"
+            ))),
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Deleted)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageOverlayOwnershipRecord {
+    pub overlay_id: String,
+    pub identity: ImageOverlayIdentity,
+    pub state: ImageOverlayState,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageOverlayUpdate {
+    pub state: ImageOverlayState,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentCommandState {
     Pending,
@@ -213,6 +280,14 @@ pub enum StoreError {
     ArtifactTransferConflict(String),
     #[error("invalid artifact transfer: {0}")]
     InvalidArtifactTransfer(String),
+    #[error("image overlay ownership not found")]
+    ImageOverlayNotFound,
+    #[error("image overlay ownership epoch does not match durable state")]
+    ImageOverlayEpochConflict,
+    #[error("image overlay ownership conflict: {0}")]
+    ImageOverlayConflict(String),
+    #[error("invalid image overlay ownership: {0}")]
+    InvalidImageOverlay(String),
 }
 
 #[async_trait]
@@ -303,6 +378,34 @@ pub trait DurableStore: Send + Sync {
     async fn list_recoverable_artifact_transfers(
         &self,
     ) -> Result<Vec<ArtifactTransferRecord>, StoreError>;
+    async fn insert_image_overlay(
+        &self,
+        overlay: &ImageOverlayOwnershipRecord,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError>;
+    async fn get_image_overlay(
+        &self,
+        overlay_id: &str,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError>;
+    async fn update_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+        update: ImageOverlayUpdate,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError>;
+    async fn list_image_overlays(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Vec<ImageOverlayOwnershipRecord>, StoreError>;
+    async fn count_image_overlay_references(
+        &self,
+        base_sha256: &str,
+        base_format: &str,
+    ) -> Result<u64, StoreError>;
+    async fn delete_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError>;
     async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError>;
     async fn insert_resource_and_operation(
         &self,
@@ -367,12 +470,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 8 {
+        if table_count != 9 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
@@ -1059,6 +1162,192 @@ impl DurableStore for SqliteStore {
         artifact_transfer::list_recoverable(&self.pool).await
     }
 
+    async fn insert_image_overlay(
+        &self,
+        overlay: &ImageOverlayOwnershipRecord,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        validate_image_overlay(overlay)?;
+        let result = sqlx::query(
+            "INSERT INTO image_overlay_ownership (overlay_id, resource_id, operation_id, command_id, agent_id, agent_epoch, base_sha256, base_format, overlay_format, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&overlay.overlay_id)
+        .bind(overlay.identity.resource_id.to_string())
+        .bind(overlay.identity.operation_id.to_string())
+        .bind(&overlay.identity.command_id)
+        .bind(&overlay.identity.agent_id)
+        .bind(&overlay.identity.agent_epoch)
+        .bind(&overlay.identity.base_sha256)
+        .bind(&overlay.identity.base_format)
+        .bind(&overlay.identity.overlay_format)
+        .bind(overlay.state.as_str())
+        .bind(&overlay.created_at)
+        .bind(&overlay.updated_at)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => self.get_image_overlay(&overlay.overlay_id).await,
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let existing = self.get_image_overlay(&overlay.overlay_id).await;
+                match existing {
+                    Ok(existing) if image_overlay_identity_matches(&existing, overlay) => {
+                        Ok(existing)
+                    }
+                    Ok(_) => Err(StoreError::ImageOverlayConflict(
+                        "overlay identity conflicts with durable state".to_owned(),
+                    )),
+                    Err(StoreError::ImageOverlayNotFound) => {
+                        let identity_exists: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(*) FROM image_overlay_ownership WHERE resource_id = ? AND operation_id = ? AND command_id = ?",
+                        )
+                        .bind(overlay.identity.resource_id.to_string())
+                        .bind(overlay.identity.operation_id.to_string())
+                        .bind(&overlay.identity.command_id)
+                        .fetch_one(&self.pool)
+                        .await
+                        .map_err(StoreError::Database)?;
+                        if identity_exists != 0 {
+                            Err(StoreError::ImageOverlayConflict(
+                                "resource operation already owns an overlay".to_owned(),
+                            ))
+                        } else {
+                            Err(StoreError::ImageOverlayNotFound)
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    async fn get_image_overlay(
+        &self,
+        overlay_id: &str,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        let row = sqlx::query(
+            "SELECT overlay_id, resource_id, operation_id, command_id, agent_id, agent_epoch, base_sha256, base_format, overlay_format, state, created_at, updated_at FROM image_overlay_ownership WHERE overlay_id = ?",
+        )
+        .bind(overlay_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ImageOverlayNotFound)?;
+        image_overlay_from_row(&row)
+    }
+
+    async fn update_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+        update: ImageOverlayUpdate,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        validate_image_overlay_identity(expected_identity)?;
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let row = sqlx::query(
+            "SELECT overlay_id, resource_id, operation_id, command_id, agent_id, agent_epoch, base_sha256, base_format, overlay_format, state, created_at, updated_at FROM image_overlay_ownership WHERE overlay_id = ?",
+        )
+        .bind(overlay_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or(StoreError::ImageOverlayNotFound)?;
+        let current = image_overlay_from_row(&row)?;
+        ensure_image_overlay_identity(&current, expected_identity)?;
+        validate_image_overlay_transition(current.state, update.state)?;
+        if current.state == update.state {
+            transaction.rollback().await.map_err(StoreError::Database)?;
+            return Ok(current);
+        }
+        let result = sqlx::query(
+            "UPDATE image_overlay_ownership SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE overlay_id = ? AND resource_id = ? AND operation_id = ? AND command_id = ? AND agent_id = ? AND agent_epoch = ? AND base_sha256 = ? AND base_format = ? AND overlay_format = ? AND state = ?",
+        )
+        .bind(update.state.as_str())
+        .bind(overlay_id)
+        .bind(expected_identity.resource_id.to_string())
+        .bind(expected_identity.operation_id.to_string())
+        .bind(&expected_identity.command_id)
+        .bind(&expected_identity.agent_id)
+        .bind(&expected_identity.agent_epoch)
+        .bind(&expected_identity.base_sha256)
+        .bind(&expected_identity.base_format)
+        .bind(&expected_identity.overlay_format)
+        .bind(current.state.as_str())
+        .execute(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::ImageOverlayConflict(
+                "concurrent overlay state change".to_owned(),
+            ));
+        }
+        transaction.commit().await.map_err(StoreError::Database)?;
+        self.get_image_overlay(overlay_id).await
+    }
+
+    async fn list_image_overlays(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Vec<ImageOverlayOwnershipRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT overlay_id, resource_id, operation_id, command_id, agent_id, agent_epoch, base_sha256, base_format, overlay_format, state, created_at, updated_at FROM image_overlay_ownership WHERE resource_id = ? ORDER BY overlay_id",
+        )
+        .bind(resource_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(image_overlay_from_row).collect()
+    }
+
+    async fn count_image_overlay_references(
+        &self,
+        base_sha256: &str,
+        base_format: &str,
+    ) -> Result<u64, StoreError> {
+        validate_base_identity(base_sha256, base_format)?;
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM image_overlay_ownership WHERE base_sha256 = ? AND base_format = ? AND state != 'deleted'",
+        )
+        .bind(base_sha256)
+        .bind(base_format)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        u64::try_from(count)
+            .map_err(|_| StoreError::Corrupt("negative overlay reference count".to_owned()))
+    }
+
+    async fn delete_image_overlay(
+        &self,
+        overlay_id: &str,
+        expected_identity: &ImageOverlayIdentity,
+    ) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+        let current = self.get_image_overlay(overlay_id).await?;
+        if current.state == ImageOverlayState::Deleted {
+            ensure_image_overlay_identity(&current, expected_identity)?;
+            return Ok(current);
+        }
+        let deleting = self
+            .update_image_overlay(
+                overlay_id,
+                expected_identity,
+                ImageOverlayUpdate {
+                    state: ImageOverlayState::Deleting,
+                },
+            )
+            .await?;
+        if deleting.state == ImageOverlayState::Deleted {
+            return Ok(deleting);
+        }
+        self.update_image_overlay(
+            overlay_id,
+            expected_identity,
+            ImageOverlayUpdate {
+                state: ImageOverlayState::Deleted,
+            },
+        )
+        .await
+    }
+
     async fn increment_operation_retry(&self, operation_id: Uuid) -> Result<u8, StoreError> {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let current: Option<i64> =
@@ -1190,6 +1479,142 @@ fn parse_uuid(value: String) -> Result<Uuid, StoreError> {
     Uuid::parse_str(&value).map_err(StoreError::InvalidUuid)
 }
 
+fn validate_image_overlay(overlay: &ImageOverlayOwnershipRecord) -> Result<(), StoreError> {
+    bounded_overlay_text("overlay_id", &overlay.overlay_id, 128)?;
+    validate_image_overlay_identity(&overlay.identity)?;
+    if overlay.state.is_terminal() {
+        return Err(StoreError::InvalidImageOverlay(
+            "a new overlay cannot start in deleted state".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_image_overlay_identity(identity: &ImageOverlayIdentity) -> Result<(), StoreError> {
+    bounded_overlay_text("command_id", &identity.command_id, 128)?;
+    bounded_overlay_text("agent_id", &identity.agent_id, 128)?;
+    bounded_overlay_text("agent_epoch", &identity.agent_epoch, 256)?;
+    validate_base_identity(&identity.base_sha256, &identity.base_format)?;
+    if identity.overlay_format != "qcow2" {
+        return Err(StoreError::InvalidImageOverlay(
+            "overlay format must be qcow2".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_base_identity(sha256: &str, format: &str) -> Result<(), StoreError> {
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StoreError::InvalidImageOverlay(
+            "base checksum must be 64 hexadecimal characters".to_owned(),
+        ));
+    }
+    if !matches!(format, "raw" | "qcow2") {
+        return Err(StoreError::InvalidImageOverlay(
+            "base format must be raw or qcow2".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_overlay_text(name: &str, value: &str, max: usize) -> Result<(), StoreError> {
+    if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+        return Err(StoreError::InvalidImageOverlay(format!(
+            "{name} is empty, too long, or contains control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn image_overlay_identity_matches(
+    left: &ImageOverlayOwnershipRecord,
+    right: &ImageOverlayOwnershipRecord,
+) -> bool {
+    left.overlay_id == right.overlay_id && left.identity == right.identity
+}
+
+fn ensure_image_overlay_identity(
+    current: &ImageOverlayOwnershipRecord,
+    expected: &ImageOverlayIdentity,
+) -> Result<(), StoreError> {
+    if current.identity.agent_epoch != expected.agent_epoch {
+        return Err(StoreError::ImageOverlayEpochConflict);
+    }
+    if current.identity != *expected {
+        return Err(StoreError::ImageOverlayConflict(
+            "overlay identity conflicts with durable state".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_image_overlay_transition(
+    current: ImageOverlayState,
+    next: ImageOverlayState,
+) -> Result<(), StoreError> {
+    let allowed = match current {
+        ImageOverlayState::Pending => matches!(
+            next,
+            ImageOverlayState::Pending
+                | ImageOverlayState::Materializing
+                | ImageOverlayState::Deleting
+                | ImageOverlayState::Failed
+        ),
+        ImageOverlayState::Materializing => matches!(
+            next,
+            ImageOverlayState::Materializing
+                | ImageOverlayState::Ready
+                | ImageOverlayState::Deleting
+                | ImageOverlayState::Failed
+        ),
+        ImageOverlayState::Ready => {
+            matches!(next, ImageOverlayState::Ready | ImageOverlayState::Deleting)
+        }
+        ImageOverlayState::Deleting => {
+            matches!(
+                next,
+                ImageOverlayState::Deleting | ImageOverlayState::Deleted
+            )
+        }
+        ImageOverlayState::Deleted => next == ImageOverlayState::Deleted,
+        ImageOverlayState::Failed => matches!(
+            next,
+            ImageOverlayState::Failed
+                | ImageOverlayState::Materializing
+                | ImageOverlayState::Deleting
+        ),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(StoreError::ImageOverlayConflict(format!(
+            "invalid overlay state transition from {current:?} to {next:?}"
+        )))
+    }
+}
+
+fn image_overlay_from_row(row: &SqliteRow) -> Result<ImageOverlayOwnershipRecord, StoreError> {
+    let record = ImageOverlayOwnershipRecord {
+        overlay_id: row.get("overlay_id"),
+        identity: ImageOverlayIdentity {
+            resource_id: parse_uuid(row.get("resource_id"))?,
+            operation_id: parse_uuid(row.get("operation_id"))?,
+            command_id: row.get("command_id"),
+            agent_id: row.get("agent_id"),
+            agent_epoch: row.get("agent_epoch"),
+            base_sha256: row.get("base_sha256"),
+            base_format: row.get("base_format"),
+            overlay_format: row.get("overlay_format"),
+        },
+        state: ImageOverlayState::parse(row.get::<String, _>("state").as_str())?,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    };
+    bounded_overlay_text("overlay_id", &record.overlay_id, 128)?;
+    validate_image_overlay_identity(&record.identity)?;
+    Ok(record)
+}
+
 /// Runs the behavior shared by every durable store adapter.
 pub async fn run_conformance<S: DurableStore>(store: &S) -> Result<(), StoreError> {
     let resource = ResourceRecord {
@@ -1313,6 +1738,115 @@ mod tests {
             store.insert_resource(&resource).await,
             Err(StoreError::ResourceAlreadyExists)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_overlay_ownership_is_fenced_restart_safe_and_reference_counted()
+    -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-image-overlay-ownership-{}.sqlite",
+            std::process::id()
+        ));
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let identity = ImageOverlayIdentity {
+            resource_id: resource.id,
+            operation_id: operation.id,
+            command_id: "command-image-1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            base_sha256: "a".repeat(64),
+            base_format: "qcow2".to_owned(),
+            overlay_format: "qcow2".to_owned(),
+        };
+        let record = ImageOverlayOwnershipRecord {
+            overlay_id: "overlay-1".to_owned(),
+            identity: identity.clone(),
+            state: ImageOverlayState::Pending,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        {
+            let store = SqliteStore::connect_file(&path).await?;
+            store
+                .insert_resource_and_operation(&resource, &operation)
+                .await?;
+            assert_eq!(
+                store.insert_image_overlay(&record).await?,
+                store.get_image_overlay("overlay-1").await?
+            );
+            assert_eq!(
+                store.insert_image_overlay(&record).await?.overlay_id,
+                "overlay-1"
+            );
+            assert_eq!(
+                store
+                    .count_image_overlay_references(&"a".repeat(64), "qcow2")
+                    .await?,
+                1
+            );
+            store
+                .update_image_overlay(
+                    "overlay-1",
+                    &identity,
+                    ImageOverlayUpdate {
+                        state: ImageOverlayState::Materializing,
+                    },
+                )
+                .await?;
+            store
+                .update_image_overlay(
+                    "overlay-1",
+                    &identity,
+                    ImageOverlayUpdate {
+                        state: ImageOverlayState::Ready,
+                    },
+                )
+                .await?;
+            let mut stale = identity.clone();
+            stale.agent_epoch = "epoch-2".to_owned();
+            assert!(matches!(
+                store.delete_image_overlay("overlay-1", &stale).await,
+                Err(StoreError::ImageOverlayEpochConflict)
+            ));
+            assert_eq!(
+                store
+                    .delete_image_overlay("overlay-1", &identity)
+                    .await?
+                    .state,
+                ImageOverlayState::Deleted
+            );
+            assert_eq!(
+                store
+                    .count_image_overlay_references(&"a".repeat(64), "qcow2")
+                    .await?,
+                0
+            );
+        }
+        let reopened = SqliteStore::connect_file(&path).await?;
+        assert_eq!(
+            reopened.get_image_overlay("overlay-1").await?.state,
+            ImageOverlayState::Deleted
+        );
+        fs::remove_file(path)?;
         Ok(())
     }
 

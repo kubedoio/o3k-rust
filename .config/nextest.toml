@@ -15,6 +15,17 @@ report-name = "o3k-nextest-pr"
 store-success-output = false
 store-failure-output = true
 
+# These tests exercise real qemu-img overlay creation.  Their temporary
+# backing-image setup is intentionally isolated from concurrent qemu-img
+# invocations; serialise only this pair rather than reducing workspace
+# parallelism.
+[[profile.pr.overrides]]
+filter = 'package(o3k-compute-agent) and test(/committed_raw_image_becomes_owned_overlay_and_deletes_idempotently|distinct_instances_share_base_but_own_independent_overlays/)'
+test-group = 'qemu-img'
+
+[test-groups.qemu-img]
+max-threads = 1
+
 [profile.deep]
 inherits = "pr"
 slow-timeout = { period = "120s", terminate-after = 3 }

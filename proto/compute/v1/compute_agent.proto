@@ -188,6 +188,15 @@ message ResolvedCreateInputs {
   string config_drive_artifact_id = 7;
   string config_drive_sha256 = 8;
   repeated NetworkAttachment network_attachments = 9;
+  // Authenticated transfer references, never host paths or credentials.
+  ArtifactReference image_transfer = 10;
+  ArtifactReference config_drive_transfer = 11;
+}
+
+message ArtifactReference {
+  string transfer_id = 1;
+  uint64 size_bytes = 2;
+  int64 expires_at_unix_ms = 3;
 }
 
 message NetworkAttachment {

@@ -47,9 +47,19 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod artifact;
+mod config_drive;
+mod image;
 pub use artifact::{
     ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_CHUNK_BYTES,
+};
+pub use config_drive::{
+    ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
+    config_drive_materialization_request,
+};
+pub use image::{
+    ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
+    image_materialization_request,
 };
 
 pub const PROTOCOL_VERSION: proto::ProtocolVersion = proto::ProtocolVersion {
@@ -74,6 +84,28 @@ const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
 const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
 const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
+
+/// Derives the stable transfer identity shared by the control-plane journal
+/// and the agent-local committed-artifact lookup. The artifact kind is part
+/// of the identity so resolver ordering cannot alias image and config-drive
+/// transfers.
+#[must_use]
+pub fn deterministic_artifact_transfer_id(
+    command_id: &str,
+    kind: proto::ArtifactKind,
+    artifact_id: &str,
+) -> String {
+    let kind = match kind {
+        proto::ArtifactKind::ImageBase => "image_base",
+        proto::ArtifactKind::ConfigDriveIso => "config_drive_iso",
+        proto::ArtifactKind::Unspecified => "unspecified",
+    };
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:artifact-transfer:{command_id}:{kind}:{artifact_id}").as_bytes(),
+    )
+    .to_string()
+}
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -1035,6 +1067,21 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
             "create command identity, resolved resources, and deadline are invalid".to_owned(),
         ));
     }
+    let command_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:command:{agent_id}:{operation_id}").as_bytes(),
+    )
+    .to_string();
+    let image_transfer_id = deterministic_artifact_transfer_id(
+        &command_id,
+        proto::ArtifactKind::ImageBase,
+        &image_artifact_id,
+    );
+    let config_drive_transfer_id = deterministic_artifact_transfer_id(
+        &command_id,
+        proto::ArtifactKind::ConfigDriveIso,
+        &config_drive_artifact_id,
+    );
     let network_port_ids = network_attachments
         .iter()
         .map(|attachment| attachment.port_id.clone())
@@ -1052,6 +1099,16 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
             disk_gib,
             config_drive_artifact_id,
             config_drive_sha256,
+            image_transfer: Some(proto::ArtifactReference {
+                transfer_id: image_transfer_id,
+                size_bytes: 0,
+                expires_at_unix_ms: deadline_unix_ms,
+            }),
+            config_drive_transfer: Some(proto::ArtifactReference {
+                transfer_id: config_drive_transfer_id,
+                size_bytes: 0,
+                expires_at_unix_ms: deadline_unix_ms,
+            }),
             network_attachments: network_attachments
                 .into_iter()
                 .map(|attachment| proto::NetworkAttachment {
@@ -1073,11 +1130,6 @@ pub fn build_create_command(spec: CreateCommandSpec) -> Result<proto::Command, A
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
     let payload_fingerprint_sha256 = hex_digest(&digest);
-    let command_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("o3k:command:{agent_id}:{operation_id}").as_bytes(),
-    )
-    .to_string();
     Ok(proto::Command {
         command_id,
         operation_id,
@@ -1314,6 +1366,19 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
         || !(1..=1_048_576).contains(&resolved.disk_gib)
         || !valid_reference(&resolved.config_drive_artifact_id)
         || !valid_sha256(&resolved.config_drive_sha256)
+        || resolved.image_transfer.as_ref().is_none_or(|reference| {
+            !valid_reference(&reference.transfer_id)
+                || reference.expires_at_unix_ms <= unix_ms()
+                || reference.size_bytes > MAX_ARTIFACT_BYTES
+        })
+        || resolved
+            .config_drive_transfer
+            .as_ref()
+            .is_none_or(|reference| {
+                !valid_reference(&reference.transfer_id)
+                    || reference.expires_at_unix_ms <= unix_ms()
+                    || reference.size_bytes > MAX_ARTIFACT_BYTES
+            })
         || resolved.network_attachments.iter().any(|attachment| {
             !valid_network_attachment(&NetworkAttachmentSpec {
                 port_id: attachment.port_id.clone(),
@@ -3972,6 +4037,69 @@ mod tests {
         let mut invalid = valid_create_spec();
         invalid.network_attachments.clear();
         assert!(build_create_command(invalid).is_err());
+    }
+
+    #[test]
+    fn create_command_carries_deterministic_artifact_transfer_identities() -> Result<(), AgentError>
+    {
+        let command = fake_create_command()?;
+        let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
+            return Err(AgentError::Protocol("expected create action".to_owned()));
+        };
+        let Some(resolved) = create.resolved.as_ref() else {
+            return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
+        };
+        assert_eq!(
+            resolved
+                .image_transfer
+                .as_ref()
+                .map(|reference| reference.transfer_id.clone())
+                .unwrap_or_default(),
+            deterministic_artifact_transfer_id(
+                &command.command_id,
+                proto::ArtifactKind::ImageBase,
+                "image-artifact-1",
+            )
+        );
+        assert_eq!(
+            resolved
+                .config_drive_transfer
+                .as_ref()
+                .map(|reference| reference.transfer_id.clone())
+                .unwrap_or_default(),
+            deterministic_artifact_transfer_id(
+                &command.command_id,
+                proto::ArtifactKind::ConfigDriveIso,
+                "config-drive-1",
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proto_create_rejects_missing_or_expired_transfer_references() -> Result<(), AgentError> {
+        let mut command = fake_create_command()?;
+        let Some(proto::command::Action::Create(create)) = command.action.as_mut() else {
+            return Err(AgentError::Protocol("expected create action".to_owned()));
+        };
+        let Some(resolved) = create.resolved.as_mut() else {
+            return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
+        };
+        resolved.image_transfer = None;
+        assert!(validate_proto_create(create).is_err());
+
+        let mut command = fake_create_command()?;
+        let Some(proto::command::Action::Create(create)) = command.action.as_mut() else {
+            return Err(AgentError::Protocol("expected create action".to_owned()));
+        };
+        let Some(resolved) = create.resolved.as_mut() else {
+            return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
+        };
+        if let Some(reference) = resolved.image_transfer.as_mut() {
+            reference.expires_at_unix_ms = unix_ms().saturating_sub(1);
+        }
+        assert!(validate_proto_create(create).is_err());
+        Ok(())
     }
 
     #[tokio::test]

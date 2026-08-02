@@ -61,7 +61,7 @@ pub mod mapping {
 
 #[cfg(test)]
 mod tests {
-    use super::{mapping, proto};
+    use super::{compute_proto, mapping, proto};
     use prost::Message;
     use uuid::Uuid;
 
@@ -103,6 +103,40 @@ mod tests {
         };
         let decoded = proto::Operation::decode(operation.encode_to_vec().as_slice())?;
         assert_eq!(decoded.state, 99);
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_reference_round_trips_as_an_additive_create_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let command = compute_proto::Command {
+            command_id: "command-1".to_owned(),
+            action: Some(compute_proto::command::Action::Create(
+                compute_proto::CreateCommand {
+                    resolved: Some(compute_proto::ResolvedCreateInputs {
+                        image_transfer: Some(compute_proto::ArtifactReference {
+                            transfer_id: "transfer-image".to_owned(),
+                            size_bytes: 42,
+                            expires_at_unix_ms: 123,
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let decoded = compute_proto::Command::decode(command.encode_to_vec().as_slice())?;
+        let Some(compute_proto::command::Action::Create(create)) = decoded.action else {
+            return Err("create action was not preserved".into());
+        };
+        let reference = create
+            .resolved
+            .and_then(|resolved| resolved.image_transfer)
+            .ok_or("image transfer reference was not preserved")?;
+        assert_eq!(reference.transfer_id, "transfer-image");
+        assert_eq!(reference.size_bytes, 42);
+        assert_eq!(reference.expires_at_unix_ms, 123);
         Ok(())
     }
 

@@ -24,6 +24,7 @@ approval before `Accepted`.
 | [ADR-0151](ADR-0151-public-go-o3k-reference-policy.md) | Public Go O3K reference boundary | Accepted |
 | [ADR-0153](ADR-0153-static-rust-and-openstack-release-policy.md) | Static Rust/OpenStack target | Accepted |
 | [ADR-0154](ADR-0154-engineering-governance-lifecycle.md) | Decision and evidence governance | Proposed |
+| [ADR-0155](ADR-0155-agent-local-image-materialization.md) | Agent-local verified image materialization | Proposed |
 
 The table is an entrypoint for the governance decisions; it is not a claim
 that every historical ADR has already been machine-audited. Until the audit is
