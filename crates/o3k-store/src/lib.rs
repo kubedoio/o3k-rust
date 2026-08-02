@@ -288,6 +288,12 @@ pub trait DurableStore: Send + Sync {
         &self,
         transfer_id: &str,
     ) -> Result<ArtifactTransferRecord, StoreError>;
+    async fn rebind_artifact_transfer_epoch(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        new_agent_epoch: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError>;
     async fn update_artifact_transfer(
         &self,
         transfer_id: &str,
@@ -1021,6 +1027,21 @@ impl DurableStore for SqliteStore {
         transfer_id: &str,
     ) -> Result<ArtifactTransferRecord, StoreError> {
         artifact_transfer::get(&self.pool, transfer_id).await
+    }
+
+    async fn rebind_artifact_transfer_epoch(
+        &self,
+        transfer_id: &str,
+        expected_agent_epoch: &str,
+        new_agent_epoch: &str,
+    ) -> Result<ArtifactTransferRecord, StoreError> {
+        artifact_transfer::rebind_epoch(
+            &self.pool,
+            transfer_id,
+            expected_agent_epoch,
+            new_agent_epoch,
+        )
+        .await
     }
 
     async fn update_artifact_transfer(

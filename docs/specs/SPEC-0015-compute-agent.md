@@ -1,7 +1,7 @@
 # SPEC-0015 — `o3k-compute` agent and control-plane protocol
 
-Status: Accepted contract draft for issue #37; additive artifact-transfer
-contract accepted; runtime implementation pending
+Status: Accepted contract; artifact-transfer runtime is implemented in part,
+with full protected-host lifecycle evidence still pending
 Version: `o3k.compute.v1` / wire revision 1
 
 ## 1. Scope and boundary
@@ -148,6 +148,11 @@ added as extensions to this common contract.
 `max_disk_gb` is the agent operator's bounded capacity declaration. Zero means
 that disk capacity is unknown; the control plane must publish the provider as
 unschedulable rather than infer capacity from `disk_formats` or a host path.
+
+An agent that supports authenticated artifact transfer advertises a supported
+`CapabilityFlag` named `artifact_transfer`. The control plane must reject an
+artifact offer when that flag is absent or false; registration and mTLS alone
+do not negotiate file transfer.
 
 ## 7. Commands and operations
 

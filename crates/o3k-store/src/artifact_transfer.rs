@@ -296,6 +296,38 @@ pub(crate) async fn update(
     get(pool, transfer_id).await
 }
 
+pub(crate) async fn rebind_epoch(
+    pool: &SqlitePool,
+    transfer_id: &str,
+    expected_agent_epoch: &str,
+    new_agent_epoch: &str,
+) -> Result<ArtifactTransferRecord, StoreError> {
+    bounded_text("expected_agent_epoch", expected_agent_epoch, 256)?;
+    bounded_text("new_agent_epoch", new_agent_epoch, 256)?;
+    if expected_agent_epoch == new_agent_epoch {
+        return get(pool, transfer_id).await;
+    }
+    let result = sqlx::query(
+        "UPDATE artifact_transfers SET agent_epoch = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_id = ? AND agent_epoch = ? AND state IN ('offered', 'receiving')",
+    )
+    .bind(new_agent_epoch)
+    .bind(transfer_id)
+    .bind(expected_agent_epoch)
+    .execute(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    if result.rows_affected() != 1 {
+        let current = get(pool, transfer_id).await?;
+        if current.agent_epoch != expected_agent_epoch {
+            return Err(StoreError::ArtifactTransferEpochConflict);
+        }
+        return Err(StoreError::ArtifactTransferConflict(
+            "terminal artifact transfer cannot be rebound".to_owned(),
+        ));
+    }
+    get(pool, transfer_id).await
+}
+
 pub(crate) async fn list_recoverable(
     pool: &SqlitePool,
 ) -> Result<Vec<ArtifactTransferRecord>, StoreError> {
@@ -475,6 +507,16 @@ mod tests {
                 )
                 .await,
             Err(StoreError::ArtifactTransferConflict(_))
+        ));
+        let rebound = store
+            .rebind_artifact_transfer_epoch(&record.transfer_id, "epoch-1", "epoch-2")
+            .await?;
+        assert_eq!(rebound.agent_epoch, "epoch-2");
+        assert!(matches!(
+            store
+                .rebind_artifact_transfer_epoch(&record.transfer_id, "epoch-1", "epoch-3")
+                .await,
+            Err(StoreError::ArtifactTransferEpochConflict)
         ));
         Ok(())
     }

@@ -126,6 +126,11 @@ async fn agent_provider_command_crosses_mutual_tls_and_observes_completion()
             max_vcpus: 4,
             max_memory_mib: 4096,
             max_disk_gb: 20,
+            flags: vec![proto::CapabilityFlag {
+                name: "artifact_transfer".to_owned(),
+                supported: true,
+                bounded_value: String::new(),
+            }],
             ..Default::default()
         },
     })?;

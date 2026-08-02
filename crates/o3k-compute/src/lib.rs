@@ -1016,10 +1016,41 @@ impl ComputeProvider for AgentComputeProvider {
                     created_at: String::new(),
                     updated_at: String::new(),
                 };
-                let existing = store
-                    .insert_artifact_transfer(&transfer)
-                    .await
-                    .map_err(|_| ProviderError::Conflict)?;
+                let existing = match store.insert_artifact_transfer(&transfer).await {
+                    Ok(existing) => existing,
+                    Err(StoreError::ArtifactTransferConflict(_)) => {
+                        let previous = store
+                            .get_artifact_transfer(&transfer.transfer_id)
+                            .await
+                            .map_err(|_| ProviderError::Conflict)?;
+                        if previous.state == ArtifactTransferState::Committed {
+                            previous
+                        } else if previous.command_id == transfer.command_id
+                            && previous.operation_id == transfer.operation_id
+                            && previous.resource_id == transfer.resource_id
+                            && previous.agent_id == transfer.agent_id
+                            && previous.artifact_id == transfer.artifact_id
+                            && previous.artifact_kind == transfer.artifact_kind
+                            && previous.sha256 == transfer.sha256
+                            && previous.size_bytes == transfer.size_bytes
+                            && previous.format == transfer.format
+                            && previous.chunk_size_bytes == transfer.chunk_size_bytes
+                            && previous.chunk_count == transfer.chunk_count
+                        {
+                            store
+                                .rebind_artifact_transfer_epoch(
+                                    &transfer.transfer_id,
+                                    &previous.agent_epoch,
+                                    &transfer.agent_epoch,
+                                )
+                                .await
+                                .map_err(|_| ProviderError::Conflict)?
+                        } else {
+                            return Err(ProviderError::Conflict);
+                        }
+                    }
+                    Err(_) => return Err(ProviderError::Conflict),
+                };
                 if existing.state == ArtifactTransferState::Committed {
                     continue;
                 }

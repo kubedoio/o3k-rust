@@ -71,6 +71,7 @@ const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
 const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
 const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
+const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -398,6 +399,16 @@ impl NodeRegistry {
             .snapshot(&offer.agent_id)
             .await
             .ok_or_else(|| AgentError::Protocol("agent is not registered".to_owned()))?;
+        if !node
+            .capabilities
+            .flags
+            .iter()
+            .any(|flag| flag.name == ARTIFACT_TRANSFER_CAPABILITY && flag.supported)
+        {
+            return Err(AgentError::Protocol(
+                "agent has not negotiated artifact transfer capability".to_owned(),
+            ));
+        }
         if node.agent_epoch.is_empty() {
             return Err(AgentError::Protocol("agent epoch is missing".to_owned()));
         }
@@ -3461,6 +3472,11 @@ mod tests {
             architecture: "x86_64".to_owned(),
             agent_provider_name: "o3k-compute".to_owned(),
             agent_provider_version: "test".to_owned(),
+            flags: vec![proto::CapabilityFlag {
+                name: ARTIFACT_TRANSFER_CAPABILITY.to_owned(),
+                supported: true,
+                bounded_value: String::new(),
+            }],
             ..Default::default()
         }
     }
@@ -3748,6 +3764,26 @@ mod tests {
         let (offer, mut data) = test_artifact_offer("node");
         data[0] = b'X';
         assert!(registry.dispatch_artifact(offer, data).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn artifact_transfer_requires_negotiated_capability()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        let mut request = register("node", "epoch");
+        if let Some(capabilities) = request.capabilities.as_mut() {
+            capabilities.flags.clear();
+        }
+        registry.register(&request).await?;
+        let (sender, _receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let (offer, data) = test_artifact_offer("node");
+        let error = registry.dispatch_artifact(offer, data).await;
+        assert!(error.is_err());
+        if let Err(error) = error {
+            assert!(error.to_string().contains("not negotiated"));
+        }
         Ok(())
     }
 
