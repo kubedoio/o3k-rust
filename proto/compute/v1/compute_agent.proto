@@ -197,6 +197,7 @@ message ArtifactReference {
   string transfer_id = 1;
   uint64 size_bytes = 2;
   int64 expires_at_unix_ms = 3;
+  string project_id = 12;
 }
 
 message NetworkAttachment {
