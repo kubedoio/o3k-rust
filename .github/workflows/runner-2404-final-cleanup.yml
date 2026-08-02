@@ -1,0 +1,31 @@
+name: Runner 2404 final exact cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/runner-2404-final-cleanup'
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Remove exact owned domain and bridge
+        run: |
+          set -euo pipefail
+          domain=o3k-e84d69cce2c47ce8be64
+          if sudo -n virsh -c qemu:///system dominfo "$domain" >/dev/null 2>&1; then
+            xml="${$(sudo -n virsh -c qemu:///system dumpxml "$domain")"
+            grep -Fq '<o3k:domain' <<<"$xml"
+            grep -Fq 'managed_by="o3k-compute"' <<<"$xml"
+            sudo -n virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
+            sudo -n virsh -c qemu:///system undefine "$domain"
+          fi
+          if ip link show dev o3k-br0 >/dev/null 2>&1; then
+            while IFS= read -r line; do
+              name="${line#*: }"; name="${name%%@*}"; name="${name%%:*}"
+              [[ "$name" == o3k-* || "$name" == o3ktap-* ]] || exit 1
+            done < <(ip -o link show master o3k-br0)
+            sudo -n ip link delete dev o3k-br0
+          fi
