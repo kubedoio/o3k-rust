@@ -497,8 +497,19 @@ fn prepare_owned_taps(
         let was_created = match network.ensure_tap(&spec) {
             Ok((_, was_created)) => was_created,
             Err(error) => {
+                let mut rollback_error = None;
                 for previous in created.iter().rev() {
-                    let _ = network.delete_tap(previous);
+                    if let Err(error) = network.delete_tap(previous) {
+                        rollback_error.get_or_insert(error);
+                    }
+                }
+                if let Err(error) = network.cleanup_if_unused() {
+                    rollback_error.get_or_insert(error);
+                }
+                if let Some(rollback_error) = rollback_error {
+                    return Err(AgentError::Protocol(format!(
+                        "host TAP preparation failed: {error}; rollback failed: {rollback_error}"
+                    )));
                 }
                 return Err(AgentError::Protocol(format!(
                     "host TAP preparation failed: {error}"
