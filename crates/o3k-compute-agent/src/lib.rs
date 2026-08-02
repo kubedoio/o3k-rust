@@ -47,10 +47,15 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod artifact;
+mod config_drive;
 mod image;
 pub use artifact::{
     ArtifactReceipt, ArtifactStore, ArtifactStoreError, MAX_ARTIFACT_BYTES,
     MAX_ARTIFACT_CHUNK_BYTES,
+};
+pub use config_drive::{
+    ConfigDriveMaterializationError, ConfigDriveMaterializationRequest,
+    config_drive_materialization_request,
 };
 pub use image::{
     ImageMaterialization, ImageMaterializationRequest, ImageMaterializer, ImageMaterializerError,
