@@ -1458,6 +1458,8 @@ impl ComputeService {
             name: name.clone(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: Some(flavor.id),
+            disk_gib: Some(flavor.disk_gib),
             image_id: Some(image_id.clone()),
             key_name: key_name.clone(),
             keypair_id: keypair.as_ref().map(|value| value.id),
@@ -1991,9 +1993,14 @@ fn server_from_resource(
 ) -> Result<Server, ()> {
     let request: CreateInstanceRequest =
         serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
-    let flavor = flavors
-        .iter()
-        .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
+    let flavor = request
+        .flavor_id
+        .and_then(|id| flavors.iter().find(|flavor| flavor.id == id))
+        .or_else(|| {
+            flavors.iter().find(|flavor| {
+                flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib
+            })
+        })
         .ok_or(())?;
     Ok(Server {
         id: resource.id,
@@ -2354,6 +2361,8 @@ mod tests {
             name: "agent-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -2407,6 +2416,8 @@ mod tests {
             name: "observed-server".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -2779,6 +2790,8 @@ mod tests {
             name: "existing-name".to_owned(),
             vcpus: flavor.vcpus,
             memory_mib: flavor.ram_mib,
+            flavor_id: Some(flavor.id),
+            disk_gib: Some(flavor.disk_gib),
             image_id: Some("image-1".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -3124,6 +3137,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
@@ -3154,6 +3169,8 @@ mod tests {
             name: "server-a".to_owned(),
             vcpus: 1,
             memory_mib: 512,
+            flavor_id: None,
+            disk_gib: None,
             image_id: Some("image-a".to_owned()),
             key_name: None,
             keypair_id: None,
