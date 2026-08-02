@@ -89,6 +89,10 @@ struct Manifest {
 }
 
 impl ArtifactStore {
+    pub(crate) fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
     pub fn open(
         root: impl Into<PathBuf>,
         agent_id: impl Into<String>,

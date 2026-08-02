@@ -28,6 +28,7 @@ struct HealthState {
 struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
     artifact_root: PathBuf,
+    image_materializer: o3k_compute_agent::ImageMaterializer,
     network: o3k_network::HostNetworkManager,
     dhcp: Arc<Mutex<DhcpRuntime>>,
 }
@@ -271,6 +272,23 @@ fn return_after_network_rollback(
         Ok(()) => error,
         Err(rollback_error) => AgentError::Protocol(format!(
             "{error}; network rollback also failed: {rollback_error}"
+        )),
+    }
+}
+
+fn return_after_create_rollback(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    preparation: &NetworkPreparation,
+    image_materializer: &o3k_compute_agent::ImageMaterializer,
+    instance_id: &str,
+    error: AgentError,
+) -> AgentError {
+    let error = return_after_network_rollback(network, dhcp, preparation, error);
+    match image_materializer.delete_instance(instance_id) {
+        Ok(()) => error,
+        Err(cleanup_error) => AgentError::Protocol(format!(
+            "{error}; image rollback also failed: {cleanup_error}"
         )),
     }
 }
@@ -554,6 +572,7 @@ fn resolve_create_domain_spec(
 fn resolve_committed_create_inputs(
     command: &proto::Command,
     artifact_root: &std::path::Path,
+    image_materializer: &o3k_compute_agent::ImageMaterializer,
     network: &o3k_network::HostNetworkManager,
 ) -> Result<CommittedCreateInputs, AgentError> {
     let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
@@ -566,7 +585,7 @@ fn resolve_committed_create_inputs(
     };
     let store = o3k_compute_agent::ArtifactStore::open(artifact_root, &command.agent_id)
         .map_err(|_| AgentError::Protocol("agent artifact store is unavailable".to_owned()))?;
-    let image_path = store
+    store
         .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
             command_id: command.command_id.clone(),
             operation_id: command.operation_id.clone(),
@@ -577,6 +596,16 @@ fn resolve_committed_create_inputs(
             format: resolved.image_format.clone(),
         })
         .map_err(|_| AgentError::Protocol("committed image artifact is unavailable".to_owned()))?;
+    let materialization_request = o3k_compute_agent::image_materialization_request(command)
+        .map_err(|_| {
+            AgentError::Protocol("image materialization identity is invalid".to_owned())
+        })?;
+    let image_path = image_materializer
+        .materialize(&materialization_request)
+        .map_err(|_| {
+            AgentError::Protocol("instance image overlay could not be realized".to_owned())
+        })?
+        .overlay_path;
     let config_path = store
         .resolve_committed_artifact(&o3k_compute_agent::CommittedArtifactQuery {
             command_id: command.command_id.clone(),
@@ -737,6 +766,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &command.agent_id,
                             &command.resource_id,
                         )?;
+                        self.image_materializer
+                            .delete_instance(&command.resource_id)
+                            .map_err(|_| {
+                                AgentError::Protocol("instance image cleanup failed".to_owned())
+                            })?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
                     Err(error) => return Err(agent_error(error)),
@@ -758,6 +792,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     &command.agent_id,
                     &command.resource_id,
                 )?;
+                self.image_materializer
+                    .delete_instance(&command.resource_id)
+                    .map_err(|_| {
+                        AgentError::Protocol("instance image cleanup failed".to_owned())
+                    })?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
@@ -787,14 +826,17 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let committed = match resolve_committed_create_inputs(
                     command,
                     &self.artifact_root,
+                    &self.image_materializer,
                     &self.network,
                 ) {
                     Ok(value) => value,
                     Err(error) => {
-                        return Err(return_after_network_rollback(
+                        return Err(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
+                            &self.image_materializer,
+                            &command.resource_id,
                             error,
                         ));
                     }
@@ -802,10 +844,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let spec = match resolve_create_domain_spec(command, Some(&committed)) {
                     Ok(value) => value,
                     Err(error) => {
-                        return Err(return_after_network_rollback(
+                        return Err(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
+                            &self.image_materializer,
+                            &command.resource_id,
                             error,
                         ));
                     }
@@ -813,10 +857,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let definition = match o3k_libvirt::build_domain_xml(&spec) {
                     Ok(value) => value,
                     Err(_) => {
-                        return Err(return_after_network_rollback(
+                        return Err(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
+                            &self.image_materializer,
+                            &command.resource_id,
                             AgentError::Protocol("domain XML is invalid".to_owned()),
                         ));
                     }
@@ -830,10 +876,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     })
                     .await
                 {
-                    return Err(return_after_network_rollback(
+                    return Err(return_after_create_rollback(
                         &self.network,
                         &self.dhcp,
                         &preparation,
+                        &self.image_materializer,
+                        &command.resource_id,
                         agent_error(error),
                     ));
                 }
@@ -847,10 +895,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             cleanup_error
                         )),
                     };
-                    return Err(return_after_network_rollback(
+                    return Err(return_after_create_rollback(
                         &self.network,
                         &self.dhcp,
                         &preparation,
+                        &self.image_materializer,
+                        &command.resource_id,
                         error,
                     ));
                 }
@@ -865,10 +915,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                                 cleanup_error
                             )),
                         };
-                        return Err(return_after_network_rollback(
+                        return Err(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
+                            &self.image_materializer,
+                            &command.resource_id,
                             error,
                         ));
                     }
@@ -880,10 +932,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             "{error}; domain rollback also failed: {cleanup_error}"
                         )),
                     };
-                    return Err(return_after_network_rollback(
+                    return Err(return_after_create_rollback(
                         &self.network,
                         &self.dhcp,
                         &preparation,
+                        &self.image_materializer,
+                        &command.resource_id,
                         error,
                     ));
                 }
@@ -997,6 +1051,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let agent = AgentClient::new(config.clone())?;
+    let agent_id = agent.load_identity()?;
     let artifact_root = agent.identity_file().with_extension("artifacts");
     let network_root = agent
         .identity_file()
@@ -1028,6 +1083,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
+        image_materializer: o3k_compute_agent::ImageMaterializer::open(
+            o3k_compute_agent::ArtifactStore::open(
+                agent.identity_file().with_extension("artifacts"),
+                agent_id,
+            )?,
+            service_root.join("image-cache"),
+            2 * 1024 * 1024 * 1024,
+        )?,
         network,
         dhcp,
     });

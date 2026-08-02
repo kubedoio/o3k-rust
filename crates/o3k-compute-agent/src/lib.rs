@@ -3203,6 +3203,9 @@ impl AgentClient {
     pub fn identity_file(&self) -> &Path {
         &self.config.identity_file
     }
+    pub fn load_identity(&self) -> Result<String, AgentError> {
+        load_or_create_identity(&self.config.identity_file)
+    }
     pub async fn run<F>(&self, shutdown: F) -> Result<(), AgentError>
     where
         F: std::future::Future<Output = ()> + Send + 'static,
