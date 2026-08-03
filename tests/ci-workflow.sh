@@ -67,6 +67,7 @@ assert "CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x
 assert "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b" in real_host_text
 assert "printf 'O3K_TESTLAB_IMAGE_PATH=%s\\n'" in real_host_text
 assert "--connect-timeout 15 --max-time 300" in real_host_text
+assert "O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS: 25" in real_host_text
 assert "timeout-minutes: 60" in real_host_text
 assert "Bootstrap disposable TestLab" in real_host_text
 assert "scripts/bootstrap-disposable-testlab.sh" in real_host_text
