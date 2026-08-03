@@ -20,7 +20,7 @@ jobs:
           sudo -n virsh -c qemu:///system dumpxml "$domain" >"$out/domain.xml"
           sudo -n virsh -c qemu:///system qemu-monitor-command "$domain" --hmp 'info status' >"$out/status.txt" || true
           sudo -n virsh -c qemu:///system ttyconsole "$domain" >"$out/tty.txt" || true
-          sudo -n find /var/lib/o3k-testlab/30773019405/data -maxdepth 5 -type f -path '*console*' -printf '%p %s bytes\n' >"$out/console-files.txt" 2>/dev/null || true
+          sudo -n find /var/lib/o3k-testlab/30774147812/data -maxdepth 5 -type f -path '*console*' -printf '%p %s bytes\n' >"$out/console-files.txt" 2>/dev/null || true
           sudo -n find /var/log/libvirt/qemu -maxdepth 1 -type f -name '*o3k*' -exec sh -c 'for f; do echo "--- $f"; tail -c 65536 "$f"; done' _ {} + >"$out/qemu.log" 2>/dev/null || true
           sudo -n ps -eo pid,args | grep qemu-system | grep o3k-e84d69cce2c47ce8be64 >"$out/process.txt" || true
       - name: Upload console evidence
