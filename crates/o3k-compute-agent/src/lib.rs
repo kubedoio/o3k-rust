@@ -1347,7 +1347,10 @@ pub fn build_console_log_command(
     };
     let digest = Sha256::digest(canonical.encode_to_vec());
     let payload_fingerprint_sha256 = hex_digest(&digest);
-    let idempotency_key = format!("console:{resource_id}:{offset}:{max_bytes}");
+    // Each console request is its own operation, so the idempotency identity
+    // must include the operation id. Sharing a key across operations would
+    // make every sequential poll conflict with the durable journal record.
+    let idempotency_key = format!("console:{resource_id}:{operation_id}:{offset}:{max_bytes}");
     Ok(proto::Command {
         command_id: Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -4618,6 +4621,37 @@ mod tests {
             reopened.entries.values().next().map(|entry| entry.state),
             Some(JournalState::Unknown)
         ));
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    #[test]
+    fn console_commands_with_distinct_operations_do_not_conflict() -> Result<(), AgentError> {
+        // Each console API request is a distinct operation. Two sequential
+        // polls for the same server, offset, and bound must both be accepted;
+        // sharing a deterministic idempotency key across operations would make
+        // the second poll conflict with the durable record and starve the
+        // caller of any terminal observation.
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-command-journal-console-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        let first =
+            build_console_log_command("node", "epoch", "operation-1", "resource-1", 0, 1024)?;
+        let second =
+            build_console_log_command("node", "epoch", "operation-2", "resource-1", 0, 1024)?;
+        assert!(matches!(
+            journal.accept(&first)?,
+            JournalDecision::New { .. }
+        ));
+        assert!(matches!(
+            journal.accept(&second)?,
+            JournalDecision::New { .. }
+        ));
+        drop(journal);
         fs::remove_file(path).map_err(AgentError::IdentityStore)?;
         Ok(())
     }

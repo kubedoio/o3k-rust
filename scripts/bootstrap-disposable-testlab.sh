@@ -399,11 +399,14 @@ sudo -n install -d -o "$SERVICE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/data/agent-
 # Host-network realization (TAP, bridge, gateway, and DHCP setup) is owned by
 # the dedicated compute service. Validate the ambient-capability launch path
 # before starting it, using a run-unique temporary link and deleting only that
-# link afterwards.
+# link afterwards. CAP_DAC_READ_SEARCH is required because libvirtd always owns
+# durable console log files as root:root mode 0600 (proven by protected run
+# 30805258510 and local reproduction); the console read must bypass file DAC
+# without granting any write bypass or a root shell.
 network_probe_name="o3k-cp-${RUN_ID:0:8}"
 sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
   --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
-  --inh-caps=+net_admin --ambient-caps=+net_admin -- \
+  --inh-caps=+net_admin,+dac_read_search --ambient-caps=+net_admin,+dac_read_search -- \
   ip link add name "$network_probe_name" type dummy \
   || fail "o3k-compute ambient CAP_NET_ADMIN capability is unavailable"
 sudo -n ip link delete "$network_probe_name" \
@@ -416,11 +419,13 @@ start_service() {
   local supervisor child candidate
   if [[ "$name" == o3k-compute ]]; then
     # CAP_NET_ADMIN must be ambient so helper processes such as ip(8) and
-    # dnsmasq retain it across exec. setpriv applies it before dropping to the
+    # dnsmasq retain it across exec. CAP_DAC_READ_SEARCH is ambient for the
+    # same reason and lets the service read the libvirtd-owned root:root 0600
+    # durable console files. setpriv applies both before dropping to the
     # dedicated service account; no daemon runs as root.
     sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
       --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
-      --inh-caps=+net_admin --ambient-caps=+net_admin -- \
+      --inh-caps=+net_admin,+dac_read_search --ambient-caps=+net_admin,+dac_read_search -- \
       bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   else

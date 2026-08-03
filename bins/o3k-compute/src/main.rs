@@ -760,16 +760,18 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .await
                     .map_err(agent_error)?;
                 verify_owned_domain(&inspection, &command.resource_id)?;
+                // CirrOS guests ignore ACPI shutdown requests, and public
+                // Nova/libvirt powers off hard by default; a graceful
+                // shutdown would never reach SHUTOFF. Force the stop, then
+                // confirm the guest is actually inactive before projecting
+                // the stopped state.
                 self.adapter
-                    .shutdown(name.clone())
+                    .force_stop(name.clone())
                     .await
                     .map_err(agent_error)?;
                 let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
-                verify_owned_domain(&inspection, &command.resource_id)?;
+                    .wait_for_domain_inactive(name.clone(), &command.resource_id)
+                    .await?;
                 success("domain stopped", resource_state(&inspection))
             }
             Some(proto::command::Action::Reboot(_)) => {
@@ -779,8 +781,15 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .await
                     .map_err(agent_error)?;
                 verify_owned_domain(&inspection, &command.resource_id)?;
+                // Hard reboot only exists as force stop plus start: guests
+                // without ACPI handling (CirrOS) never react to an ACPI
+                // reboot request.
                 self.adapter
-                    .reboot(name.clone())
+                    .force_stop(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                self.adapter
+                    .start(name.clone())
                     .await
                     .map_err(agent_error)?;
                 let inspection = self
@@ -1124,6 +1133,34 @@ fn verify_owned_domain(
 
 fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
     AgentError::Protocol("libvirt command failed".to_owned())
+}
+
+impl LibvirtCommandExecutor {
+    /// Polls until the domain is inactive or the bounded wait expires.
+    async fn wait_for_domain_inactive(
+        &self,
+        name: String,
+        resource_id: &str,
+    ) -> Result<o3k_libvirt::DomainInspection, AgentError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let inspection = self
+                .adapter
+                .inspect(name.clone())
+                .await
+                .map_err(agent_error)?;
+            verify_owned_domain(&inspection, resource_id)?;
+            if !inspection.active {
+                return Ok(inspection);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(AgentError::Protocol(
+                    "domain did not stop within the bounded wait".to_owned(),
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 }
 
 #[tokio::main]

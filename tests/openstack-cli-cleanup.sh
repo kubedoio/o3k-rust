@@ -36,10 +36,17 @@ case "$*" in
   flavor\ show*)
     if [[ -e "${state_dir}/flavor-flavor-id" ]]; then echo '{}'; else echo 'No flavor with a name or ID was found' >&2; exit 1; fi;;
   server\ create*) : >"${state_file}"; echo server-id;;
+  server\ stop*) echo SHUTOFF >"${state_dir}/server-status";;
+  server\ start*) echo ACTIVE >"${state_dir}/server-status";;
+  server\ reboot*) echo ACTIVE >"${state_dir}/server-status";;
   server\ show*)
     if [[ ! -e "${state_file}" ]]; then
       echo 'No server with a name or ID was found' >&2
       exit 1
+    fi
+    if [[ "$*" == *"-c status"* ]]; then
+      cat "${state_dir}/server-status" 2>/dev/null || echo ACTIVE
+      exit 0
     fi
     case "${mode}" in
       empty) echo '{}';;
@@ -193,9 +200,13 @@ grep -Fq "keypair create --public-key" "${O3K_MOCK_LOG}"
 grep -Fq -- "--key-name o3k-testlab-keypair" "${O3K_MOCK_LOG}"
 grep -Fq -- "--config-drive true" "${O3K_MOCK_LOG}"
 grep -Fq -- "--nic port-id=port-id" "${O3K_MOCK_LOG}"
-grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
-grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
-grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
+grep -Fq "server stop server-id" "${O3K_MOCK_LOG}"
+grep -Fq "server start server-id" "${O3K_MOCK_LOG}"
+grep -Fq "server reboot --hard server-id" "${O3K_MOCK_LOG}"
+if grep -Eq "server (stop|start|reboot).*--wait" "${O3K_MOCK_LOG}"; then
+  echo "CLI harness passed an unsupported lifecycle wait option" >&2
+  exit 1
+fi
 grep -Fq "console log show server-id" "${O3K_MOCK_LOG}"
 if grep -Fq "console log show server-id -f value" "${O3K_MOCK_LOG}"; then
   echo "CLI harness passed an unsupported console output format option" >&2

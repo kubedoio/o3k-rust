@@ -408,6 +408,23 @@ impl AgentComputeProvider {
         operation_id: Uuid,
     ) -> Result<Operation, ProviderError> {
         if let Some(store) = &self.store {
+            if let Ok(existing) = store.get_agent_command_by_operation(operation_id).await {
+                // A repeated reconcile pass for the same operation must reuse
+                // the durable command payload: rebuilding it would drift the
+                // embedded deadline and break the agent journal's idempotent
+                // replay with an identity conflict.
+                if matches!(
+                    existing.state,
+                    AgentCommandState::Succeeded | AgentCommandState::Failed
+                ) {
+                    return self.get_operation(operation_id).await;
+                }
+                let recorded = o3k_provider_contract::compute_proto::Command::decode(
+                    existing.payload.as_slice(),
+                )
+                .map_err(|_| ProviderError::Storage)?;
+                return self.dispatch_accepted(recorded, operation_id).await;
+            }
             let record = AgentCommandRecord {
                 command_id: command.command_id.clone(),
                 idempotency_key: command.idempotency_key.clone(),
@@ -424,17 +441,19 @@ impl AgentComputeProvider {
                 provider_operation_id: Some(operation_id.to_string()),
                 provider_resource_id: None,
             };
-            let existing = store
+            store
                 .insert_agent_command(&record)
                 .await
                 .map_err(|_| ProviderError::Conflict)?;
-            if matches!(
-                existing.state,
-                AgentCommandState::Succeeded | AgentCommandState::Failed
-            ) {
-                return self.get_operation(operation_id).await;
-            }
         }
+        self.dispatch_accepted(command, operation_id).await
+    }
+
+    async fn dispatch_accepted(
+        &self,
+        command: o3k_provider_contract::compute_proto::Command,
+        operation_id: Uuid,
+    ) -> Result<Operation, ProviderError> {
         let operation = self.accepted_operation(operation_id).await?;
         if let Err(error) = self.dispatch(command).await {
             self.state.write().await.operations.remove(&operation_id);
@@ -1572,12 +1591,15 @@ impl ComputeProvider for AgentComputeProvider {
         if agent.agent_epoch != binding.agent_epoch {
             return Err(ProviderError::StaleState);
         }
+        // The command resource identity is the O3K server id, never the
+        // provider (libvirt domain) name: the agent derives the domain from
+        // the server id and the durable command store requires a UUID.
         let command = build_lifecycle_command(
             LifecycleCommand::Delete,
             &agent.agent_id,
             &agent.agent_epoch,
             &request.operation_id.to_string(),
-            &request.provider_instance_id,
+            &binding.resource_id,
         )
         .map_err(map_agent_error)?;
         self.dispatch_recorded(command, request.operation_id).await
@@ -1613,7 +1635,7 @@ impl ComputeProvider for AgentComputeProvider {
             &agent.agent_id,
             &agent.agent_epoch,
             &operation_id.to_string(),
-            id,
+            &binding.resource_id,
         )
         .map_err(map_agent_error)?;
         self.dispatch_recorded(command, operation_id).await
@@ -2668,7 +2690,9 @@ impl ComputeService {
             Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
             Err(error) => return Err(ComputeError::Reconcile(error)),
         }
-        if self.journal.reconcile_lifecycle_once(operation_id).await?
+        if self
+            .reconcile_lifecycle_until_terminal(operation_id)
+            .await?
             != o3k_store::OperationState::Succeeded
         {
             return Err(ComputeError::Conflict);
@@ -2760,12 +2784,49 @@ impl ComputeService {
             Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
             Err(error) => return Err(ComputeError::Reconcile(error)),
         }
-        if self.journal.reconcile_lifecycle_once(operation_id).await?
+        if self
+            .reconcile_lifecycle_until_terminal(operation_id)
+            .await?
             != o3k_store::OperationState::Succeeded
         {
             return Err(ComputeError::Conflict);
         }
         self.show_server(project_id, id).await
+    }
+
+    /// Drives a lifecycle operation to a terminal state. Agent-backed
+    /// providers complete commands asynchronously, so a single reconcile pass
+    /// almost always returns `Running`; polling briefly preserves the
+    /// synchronous action contract without inventing new API semantics.
+    /// Passes are idempotent, so transient store races with the live
+    /// observation consumer are retried within the same bounded budget;
+    /// only a terminal outcome or a deterministic intent error ends the wait.
+    async fn reconcile_lifecycle_until_terminal(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<o3k_store::OperationState, ComputeError> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut last_error = None;
+        loop {
+            match self.journal.reconcile_lifecycle_once(operation_id).await {
+                Ok(
+                    state @ (o3k_store::OperationState::Succeeded
+                    | o3k_store::OperationState::Failed),
+                ) => return Ok(state),
+                Ok(_) => {}
+                Err(ReconcileError::InvalidIntent) => {
+                    return Err(ComputeError::Reconcile(ReconcileError::InvalidIntent));
+                }
+                Err(error) => last_error = Some(ComputeError::Reconcile(error)),
+            }
+            if std::time::Instant::now() >= deadline {
+                return match last_error {
+                    Some(error) => Err(error),
+                    None => Ok(o3k_store::OperationState::Running),
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 }
 
@@ -3064,6 +3125,55 @@ mod tests {
         assert_eq!(refreshed.inventories[o3k_placement::VCPU].used, 1);
 
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn action_waits_for_asynchronous_provider_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-compute-async-action-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let flavor = service.flavors()[0].id;
+        let server = service
+            .create_server(
+                "project-a",
+                "server".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "request-1".to_owned(),
+            )
+            .await?;
+        // An agent-backed provider reports Running until the asynchronous
+        // command completes. The action must keep reconciling instead of
+        // returning a conflict while the provider is still converging.
+        provider.set_failure(o3k_provider::FailureInjection::PartialCompletion)?;
+        let resource = store.get_resource(server.id).await?;
+        let action_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:action:project-a:{}:SHUTOFF:{}",
+                server.id, resource.generation
+            )
+            .as_bytes(),
+        );
+        let flipping_provider = provider.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = flipping_provider
+                .set_operation_state(action_operation_id, o3k_provider::OperationState::Succeeded);
+        });
+        let stopped = service
+            .action("project-a", server.id, InstanceAction::Stop)
+            .await?;
+        assert_eq!(stopped.status, "SHUTOFF");
+        std::fs::remove_file(&path)?;
         Ok(())
     }
 
@@ -4052,6 +4162,160 @@ mod tests {
         let instance = provider.get_instance("domain-a").await?;
         assert_eq!(instance.o3k_server_id, server_id);
         assert_eq!(instance.state, o3k_provider::InstanceState::Running);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_lifecycle_commands_use_the_o3k_server_id_as_resource_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&registered_agent("node-a")).await?;
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let server_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: server_id,
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: "flavor-1".to_owned(),
+            disk_gib: 10,
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request)?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("domain-a".to_owned()),
+            })
+            .await?;
+        store
+            .attach_provider_reference(&o3k_store::ProviderReference {
+                resource_id: server_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-a".to_owned(),
+            })
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry,
+            Arc::new(UnconfiguredResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        // Lifecycle commands must carry the O3K server id, not the provider
+        // (libvirt domain) name: the agent derives the domain name from the
+        // server id, and the durable command store requires a UUID. Dispatch
+        // fails without a live stream, but the durable record proves the
+        // command identity that would be sent.
+        let stop_operation_id = Uuid::now_v7();
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: stop_operation_id,
+                resource_id: server_id,
+                kind: "lifecycle:stop".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        let stop = provider
+            .action_instance(
+                "domain-a",
+                o3k_provider::InstanceAction::Stop,
+                stop_operation_id,
+                "stop-a",
+            )
+            .await;
+        let stop_error = match stop {
+            Err(error) => error,
+            Ok(_) => return Err("stop dispatch unexpectedly succeeded without a stream".into()),
+        };
+        assert!(
+            matches!(stop_error, ProviderError::Retryable),
+            "stop failed with {stop_error:?}"
+        );
+        let record = store
+            .get_agent_command_by_operation(stop_operation_id)
+            .await?;
+        let command = proto::Command::decode(record.payload.as_slice())?;
+        assert_eq!(command.resource_id, server_id.to_string());
+        assert!(matches!(
+            command.action,
+            Some(proto::command::Action::Stop(_))
+        ));
+        let delete_operation_id = Uuid::now_v7();
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: delete_operation_id,
+                resource_id: server_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        let delete = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: delete_operation_id,
+                provider_instance_id: "domain-a".to_owned(),
+                idempotency_key: "delete-a".to_owned(),
+            })
+            .await;
+        let delete_error = match delete {
+            Err(error) => error,
+            Ok(_) => {
+                return Err("delete dispatch unexpectedly succeeded without a stream".into());
+            }
+        };
+        assert!(
+            matches!(delete_error, ProviderError::Retryable),
+            "delete failed with {delete_error:?}"
+        );
+        let record = store
+            .get_agent_command_by_operation(delete_operation_id)
+            .await?;
+        let command = proto::Command::decode(record.payload.as_slice())?;
+        assert_eq!(command.resource_id, server_id.to_string());
+        assert!(matches!(
+            command.action,
+            Some(proto::command::Action::Delete(_))
+        ));
+        // A reconcile retry of the same operation must reuse the durable
+        // command payload. Rebuilding it would drift the embedded deadline
+        // and conflict with the durable record instead of replaying.
+        let retry = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: delete_operation_id,
+                provider_instance_id: "domain-a".to_owned(),
+                idempotency_key: "delete-a".to_owned(),
+            })
+            .await;
+        let retry_error = match retry {
+            Err(error) => error,
+            Ok(_) => return Err("delete retry unexpectedly succeeded without a stream".into()),
+        };
+        assert!(
+            matches!(retry_error, ProviderError::Retryable),
+            "delete retry failed with {retry_error:?}"
+        );
+        let replayed = store
+            .get_agent_command_by_operation(delete_operation_id)
+            .await?;
+        assert_eq!(replayed.payload, record.payload);
         Ok(())
     }
 
