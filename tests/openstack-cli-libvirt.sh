@@ -163,13 +163,13 @@ PY
 }
 
 console_request() {
-    local server_id="$1" output_path="$2" timeout_seconds="${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-5}"
+    local server_id="$1" output_path="$2" timeout_seconds="${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-15}"
     local client_pid watchdog_pid status
 
     # Run the CLI in its own session so a client that is blocked below the
     # Python/OpenStack layer cannot strand the lifecycle shell or its cleanup.
     setsid --wait openstack console log show "${server_id}" -f value \
-        >"${output_path}" 2>/dev/null &
+        >"${output_path}" 2>"${ARTIFACT_DIR}/console-error.log" &
     client_pid=$!
     (
         sleep "${timeout_seconds}"

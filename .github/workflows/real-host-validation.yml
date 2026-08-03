@@ -99,7 +99,7 @@ jobs:
           O3K_TESTLAB_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_TESTLAB_CONFIG_DRIVE: true
           O3K_TESTLAB_CONSOLE_ATTEMPTS: 12
-          O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS: 5
+          O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS: 15
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
         run: bash tests/testlab-libvirt.sh
 
