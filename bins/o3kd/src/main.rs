@@ -489,9 +489,11 @@ async fn run_agent_inspect_probe(
     fixed_resource_id: Option<&str>,
     resource_file: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut resource_id: Option<Uuid> = None;
-    while tokio::time::Instant::now() < deadline {
+    // Wait up to 120s for a valid resource UUID to appear (lifecycle script
+    // writes it after server create, which happens well after o3kd startup).
+    let resource_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while tokio::time::Instant::now() < resource_deadline {
         let candidate = match (fixed_resource_id, resource_file) {
             (Some(value), _) => value.trim().to_owned(),
             (None, Some(path)) => std::fs::read_to_string(path)
@@ -502,12 +504,19 @@ async fn run_agent_inspect_probe(
         };
         if let Ok(id) = Uuid::parse_str(&candidate) {
             resource_id = Some(id);
+            break;
         }
-        let Some(id) = resource_id else {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
-        };
-        // Dispatch inspect (or re-check durable state if already terminal).
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let Some(id) = resource_id else {
+        return Err(
+            "agent inspect probe timed out waiting for a lifecycle resource UUID".to_owned(),
+        );
+    };
+    // Once the resource ID is known, allow up to 30s for the async inspect
+    // to reach a terminal state through the agent.
+    let inspect_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while tokio::time::Instant::now() < inspect_deadline {
         let inspect_result = compute
             .inspect_server(project_id, id, "o3k-agent-inspect-probe")
             .await;
