@@ -166,12 +166,35 @@ console_request() {
     local server_id="$1" output_path="$2" timeout_seconds="${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-15}"
     local status
 
-    # Run the client synchronously under an isolated process-group timeout.
-    # GNU timeout keeps the parent shell out of the terminated client group,
-    # so a blocked request cannot strand this lifecycle's cleanup trap.
-    if timeout --foreground --signal=TERM --kill-after=1s "${timeout_seconds}s" \
-        openstack console log show "${server_id}" -f value \
-        >"${output_path}" 2>"${ARTIFACT_DIR}/console-error.log"
+    # Use a dedicated Python process because it can create and terminate the
+    # complete client session without ever signaling this lifecycle shell.
+    if python3 - "${server_id}" "${output_path}" \
+        "${ARTIFACT_DIR}/console-error.log" "${timeout_seconds}" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+server_id, output_path, error_path, timeout_seconds = sys.argv[1:]
+with open(output_path, "wb") as output, open(error_path, "wb") as error:
+    process = subprocess.Popen(
+        ["openstack", "console", "log", "show", server_id, "-f", "value"],
+        stdout=output,
+        stderr=error,
+        start_new_session=True,
+    )
+    try:
+        process.wait(timeout=float(timeout_seconds))
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGTERM)
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+        raise SystemExit(124)
+    raise SystemExit(process.returncode)
+PY
     then
         status=0
     else
