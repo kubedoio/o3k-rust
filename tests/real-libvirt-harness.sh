@@ -53,13 +53,19 @@ case "$*" in
     rm -f -- "${resource_state}/${3}"
     ;;
   server\ create*) : >"${state_file}"; echo server-id;;
+  server\ stop*) echo SHUTOFF >"${resource_state}/server-status";;
+  server\ start*) echo ACTIVE >"${resource_state}/server-status";;
+  server\ reboot*) echo ACTIVE >"${resource_state}/server-status";;
   server\ show*)
-    if [[ -e "${state_file}" ]]; then
-      echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}'
-    else
+    if [[ ! -e "${state_file}" ]]; then
       echo 'No server with a name or ID was found' >&2
       exit 1
     fi
+    if [[ "$*" == *"-c status"* ]]; then
+      cat "${resource_state}/server-status" 2>/dev/null || echo ACTIVE
+      exit 0
+    fi
+    echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}'
     ;;
   server\ list*)
     if [[ -e "${state_file}" ]]; then
