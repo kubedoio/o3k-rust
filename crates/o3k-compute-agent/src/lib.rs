@@ -663,8 +663,20 @@ impl NodeRegistry {
         let agent_epoch = command.agent_epoch.clone();
         let resource_id = command.resource_id.clone();
         let operation_id = command.operation_id.clone();
-        self.dispatch_command(command).await?;
-        time::timeout(timeout, async move {
+        let action = command_action_name(&command);
+        info!(
+            agent_id = %agent_id,
+            operation_id = %operation_id,
+            resource_id = %resource_id,
+            action,
+            timeout_ms = timeout.as_millis(),
+            "command dispatch start"
+        );
+        if let Err(error) = self.dispatch_command(command).await {
+            warn!(%error, operation_id = %operation_id, action, "command dispatch failed");
+            return Err(error);
+        }
+        match time::timeout(timeout, async move {
             loop {
                 match events.recv().await {
                     Ok(AgentEvent::Observation(observation))
@@ -690,7 +702,27 @@ impl NodeRegistry {
             }
         })
         .await
-        .map_err(|_| AgentError::Protocol("agent observation timed out".to_owned()))?
+        {
+            Ok(Ok(observation)) => {
+                info!(
+                    operation_id = %observation.operation_id,
+                    operation_state = observation.operation_state,
+                    console_bytes = observation.console_log_bytes.len(),
+                    "command observation received"
+                );
+                Ok(observation)
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "command observation stream failed");
+                Err(error)
+            }
+            Err(_) => {
+                warn!("agent observation timed out");
+                Err(AgentError::Protocol(
+                    "agent observation timed out".to_owned(),
+                ))
+            }
+        }
     }
 
     fn publish_event(&self, event: AgentEvent) {
@@ -1843,6 +1875,14 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
+                        info!(
+                            agent_id = %observation.agent_id,
+                            operation_id = %observation.operation_id,
+                            resource_id = %observation.resource_id,
+                            operation_state = observation.operation_state,
+                            console_bytes = observation.console_log_bytes.len(),
+                            "agent observation forwarded"
+                        );
                         registry.publish_event(AgentEvent::Observation(observation));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
@@ -2859,6 +2899,20 @@ fn fake_success(provider_resource_id: String, resource_state: i32) -> CommandExe
     }
 }
 
+/// Returns the stable, payload-free name of a command action for diagnostics.
+fn command_action_name(command: &proto::Command) -> &'static str {
+    match command.action.as_ref() {
+        Some(proto::command::Action::Inspect(_)) => "inspect",
+        Some(proto::command::Action::Start(_)) => "start",
+        Some(proto::command::Action::Stop(_)) => "stop",
+        Some(proto::command::Action::Reboot(_)) => "reboot",
+        Some(proto::command::Action::Delete(_)) => "delete",
+        Some(proto::command::Action::Create(_)) => "create",
+        Some(proto::command::Action::ConsoleLog(_)) => "console_log",
+        None => "missing",
+    }
+}
+
 fn observation_from_result(
     agent_id: &str,
     agent_epoch: &str,
@@ -2966,16 +3020,17 @@ async fn replay_journal_entry(
         JournalState::Accepted | JournalState::Running => return Ok(()),
     };
     if let Some(result) = entry.result.as_ref() {
+        let observation =
+            observation_from_result(agent_id, agent_epoch, command, result, entry.last_sequence);
+        info!(
+            operation_id = %observation.operation_id,
+            resource_id = %observation.resource_id,
+            operation_state = observation.operation_state,
+            console_bytes = observation.console_log_bytes.len(),
+            "command observation sent"
+        );
         tx.send(proto::ControlRequest {
-            body: Some(proto::control_request::Body::Observation(
-                observation_from_result(
-                    agent_id,
-                    agent_epoch,
-                    command,
-                    result,
-                    entry.last_sequence,
-                ),
-            )),
+            body: Some(proto::control_request::Body::Observation(observation)),
         })
         .await
         .map_err(|_| AgentError::Protocol("control stream closed".to_owned()))?;
@@ -3419,6 +3474,12 @@ impl AgentClient {
                             let decision = match journal.accept(&command) {
                                 Ok(decision) => decision,
                                 Err(error @ AgentError::Protocol(_)) => {
+                                    warn!(
+                                        %error,
+                                        operation_id = %command.operation_id,
+                                        action = command_action_name(&command),
+                                        "command acceptance rejected"
+                                    );
                                     tx.send(proto::ControlRequest {
                                         body: Some(proto::control_request::Body::Error(
                                             protocol_error_for_command(&command, &error),
@@ -3441,6 +3502,13 @@ impl AgentClient {
                                     key,
                                     accepted_sequence,
                                 } => {
+                                    info!(
+                                        command_id = %command.command_id,
+                                        operation_id = %command.operation_id,
+                                        resource_id = %command.resource_id,
+                                        action = command_action_name(&command),
+                                        "command accepted"
+                                    );
                                     send_command_accepted(
                                         &tx,
                                         &command,
@@ -3451,9 +3519,26 @@ impl AgentClient {
                                     .await?;
                                     journal.mark_running(&key)?;
                                     let result = match executor.execute(&command).await {
-                                        Ok(result) => result,
+                                        Ok(result) => {
+                                            info!(
+                                                operation_id = %command.operation_id,
+                                                action = command_action_name(&command),
+                                                state = result.state,
+                                                console_bytes = result
+                                                    .console_log
+                                                    .as_ref()
+                                                    .map_or(0, |log| log.bytes.len()),
+                                                "command execution completed"
+                                            );
+                                            result
+                                        }
                                         Err(error) => {
-                                            tracing::warn!(%error, "command execution failed");
+                                            tracing::warn!(
+                                                %error,
+                                                operation_id = %command.operation_id,
+                                                action = command_action_name(&command),
+                                                "command execution failed"
+                                            );
                                             CommandExecutionResult {
                                             state: proto::OperationState::UnknownOutcome as i32,
                                             error_category: proto::ErrorCategory::UnknownOutcome as i32,
@@ -3464,7 +3549,15 @@ impl AgentClient {
                                             }
                                         }
                                     };
-                                    let entry = journal.complete(&key, result)?;
+                                    let entry = journal.complete(&key, result).inspect_err(
+                                        |error| {
+                                            tracing::warn!(
+                                                %error,
+                                                operation_id = %command.operation_id,
+                                                "command journal completion persistence failed"
+                                            );
+                                        },
+                                    )?;
                                     replay_journal_entry(
                                         &tx,
                                         &entry,
@@ -3854,6 +3947,90 @@ mod tests {
         let mut fenced = command;
         fenced.agent_epoch = "old-epoch".to_owned();
         assert!(registry.dispatch_command(fenced).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_observation_wait_times_out_without_agent_progress()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, _receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            "node",
+            "epoch",
+            "operation-timeout",
+            "resource-1",
+        )?;
+        let started = std::time::Instant::now();
+        let result = registry
+            .dispatch_command_and_wait(command, Duration::from_millis(50))
+            .await;
+        assert!(
+            matches!(result, Err(AgentError::Protocol(message)) if message == "agent observation timed out")
+        );
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn command_observation_wait_returns_the_matching_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch")).await?;
+        let (sender, mut receiver) = mpsc::channel(1);
+        registry.attach_connection("node", "epoch", sender).await?;
+        let command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            "node",
+            "epoch",
+            "operation-observe",
+            "resource-1",
+        )?;
+        let waiting = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .dispatch_command_and_wait(command, Duration::from_secs(5))
+                    .await
+            })
+        };
+        // Receiving the dispatched command proves the waiter subscribed before
+        // dispatching, so the observation published now cannot be missed.
+        let _dispatched = receiver.recv().await.ok_or("dispatched command")??;
+        registry.publish_event(AgentEvent::Observation(proto::Observation {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch".to_owned(),
+            resource_id: "resource-1".to_owned(),
+            operation_id: "operation-observe".to_owned(),
+            ..Default::default()
+        }));
+        let observation = waiting.await??;
+        assert_eq!(observation.operation_id, "operation-observe");
+        Ok(())
+    }
+
+    #[test]
+    fn command_action_names_are_stable_for_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
+        for (action, expected) in [
+            (LifecycleCommand::Inspect, "inspect"),
+            (LifecycleCommand::Start, "start"),
+            (LifecycleCommand::Stop, "stop"),
+            (LifecycleCommand::HardReboot, "reboot"),
+            (LifecycleCommand::Delete, "delete"),
+        ] {
+            let command =
+                build_lifecycle_command(action, "node", "epoch", "operation-1", "resource-1")?;
+            assert_eq!(command_action_name(&command), expected);
+        }
+        let console =
+            build_console_log_command("node", "epoch", "operation-1", "resource-1", 0, 1024)?;
+        assert_eq!(command_action_name(&console), "console_log");
+        let mut missing = console;
+        missing.action = None;
+        assert_eq!(command_action_name(&missing), "missing");
         Ok(())
     }
 

@@ -147,6 +147,42 @@ jobs:
           } >"${output}"
           chmod 0644 "${output}"
 
+      - name: Capture redacted console boundary diagnostics
+        if: always()
+        run: |
+          output=target/real-host-workflow-artifacts/console-boundary-diagnostics.log
+          state_root="/var/lib/o3k-testlab/${GITHUB_RUN_ID}"
+          {
+            printf 'artifact_type=protected-console-boundary-diagnostics\n'
+            printf 'source_commit=%s\n' "${GITHUB_SHA}"
+            printf '== console path metadata (no content) ==\n'
+            if sudo -n test -d "${state_root}"; then
+              sudo -n stat -c '%n %U:%G:%a' \
+                "${state_root}" "${state_root}/data" "${state_root}/data/console" 2>/dev/null || true
+              sudo -n find "${state_root}/data" -maxdepth 5 -path '*/console/*' \
+                -printf '%p %u:%g:%m %s bytes\n' 2>/dev/null || true
+            else
+              printf 'state_root=absent\n'
+            fi
+            printf '== qemu processes (owner only, no arguments) ==\n'
+            ps -eo user,group,comm --no-headers 2>/dev/null | grep -i qemu || printf 'qemu=none\n'
+            printf '== o3kd console boundary log lines ==\n'
+            if sudo -n test -f "${state_root}/log/o3kd.log"; then
+              sudo -n grep -aE 'console dispatch|agent console|agent observation|command dispatch|command observation|persisted console' \
+                "${state_root}/log/o3kd.log" 2>/dev/null | tail -n 200 || true
+            else
+              printf 'o3kd_log=unavailable\n'
+            fi
+            printf '== o3k-compute console boundary log lines ==\n'
+            if sudo -n test -f "${state_root}/log/o3k-compute.log"; then
+              sudo -n grep -aE 'console inspect|console read|read_console|command accepted|command execution|command observation|durable console' \
+                "${state_root}/log/o3k-compute.log" 2>/dev/null | tail -n 200 || true
+            else
+              printf 'o3k_compute_log=unavailable\n'
+            fi
+          } >"${output}"
+          chmod 0644 "${output}"
+
       - name: Stop and remove disposable TestLab
         if: always()
         run: bash scripts/cleanup-disposable-testlab.sh
@@ -174,5 +210,6 @@ jobs:
             target/real-host-workflow-artifacts/compute-agent-process-mtls-result.json
             target/real-host-workflow-artifacts/agent-inspect-resource-id
             target/real-host-workflow-artifacts/create-diagnostics.log
+            target/real-host-workflow-artifacts/console-boundary-diagnostics.log
           if-no-files-found: warn
           retention-days: 14

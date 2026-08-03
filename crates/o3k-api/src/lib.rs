@@ -2019,16 +2019,48 @@ async fn server_action(
                                 );
                             }
                         };
+                        let dispatch_started = std::time::Instant::now();
+                        tracing::info!(
+                            server_id = %id,
+                            agent_id = %agent_id,
+                            %operation_id,
+                            offset,
+                            length,
+                            "console dispatch start"
+                        );
                         let observation = match registry
                             .dispatch_command_and_wait(command, CONSOLE_AGENT_DISPATCH_TIMEOUT)
                             .await
                         {
-                            Ok(observation) => observation,
+                            Ok(observation) => {
+                                tracing::info!(
+                                    server_id = %id,
+                                    %operation_id,
+                                    console_bytes = observation.console_log_bytes.len(),
+                                    console_offset = observation.console_log_offset,
+                                    complete = observation.console_log_complete,
+                                    truncated = observation.console_log_truncated,
+                                    elapsed_ms = dispatch_started.elapsed().as_millis(),
+                                    "console dispatch observation received"
+                                );
+                                observation
+                            }
                             Err(error) => {
-                                tracing::warn!(%error, server_id = %id, "agent console query failed");
+                                tracing::warn!(
+                                    %error,
+                                    server_id = %id,
+                                    %operation_id,
+                                    elapsed_ms = dispatch_started.elapsed().as_millis(),
+                                    "agent console query failed"
+                                );
                                 if let Some(response) =
                                     cached_console_response(console, id, offset, length)
                                 {
+                                    tracing::info!(
+                                        server_id = %id,
+                                        %operation_id,
+                                        "console dispatch fell back to cached output"
+                                    );
                                     return response;
                                 }
                                 return keystone_error(
@@ -2043,7 +2075,12 @@ async fn server_action(
                             observation.console_log_offset,
                             &observation.console_log_bytes,
                         ) {
-                            tracing::warn!(%error, server_id = %id, "agent console observation persistence failed");
+                            tracing::warn!(
+                                %error,
+                                server_id = %id,
+                                %operation_id,
+                                "agent console observation persistence failed"
+                            );
                         }
                         if let Some(response) = cached_console_response(console, id, offset, length)
                         {
@@ -2066,6 +2103,11 @@ async fn server_action(
                 )
                     .into_response(),
                 Err(ConsoleError::NotFound) => {
+                    tracing::info!(
+                        server_id = %id,
+                        offset,
+                        "no persisted console output; returning empty response"
+                    );
                     (StatusCode::OK, Json(serde_json::json!({"output": ""}))).into_response()
                 }
                 Err(_) => keystone_error(

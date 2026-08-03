@@ -1020,17 +1020,51 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 if max_bytes == 0 {
                     return Err(AgentError::Protocol("console bound is invalid".to_owned()));
                 }
-                let inspection = self
-                    .adapter
-                    .inspect(name.clone())
-                    .await
-                    .map_err(agent_error)?;
-                verify_owned_domain(&inspection, &command.resource_id)?;
+                tracing::info!(
+                    server_id = %command.resource_id,
+                    domain = %name,
+                    max_bytes,
+                    "console inspect start"
+                );
+                let inspection = self.adapter.inspect(name.clone()).await.map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        server_id = %command.resource_id,
+                        "console inspect failed"
+                    );
+                    agent_error(error)
+                })?;
+                verify_owned_domain(&inspection, &command.resource_id).inspect_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        server_id = %command.resource_id,
+                        "console ownership verification failed"
+                    );
+                })?;
+                tracing::info!(
+                    server_id = %command.resource_id,
+                    active = inspection.active,
+                    persistent = inspection.persistent,
+                    state = %inspection.state,
+                    "console inspect end"
+                );
                 let bytes = self
                     .adapter
                     .read_console(name.clone(), max_bytes, command.resource_id.clone())
                     .await
-                    .map_err(agent_error)?;
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            server_id = %command.resource_id,
+                            "console read failed"
+                        );
+                        agent_error(error)
+                    })?;
+                tracing::info!(
+                    server_id = %command.resource_id,
+                    bytes = bytes.len(),
+                    "console read end"
+                );
                 Ok(CommandExecutionResult {
                     state: proto::OperationState::Succeeded as i32,
                     error_category: proto::ErrorCategory::Unspecified as i32,
