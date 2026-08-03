@@ -168,7 +168,7 @@ console_request() {
 
     # Bound the complete client process so a client blocked below the
     # Python/OpenStack layer cannot strand the lifecycle shell or its cleanup.
-    timeout --foreground --signal=TERM --kill-after=1s "${timeout_seconds}s" \
+    timeout --signal=TERM --kill-after=1s "${timeout_seconds}s" \
         openstack console log show "${server_id}" -f value \
         >"${output_path}" 2>"${ARTIFACT_DIR}/console-error.log" &
     local client_pid=$!
