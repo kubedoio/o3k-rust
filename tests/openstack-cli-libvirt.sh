@@ -162,6 +162,33 @@ except BaseException:
 PY
 }
 
+console_request() {
+    local server_id="$1" output_path="$2" timeout_seconds="${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-5}"
+    local client_pid watchdog_pid status
+
+    # Run the CLI in its own session so a client that is blocked below the
+    # Python/OpenStack layer cannot strand the lifecycle shell or its cleanup.
+    setsid --wait openstack console log show "${server_id}" -f value \
+        >"${output_path}" 2>/dev/null &
+    client_pid=$!
+    (
+        sleep "${timeout_seconds}"
+        kill -TERM -- "-${client_pid}" 2>/dev/null || true
+        sleep 1
+        kill -KILL -- "-${client_pid}" 2>/dev/null || true
+    ) &
+    watchdog_pid=$!
+
+    if wait "${client_pid}"; then
+        status=0
+    else
+        status=$?
+    fi
+    kill "${watchdog_pid}" 2>/dev/null || true
+    wait "${watchdog_pid}" 2>/dev/null || true
+    return "${status}"
+}
+
 server_is_absent() {
     local server_id="$1"
     local show_error="${DATA_DIR}/server-delete-show.error"
@@ -513,9 +540,8 @@ PY
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     CONSOLE_POLL_ATTEMPTS=$((CONSOLE_POLL_ATTEMPTS + 1))
-    if timeout --kill-after=2s \
-        "${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-5}" \
-        openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
+    write_console_result pending "console polling in progress"
+    if console_request "${SERVER_ID}" "${ARTIFACT_DIR}/console.log" \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
         CONSOLE_POLL_SUCCEEDED=true
         break
