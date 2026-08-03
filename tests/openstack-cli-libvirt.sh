@@ -412,6 +412,21 @@ PY
 on_exit() {
     local exit_code="$?"
     if ((exit_code != 0)); then
+        if [[ -f "${ARTIFACT_DIR}/console-result.json" ]] \
+            && python3 - "${ARTIFACT_DIR}/console-result.json" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        result = json.load(stream)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if result.get("status") == "pending" else 1)
+PY
+        then
+            write_console_result failed "console polling interrupted before terminal evidence"
+        fi
         local cleanup_status=passed
         cleanup_resources || cleanup_status=failed
         write_result failed "CLI workflow failed (exit ${exit_code})" "${cleanup_status}"
