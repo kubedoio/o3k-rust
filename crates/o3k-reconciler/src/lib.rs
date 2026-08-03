@@ -469,6 +469,23 @@ where
             .store
             .update_resource_from_observation(resource_id, &update)
             .await?;
+        // Observations for inspect commands carry the terminal operation state
+        // but do not emit a separate OperationUpdate. Promote the operation to
+        // Succeeded so that idempotent re-inspect returns the durable result.
+        if !matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::Failed
+        ) {
+            self.store
+                .update_operation(
+                    operation_id,
+                    OperationState::Succeeded,
+                    operation.provider_operation_id.as_deref(),
+                    None,
+                    None,
+                )
+                .await?;
+        }
         if updated.generation == resource.generation {
             return Ok(());
         }
