@@ -68,13 +68,15 @@ if evidence.get("command") != "inspect":
     raise SystemExit("probe command kind is missing")
 if evidence.get("command_state") != "accepted":
     raise SystemExit("probe command was not accepted")
-if evidence.get("operation_state") != "failed" or evidence.get("error_category") != "not_found":
+if evidence.get("operation_state") != "succeeded":
     raise SystemExit("probe operation result is incomplete")
-if evidence.get("observation_state") != "failed_not_found":
-    raise SystemExit("probe did not observe the expected absent-domain result")
-if evidence.get("observation_operation_state") != "failed":
+if evidence.get("observation_state") != "running":
+    raise SystemExit("probe did not observe the expected running domain result")
+if evidence.get("observation_operation_state") != "succeeded":
     raise SystemExit("probe observation operation state is incomplete")
-if evidence.get("transitions") != ["accepted", "operation_failed", "observation_failed"]:
+if evidence.get("resource_source") != "real-lifecycle-server":
+    raise SystemExit("probe resource source is not the lifecycle server")
+if evidence.get("transitions") != ["accepted", "operation_succeeded", "observation_succeeded"]:
     raise SystemExit("probe transition sequence is incomplete")
 PY
 then

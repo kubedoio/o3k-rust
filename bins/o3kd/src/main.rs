@@ -4,8 +4,7 @@ use o3k_compute::{
 };
 use o3k_compute_agent::NodeSnapshot;
 use o3k_provider::{
-    ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, ErrorCategory, OperationState,
-    ProviderError,
+    ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, OperationState, ProviderError,
 };
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -516,8 +515,7 @@ async fn run_agent_inspect_probe(
                         | OperationState::UnknownOutcome
                 ) =>
             {
-                let expected = operation.state == OperationState::Failed
-                    && operation.error_category == Some(ErrorCategory::NotFound);
+                let expected = operation.state == OperationState::Succeeded;
                 if !expected {
                     return Err(format!(
                         "agent inspect probe state mismatch: state={:?} error_category={:?}",
@@ -529,11 +527,11 @@ async fn run_agent_inspect_probe(
                     "evidence": {
                         "command": "inspect",
                         "command_state": "accepted",
-                        "error_category": "not_found",
-                        "operation_state": "failed",
-                        "observation_state": "failed_not_found",
-                        "observation_operation_state": "failed",
-                        "transitions": ["accepted", "operation_failed", "observation_failed"],
+                        "operation_state": "succeeded",
+                        "observation_state": "running",
+                        "observation_operation_state": "succeeded",
+                        "resource_source": "real-lifecycle-server",
+                        "transitions": ["accepted", "operation_succeeded", "observation_succeeded"],
                         "transport": "mutual_tls"
                     },
                     "redacted": true,
