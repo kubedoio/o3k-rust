@@ -1,24 +1,26 @@
 schema_version: 1
-source_commit: 74cf5f6e83c92a1430815d23c796e099a0f1a198
+source_commit: 9bf1c83b6d15c09890392b818ec3e9b734d6cf81
 release: v0.2.0-alpha.1
-updated_at: 2026-08-02T17:30:33Z
+updated_at: 2026-08-03T01:15:00Z
 last_protected_run:
-  id: 30758733367
-  commit: 74cf5f6e83c92a1430815d23c796e099a0f1a198
+  id: 30775861837
+  commit: 9bf1c83b6d15c09890392b818ec3e9b734d6cf81
   result: failed
 
 current_blocker:
-  layer: guest
+  layer: console
   summary: >-
-    Protected bootstrap and authenticated command evidence now pass, but the
-    first real public server create returned a compute-state conflict. The
-    lifecycle therefore did not reach guest observation or console polling,
-    and the process-boundary probe could not obtain a durable server record.
-    The failed run also left owned OpenStack server and flavor records until
-    workflow cleanup; foreign host state was unchanged.
+    Protected create reached ACTIVE with config-drive enabled and fixed IP
+    192.0.2.2, and image/config-drive transfers were committed. The public
+    console request did not return within the bounded polling budget, leaving
+    console-result pending with zero completed polls; the lifecycle did not
+    reach restart/delete cleanup and the process-boundary probe timed out.
+    Owned domain, bridge, server and flavor resources remained; the foreign
+    state digest changed because those owned resources were present.
   evidence: >-
-    Protected workflow 30758733367 disposable-testlab-bootstrap.json,
-    openstack-cli-result.json, compute-agent-mtls-result.json,
+    Protected workflow 30775861837 server-show-evidence.json,
+    server-list-evidence.json, create-diagnostics.log, console-result.json,
+    console-file-size-evidence.txt, compute-agent-mtls-result.json,
     compute-agent-process-mtls-result.json, resource-leak-result.json, and
     real-host-workflow-result.json.
 
@@ -26,8 +28,8 @@ completed:
   api_baseline: true
   nova_pre_dispatch: true
   agent_command_path: true
-  server_active: false
-  fixed_ip_projection: false
+  server_active: true
+  fixed_ip_projection: true
   cleanup_guard: false
 
 pending:
@@ -40,7 +42,6 @@ pending:
 open_prs: []
 
 next_actions:
-  - Diagnose the protected compute-state conflict during the first public server create and preserve idempotent retry semantics.
-  - Make the process-boundary inspect probe observe a durable server after the lifecycle creates it.
-  - Re-run the protected lifecycle and prove image overlay, config-drive consumption, fixed IP, console, restart, and delete.
-  - Resolve owned-resource cleanup after failed create without weakening foreign-state protection.
+  - Dispatch the protected lifecycle from current main after the GitHub API rate limit resets.
+  - Inspect the bounded console request and console-file-size evidence; prove a CirrOS boot marker.
+  - Re-run and verify stop/start/reboot/delete, process-boundary inspection, owned cleanup, and unchanged foreign state.
