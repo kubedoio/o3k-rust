@@ -203,6 +203,18 @@ PY
     return "${status}"
 }
 
+wait_for_server_status() {
+    local server_id="$1" wanted="$2" attempts="${3:-30}"
+    local status
+    for _ in $(seq 1 "${attempts}"); do
+        status="$(openstack server show "${server_id}" -f value -c status 2>/dev/null || true)"
+        [[ "${status}" == "${wanted}" ]] && return 0
+        [[ "${status}" == "ERROR" ]] && return 1
+        sleep 2
+    done
+    return 1
+}
+
 server_is_absent() {
     local server_id="$1"
     local show_error="${DATA_DIR}/server-delete-show.error"
@@ -600,9 +612,15 @@ CONSOLE_BOOT_MARKER=true
 write_console_result passed "CirrOS boot marker found" true
 tail -c 65536 "${ARTIFACT_DIR}/console.log" >"${ARTIFACT_DIR}/console.log.tmp"
 mv "${ARTIFACT_DIR}/console.log.tmp" "${ARTIFACT_DIR}/console.log"
-openstack server stop --wait "${SERVER_ID}"
-openstack server start --wait "${SERVER_ID}"
-openstack server reboot --hard --wait "${SERVER_ID}"
+openstack server stop "${SERVER_ID}"
+wait_for_server_status "${SERVER_ID}" SHUTOFF \
+  || { echo "server did not reach SHUTOFF after stop" >&2; exit 1; }
+openstack server start "${SERVER_ID}"
+wait_for_server_status "${SERVER_ID}" ACTIVE \
+  || { echo "server did not reach ACTIVE after start" >&2; exit 1; }
+openstack server reboot --hard "${SERVER_ID}"
+wait_for_server_status "${SERVER_ID}" ACTIVE \
+  || { echo "server did not reach ACTIVE after reboot" >&2; exit 1; }
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show-after-reboot.json"
 validate_server_json show "${ARTIFACT_DIR}/server-show-after-reboot.json" "${SERVER_ID}"
 SERVER_RESTART_ACTIVE=true

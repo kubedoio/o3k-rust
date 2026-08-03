@@ -488,7 +488,7 @@ impl ArtifactStore {
                 return Err(ArtifactStoreError::UnownedPath);
             }
             let manifest = read_manifest(&manifest_path)?;
-            validate_offer(&manifest.offer, &self.agent_id)?;
+            validate_offer_identity(&manifest.offer, &self.agent_id)?;
             let state = proto::ArtifactTransferState::try_from(manifest.state)
                 .map_err(|_| ArtifactStoreError::CorruptManifest)?;
             if !matches!(
@@ -563,6 +563,22 @@ fn receipt(manifest: &Manifest, path: Option<PathBuf>) -> ArtifactReceipt {
 }
 
 fn validate_offer(offer: &proto::ArtifactOffer, agent: &str) -> Result<(), ArtifactStoreError> {
+    validate_offer_identity(offer, agent)?;
+    if offer.expires_at_unix_ms <= crate::unix_ms() {
+        return Err(ArtifactStoreError::InvalidOffer);
+    }
+    Ok(())
+}
+
+/// Validates offer identity and shape without the admission expiry fence.
+///
+/// Expiry fences new transfer admission; it must not prevent cleanup of a
+/// committed artifact whose offer expired after the transfer completed, or a
+/// server could never be deleted once its create deadline passed.
+fn validate_offer_identity(
+    offer: &proto::ArtifactOffer,
+    agent: &str,
+) -> Result<(), ArtifactStoreError> {
     let chunks = offer
         .size_bytes
         .div_ceil(u64::from(offer.chunk_size_bytes.max(1)));
@@ -584,7 +600,6 @@ fn validate_offer(offer: &proto::ArtifactOffer, agent: &str) -> Result<(), Artif
         || !matches!(offer.format.as_str(), "raw" | "qcow2" | "iso")
         || (offer.kind == proto::ArtifactKind::ImageBase as i32 && offer.format == "iso")
         || (offer.kind == proto::ArtifactKind::ConfigDriveIso as i32 && offer.format != "iso")
-        || offer.expires_at_unix_ms <= crate::unix_ms()
     {
         return Err(ArtifactStoreError::InvalidOffer);
     }
@@ -1114,6 +1129,51 @@ mod tests {
                 .cleanup_config_drive_for_resource("resource-2")
                 .unwrap(),
             ArtifactCleanup::AlreadyAbsent
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_drive_cleanup_succeeds_after_the_offer_expiry() {
+        // Artifact offers expire at the create command deadline. Deleting a
+        // server later must still clean up its committed config-drive:
+        // expiry fences transfer admission, not owned-artifact deletion.
+        let root = std::env::temp_dir().join(format!("o3k-artifact-expiry-{}", Uuid::now_v7()));
+        let (store, mut offer, content) = fixture(&root);
+        offer.kind = proto::ArtifactKind::ConfigDriveIso as i32;
+        offer.format = "iso".to_owned();
+        offer.expires_at_unix_ms = crate::unix_ms() + 50;
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            store
+                .cleanup_config_drive_for_resource("resource-1")
+                .unwrap(),
+            ArtifactCleanup::Removed
         );
         fs::remove_dir_all(root).unwrap();
     }
