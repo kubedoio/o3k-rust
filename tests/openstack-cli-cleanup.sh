@@ -73,6 +73,9 @@ case "$*" in
   port\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/port-port-id";;
   flavor\ delete*) [[ "${mode}" != noop-dependent-delete ]] && rm -f -- "${state_dir}/flavor-flavor-id";;
   console\ log\ show*)
+    if [[ "${mode}" == console-hang ]]; then
+      while :; do sleep 1; done
+    fi
     if [[ "${mode}" == console-failure ]]; then
       echo 'console request failed' >&2
       exit 1
@@ -149,6 +152,23 @@ error_path = pathlib.Path(sys.argv[2]) / "console-error.log"
 assert error_path.exists()
 assert error_path.read_text(encoding="utf-8").strip() == "console request failed"
 PY
+
+rm -f -- "${ARTIFACT_DIR}/console-result.json"
+if O3K_MOCK_MODE=console-hang O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS=1 \
+    timeout 10s bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"; then
+  echo "CLI harness unexpectedly passed when console polling hung" >&2
+  exit 1
+fi
+python3 - "${ARTIFACT_DIR}/console-result.json" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+assert result["status"] == "failed"
+assert result["reason"] == "console polling did not produce non-empty output"
+assert result["polling"] == {"attempts": 1, "max_attempts": 1}
+PY
+
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
                 "port delete port-id" "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
                 "network delete network-id" "image delete image-id"; do
