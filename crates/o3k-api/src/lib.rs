@@ -25,6 +25,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
 
+/// The public console request and the agent observation must share one
+/// bounded budget.  The protected real-host harness allows fifteen seconds
+/// for a console query, so the API must not expire the agent dispatch sooner.
+pub const CONSOLE_AGENT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -2015,7 +2020,7 @@ async fn server_action(
                             }
                         };
                         let observation = match registry
-                            .dispatch_command_and_wait(command, Duration::from_secs(5))
+                            .dispatch_command_and_wait(command, CONSOLE_AGENT_DISPATCH_TIMEOUT)
                             .await
                         {
                             Ok(observation) => observation,
@@ -2095,7 +2100,10 @@ async fn server_action(
 
 #[cfg(test)]
 mod tests {
-    use super::{Server, server_response, should_query_live_console};
+    use super::{
+        CONSOLE_AGENT_DISPATCH_TIMEOUT, Server, server_response, should_query_live_console,
+    };
+    use std::time::Duration;
     use uuid::Uuid;
 
     #[test]
@@ -2103,6 +2111,11 @@ mod tests {
         assert!(should_query_live_console(0));
         assert!(!should_query_live_console(1));
         assert!(!should_query_live_console(u64::MAX));
+    }
+
+    #[test]
+    fn live_console_agent_budget_matches_public_request_budget() {
+        assert_eq!(CONSOLE_AGENT_DISPATCH_TIMEOUT, Duration::from_secs(15));
     }
 
     #[test]
