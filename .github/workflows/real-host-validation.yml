@@ -34,6 +34,10 @@ jobs:
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-host-workflow-artifacts
           O3K_PROVIDER: agent
+          # Scoped info filters keep protected evidence readable without
+          # logging payloads; secrets remain excluded by the redacted fields.
+          O3K_LOG_FILTER: warn,o3k_api=info,o3k_compute_agent=info
+          O3K_COMPUTE_LOG_FILTER: warn,o3k_compute=info,o3k_compute_agent=info,o3k_libvirt=info
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
         run: bash scripts/bootstrap-disposable-testlab.sh
@@ -173,17 +177,21 @@ jobs:
             fi
             printf '== o3kd console boundary log lines ==\n'
             if sudo -n test -f "${state_root}/log/o3kd.log"; then
-              sudo -n grep -aE 'console dispatch|agent console|agent observation|command dispatch|command observation|persisted console' \
+              sudo -n grep -aE 'console dispatch|agent console|agent observation|command dispatch|command observation|persisted console|control connection|compute agent' \
                 "${state_root}/log/o3kd.log" 2>/dev/null | tail -n 200 || true
             else
               printf 'o3kd_log=unavailable\n'
             fi
             printf '== o3k-compute console boundary log lines ==\n'
             if sudo -n test -f "${state_root}/log/o3k-compute.log"; then
-              sudo -n grep -aE 'console inspect|console read|read_console|command accepted|command execution|command observation|durable console' \
+              sudo -n grep -aE 'console inspect|console read|read_console|command accepted|command execution|command observation|durable console|control connection' \
                 "${state_root}/log/o3k-compute.log" 2>/dev/null | tail -n 200 || true
             else
               printf 'o3k_compute_log=unavailable\n'
+            fi
+            printf '== daemon WARN/ERROR log lines ==\n'
+            if sudo -n test -d "${state_root}/log"; then
+              sudo -n sh -c 'grep -ahE '"'"'"level":"(WARN|ERROR)"'"'"' "$1"/log/*.log 2>/dev/null | tail -n 100 || true' _ "${state_root}"
             fi
           } >"${output}"
           chmod 0644 "${output}"

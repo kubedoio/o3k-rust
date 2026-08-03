@@ -364,6 +364,9 @@ O3K_COMPUTE_HOST_LABEL=o3k-testlab
 O3K_COMPUTE_TLS_DIR=$(printf '%q' "$STATE_ROOT/tls")
 O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
 O3K_COMPUTE_MAX_DISK_GB=10
+# The compute daemon reads RUST_LOG directly. Keep the default at warn and let
+# protected runs opt into scoped info filters via O3K_COMPUTE_LOG_FILTER.
+RUST_LOG=$(printf '%q' "${O3K_COMPUTE_LOG_FILTER:-warn}")
 EOF
 if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
   if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
