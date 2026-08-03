@@ -178,7 +178,7 @@ import sys
 server_id, output_path, error_path, timeout_seconds = sys.argv[1:]
 with open(output_path, "wb") as output, open(error_path, "wb") as error:
     process = subprocess.Popen(
-        ["openstack", "console", "log", "show", server_id, "-f", "value"],
+        ["openstack", "console", "log", "show", server_id],
         stdout=output,
         stderr=error,
         start_new_session=True,

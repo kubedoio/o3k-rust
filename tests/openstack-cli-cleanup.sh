@@ -196,6 +196,11 @@ grep -Fq -- "--nic port-id=port-id" "${O3K_MOCK_LOG}"
 grep -Fq "server stop --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server start --wait" "${O3K_MOCK_LOG}"
 grep -Fq "server reboot --hard --wait" "${O3K_MOCK_LOG}"
+grep -Fq "console log show server-id" "${O3K_MOCK_LOG}"
+if grep -Fq "console log show server-id -f value" "${O3K_MOCK_LOG}"; then
+  echo "CLI harness passed an unsupported console output format option" >&2
+  exit 1
+fi
 
 O3K_TESTLAB_CONFIG_DRIVE=false O3K_MOCK_MODE=normal bash "${ROOT_DIR}/tests/openstack-cli-libvirt.sh"
 python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" <<'PY'
