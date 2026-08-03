@@ -166,13 +166,13 @@ console_request() {
     local server_id="$1" output_path="$2" timeout_seconds="${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-15}"
     local status
 
-    # Bound the complete client process so a client blocked below the
-    # Python/OpenStack layer cannot strand the lifecycle shell or its cleanup.
-    timeout --signal=TERM --kill-after=1s "${timeout_seconds}s" \
+    # Run the client synchronously under an isolated process-group timeout.
+    # GNU timeout keeps the parent shell out of the terminated client group,
+    # so a blocked request cannot strand this lifecycle's cleanup trap.
+    if timeout --foreground --signal=TERM --kill-after=1s "${timeout_seconds}s" \
         openstack console log show "${server_id}" -f value \
-        >"${output_path}" 2>"${ARTIFACT_DIR}/console-error.log" &
-    local client_pid=$!
-    if wait "${client_pid}"; then
+        >"${output_path}" 2>"${ARTIFACT_DIR}/console-error.log"
+    then
         status=0
     else
         status=$?
