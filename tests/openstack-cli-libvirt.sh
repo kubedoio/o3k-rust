@@ -88,14 +88,17 @@ if kind == "show":
     if expected_fixed_ip not in addresses:
         raise SystemExit("server show did not prove the expected fixed IP")
 elif kind == "list":
-    if not isinstance(value, list) or not any(
+    rows = value if isinstance(value, list) else (
+        value.get("servers", []) if isinstance(value, dict) else []
+    )
+    if not any(
         isinstance(row, dict)
         and next(
             (str(item) for key, item in row.items() if str(key).lower() == "id"),
             "",
         )
         == expected_id
-        for row in value
+        for row in rows
     ):
         raise SystemExit("server list did not contain the created server")
 else:
