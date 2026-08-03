@@ -165,7 +165,12 @@ jobs:
               printf 'state_root=absent\n'
             fi
             printf '== qemu processes (owner only, no arguments) ==\n'
-            ps -eo user,group,comm --no-headers 2>/dev/null | grep -i qemu || printf 'qemu=none\n'
+            qemu_pids=$(pgrep -i qemu 2>/dev/null || true)
+            if [ -n "${qemu_pids}" ]; then
+              ps -o user=,group=,comm= -p "$(printf '%s' "${qemu_pids}" | tr '\n' ',')" 2>/dev/null || true
+            else
+              printf 'qemu=none\n'
+            fi
             printf '== o3kd console boundary log lines ==\n'
             if sudo -n test -f "${state_root}/log/o3kd.log"; then
               sudo -n grep -aE 'console dispatch|agent console|agent observation|command dispatch|command observation|persisted console' \
