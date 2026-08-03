@@ -238,12 +238,12 @@ json.dump({
     "evidence": {
         "command": "inspect",
         "command_state": "accepted",
-        "error_category": "not_found",
-        "operation_state": "failed",
-        "observation_state": "failed_not_found",
-        "observation_operation_state": "failed",
+        "operation_state": "succeeded",
+        "observation_state": "running",
+        "observation_operation_state": "succeeded",
+        "resource_source": "real-lifecycle-server",
         "redacted": True,
-        "transitions": ["accepted", "operation_failed", "observation_failed"],
+        "transitions": ["accepted", "operation_succeeded", "observation_succeeded"],
         "transport": "mutual_tls",
     },
 }, open(sys.argv[1], "w", encoding="utf-8"))
