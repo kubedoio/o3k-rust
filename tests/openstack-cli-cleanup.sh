@@ -145,7 +145,9 @@ PY
 python3 - "${ARTIFACT_DIR}/openstack-cli-result.json" "${ARTIFACT_DIR}" <<'PY'
 import pathlib
 import sys
-assert not (pathlib.Path(sys.argv[2]) / "console-error.log").exists()
+error_path = pathlib.Path(sys.argv[2]) / "console-error.log"
+assert error_path.exists()
+assert error_path.read_text(encoding="utf-8").strip() == "console request failed"
 PY
 for resource in "server delete --wait server-id" "flavor delete flavor-id" \
                 "port delete port-id" "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
