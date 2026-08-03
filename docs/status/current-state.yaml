@@ -1,28 +1,28 @@
 schema_version: 1
-source_commit: a47b2383792df279d3233611c9eaa5705754721c
+source_commit: 2a929af395209cc130f3e0bd646e267fcf6c2d3c
 release: v0.2.0-alpha.1
-updated_at: 2026-08-03T01:35:00Z
+updated_at: 2026-08-03T02:20:00Z
 last_protected_run:
-  id: 30775861837
-  commit: 9bf1c83b6d15c09890392b818ec3e9b734d6cf81
+  id: 30778337841
+  commit: 9383d3c5e203b9bac3903d5bee7b6e8923a7bc1b
   result: failed
 
 current_blocker:
   layer: console
   summary: >-
     Protected create reached ACTIVE with config-drive enabled and fixed IP
-    192.0.2.2, and image/config-drive transfers were committed. The public
-    console request did not return within the bounded polling budget, leaving
-    console-result pending with zero completed polls; the lifecycle did not
-    reach restart/delete cleanup and the process-boundary probe timed out.
-    Owned domain, bridge, server and flavor resources remained; the foreign
-    state digest changed because those owned resources were present.
+    192.0.2.2, and image/config-drive transfers were committed. The explicit
+    console-session watchdog completed all 12 bounded requests, but none
+    produced console bytes or a CirrOS marker. The lifecycle did not reach
+    restart/delete cleanup; owned domain, bridge, server and flavor resources
+    remained, and the process-boundary probe timed out.
   evidence: >-
-    Protected workflow 30775861837 server-show-evidence.json,
+    Protected workflow 30778337841 server-show-evidence.json,
     server-list-evidence.json, create-diagnostics.log, console-result.json,
     console-file-size-evidence.txt, compute-agent-mtls-result.json,
     compute-agent-process-mtls-result.json, resource-leak-result.json, and
-    real-host-workflow-result.json.
+    real-host-workflow-result.json; PR #399 merged as main commit
+    2a929af395209cc130f3e0bd646e267fcf6c2d3c.
 
 completed:
   api_baseline: true
@@ -42,6 +42,7 @@ pending:
 open_prs: []
 
 next_actions:
-  - Dispatch the protected lifecycle from current main after the GitHub API rate limit resets.
-  - Inspect the bounded console request and console-file-size evidence; prove a CirrOS boot marker.
+  - Clean the exact owned resources left by protected workflow 30778337841.
+  - Dispatch the protected lifecycle from current main after cleanup.
+  - Inspect the 15-second bounded console request and console-file-size evidence; prove a CirrOS boot marker.
   - Re-run and verify stop/start/reboot/delete, process-boundary inspection, owned cleanup, and unchanged foreign state.
