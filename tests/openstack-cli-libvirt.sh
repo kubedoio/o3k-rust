@@ -513,7 +513,8 @@ PY
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     CONSOLE_POLL_ATTEMPTS=$((CONSOLE_POLL_ATTEMPTS + 1))
-    if openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
+    if timeout --foreground "${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-10}" \
+        openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
         CONSOLE_POLL_SUCCEEDED=true
         break

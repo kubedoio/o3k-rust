@@ -162,6 +162,7 @@ jobs:
             target/real-host-workflow-artifacts/libvirt-result.json
             target/real-host-workflow-artifacts/openstack-cli-result.json
             target/real-host-workflow-artifacts/console-result.json
+            target/real-host-workflow-artifacts/console-file-size-evidence.txt
             target/real-host-workflow-artifacts/server-show-evidence.json
             target/real-host-workflow-artifacts/server-list-evidence.json
             target/real-host-workflow-artifacts/compute-agent-mtls-result.json
