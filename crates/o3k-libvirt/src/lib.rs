@@ -860,11 +860,21 @@ fn backend_read_console(
         )
     })?;
     validate_console_ownership(name, &xml, expected_server_id)?;
-    if let Some(console) = xml.split("<console type=\"file\">").nth(1) {
+    if let Some(console) = xml
+        .split("<console type=\"file\">")
+        .nth(1)
+        .or_else(|| xml.split("<console type='file'>").nth(1))
+    {
         let path = console
             .split_once("<source path=\"")
             .and_then(|(_, value)| value.split_once('"'))
             .map(|(value, _)| value)
+            .or_else(|| {
+                console
+                    .split_once("<source path='")
+                    .and_then(|(_, value)| value.split_once('\''))
+                    .map(|(value, _)| value)
+            })
             .ok_or_else(|| {
                 LibvirtError::new(
                     ErrorCategory::OperationFailed,
