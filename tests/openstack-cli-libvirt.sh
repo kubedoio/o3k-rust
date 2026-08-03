@@ -518,6 +518,16 @@ for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     sleep "${O3K_TESTLAB_CONSOLE_INTERVAL_SECONDS:-1}"
 done
 if [[ "${CONSOLE_POLL_SUCCEEDED}" != true ]]; then
+    {
+        printf 'artifact_type=console-file-size-evidence\n'
+        if [[ -n "${O3K_TESTLAB_STATE_ROOT:-}" && -d "${O3K_TESTLAB_STATE_ROOT}/data" ]]; then
+            find "${O3K_TESTLAB_STATE_ROOT}/data" -maxdepth 5 -type f -path '*/console/*' \
+                -printf '%p %s bytes\n' 2>/dev/null | sort
+        else
+            printf 'console_state_root=unavailable\n'
+        fi
+    } >"${ARTIFACT_DIR}/console-file-size-evidence.txt"
+    chmod 0644 "${ARTIFACT_DIR}/console-file-size-evidence.txt"
     write_console_result failed "console polling did not produce non-empty output"
     [[ -s "${ARTIFACT_DIR}/console.log" ]]
 fi
