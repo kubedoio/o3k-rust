@@ -490,8 +490,9 @@ async fn run_agent_inspect_probe(
     resource_file: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut resource_id: Option<Uuid> = None;
     while tokio::time::Instant::now() < deadline {
-        let resource_id = match (fixed_resource_id, resource_file) {
+        let candidate = match (fixed_resource_id, resource_file) {
             (Some(value), _) => value.trim().to_owned(),
             (None, Some(path)) => std::fs::read_to_string(path)
                 .ok()
@@ -499,14 +500,18 @@ async fn run_agent_inspect_probe(
                 .unwrap_or_default(),
             (None, None) => String::new(),
         };
-        let Ok(resource_id) = Uuid::parse_str(&resource_id) else {
+        if let Ok(id) = Uuid::parse_str(&candidate) {
+            resource_id = Some(id);
+        }
+        let Some(id) = resource_id else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
-        match compute
-            .inspect_server(project_id, resource_id, "o3k-agent-inspect-probe")
-            .await
-        {
+        // Dispatch inspect (or re-check durable state if already terminal).
+        let inspect_result = compute
+            .inspect_server(project_id, id, "o3k-agent-inspect-probe")
+            .await;
+        match inspect_result {
             Ok(operation)
                 if matches!(
                     operation.state,
@@ -539,8 +544,11 @@ async fn run_agent_inspect_probe(
                     "status": "passed"
                 }));
             }
-            Ok(_)
-            | Err(o3k_compute::ComputeError::NotFound | o3k_compute::ComputeError::Conflict) => {
+            Ok(_) => {
+                // Inspect dispatched (Accepted/Running); wait for observation.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(o3k_compute::ComputeError::NotFound | o3k_compute::ComputeError::Conflict) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             Err(error) => return Err(format!("agent inspect probe failed: {error}")),
