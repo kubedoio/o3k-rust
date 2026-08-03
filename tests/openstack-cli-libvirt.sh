@@ -513,7 +513,7 @@ PY
 validate_server_json list "${ARTIFACT_DIR}/server-list.json" "${SERVER_ID}"
 for _ in $(seq 1 "${O3K_TESTLAB_CONSOLE_ATTEMPTS:-30}"); do
     CONSOLE_POLL_ATTEMPTS=$((CONSOLE_POLL_ATTEMPTS + 1))
-    if timeout --foreground --kill-after=2s \
+    if timeout --kill-after=2s \
         "${O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS:-5}" \
         openstack console log show "${SERVER_ID}" -f value >"${ARTIFACT_DIR}/console.log" 2>/dev/null \
         && [[ -s "${ARTIFACT_DIR}/console.log" ]]; then
