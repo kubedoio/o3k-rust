@@ -371,3 +371,25 @@ a cinder-api keystonemiddleware-to-O3K connectivity/negotiation detail that
 requires the real Cinder process to inspect (identity_uri / interface URL
 negotiation). This is the sole remaining defect before the real volume
 lifecycle can be proven.
+
+### RabbitMQ ACCESS_REFUSED — precise finding (2026-08-04)
+
+With the identity-interface fix, cinder-api authenticates user tokens (the
+volume-create POST shows `bootstrap-user` authenticating, and the error moved
+from 503 to 404/backend-unavailable). The scheduler and volume services still
+log `(403) ACCESS_REFUSED ... AMQPLAIN` against the run-owned RabbitMQ user and
+vhost, so volume creation cannot route to a backend.
+
+Isolated verification shows the run-owned user and vhost authenticate correctly
+via `rabbitmqctl authenticate_user` and via the venv kombu with an explicit
+`amqp://` URL. The transport_url is well-formed
+(`rabbit://<hex-user>:<48-hex-pw>@127.0.0.1:5672/<vhost>`; permissions granted
+on both `/` and the run-owned vhost). The suspect is oslo.messaging's
+rabbit-driver URL virtual-host parsing (the vhost after the last `/` may be
+parsed differently than the run-owned vhost), which requires inspecting the
+real cinder scheduler/volume process to confirm. Per-service logs
+(cinder-api/scheduler/volume.log) are now captured by the runner so this is
+diagnosable in the next real run.
+
+This is the single remaining defect before the real volume lifecycle can be
+proven. The runner now surfaces these logs on startup failure (PR #463).
