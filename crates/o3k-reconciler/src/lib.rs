@@ -419,32 +419,78 @@ where
         observation: &agent_proto::Observation,
     ) -> Result<(), ReconcileError> {
         let operation_id = Uuid::parse_str(&observation.operation_id)
-            .map_err(|_| ReconcileError::InvalidIntent)?;
-        let resource_id =
-            Uuid::parse_str(&observation.resource_id).map_err(|_| ReconcileError::InvalidIntent)?;
+            .map_err(|e| {
+                tracing::debug!(error=%e, operation_id=%observation.operation_id, "apply_agent_observation: invalid operation_id uuid");
+                ReconcileError::InvalidIntent
+            })?;
+        let resource_id = Uuid::parse_str(&observation.resource_id)
+            .map_err(|e| {
+                tracing::debug!(error=%e, resource_id=%observation.resource_id, "apply_agent_observation: invalid resource_id uuid");
+                ReconcileError::InvalidIntent
+            })?;
         let operation = self.store.get_operation(operation_id).await?;
         if operation.resource_id != resource_id {
+            tracing::debug!(
+                operation_id=%operation_id,
+                operation_resource_id=%operation.resource_id,
+                observation_resource_id=%resource_id,
+                "apply_agent_observation: resource_id mismatch"
+            );
             return Err(ReconcileError::InvalidIntent);
         }
         let operation_state = agent_proto::OperationState::try_from(observation.operation_state)
-            .map_err(|_| ReconcileError::InvalidIntent)?;
+            .map_err(|e| {
+                tracing::debug!(error=%e, operation_state=observation.operation_state, "apply_agent_observation: invalid operation_state");
+                ReconcileError::InvalidIntent
+            })?;
         if operation_state != agent_proto::OperationState::Succeeded {
+            tracing::debug!(
+                operation_id=%operation_id,
+                operation_state=?operation_state,
+                "apply_agent_observation: operation_state is not Succeeded"
+            );
             return Err(ReconcileError::InvalidIntent);
         }
-        let observed_state = agent_resource_state(observation.state)?;
+        let observed_state = agent_resource_state(observation.state)
+            .map_err(|e| {
+                tracing::debug!(error=%e, state=observation.state, "apply_agent_observation: invalid agent_resource_state");
+                e
+            })?;
         let resource = self.store.get_resource(resource_id).await?;
         let provider_id = (!observation.provider_resource_id.is_empty())
             .then_some(observation.provider_resource_id.as_str())
             .or(resource.provider_id.as_deref());
+        tracing::debug!(
+            operation_id=%operation_id,
+            resource_id=%resource_id,
+            operation_state=?operation.state,
+            resource_generation=resource.generation,
+            provider_id=?provider_id,
+            observed_state=%observed_state,
+            agent_epoch=%observation.agent_epoch,
+            observation_sequence=observation.observation_sequence,
+            "apply_agent_observation: processing observation"
+        );
         if let Some(provider_resource_id) = provider_id {
             match self
                 .store
                 .get_provider_reference(resource_id, "compute-agent")
                 .await
             {
-                Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
-                Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
+                Ok(existing) if existing.provider_resource_id == provider_resource_id => {
+                    tracing::debug!(resource_id=%resource_id, provider_resource_id, "apply_agent_observation: provider reference already matches");
+                }
+                Ok(existing) => {
+                    tracing::debug!(
+                        resource_id=%resource_id,
+                        existing_provider_resource_id=%existing.provider_resource_id,
+                        new_provider_resource_id=provider_resource_id,
+                        "apply_agent_observation: provider reference conflict"
+                    );
+                    return Err(StoreError::ProviderReferenceAlreadyExists.into());
+                }
                 Err(StoreError::ProviderReferenceNotFound) => {
+                    tracing::debug!(resource_id=%resource_id, provider_resource_id, "apply_agent_observation: attaching new provider reference");
                     self.store
                         .attach_provider_reference(&ProviderReference {
                             resource_id,
@@ -453,7 +499,10 @@ where
                         })
                         .await?;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    tracing::debug!(error=%error, resource_id=%resource_id, "apply_agent_observation: get_provider_reference failed");
+                    return Err(error.into());
+                }
             }
         }
         let update = ObservationUpdate {
@@ -468,7 +517,26 @@ where
         let updated = self
             .store
             .update_resource_from_observation(resource_id, &update)
-            .await?;
+            .await
+            .map_err(|e| {
+                tracing::debug!(
+                    error=%e,
+                    resource_id=%resource_id,
+                    expected_generation=resource.generation,
+                    observed_state=%observed_state,
+                    agent_epoch=%observation.agent_epoch,
+                    observation_sequence=observation.observation_sequence,
+                    "apply_agent_observation: update_resource_from_observation failed"
+                );
+                e
+            })?;
+        tracing::debug!(
+            operation_id=%operation_id,
+            resource_id=%resource_id,
+            old_generation=resource.generation,
+            new_generation=updated.generation,
+            "apply_agent_observation: resource updated from observation"
+        );
         // Observations for inspect commands carry the terminal operation state
         // but do not emit a separate OperationUpdate. Promote the operation to
         // Succeeded so that idempotent re-inspect returns the durable result.
@@ -485,8 +553,10 @@ where
                     None,
                 )
                 .await?;
+            tracing::debug!(operation_id=%operation_id, "apply_agent_observation: promoted operation to Succeeded");
         }
         if updated.generation == resource.generation {
+            tracing::debug!(operation_id=%operation_id, resource_id=%resource_id, "apply_agent_observation: generation unchanged, observation was duplicate");
             return Ok(());
         }
         self.event(operation_id, resource_id, JournalEventKind::UnknownObserved);
