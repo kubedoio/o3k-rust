@@ -297,6 +297,16 @@ impl PasswordHash {
         Self::derive_with_iterations(password, Self::ITERATIONS)
     }
 
+    /// Derives a hash with an explicit iteration count. Tests and constrained
+    /// environments may use lower counts; the encoded hash records the count
+    /// actually used.
+    pub fn derive_with_iterations_for_testing(
+        password: &str,
+        iterations: u32,
+    ) -> Result<Self, AuthError> {
+        Self::derive_with_iterations(password, iterations)
+    }
+
     fn derive_with_iterations(password: &str, iterations: u32) -> Result<Self, AuthError> {
         if iterations < 1 {
             return Err(AuthError::InvalidRequest);
@@ -444,6 +454,8 @@ pub struct BootstrapConfig {
     /// External Cinder API base URL. When present, a durable `volumev3`
     /// service and endpoint are registered.
     pub cinder_endpoint: Option<String>,
+    /// PBKDF2 iteration count. Zero selects the production default.
+    pub pbkdf2_iterations: u32,
 }
 
 /// Seeds the durable identity universe required by the hosted-service profile.
@@ -487,8 +499,14 @@ pub async fn seed_identity_defaults(
         })
         .await?;
 
+    let iterations = if config.pbkdf2_iterations == 0 {
+        PasswordHash::ITERATIONS
+    } else {
+        config.pbkdf2_iterations
+    };
     let admin_hash =
-        PasswordHash::derive(config.bootstrap_password.expose()).map_err(store_auth_error)?;
+        PasswordHash::derive_with_iterations(config.bootstrap_password.expose(), iterations)
+            .map_err(store_auth_error)?;
     store
         .insert_keystone_user(&o3k_store::KeystoneUserRecord {
             id: "bootstrap-user".to_owned(),
@@ -503,7 +521,8 @@ pub async fn seed_identity_defaults(
 
     if let Some(cinder_password) = &config.cinder_password {
         let cinder_hash =
-            PasswordHash::derive(cinder_password.expose()).map_err(store_auth_error)?;
+            PasswordHash::derive_with_iterations(cinder_password.expose(), iterations)
+                .map_err(store_auth_error)?;
         store
             .insert_keystone_user(&o3k_store::KeystoneUserRecord {
                 id: "cinder".to_owned(),
@@ -1260,6 +1279,7 @@ pub mod testkit {
                 bootstrap_password: Secret::new("password".to_owned()),
                 cinder_password: Some(Secret::new("password".to_owned())),
                 cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+                pbkdf2_iterations: 1_000,
             },
         )
         .await
@@ -1363,21 +1383,27 @@ mod tests {
                     id: "bootstrap-user".to_owned(),
                     domain_id: "default".to_owned(),
                     name: "admin".to_owned(),
-                    password_hash: PasswordHash::derive("password")?,
+                    password_hash: PasswordHash::derive_with_iterations_for_testing(
+                        "password", 1_000,
+                    )?,
                     enabled: true,
                 },
                 SnapshotUser {
                     id: "cinder".to_owned(),
                     domain_id: "default".to_owned(),
                     name: "cinder".to_owned(),
-                    password_hash: PasswordHash::derive("password")?,
+                    password_hash: PasswordHash::derive_with_iterations_for_testing(
+                        "password", 1_000,
+                    )?,
                     enabled: true,
                 },
                 SnapshotUser {
                     id: "disabled-user".to_owned(),
                     domain_id: "default".to_owned(),
                     name: "disabled".to_owned(),
-                    password_hash: PasswordHash::derive("password")?,
+                    password_hash: PasswordHash::derive_with_iterations_for_testing(
+                        "password", 1_000,
+                    )?,
                     enabled: false,
                 },
             ],
@@ -1708,6 +1734,7 @@ mod tests {
                 bootstrap_password: Secret::new("password".to_owned()),
                 cinder_password: Some(Secret::new("password".to_owned())),
                 cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+                pbkdf2_iterations: 1_000,
             },
         )
         .await
