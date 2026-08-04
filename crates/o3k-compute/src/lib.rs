@@ -16,8 +16,9 @@ use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError,
+    ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError, VolumeAttachmentRecord,
 };
+
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -2431,6 +2432,92 @@ impl ComputeService {
         }
         server.key_name = self.store.get_server_keypair_name(server.id).await?;
         Ok(server)
+    }
+
+    pub async fn attach_volume(
+        &self,
+        project_id: &str,
+        server_id: Uuid,
+        volume_id: Uuid,
+        device: Option<String>,
+        tag: Option<String>,
+        delete_on_termination: bool,
+    ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let _ = self.show_server(project_id, server_id).await?;
+
+        let device = match device {
+            Some(d) if !d.trim().is_empty() => {
+                if d.starts_with("/dev/") {
+                    d
+                } else {
+                    format!("/dev/{d}")
+                }
+            }
+            _ => {
+                let existing = self.store.list_volume_attachments(server_id).await?;
+                let count = existing.len();
+                let letter = (b'b' + count as u8) as char;
+                format!("/dev/vd{letter}")
+            }
+        };
+
+        let record = VolumeAttachmentRecord {
+            id: volume_id,
+            server_id,
+            volume_id,
+            device,
+            tag,
+            delete_on_termination,
+            created_at: format!("{:?}", SystemTime::now()),
+        };
+
+        self.store
+            .insert_volume_attachment(&record)
+            .await
+            .map_err(|err| match err {
+                StoreError::ResourceAlreadyExists => ComputeError::Conflict,
+                other => ComputeError::Store(other),
+            })?;
+
+        Ok(record)
+    }
+
+    pub async fn list_volume_attachments(
+        &self,
+        project_id: &str,
+        server_id: Uuid,
+    ) -> Result<Vec<VolumeAttachmentRecord>, ComputeError> {
+        let _ = self.show_server(project_id, server_id).await?;
+        Ok(self.store.list_volume_attachments(server_id).await?)
+    }
+
+    pub async fn get_volume_attachment(
+        &self,
+        project_id: &str,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let _ = self.show_server(project_id, server_id).await?;
+        self.store
+            .get_volume_attachment(server_id, attachment_id)
+            .await?
+            .ok_or(ComputeError::NotFound)
+    }
+
+    pub async fn detach_volume(
+        &self,
+        project_id: &str,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let _ = self.show_server(project_id, server_id).await?;
+        self.store
+            .delete_volume_attachment(server_id, attachment_id)
+            .await
+            .map_err(|err| match err {
+                StoreError::ResourceNotFound => ComputeError::NotFound,
+                other => ComputeError::Store(other),
+            })
     }
 
     /// Revalidates and inspects an already-created server through the
