@@ -219,8 +219,8 @@ A real external Cinder test records:
 - no O3K-owned leak and no unauthorized external-state mutation.
 
 The valid claim is that O3K replaces the surrounding OpenStack control plane
-required by the selected test workflow. It is not “Cinder without
- dependencies.”
+required by the selected test workflow. It is not "Cinder without
+dependencies."
 
 ## Non-goals
 
