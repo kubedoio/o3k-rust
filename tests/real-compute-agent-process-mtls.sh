@@ -4,7 +4,10 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_DIR="${O3K_REAL_HOST_ARTIFACT_DIR:-${ROOT_DIR}/target/real-host-workflow-artifacts}"
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-}"
-PROBE_FILE="${STATE_ROOT%/}/agent-inspect-probe.json"
+PROBE_FILE="${ARTIFACT_DIR}/agent-inspect-probe.json"
+if [[ ! -f "$PROBE_FILE" && -n "$STATE_ROOT" ]]; then
+  PROBE_FILE="${STATE_ROOT%/}/agent-inspect-probe.json"
+fi
 RESULT_FILE="${ARTIFACT_DIR}/compute-agent-process-mtls-result.json"
 
 mkdir -p -- "$ARTIFACT_DIR"
@@ -26,7 +29,7 @@ with open(path, "w", encoding="utf-8") as stream:
 PY
 }
 
-if [[ -z "$STATE_ROOT" || "$STATE_ROOT" != /* || "$STATE_ROOT" == *..* ]]; then
+if [[ ! -f "$PROBE_FILE" && ( -z "$STATE_ROOT" || "$STATE_ROOT" != /* || "$STATE_ROOT" == *..* ) ]]; then
   write_result failed "protected TestLab state root is unavailable"
   exit 1
 fi

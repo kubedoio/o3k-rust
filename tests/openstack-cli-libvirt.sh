@@ -550,6 +550,10 @@ PY
                 )
                 if [[ "${probe_status}" == "passed" ]]; then
                     echo "agent inspect probe passed"
+                    if [[ -n "${O3K_REAL_HOST_ARTIFACT_DIR:-}" ]]; then
+                        mkdir -p "${O3K_REAL_HOST_ARTIFACT_DIR}"
+                        cp -f "${probe_output}" "${O3K_REAL_HOST_ARTIFACT_DIR}/agent-inspect-probe.json" 2>/dev/null || true
+                    fi
                     break
                 elif [[ "${probe_status}" == "failed" ]]; then
                     echo "agent inspect probe failed" >&2
