@@ -2104,6 +2104,7 @@ mod block_device_tests {
         assert!(foreign.is_empty());
     }
 
+    #[cfg(feature = "libvirt")]
     #[test]
     fn owned_disk_xml_for_volume_finds_whole_element() -> Result<(), LibvirtError> {
         let xml = format!(
