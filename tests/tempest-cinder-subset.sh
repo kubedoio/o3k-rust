@@ -95,32 +95,53 @@ if [ "${REAL_CINDER_UP}" = true ] && [ -n "${TEMPEST_BIN}" ]; then
   tempest run --test-ids "${SELECTED_IDS}" --os-cloud o3k-protected \
     --testr-args='' --log-file "${PROFILE_DIR}/tempest.log" \
     --output "${PROFILE_DIR}" || true
-  python3 - "${PROFILE_DIR}" "${TEMPEST_PIN}" "${CINDER_TEMPEST_PLUGIN_PIN}" <<'PY'
+  python3 - "${PROFILE_DIR}" "${TEMPEST_PIN}" "${CINDER_TEMPEST_PLUGIN_PIN}" "${SELECTED_IDS}" <<'PY'
 import json, sys, pathlib
-out_dir, tempest_pin, plugin_pin = sys.argv[1:]
-# Read the JUnit results written by Tempest (tempest-results.xml is produced
-# by --output) and emit a machine-readable summary.
-try:
-    import xml.etree.ElementTree as ET
-    tree = ET.parse(pathlib.Path(out_dir) / "tempest-results.xml")
-    root = tree.getroot()
-    tests = int(root.attrib.get("tests", 0))
-    failures = int(root.attrib.get("failures", 0))
-    errors = int(root.attrib.get("errors", 0))
-    skipped = int(root.attrib.get("skipped", 0))
-except Exception:
-    tests = failures = errors = skipped = -1
+out_dir, tempest_pin, plugin_pin, selected_ids = sys.argv[1:]
+import xml.etree.ElementTree as ET
+
+results_xml = pathlib.Path(out_dir) / "tempest-results.xml"
+tests = failures = errors = skipped = 0
+test_cases = []
+skip_reasons = {}
+if results_xml.exists():
+    try:
+        tree = ET.parse(results_xml)
+        root = tree.getroot()
+        tests = int(root.attrib.get("tests", 0))
+        failures = int(root.attrib.get("failures", 0))
+        errors = int(root.attrib.get("errors", 0))
+        skipped = int(root.attrib.get("skipped", 0))
+        for case in root.iter("testcase"):
+            name = case.attrib.get("name", "")
+            status = "passed"
+            reason = ""
+            if case.find("failure") is not None:
+                status = "failed"
+            elif case.find("error") is not None:
+                status = "error"
+            elif case.find("skipped") is not None:
+                status = "skipped"
+                skip = case.find("skipped")
+                reason = (skip.attrib.get("message") or skip.text or "").strip()
+            test_cases.append({"name": name, "status": status})
+            if status == "skipped" and reason:
+                skip_reasons[name] = reason
+    except Exception:
+        tests = failures = errors = skipped = -1
+
 summary = {
     "tempest_revision": tempest_pin,
     "cinder_tempest_plugin": plugin_pin,
-    "selected_test_ids": "...",  # redacted listing pointer; full list in script
-    "passed": tests - failures - errors - skipped,
+    "selected_test_ids": [tid for tid in selected_ids.split(",") if tid],
+    "passed": max(tests - failures - errors - skipped, 0),
     "failed": failures + errors,
     "skipped": skipped,
     "profile_id": "openstack-service-testbed",
     "o3k_commit": "<recorded in workflow>",
     "cinder_version": "<recorded by runner>",
-    "skip_reasons": "each skip maps to an explicit unsupported operation",
+    "skip_reasons": skip_reasons,
+    "test_cases": test_cases,
 }
 with open(pathlib.Path(out_dir) / "tempest-cinder-summary.json", "w") as f:
     json.dump(summary, f, indent=2)
