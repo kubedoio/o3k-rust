@@ -50,7 +50,6 @@ async fn keystone_router(
             post({
                 let service = service.clone();
                 move |body: axum::body::Bytes| async move {
-                    let started = std::time::Instant::now();
                     let request: o3k_identity::TokenRequest =
                         match serde_json::from_slice(&body) {
                             Ok(request) => request,
@@ -63,7 +62,6 @@ async fn keystone_router(
                             }
                         };
                     let result = service.issue(&request, std::time::SystemTime::now());
-                    eprintln!("[debug] keystone POST handler took {:?}", started.elapsed());
                     match result {
                         Ok((token, response)) => subject_response(
                             axum::http::StatusCode::CREATED,
