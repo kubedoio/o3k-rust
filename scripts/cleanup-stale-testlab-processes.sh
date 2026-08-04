@@ -49,6 +49,10 @@ for base_dir in "${STATE_BASES[@]}"; do
     echo "stale cleanup: removing prior owned run ${stale_run_id}"
     RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$stale_run_id" \
       O3K_TESTLAB_STATE_ROOT="$state_root" \
+      O3K_REAL_HOST_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${stale_run_id}" \
+      O3K_TESTLAB_PID_ROOT="${RUNNER_TEMP%/}/o3k-testlab-pids/${stale_run_id}" \
+      O3K_OPENSTACK_VENV="" \
+      O3K_TESTLAB_IMAGE_PATH="" \
       bash "$CLEANUP_SCRIPT"
   done
 done
