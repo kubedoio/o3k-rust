@@ -235,9 +235,11 @@ LOOP_DEV=$(losetup --find --show "${LOOP_FILE}")
 pvcreate -f "${LOOP_DEV}"
 vgcreate "${VG_NAME}" "${LOOP_DEV}"
 
-echo "==> Writing cinder.conf..."
-CONF="/etc/cinder/cinder.conf"
-cp "${CONF}" "${EVIDENCE_DIR}/cinder.conf.before" 2>/dev/null || true
+echo "==> Writing run-owned cinder.conf..."
+# The config lives entirely inside the run state root so the run never mutates
+# the foreign /etc/cinder/cinder.conf and never interferes with any foreign
+# Cinder services that may be present on the host.
+CONF="${STATE_ROOT}/cinder.conf"
 cat > "${CONF}" <<EOF
 [DEFAULT]
 transport_url = rabbit://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}
@@ -327,7 +329,6 @@ cleanup_early() {
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
-  if [ -f "${EVIDENCE_DIR}/cinder.conf.before" ]; then cp "${EVIDENCE_DIR}/cinder.conf.before" "${CONF}"; fi
 }
 trap cleanup_early EXIT
 
@@ -720,7 +721,6 @@ cleanup_run_owned() {
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
-  if [ -f "${EVIDENCE_DIR}/cinder.conf.before" ]; then cp "${EVIDENCE_DIR}/cinder.conf.before" "${CONF}"; fi
 }
 
 verify_clean() {
