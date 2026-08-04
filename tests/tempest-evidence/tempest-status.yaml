@@ -6,10 +6,16 @@
 # machine-readable JUnit report is generated only when the real Cinder
 # profile is running and a frozen Tempest version is installed.
 #
-# Last checked: 2026-08-04T16:41:42Z
+# Pinned Gazpacho revisions:
+#   tempest: 46.0.0 (releases.openstack.org/gazpacho/index.html)
+#   cinder-tempest-plugin: 1.21.0
+#
+# Last checked: 2026-08-04T21:26:44Z
 
 tempest:
-  version_pinned: false
+  version_pinned: true
+  tempest_revision: 46.0.0
+  cinder_tempest_plugin: 1.21.0
   installed: false
   real_cinder_profile_running: false
   evidence_status: NOT_READY

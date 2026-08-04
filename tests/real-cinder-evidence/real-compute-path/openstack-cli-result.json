@@ -1,0 +1,51 @@
+{
+  "artifact_type": "openstack-cli-e2e",
+  "status": "passed",
+  "reason": "CLI lifecycle completed",
+  "profile": "libvirt",
+  "public_api_only": true,
+  "redacted": true,
+  "cleanup": {
+    "status": "passed",
+    "resources": {
+      "image": "verified_absent",
+      "keypair": "verified_absent",
+      "network": "verified_absent",
+      "subnet": "verified_absent",
+      "flavor": "verified_absent",
+      "port": "verified_absent",
+      "server": "verified_absent"
+    }
+  },
+  "finished_at": 1785878402,
+  "resources": {
+    "image_id": "019fcea5-07b9-7fa0-acaa-a616105e9ab0",
+    "keypair_id": "o3k-testlab-keypair",
+    "network_id": "019fcea5-12f8-7ff1-a06f-f77e446aebe6",
+    "subnet_id": "019fcea5-1862-7252-b84f-94ce01867fe5",
+    "port_id": "019fcea5-1dc1-7761-b564-7e6cc8ec5509",
+    "flavor_id": "019fcea5-2332-7b32-9d05-c10ca5874760",
+    "server_id": "0da21dac-20ce-5208-b988-38dc6b80616c"
+  },
+  "lifecycle": {
+    "create": true,
+    "show": true,
+    "list": true,
+    "stop": true,
+    "start": true,
+    "reboot": true,
+    "console": true,
+    "delete": true
+  },
+  "acceptance": {
+    "status": "ACTIVE",
+    "fixed_ip": "192.0.2.2",
+    "config_drive": true,
+    "console_boot_marker": true,
+    "restart": {
+      "status": "ACTIVE",
+      "fixed_ip": "192.0.2.2",
+      "config_drive": true
+    }
+  }
+}
