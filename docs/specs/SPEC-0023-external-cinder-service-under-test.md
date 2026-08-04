@@ -222,6 +222,27 @@ The valid claim is that O3K replaces the surrounding OpenStack control plane
 required by the selected test workflow. It is not "Cinder without
 dependencies."
 
+## Pinned Cinder version
+
+The primary compatibility profile is `2026.1 Gazpacho`. The primary real-service
+Cinder version is pinned to `28.0.0` (Gazpacho) with `cinder-tempest-plugin`
+`1.21.0`, installed from a pinned PyPI source distribution into an isolated
+Python virtual environment. The fallback profile is `2025.2 Flamingo`, pinned to
+Cinder `27.0.0` with `cinder-tempest-plugin` `1.19.0`. These pins match the
+official OpenStack release deliverables:
+
+- https://releases.openstack.org/gazpacho/index.html
+- https://releases.openstack.org/flamingo/index.html
+
+Dalmatian (Cinder 24.2.0) is too old and is not an accepted profile; its
+evidence must never satisfy the Gazpacho profile. The machine-readable pins are
+recorded in `compatibility/openstack-targets.yaml` under each profile's
+`external_hosted_services[].version_pin`. The runner
+(`scripts/real-cinder-testbed-runner.sh`) selects the profile with
+`O3K_CINDER_PROFILE=gazpacho` (default) or `flamingo` and records the exact
+installed version, pip freeze, host distribution, kernel, libvirt, QEMU, LVM,
+and iSCSI implementations in its evidence directory.
+
 ## Non-goals
 
 - full Keystone, Nova, Glance, or Cinder parity;

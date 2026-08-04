@@ -63,7 +63,7 @@ pull_requests: []
 
 ### W5 — Mock → component rename + real Cinder profile
 - Python mock renamed to `scripts/component-cinder-mock.sh` with stateful attachment API; exercises full lifecycle against running o3kd.
-- Protected real Cinder profile script (`scripts/real-cinder-testbed-runner.sh`) provisions pinned Cinder 24.2.0 with MariaDB/RabbitMQ/LVM backend; records evidence tiers with honest status.
+- Protected real Cinder profile script (`scripts/real-cinder-testbed-runner.sh`) provisions pinned Cinder 28.0.0 (2026.1 Gazpacho) with MariaDB/RabbitMQ/LVM backend and run-owned disposable resources; records evidence tiers with honest status.
 - Workflow renamed to `.github/workflows/component-cinder-mock.yml`.
 - Real Cinder execution: script exists; apt installation timed out in this environment.
 
