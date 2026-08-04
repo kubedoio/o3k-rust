@@ -1,5 +1,5 @@
 use axum::body::Body;
-use http::{Method, Request, StatusCode, header};
+use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
 use o3k_identity::{Secret, TokenService};
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
@@ -1013,16 +1013,18 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "compute 2.1"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("compute 2.1"))
     );
     assert_eq!(
-        resp.headers().get("X-OpenStack-Nova-API-Version").unwrap(),
-        "2.1"
+        resp.headers().get("X-OpenStack-Nova-API-Version"),
+        Some(&HeaderValue::from_static("2.1"))
     );
     assert_eq!(
-        resp.headers().get("Vary").unwrap(),
-        "OpenStack-API-Version, X-OpenStack-Nova-API-Version"
+        resp.headers().get("Vary"),
+        Some(&HeaderValue::from_static(
+            "OpenStack-API-Version, X-OpenStack-Nova-API-Version"
+        ))
     );
 
     let req = Request::builder()
@@ -1031,8 +1033,8 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "compute 2.1"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("compute 2.1"))
     );
 
     let req = Request::builder()
@@ -1041,8 +1043,8 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "compute 2.1"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("compute 2.1"))
     );
 
     let req = Request::builder()
@@ -1067,8 +1069,8 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "compute 2.1"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("compute 2.1"))
     );
 
     Ok(())
@@ -1091,8 +1093,8 @@ async fn microversion_placement_discovery_and_negotiation() -> Result<(), Box<dy
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "placement 1.28"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("placement 1.28"))
     );
 
     let req = Request::builder()
@@ -1101,8 +1103,8 @@ async fn microversion_placement_discovery_and_negotiation() -> Result<(), Box<dy
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
-        resp.headers().get("OpenStack-API-Version").unwrap(),
-        "placement 1.28"
+        resp.headers().get("OpenStack-API-Version"),
+        Some(&HeaderValue::from_static("placement 1.28"))
     );
 
     let req = Request::builder()
