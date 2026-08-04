@@ -147,6 +147,40 @@ pub struct EndpointDetails {
     pub region_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceRecord {
+    pub id: String,
+    pub name: String,
+    pub service_type: String,
+    pub enabled: bool,
+    pub endpoints: Vec<EndpointRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EndpointRecord {
+    pub id: String,
+    pub url: String,
+    pub interface: String,
+    pub region: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthContext {
+    pub token_id: String,
+    pub user_id: String,
+    pub user_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub domain_id: String,
+    pub domain_name: String,
+    pub roles: Vec<String>,
+    pub service_user: bool,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub audit_id: String,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AuthError {
     #[error("invalid authentication request")]
@@ -171,6 +205,7 @@ pub struct TokenService {
     signing_key: Secret,
     token_ttl: Duration,
     catalog_endpoint: String,
+    cinder_endpoint: Option<String>,
 }
 
 impl TokenService {
@@ -198,6 +233,7 @@ impl TokenService {
             signing_key,
             token_ttl,
             catalog_endpoint: "http://127.0.0.1:8080".to_owned(),
+            cinder_endpoint: None,
         })
     }
 
@@ -211,6 +247,22 @@ impl TokenService {
     #[must_use]
     pub fn catalog_endpoint(&self) -> &str {
         &self.catalog_endpoint
+    }
+
+    /// Set an optional external Cinder endpoint to be advertised in service catalogs.
+    #[must_use]
+    pub fn with_cinder_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        let trimmed = endpoint.into().trim_end_matches('/').to_owned();
+        if !trimmed.is_empty() {
+            self.cinder_endpoint = Some(trimmed);
+        } else {
+            self.cinder_endpoint = None;
+        }
+        self
+    }
+
+    pub fn cinder_endpoint(&self) -> Option<&str> {
+        self.cinder_endpoint.as_deref()
     }
 
     pub fn issue(
@@ -333,13 +385,84 @@ impl TokenService {
             return Err(AuthError::ExpiredToken);
         }
         Ok(VerifiedToken {
+            token_id: claims.token_id,
             user_id: claims.sub,
             project_id: claims.project,
+            issued: claims.issued,
             expires: claims.expires,
         })
     }
 
+    pub fn verify_details(&self, token: &str, now: SystemTime) -> Result<TokenResponse, AuthError> {
+        let verified = self.verify(token, now)?;
+        let issued_at = format_time(verified.issued)?;
+        let expires_at = format_time(verified.expires)?;
+        Ok(TokenResponse {
+            token: self.details(issued_at, expires_at),
+        })
+    }
+
+    pub fn auth_context(&self, token: &str, now: SystemTime) -> Result<AuthContext, AuthError> {
+        let verified = self.verify(token, now)?;
+        Ok(AuthContext {
+            token_id: verified.token_id,
+            user_id: verified.user_id,
+            user_name: self.user_name.clone(),
+            project_id: verified.project_id,
+            project_name: self.project_name.clone(),
+            domain_id: "default".to_owned(),
+            domain_name: "Default".to_owned(),
+            roles: vec!["admin".to_owned(), "member".to_owned()],
+            service_user: false,
+            issued_at: verified.issued,
+            expires_at: verified.expires,
+            audit_id: Uuid::now_v7().to_string(),
+        })
+    }
+
     fn details(&self, issued_at: String, expires_at: String) -> TokenDetails {
+        let mut catalog = vec![
+            service(
+                "identity",
+                "identity",
+                "identity",
+                &format!("{}/v3", self.catalog_endpoint),
+            ),
+            service(
+                "image",
+                "image",
+                "image",
+                &format!("{}/v2", self.catalog_endpoint),
+            ),
+            service(
+                "network",
+                "network",
+                "network",
+                &format!("{}/v2.0", self.catalog_endpoint),
+            ),
+            service(
+                "compute",
+                "compute",
+                "compute",
+                &format!("{}/v2.1/{}", self.catalog_endpoint, self.project_id),
+            ),
+            service(
+                "placement",
+                "placement",
+                "placement",
+                &format!("{}/placement", self.catalog_endpoint),
+            ),
+        ];
+
+        if let Some(cinder_url) = &self.cinder_endpoint {
+            catalog.push(service(
+                "cinder",
+                "volumev3",
+                "cinder",
+                &format!("{cinder_url}/v3/{}", self.project_id),
+            ));
+        }
+
         TokenDetails {
             expires_at,
             issued_at,
@@ -359,46 +482,17 @@ impl TokenService {
                 id: "member".to_owned(),
                 name: "member".to_owned(),
             }],
-            catalog: vec![
-                service(
-                    "identity",
-                    "identity",
-                    "identity",
-                    &format!("{}/v3", self.catalog_endpoint),
-                ),
-                service(
-                    "image",
-                    "image",
-                    "image",
-                    &format!("{}/v2", self.catalog_endpoint),
-                ),
-                service(
-                    "network",
-                    "network",
-                    "network",
-                    &format!("{}/v2.0", self.catalog_endpoint),
-                ),
-                service(
-                    "compute",
-                    "compute",
-                    "compute",
-                    &format!("{}/v2.1/{}", self.catalog_endpoint, self.project_id),
-                ),
-                service(
-                    "placement",
-                    "placement",
-                    "placement",
-                    &format!("{}/placement", self.catalog_endpoint),
-                ),
-            ],
+            catalog,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedToken {
+    pub token_id: String,
     pub user_id: String,
     pub project_id: String,
+    pub issued: u64,
     pub expires: u64,
 }
 
@@ -603,6 +697,50 @@ mod tests {
             service.verify(&token, now + Duration::from_secs(3600)),
             Err(AuthError::ExpiredToken)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cinder_endpoint_adds_volumev3_to_catalog() -> Result<(), AuthError> {
+        let service = service()?
+            .with_catalog_endpoint("http://127.0.0.1:8080")
+            .with_cinder_endpoint("http://127.0.0.1:8776");
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, response) = service.issue(&request("password"), now)?;
+
+        let cinder_entry = response
+            .token
+            .catalog
+            .iter()
+            .find(|item| item.service_type == "volumev3")
+            .ok_or(AuthError::InvalidRequest)?;
+        let cinder_url = &cinder_entry.endpoints[0].url;
+        assert_eq!(cinder_url, "http://127.0.0.1:8776/v3/project-1");
+
+        let auth_ctx = service.auth_context(&token, now)?;
+        assert_eq!(auth_ctx.user_id, "user-1");
+        assert_eq!(auth_ctx.project_id, "project-1");
+
+        let verified_details = service.verify_details(&token, now)?;
+        assert_eq!(verified_details.token.project.id, "project-1");
+        Ok(())
+    }
+
+    #[test]
+    fn incorrect_project_id_as_display_name_is_rejected() -> Result<(), AuthError> {
+        let service = service()?;
+        let mut req = request("password");
+        if let Some(scope) = req.auth.scope.as_mut() {
+            scope.project = Some(ProjectReference {
+                id: Some("admin".to_owned()), // "admin" is display name, not durable ID ("project-1")
+                name: None,
+                domain: None,
+            });
+        }
+        assert!(matches!(
+            service.issue(&req, UNIX_EPOCH + Duration::from_secs(1000)),
+            Err(AuthError::Unauthorized)
+        ));
         Ok(())
     }
 }

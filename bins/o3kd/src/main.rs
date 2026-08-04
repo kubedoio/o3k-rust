@@ -323,8 +323,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let console_event_task =
         spawn_console_event_consumer(registry.clone(), console_service.clone());
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
-        (Some(password), Some(signing_key)) => Some(
-            o3k_identity::TokenService::new(
+        (Some(password), Some(signing_key)) => {
+            let mut service = o3k_identity::TokenService::new(
                 "bootstrap-user".to_owned(),
                 "admin".to_owned(),
                 o3k_identity::Secret::new(password.expose().to_owned()),
@@ -333,10 +333,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 o3k_identity::Secret::new(signing_key.expose().to_owned()),
                 Duration::from_secs(3600),
             )?
-            .with_catalog_endpoint(format!("http://{}", config.listen_addr)),
-        ),
+            .with_catalog_endpoint(format!("http://{}", config.listen_addr));
+            if let Ok(cinder_url) = std::env::var("O3K_CINDER_ENDPOINT") {
+                service = service.with_cinder_endpoint(cinder_url);
+            }
+            Some(service)
+        }
         _ => None,
     };
+
     let listener = TcpListener::bind(config.listen_addr).await?;
     info!(address = %config.listen_addr, data_dir = %config.data_dir.display(), provider = ?config.provider, "o3kd listening");
     let authorized_agents = config

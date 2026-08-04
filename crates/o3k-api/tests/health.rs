@@ -1136,3 +1136,115 @@ async fn identity_image_network_services_have_no_microversion_headers()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn keystone_get_and_head_token_validation_and_cinder_catalog()
+-> Result<(), Box<dyn std::error::Error>> {
+    use tower::ServiceExt;
+
+    let identity = TokenService::new(
+        "bootstrap-user".to_owned(),
+        "admin".to_owned(),
+        Secret::new("password".to_owned()),
+        "bootstrap-project".to_owned(),
+        "admin".to_owned(),
+        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+        Duration::from_secs(3600),
+    )?
+    .with_catalog_endpoint("http://127.0.0.1:18080")
+    .with_cinder_endpoint("http://127.0.0.1:8776");
+
+    let state = o3k_api::AppState::new().with_identity(identity);
+    state.set_ready(true);
+    let app = o3k_api::router_with_state(state);
+
+    let auth_body = serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {
+                    "user": {
+                        "name": "admin",
+                        "password": "password"
+                    }
+                }
+            },
+            "scope": {
+                "project": {
+                    "name": "admin"
+                }
+            }
+        }
+    });
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/v3/auth/tokens")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(auth_body.to_string()))?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let token = resp
+        .headers()
+        .get("x-subject-token")
+        .ok_or("missing x-subject-token header")?
+        .to_str()?
+        .to_owned();
+
+    // Verify GET /v3/auth/tokens validates token
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/v3/auth/tokens")
+        .header("x-subject-token", &token)
+        .body(Body::empty())?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-subject-token")
+            .ok_or("missing x-subject-token header")?
+            .to_str()?,
+        token
+    );
+
+    let body_bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await?;
+    let json: Value = serde_json::from_slice(&body_bytes)?;
+    let catalog = json["token"]["catalog"]
+        .as_array()
+        .ok_or("missing catalog")?;
+    let cinder_entry = catalog
+        .iter()
+        .find(|item| item["type"] == "volumev3")
+        .ok_or("missing volumev3 service entry")?;
+    assert_eq!(
+        cinder_entry["endpoints"][0]["url"],
+        "http://127.0.0.1:8776/v3/bootstrap-project"
+    );
+
+    // Verify HEAD /v3/auth/tokens validates token without body
+    let req = Request::builder()
+        .method(Method::HEAD)
+        .uri("/v3/auth/tokens")
+        .header("x-subject-token", &token)
+        .body(Body::empty())?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-subject-token")
+            .ok_or("missing x-subject-token header")?
+            .to_str()?,
+        token
+    );
+
+    // Invalid token on GET returns 404
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("/v3/auth/tokens")
+        .header("x-subject-token", "invalid.token.str")
+        .body(Body::empty())?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}
