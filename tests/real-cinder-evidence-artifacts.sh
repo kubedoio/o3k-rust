@@ -42,7 +42,7 @@ REQUIRED=(
     real-cinder-cleanup-result.json
     foreign-state-result.json
     tempest-cinder-summary.json
-    real-cinder-workflow-result.json
+    real-cinder-runner-result.json
 )
 
 for artifact in "${REQUIRED[@]}"; do
@@ -72,6 +72,14 @@ python3 - "${EVIDENCE_DIR}/foreign-state-result.json" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["status"] == "pending-post-run-guard", doc["status"]
+PY
+# The runner result must not assert an aggregate pass; the post-run guard owns
+# the aggregate decision.
+python3 - "${EVIDENCE_DIR}/real-cinder-runner-result.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["artifact_type"] == "real-cinder-runner-result.json", doc.get("artifact_type")
+assert doc["status"] == "runner-completed", doc["status"]
 PY
 if grep -rqE "cinder-service-password|cinder-db-password|O3K_PW=|DB_PW=|MQ_PW=" "${EVIDENCE_DIR}"; then
     echo "secret value leaked into evidence artifacts" >&2
