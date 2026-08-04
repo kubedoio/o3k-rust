@@ -306,3 +306,41 @@ implementation path, test, CI workflow, and evidence artifact.
 - `main` at commit 107e96c plus the uncommitted store identity work on branch
   `issue-420-durable-keystone-identity`.
 - No public Go O3K source was consulted for this reconciliation.
+
+---
+
+## Current status — real Gazpacho Cinder service-testbed (2026-08-04)
+
+PRs #454–#459 landed on `main` for the real-service profile. The protected
+workflow, disposable run-ID resources, pre/post-run guards, evidence artifacts,
+and the real Nova-to-compute attachment integration are in place. The real
+compute path (libvirt lifecycle + mTLS) is proven locally (PR #456 evidence).
+
+### Real-service run findings (defects blocking #429 closure)
+
+A real run of `scripts/real-cinder-testbed-runner.sh` against Cinder 28.0.0
+(PyPI venv, MariaDB, RabbitMQ, LVM/iSCSI) progresses through identity and
+cinder-api startup but fails at volume creation. Defects identified by
+execution (not guesswork):
+
+1. **Fixed — `python-memcached` missing** from the Cinder venv. Cinder's
+   keystonemiddleware token-cache pool requires the `memcache` module; without
+   it `cinder-api` returns HTTP 500 on every request. Re-applied in PR #460
+   (the earlier commit was never merged).
+2. **Open — RabbitMQ `ACCESS_REFUSED`** for the run-owned user from the Cinder
+   scheduler/volume services. The run-owned user/vhost are created before the
+   services start; the refusal indicates the services resolve a different
+   credential or the user creation raced. Needs a targeted reproduction.
+3. **Open — keystonemiddleware `EndpointNotFound`** during token verification
+   on the volume-create path. O3K's catalog advertises `identity` at
+   `{base}/v3` (validated by the portable test and the admin-token catalog),
+   so the middleware config/interface negotiation needs investigation against
+   real Cinder. This is the Phase-6 identity-compatibility gate.
+
+The volume-service also reports the run-owned LVM VG "not found" from the
+`cinder-volume` process; the VG exists on the host, so this points to
+rootwrap/privilege or VG-activation handling for the venv-launched volume
+service.
+
+These are the precise items the deferred external-Cinder work must resolve
+before #420/#421/#424/#429 can close.
