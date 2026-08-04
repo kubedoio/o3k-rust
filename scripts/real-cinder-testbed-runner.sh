@@ -696,9 +696,9 @@ write("tempest-cinder-summary.json", {
     "tempest_revision": "", "cinder_tempest_plugin": plugin_pin,
     "test_ids": [], "passed": 0, "failed": 0, "skipped": 0,
 })
-write("real-cinder-workflow-result.json", {
-    "status": "passed",
-    "reason": "real-service and real-compute evidence tiers passed",
+write("real-cinder-runner-result.json", {
+    "status": "runner-completed",
+    "reason": "runner completed; aggregate pass/fail is decided by the post-run guard",
 })
 PY
   echo "    machine-readable evidence artifacts written under ${EVIDENCE_DIR}"
