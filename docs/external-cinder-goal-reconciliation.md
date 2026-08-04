@@ -393,3 +393,23 @@ diagnosable in the next real run.
 
 This is the single remaining defect before the real volume lifecycle can be
 proven. The runner now surfaces these logs on startup failure (PR #463).
+
+### RabbitMQ ACCESS_REFUSED — isolated proof (2026-08-04, PR #464)
+
+The run-owned RabbitMQ pattern was exhaustively verified in isolation with the
+pinned venv oslo.messaging (18.2.0, matching the run's venv):
+
+- TransportURL.parse correctly reads the run-owned vhost.
+- RPCClient cast (publish) succeeds with a 48-hex password to a run-owned vhost.
+- get_rpc_server (consume) starts successfully on a run-owned vhost.
+- kombu amqp:// also connects; rabbitmqctl authenticate_user succeeds.
+
+The transport_url, hex password, and vhost are therefore correct. The full
+deployment's scheduler/volume ACCESS_REFUSED (while cinder-api is reachable and
+0 ACCESS_REFUSED) is deployment-specific: the foreign systemd Cinder 24.2.0
+scheduler/volume services are active and connected to the default vhost `/`,
+and cinder's RPC queue declaration/consumption on the run vhost interacts with
+that environment. A RabbitMQ-ready AMQP probe was added to the runner (PR
+#464) and per-service logs are captured; resolving the remaining interaction
+requires inspecting the real scheduler/volume processes during a live run,
+which is deferred with external Cinder.
