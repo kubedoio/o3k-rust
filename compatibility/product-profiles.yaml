@@ -14,12 +14,14 @@ profiles:
     external_hosted_services:
       - selected-service-under-test
     database:
-      default: sqlite
-      production_target: postgres
-      postgres_support: planned
+      o3k_default: sqlite
+      o3k_production_target: postgres
+      o3k_postgres_support: planned
+      external_service_database: owned-by-external-service
     release_blocking_for_first_alpha: false
     footprint_claim: unmeasured
     evidence_state: specified
+
   - id: native-rust-testlab
     maturity: implemented-partial
     user_outcome: run a declared OpenStack-compatible workflow using O3K-owned Rust service implementations
@@ -41,6 +43,7 @@ profiles:
     release_blocking_for_first_alpha: true
     footprint_claim: unmeasured-target-approximately-50mb
     evidence_state: implemented
+
   - id: small-edge-cloud
     maturity: planned
     target_hypervisors:
@@ -67,12 +70,14 @@ profiles:
     release_blocking_for_first_alpha: false
     footprint_claim: unmeasured
     evidence_state: planned
+
 claim_rules:
   approximate_50mb:
     type: target
     requires_profile_specific_measurement: true
+    may_be_claimed_as_guarantee: false
   postgres_for_production:
-    type: production_profile_target
+    type: production-profile-target
     support_status: planned
     may_be_claimed_supported_only_after_adapter_and_conformance: true
   openstack_release_compatibility:
@@ -80,3 +85,6 @@ claim_rules:
     blanket_release_parity_forbidden: true
   external_hosted_service:
     must_not_be_claimed_o3k_implemented: true
+  cross_cloud_interoperation:
+    generic_claim_forbidden: true
+    requires_explicit_integration_profile: true
