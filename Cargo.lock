@@ -1214,6 +1214,7 @@ dependencies = [
  "async-trait",
  "base64",
  "md-5",
+ "serde",
  "sqlx",
  "thiserror",
  "tokio",
