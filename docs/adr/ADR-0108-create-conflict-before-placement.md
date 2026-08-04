@@ -1,8 +1,12 @@
 # ADR-0108 — Check durable create conflicts before Placement allocation
 
-## Status
+Status: Accepted for the repository-side issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, governance
 
-Accepted for the repository-side issue #82 lifecycle slice.
+#82 lifecycle slice.
 
 ## Context
 

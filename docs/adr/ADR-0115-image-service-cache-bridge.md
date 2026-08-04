@@ -1,8 +1,12 @@
 # ADR-0115 — Bridge verified image artifacts into the local cache
 
-## Status
+Status: Accepted for the issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, image, governance
 
-Accepted for the issue #79 repository integration slice.
+#79 repository integration slice.
 
 ## Context
 

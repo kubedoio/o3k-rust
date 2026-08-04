@@ -1,8 +1,10 @@
 # ADR-0084 — Protect and honestly report real-host validation
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Context
 

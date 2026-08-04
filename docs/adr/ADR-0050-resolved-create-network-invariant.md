@@ -1,8 +1,10 @@
 # ADR-0050 — Require a network attachment in resolved create commands
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Context
 

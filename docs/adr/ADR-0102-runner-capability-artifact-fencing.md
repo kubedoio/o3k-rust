@@ -1,8 +1,10 @@
 # ADR-0102 — Fence protected runner capability artifacts to one workflow attempt
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
 ## Context
 
@@ -43,4 +45,3 @@ workflow run and human inspection.
   resolution do not identify a workflow attempt.
 - Signing the artifact was rejected as out of scope for this repository-side
   runner fence; it would not replace host isolation or the protected workflow.
-

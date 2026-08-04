@@ -1,8 +1,10 @@
 # ADR-0044 — Route console queries through the fenced agent
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, identity, governance
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0126 — Revalidate domain ownership before opening a console
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

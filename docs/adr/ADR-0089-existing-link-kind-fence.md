@@ -1,8 +1,12 @@
 # ADR-0089 — Existing bridge link-kind fence
 
-## Status
+Status: Accepted for the portable issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
-Accepted for the portable issue #81 network safety slice.
+#81 network safety slice.
 
 ## Context
 

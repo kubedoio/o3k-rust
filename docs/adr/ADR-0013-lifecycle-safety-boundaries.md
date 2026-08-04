@@ -1,8 +1,10 @@
 # ADR-0013 — Lifecycle safety boundaries for the libvirt provider
 
-## Status
-
-Accepted for the portable lifecycle foundation; real guest/network validation remains environment-gated.
+Status: Accepted for the portable lifecycle foundation; real guest/network validation remains environment-gated.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, governance
 
 ## Decision
 

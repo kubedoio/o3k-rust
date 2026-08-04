@@ -1,8 +1,10 @@
 # ADR-0017 — Authenticated compute-agent command router
 
-## Status
-
-Accepted as the transport bridge for the alpha control plane.
+Status: Accepted as the transport bridge for the alpha control plane.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, governance
 
 ## Context
 

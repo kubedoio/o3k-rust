@@ -1,6 +1,10 @@
 # ADR-0144 — Persist agent observation watermarks
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 Successful agent observations are applied through an atomic SQLite transaction
 that updates the resource projection and a durable `(agent_epoch,

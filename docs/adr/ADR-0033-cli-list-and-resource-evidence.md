@@ -1,8 +1,10 @@
 # ADR-0033 — Record CLI list coverage and resource identities
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: cli, governance
 
 ## Context
 

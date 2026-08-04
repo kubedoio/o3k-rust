@@ -1,8 +1,10 @@
 # ADR-0018 — Persist scheduler and Placement bindings in create intent
 
-## Status
-
-Accepted for the alpha control-plane scheduling slice.
+Status: Accepted for the alpha control-plane scheduling slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, governance
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0003 — CellHV through a provider contract
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Decision
 

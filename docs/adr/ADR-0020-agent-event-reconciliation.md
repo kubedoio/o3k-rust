@@ -1,8 +1,10 @@
 # ADR-0020 — Durable agent-event reconciliation
 
-## Status
-
-Accepted for the alpha command-routing slice.
+Status: Accepted for the alpha command-routing slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, identity, governance
 
 ## Context
 

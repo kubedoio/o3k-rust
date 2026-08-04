@@ -1,6 +1,10 @@
 # ADR-0134 — Wire daemon compute requests through Placement
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, identity, governance
 
 The `o3kd` process opens its Placement ledger below the configured data
 directory and constructs one scheduler from that ledger. When all compute-agent

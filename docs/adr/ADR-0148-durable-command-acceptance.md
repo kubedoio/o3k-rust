@@ -1,8 +1,12 @@
 # ADR-0148 — Persist authenticated command acceptance
 
-## Status
+Status: Accepted for the repository-side issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, governance
 
-Accepted for the repository-side issue #78 operation-journal slice.
+#78 operation-journal slice.
 
 ## Context
 

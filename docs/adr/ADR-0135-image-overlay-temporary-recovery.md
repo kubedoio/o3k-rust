@@ -1,6 +1,10 @@
 # ADR-0135 — Recover stale image-overlay temporaries on restart
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, image, governance
 
 `ImageCache` startup removes regular files whose names contain the managed
 temporary marker from both the cache root and its managed `overlays` directory.

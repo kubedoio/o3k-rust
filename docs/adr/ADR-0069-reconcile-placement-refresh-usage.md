@@ -1,6 +1,10 @@
 # ADR-0069 — Reconcile usage during placement inventory refresh
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
 ## Context
 

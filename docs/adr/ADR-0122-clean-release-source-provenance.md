@@ -1,8 +1,12 @@
 # ADR-0122 — Require a clean source tree before release packaging
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side preparation of issue #93. This does not claim
+#93. This does not claim
 that release evidence, human approval, or publication exists.
 
 ## Context

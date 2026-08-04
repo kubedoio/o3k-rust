@@ -1,8 +1,12 @@
 # ADR-0113 — Require explicit benchmark release eligibility
 
-## Status
+Status: Accepted for the issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
-Accepted for the issue #91 release-evidence boundary.
+#91 release-evidence boundary.
 
 ## Context
 

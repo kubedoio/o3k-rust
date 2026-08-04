@@ -1,8 +1,10 @@
 # ADR-0019 — Canonical create-command construction
 
-## Status
-
-Accepted for the alpha command-routing slice.
+Status: Accepted for the alpha command-routing slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
 ## Context
 

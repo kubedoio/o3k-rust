@@ -1,8 +1,10 @@
 # ADR-0152 — Bounded authenticated artifact transfer
 
-## Status
-
-Accepted additive contract decision; runtime implementation is a follow-up.
+Status: Accepted additive contract decision; runtime implementation is a follow-up.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, image, identity, cli, governance
 
 ## Context
 

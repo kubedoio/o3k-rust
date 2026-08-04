@@ -1,6 +1,10 @@
 # ADR-0124 — Keep agent operation updates separate from resource observations
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, governance
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0005 — Libvirt/KVM as the primary compute backend
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Decision
 

@@ -1,8 +1,10 @@
 # ADR-0057 — Existing TAP attachment in libvirt domain XML
 
-## Status
-
-Accepted for the libvirt XML boundary.
+Status: Accepted for the libvirt XML boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
 ## Context
 

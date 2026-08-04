@@ -1,8 +1,10 @@
 # ADR-0145 — Route nonzero console offsets to durable storage
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, storage, governance
 
 ## Context
 

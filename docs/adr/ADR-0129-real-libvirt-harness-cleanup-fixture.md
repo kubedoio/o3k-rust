@@ -1,6 +1,10 @@
 # ADR-0129 — Make the portable real-libvirt harness model cleanup state
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, cli, governance
 
 ## Context
 

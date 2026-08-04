@@ -1,8 +1,12 @@
 # ADR-0116 — Bind libvirt config-drive attachment to verified bytes
 
-## Status
+Status: Accepted for the issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
-Accepted for the issue #80 repository attachment slice.
+#80 repository attachment slice.
 
 ## Context
 

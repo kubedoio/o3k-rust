@@ -1,8 +1,10 @@
 # ADR-0093 — Verify absence of every CLI-owned resource
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, image, cli, governance
 
 ## Context
 

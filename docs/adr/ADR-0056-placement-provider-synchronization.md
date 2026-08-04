@@ -1,8 +1,10 @@
 # ADR-0056 — Durable placement provider synchronization
 
-## Status
-
-Accepted for the placement ledger boundary.
+Status: Accepted for the placement ledger boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, governance
 
 ## Context
 

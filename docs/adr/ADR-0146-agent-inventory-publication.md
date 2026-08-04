@@ -1,8 +1,12 @@
 # ADR-0146 — Publish authenticated agent inventory to Placement
 
-## Status
+Status: Accepted for the repository-side issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, identity, governance
 
-Accepted for the repository-side issue #82 inventory slice.
+#82 inventory slice.
 
 ## Context
 

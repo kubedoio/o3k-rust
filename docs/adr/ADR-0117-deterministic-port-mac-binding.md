@@ -1,8 +1,12 @@
 # ADR-0117 — Persist one deterministic MAC binding per network port
 
-## Status
+Status: Accepted for the issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
-Accepted for the issue #81 repository network-resource slice.
+#81 repository network-resource slice.
 
 ## Context
 

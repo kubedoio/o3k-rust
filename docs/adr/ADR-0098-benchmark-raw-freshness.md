@@ -1,8 +1,12 @@
 # ADR-0098 — Require fresh raw benchmark evidence
 
-## Status
+Status: Accepted for the issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the issue #91 measurement and release-evidence boundary.
+#91 measurement and release-evidence boundary.
 
 ## Context
 

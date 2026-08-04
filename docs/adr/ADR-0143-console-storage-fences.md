@@ -1,6 +1,10 @@
 # ADR-0143 — Fence console storage and bounded reads
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: storage, governance
 
 The console root must be a real directory and is restricted to mode `0700` on
 Unix. Published console artifacts and temporary files are regular private

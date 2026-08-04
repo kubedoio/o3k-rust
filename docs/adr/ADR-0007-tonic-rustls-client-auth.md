@@ -1,6 +1,10 @@
 # ADR-0007 — Tonic version for compute-agent mutual TLS
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, identity, cli, governance
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0064 — Require benchmark evidence for release readiness
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

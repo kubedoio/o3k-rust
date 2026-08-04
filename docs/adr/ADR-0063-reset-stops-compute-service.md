@@ -1,6 +1,10 @@
 # ADR-0063 — Stop both services before reset cleanup
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

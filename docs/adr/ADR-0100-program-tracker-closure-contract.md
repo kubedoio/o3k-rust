@@ -1,8 +1,12 @@
 # ADR-0100 — Keep the program tracker fail closed
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
-Accepted for the repository-side preparation of issue #94. This ADR does not
+#94. This ADR does not
 close the program or issue #93.
 
 ## Context

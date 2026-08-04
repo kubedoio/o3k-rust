@@ -1,8 +1,10 @@
 # ADR-0080 — Measure only an owned control-plane process
 
-## Status
-
-Accepted for the measurement and release-evidence boundary.
+Status: Accepted for the measurement and release-evidence boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, identity, cli, governance
 
 ## Context
 

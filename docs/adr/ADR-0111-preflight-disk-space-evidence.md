@@ -1,8 +1,12 @@
 # ADR-0111 — Fail closed on missing preflight disk-space evidence
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side preparation of issue #90. This ADR does not
+#90. This ADR does not
 claim that a Debian host passed preflight or the full TestLab lifecycle.
 
 ## Context

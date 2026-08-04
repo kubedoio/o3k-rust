@@ -1,6 +1,10 @@
 # ADR-0065 — Reject DHCP gateway and fixed-binding conflicts
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

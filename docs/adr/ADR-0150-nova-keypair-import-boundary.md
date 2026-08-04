@@ -1,8 +1,12 @@
 # ADR-0150 — Nova public-keypair import boundary
 
-## Status
+Status: Accepted for issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, cli, governance
 
-Accepted for issue #280.
+#280.
 
 ## Decision
 

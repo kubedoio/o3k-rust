@@ -1,8 +1,10 @@
 # ADR-0034 — Use unique temporary files for Placement publication
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
 ## Context
 

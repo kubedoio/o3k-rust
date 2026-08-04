@@ -1,8 +1,12 @@
 # ADR-0112 — Reject unsafe components in clean-install paths
 
-## Status
+Status: Accepted for the repository-side portion of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
-Accepted for the repository-side portion of issue #89.
+#89.
 
 ## Context
 

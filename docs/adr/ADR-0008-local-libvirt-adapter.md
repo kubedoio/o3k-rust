@@ -1,6 +1,10 @@
 # ADR-0008 — Local libvirt adapter boundary
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Decision
 

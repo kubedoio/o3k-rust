@@ -1,8 +1,12 @@
 # ADR-0103 — Retain protected real-host evidence for a bounded period
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side implementation of issue #77. This ADR does
+#77. This ADR does
 not claim that a protected workflow has run successfully.
 
 ## Context

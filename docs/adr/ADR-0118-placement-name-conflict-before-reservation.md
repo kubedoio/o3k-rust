@@ -1,8 +1,12 @@
 # ADR-0118 — Reject deterministic name conflicts before Placement reservation
 
-## Status
+Status: Accepted for the repository-side portion of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
-Accepted for the repository-side portion of issue #82.
+#82.
 
 ## Context
 

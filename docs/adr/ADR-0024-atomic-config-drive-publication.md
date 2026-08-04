@@ -1,8 +1,10 @@
 # ADR-0024 — Atomic config-drive publication
 
-## Status
-
-Accepted for the portable config-drive slice.
+Status: Accepted for the portable config-drive slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
 ## Context
 

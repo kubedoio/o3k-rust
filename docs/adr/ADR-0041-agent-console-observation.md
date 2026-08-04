@@ -1,8 +1,10 @@
 # ADR-0041 — Emit bounded console observations from compute agents
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, identity, governance
 
 ## Context
 

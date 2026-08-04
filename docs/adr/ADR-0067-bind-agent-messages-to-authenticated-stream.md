@@ -1,6 +1,10 @@
 # ADR-0067 — Bind agent messages to the authenticated stream
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, identity, governance
 
 ## Context
 

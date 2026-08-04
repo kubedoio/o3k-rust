@@ -1,8 +1,12 @@
 # ADR-0155 — Agent-local verified image materialization
 
-## Status
+Status: Proposed for the
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, image, identity, governance
 
-Proposed for the #79 implementation boundary; human approval remains part of
+#79 implementation boundary; human approval remains part of
 #92.
 
 ## Decision

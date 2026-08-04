@@ -1,8 +1,10 @@
 # ADR-0040 — Gate scheduled placement by authenticated agent eligibility
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, identity, governance
 
 ## Context
 

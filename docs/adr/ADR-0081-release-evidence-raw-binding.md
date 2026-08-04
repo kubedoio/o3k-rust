@@ -1,6 +1,10 @@
 # ADR-0081 — Bind release benchmark summaries to raw evidence
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 ## Context
 

@@ -1,8 +1,10 @@
 # ADR-0027 — Agent-targeted scheduling contract
 
-## Status
-
-Accepted as a scheduler/agent integration boundary.
+Status: Accepted as a scheduler/agent integration boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, identity, governance
 
 ## Context
 

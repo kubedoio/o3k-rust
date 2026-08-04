@@ -1,6 +1,10 @@
 # ADR-0138 — Serialize measurement artifact writers
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 `tests/measure-testlab.sh` takes an exclusive `flock` on a lock file inside
 the configured artifact directory before removing or writing any measurement

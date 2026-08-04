@@ -1,8 +1,12 @@
 # ADR-0120 — Fence uninstall paths before removing files
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side preparation of issue #90. This ADR does not
+#90. This ADR does not
 claim that a clean Debian host passed installation or the TestLab lifecycle.
 
 ## Context

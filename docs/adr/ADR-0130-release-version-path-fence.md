@@ -1,8 +1,12 @@
 # ADR-0130 — Fence release version input before packaging cleanup
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side implementation of issue #93. This does not
+#93. This does not
 claim that a release is ready or that any artifact has been published.
 
 ## Decision

@@ -1,8 +1,10 @@
 # ADR-0059 — Ownership fencing for libvirt agent mutations
 
-## Status
-
-Accepted for the compute-agent lifecycle boundary.
+Status: Accepted for the compute-agent lifecycle boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

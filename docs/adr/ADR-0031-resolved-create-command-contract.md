@@ -1,8 +1,12 @@
 # ADR-0031 — Typed resolved inputs for agent create commands
 
-## Status
+Status: Accepted as the create-contract slice for issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, governance
 
-Accepted as the create-contract slice for issue #47.
+#47.
 
 ## Context
 

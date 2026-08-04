@@ -1,8 +1,12 @@
 # ADR-0149 — Reject unsupported config-drive server requests
 
-## Status
+Status: Accepted for the bounded issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
-Accepted for the bounded issue #80 API safety slice.
+#80 API safety slice.
 
 ## Context
 

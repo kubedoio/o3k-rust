@@ -6,6 +6,7 @@ Review date: 2026-09-01
 Responsible maintainer: O3K maintainers
 Supersedes: none
 Superseded-by: none
+Affected-services: governance
 
 This is a proposal. It is not an accepted architecture, public-contract, or
 release-governance decision until a human maintainer accepts it in a reviewed

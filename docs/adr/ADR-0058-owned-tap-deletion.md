@@ -1,8 +1,10 @@
 # ADR-0058 — Ownership-checked TAP deletion
 
-## Status
-
-Accepted for host-network cleanup safety.
+Status: Accepted for host-network cleanup safety.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

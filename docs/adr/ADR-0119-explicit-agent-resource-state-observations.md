@@ -1,8 +1,12 @@
 # ADR-0119 — Propagate explicit resource state in agent observations
 
-## Status
+Status: Accepted for the repository protocol/agent slice of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
-Accepted for the repository protocol/agent slice of issue #83.
+#83.
 
 ## Context
 

@@ -1,8 +1,10 @@
 # ADR-0035 — Isolate all image publication temporary files
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: image, governance
 
 ## Context
 

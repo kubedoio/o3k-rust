@@ -1,6 +1,10 @@
 # ADR-0139 — Preserve foreign installation files
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
 The installer rejects symlinked or non-directory `PREFIX/bin`, `PREFIX/share`,
 and `PREFIX/share/o3k` paths before creating files. It refuses to overwrite an

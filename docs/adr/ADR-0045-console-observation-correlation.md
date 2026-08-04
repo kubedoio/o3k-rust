@@ -1,8 +1,10 @@
 # ADR-0045 — Correlate console observations to the fenced agent
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
 ## Context
 
