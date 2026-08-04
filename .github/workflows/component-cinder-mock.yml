@@ -1,4 +1,4 @@
-name: External Cinder Service Testbed
+name: Mock Cinder Component Test
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  cinder-testbed:
-    name: External Cinder Service-Under-Test
+  cinder-mock:
+    name: Mock Cinder Component Test (not a real Cinder deployment)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,5 +19,5 @@ jobs:
         with:
           toolchain: 1.97.1
 
-      - name: Run external Cinder service-under-test runner
-        run: bash scripts/external-cinder-testbed-runner.sh
+      - name: Run mock Cinder component test
+        run: bash scripts/component-cinder-mock.sh
