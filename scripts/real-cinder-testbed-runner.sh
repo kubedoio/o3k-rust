@@ -257,7 +257,8 @@ osapi_volume_listen_port = ${CINDER_PORT}
 connection = mysql+pymysql://${DB_USER}:${DB_PW}@127.0.0.1/${DB_NAME}
 [keystone_authtoken]
 www_authenticate_uri = http://127.0.0.1:${O3K_PORT}/
-auth_url = http://127.0.0.1:${O3K_PORT}/
+auth_url = http://127.0.0.1:${O3K_PORT}/v3
+identity_uri = http://127.0.0.1:${O3K_PORT}/v3
 memcached_servers = 127.0.0.1:11211
 auth_type = password
 project_domain_name = Default
@@ -389,11 +390,11 @@ echo "==> Workflow: catalog discovery of the external volumev3 endpoint..."
 grep -q "127.0.0.1:${CINDER_PORT}" "${EVIDENCE_DIR}/validated-token.json"
 
 echo "==> Starting real Cinder services from the pinned venv..."
-"${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" &
+"${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" > "${EVIDENCE_DIR}/cinder-api.log" 2>&1 &
 CINDER_API_PID=$!
-"${VENV_DIR}/bin/cinder-scheduler" --config-file "${CONF}" &
+"${VENV_DIR}/bin/cinder-scheduler" --config-file "${CONF}" > "${EVIDENCE_DIR}/cinder-scheduler.log" 2>&1 &
 CINDER_SCHED_PID=$!
-"${VENV_DIR}/bin/cinder-volume" --config-file "${CONF}" &
+"${VENV_DIR}/bin/cinder-volume" --config-file "${CONF}" > "${EVIDENCE_DIR}/cinder-volume.log" 2>&1 &
 CINDER_VOL_PID=$!
 
 echo "==> Waiting for cinder-api to become reachable..."
@@ -402,7 +403,7 @@ for i in $(seq 1 60); do
   curl -s -o /dev/null -w "%{http_code}" -m 2 "http://127.0.0.1:${CINDER_PORT}/v3/" 2>/dev/null | grep -qE "^[24][0-9]{2}$" && { CINDER_UP=yes; break; }
   sleep 2
 done
-[ "${CINDER_UP}" = "yes" ] || { echo "ERROR: cinder-api did not become reachable"; tail -30 "${EVIDENCE_DIR}/o3kd.log" 2>/dev/null || true; exit 1; }
+[ "${CINDER_UP}" = "yes" ] || { echo "ERROR: cinder-api did not become reachable"; echo "--- cinder-api.log ---"; tail -30 "${EVIDENCE_DIR}/cinder-api.log" 2>/dev/null || true; echo "--- cinder-scheduler.log ---"; tail -10 "${EVIDENCE_DIR}/cinder-scheduler.log" 2>/dev/null || true; echo "--- cinder-volume.log ---"; tail -10 "${EVIDENCE_DIR}/cinder-volume.log" 2>/dev/null || true; exit 1; }
 echo "    cinder-api reachable"
 
 echo "==> Workflow: create a real volume through real Cinder..."
