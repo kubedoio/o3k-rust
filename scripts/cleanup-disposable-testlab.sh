@@ -15,7 +15,7 @@ sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" \
 EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 EXPECTED_INVENTORY_ROOT="${RUNNER_TEMP%/}/o3k-testlab-inventory/${RUN_ID}"
 EXPECTED_ROOT="/var/lib/o3k-testlab/${RUN_ID}"
-if [[ "$RUN_ID" =~ ^local- ]]; then
+if [[ "$RUN_ID" =~ ^local- || "${O3K_TESTLAB_STATE_ROOT:-}" == "${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}" ]]; then
   EXPECTED_ROOT="${RUNNER_TEMP%/}/o3k-testlab/${RUN_ID}"
 fi
 STATE_ROOT="${O3K_TESTLAB_STATE_ROOT:-$EXPECTED_ROOT}"
