@@ -1,8 +1,10 @@
 # ADR-0077 — Fail-closed validation for bounded libvirt create inputs
 
-## Status
-
-Accepted for the bounded libvirt provider create path.
+Status: Accepted for the bounded libvirt provider create path.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, governance
 
 ## Context
 

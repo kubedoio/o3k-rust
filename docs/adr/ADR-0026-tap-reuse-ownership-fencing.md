@@ -1,8 +1,10 @@
 # ADR-0026 — TAP reuse ownership fencing
 
-## Status
-
-Accepted for the portable host-network safety slice.
+Status: Accepted for the portable host-network safety slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

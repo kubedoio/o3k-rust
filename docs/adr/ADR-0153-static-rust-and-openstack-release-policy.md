@@ -6,6 +6,7 @@ Review date: 2027-08-02
 Responsible maintainer: O3K maintainers
 Supersedes: provisional Rust 1.95/Flamingo-only draft decisions
 Superseded-by: none
+Affected-services: governance
 
 ## Context
 

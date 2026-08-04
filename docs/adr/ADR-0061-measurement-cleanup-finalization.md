@@ -1,8 +1,10 @@
 # ADR-0061 — Finalize measurement cleanup status on process exit
 
-## Status
-
-Accepted for the measurement and release-gate boundary.
+Status: Accepted for the measurement and release-gate boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: cli, governance
 
 ## Context
 

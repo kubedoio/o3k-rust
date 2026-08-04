@@ -1,8 +1,12 @@
 # ADR-0107 — Retry Placement release after provider deletion
 
-## Status
+Status: Accepted for the repository-side issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
-Accepted for the repository-side issue #82 lifecycle slice.
+#82 lifecycle slice.
 
 ## Context
 

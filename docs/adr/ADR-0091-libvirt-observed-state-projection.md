@@ -1,8 +1,12 @@
 # ADR-0091 — Fail closed on ambiguous libvirt lifecycle observations
 
-## Status
+Status: Accepted for the portable issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
-Accepted for the portable issue #83 lifecycle-observation slice.
+#83 lifecycle-observation slice.
 
 ## Context
 

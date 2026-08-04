@@ -1,8 +1,10 @@
 # ADR-0055 — Read-only libvirt config-drive attachment
 
-## Status
-
-Accepted for the libvirt XML boundary.
+Status: Accepted for the libvirt XML boundary.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, image, governance
 
 ## Context
 

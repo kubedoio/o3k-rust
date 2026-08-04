@@ -1,8 +1,10 @@
 # ADR-0023 — Stateful fake command realization
 
-## Status
-
-Accepted as test-support coverage for the compute-agent command protocol.
+Status: Accepted as test-support coverage for the compute-agent command protocol.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, governance
 
 ## Context
 

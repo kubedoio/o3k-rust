@@ -1,8 +1,10 @@
 # ADR-0032 — Use the configured password in measurement authentication
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, cli, governance
 
 ## Context
 

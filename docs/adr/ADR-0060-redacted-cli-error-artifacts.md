@@ -1,8 +1,10 @@
 # ADR-0060 — Do not persist raw CLI error output in evidence artifacts
 
-## Status
-
-Accepted for the OpenStack CLI harness.
+Status: Accepted for the OpenStack CLI harness.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, cli, governance
 
 ## Context
 

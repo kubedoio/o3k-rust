@@ -1,6 +1,10 @@
 # ADR-0136 — Fence release output roots and bundle file types
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 Release packaging rejects a configured `dist` root that is a symlink or other
 special file before invoking Cargo or removing an output directory. The root

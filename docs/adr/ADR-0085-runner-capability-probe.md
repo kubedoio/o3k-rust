@@ -1,8 +1,10 @@
 # ADR-0085 — Read-only protected runner capability probe
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: cli, governance
 
 ## Context
 

@@ -1,8 +1,10 @@
 # ADR-0095 — Require stable, redacted resource-leak evidence
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
 ## Context
 

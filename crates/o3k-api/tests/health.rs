@@ -993,3 +993,144 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     std::fs::remove_dir_all(network_root)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std::error::Error>> {
+    let req = Request::builder().uri("/v2.1").body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 2048).await?)?;
+    assert_eq!(json["version"]["id"], "v2.1");
+    assert_eq!(json["version"]["version"], "2.1");
+    assert_eq!(json["version"]["min_version"], "2.1");
+
+    let req = Request::builder().uri("/v2.1/").body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "compute 2.1"
+    );
+    assert_eq!(
+        resp.headers().get("X-OpenStack-Nova-API-Version").unwrap(),
+        "2.1"
+    );
+    assert_eq!(
+        resp.headers().get("Vary").unwrap(),
+        "OpenStack-API-Version, X-OpenStack-Nova-API-Version"
+    );
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .header("OpenStack-API-Version", "compute 2.1")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "compute 2.1"
+    );
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .header("X-OpenStack-Nova-API-Version", "2.1")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "compute 2.1"
+    );
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .header("OpenStack-API-Version", "compute 2.95")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+    let json: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 2048).await?)?;
+    assert_eq!(json["computeFault"]["code"], 406);
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .header("OpenStack-API-Version", "compute invalid_ver extra_token")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    let req = Request::builder()
+        .uri("/v2.1/bootstrap-project/flavors")
+        .header("OpenStack-API-Version", "placement 1.28")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "compute 2.1"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn microversion_placement_discovery_and_negotiation() -> Result<(), Box<dyn std::error::Error>>
+{
+    let req = Request::builder().uri("/placement").body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 2048).await?)?;
+    assert_eq!(json["versions"][0]["id"], "v1.0");
+    assert_eq!(json["versions"][0]["min_version"], "1.0");
+    assert_eq!(json["versions"][0]["max_version"], "1.28");
+
+    let req = Request::builder()
+        .uri("/placement/resource_providers")
+        .header("OpenStack-API-Version", "placement 1.28")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "placement 1.28"
+    );
+
+    let req = Request::builder()
+        .uri("/placement/resource_providers")
+        .header("OpenStack-API-Version", "placement latest")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(
+        resp.headers().get("OpenStack-API-Version").unwrap(),
+        "placement 1.28"
+    );
+
+    let req = Request::builder()
+        .uri("/placement/resource_providers")
+        .header("OpenStack-API-Version", "placement 1.39")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_ACCEPTABLE);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn identity_image_network_services_have_no_microversion_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let req = Request::builder().uri("/v3").body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert!(resp.headers().get("OpenStack-API-Version").is_none());
+
+    let req = Request::builder().uri("/v2/images").body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert!(resp.headers().get("OpenStack-API-Version").is_none());
+
+    let req = Request::builder()
+        .uri("/v2.0/networks")
+        .body(Body::empty())?;
+    let resp = o3k_api::router().oneshot(req).await?;
+    assert!(resp.headers().get("OpenStack-API-Version").is_none());
+
+    Ok(())
+}

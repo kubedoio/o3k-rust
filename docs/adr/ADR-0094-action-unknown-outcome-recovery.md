@@ -1,8 +1,10 @@
 # ADR-0094 — Recover lifecycle actions from observed unknown outcomes
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

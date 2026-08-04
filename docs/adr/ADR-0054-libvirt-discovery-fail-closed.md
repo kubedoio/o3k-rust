@@ -1,6 +1,10 @@
 # ADR-0054: Fail closed on ambiguous libvirt ownership discovery
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

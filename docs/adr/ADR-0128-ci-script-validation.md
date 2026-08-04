@@ -1,6 +1,10 @@
 # ADR-0128 — Validate scripts used by protected workflows in normal CI
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

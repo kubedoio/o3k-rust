@@ -1,6 +1,10 @@
 # ADR-0137 — Fence the default SBOM output root
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 When `packaging/make-sbom.sh` is invoked without an explicit output path, its
 default `dist` root must be a real directory rather than a symlink or special

@@ -1,6 +1,10 @@
 # ADR-0068 — Validate existing bridge and uplink ownership
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

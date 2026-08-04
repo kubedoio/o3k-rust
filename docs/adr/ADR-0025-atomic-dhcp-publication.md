@@ -1,8 +1,10 @@
 # ADR-0025 — Atomic DHCP state publication
 
-## Status
-
-Accepted for the portable DHCP configuration slice.
+Status: Accepted for the portable DHCP configuration slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

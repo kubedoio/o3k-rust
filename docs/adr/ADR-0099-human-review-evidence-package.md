@@ -1,8 +1,12 @@
 # ADR-0099 — Make human review evidence explicit and fail closed
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
-Accepted for the repository-side preparation of issue #92. This ADR does not
+#92. This ADR does not
 accept the release or close the issue.
 
 ## Context

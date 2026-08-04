@@ -1,8 +1,10 @@
 # ADR-0048 — Make the real-libvirt runner execute the public lifecycle harness
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, cli, governance
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0141 — Fence events from replaced agent streams
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, identity, governance
 
 The control-plane registry treats the connection epoch currently attached to an
 agent identity as authoritative. Before publishing operation updates,

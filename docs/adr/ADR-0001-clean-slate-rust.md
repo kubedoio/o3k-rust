@@ -1,6 +1,10 @@
 # ADR-0001 — Clean-slate Rust implementation
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
 ## Decision
 

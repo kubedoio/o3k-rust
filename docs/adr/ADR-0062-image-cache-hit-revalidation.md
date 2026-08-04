@@ -1,6 +1,10 @@
 # ADR-0062 — Revalidate content-addressed image-cache hits
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: image, governance
 
 ## Context
 

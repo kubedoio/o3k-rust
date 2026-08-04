@@ -1,8 +1,10 @@
 # ADR-0073 — Roll back allocations on duplicate-name conflicts
 
-## Status
-
-Accepted for the alpha scheduler integration.
+Status: Accepted for the alpha scheduler integration.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, placement, governance
 
 ## Context
 

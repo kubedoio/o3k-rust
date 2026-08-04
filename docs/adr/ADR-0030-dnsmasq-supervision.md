@@ -1,8 +1,10 @@
 # ADR-0030 — Own the dnsmasq process lifecycle
 
-## Status
-
-Accepted for the portable DHCP process-lifecycle slice.
+Status: Accepted for the portable DHCP process-lifecycle slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Context
 

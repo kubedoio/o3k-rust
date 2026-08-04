@@ -1,6 +1,10 @@
 # ADR-0066 — Select the configured CellHV provider
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Context
 

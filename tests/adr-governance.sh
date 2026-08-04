@@ -2,85 +2,104 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-adr_root="${O3K_ADR_ROOT:-${repo_root}/docs/adr}"
 
-python3 - "${adr_root}" <<'PY'
-import pathlib
-import re
-import sys
+echo "Running primary ADR governance and normative drift validator..."
+python3 "${repo_root}/scripts/validate-adr-index.py" --root "${repo_root}"
 
-root = pathlib.Path(sys.argv[1])
-allowed = {"draft", "proposed", "accepted", "rejected", "superseded"}
-files = sorted(root.glob("ADR-*.md"))
-if not files:
-    raise SystemExit(f"no ADR files found under {root}")
+echo "Testing negative scenarios for ADR governance validator..."
 
-records = {}
-for path in files:
-    match = re.fullmatch(r"ADR-(\d{4})-.+\.md", path.name)
-    if not match:
-        raise SystemExit(f"invalid ADR filename: {path.name}")
-    identifier = f"ADR-{match.group(1)}"
-    if identifier in records:
-        raise SystemExit(f"duplicate ADR identifier: {identifier}")
-    text = path.read_text(encoding="utf-8")
-    heading = re.search(r"^#\s+(ADR-\d{4})\b", text, re.MULTILINE)
-    if not heading or heading.group(1) != identifier:
-        raise SystemExit(f"{path}: heading must identify {identifier}")
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-adr-test.XXXXXX")"
+trap 'rm -rf "${temp_dir}"' EXIT
 
-    status_match = re.search(r"^Status:\s*(\S+)", text, re.MULTILINE | re.IGNORECASE)
-    if status_match:
-        status = status_match.group(1).rstrip(".").lower()
-    else:
-        section = re.search(r"^##\s+Status\s*$([\s\S]*?)(?=^##\s+|\Z)", text, re.MULTILINE | re.IGNORECASE)
-        if not section:
-            raise SystemExit(f"{path}: missing Status metadata")
-        line = next((line.strip() for line in section.group(1).splitlines() if line.strip()), "")
-        status = line.split()[0].rstrip(".").lower() if line else ""
-    if status not in allowed:
-        raise SystemExit(f"{path}: invalid ADR status {status!r}")
+# Create minimal valid repo mock
+mkdir -p "${temp_dir}/docs/adr" "${temp_dir}/docs/specs"
+cat <<'EOF' > "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+# ADR-0001 — Test One
 
-    supersedes = []
-    for field in ("Supersedes", "Superseded-by"):
-        field_match = re.search(rf"^{field}:\s*(.+)$", text, re.MULTILINE | re.IGNORECASE)
-        if field_match and field_match.group(1).strip().lower() != "none":
-            supersedes.extend(re.findall(r"ADR-\d{4}", field_match.group(1)))
-    records[identifier] = {"path": path, "status": status, "links": supersedes}
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute
+EOF
 
-for identifier, record in records.items():
-    for target in record["links"]:
-        if target not in records:
-            raise SystemExit(f"{record['path']}: dangling ADR link {target}")
+cat <<'EOF' > "${temp_dir}/docs/adr/ADR-0002-test-two.md"
+# ADR-0002 — Test Two
 
-def visit(identifier, stack):
-    if identifier in stack:
-        cycle = " -> ".join(stack[stack.index(identifier):] + [identifier])
-        raise SystemExit(f"ADR supersession cycle: {cycle}")
-    if identifier in visited:
-        return
-    stack.append(identifier)
-    for target in records[identifier]["links"]:
-        visit(target, stack)
-    stack.pop()
-    visited.add(identifier)
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network
+EOF
 
-visited = set()
-for identifier in records:
-    visit(identifier, [])
+cat <<'EOF' > "${temp_dir}/docs/adr/README.md"
+# ADR Index
 
-print(f"validated ADR governance: {len(records)} ADRs, allowed statuses, resolved acyclic links")
-PY
+## ADR index
 
-temp_root="$(mktemp -d "${TMPDIR:-/tmp}/o3k-adr-governance.XXXXXX")"
-trap 'rm -rf "${temp_root}"' EXIT
-cp "${adr_root}/ADR-0153-static-rust-and-openstack-release-policy.md" "${temp_root}/ADR-0153-static-rust-and-openstack-release-policy.md"
-sed -i 's/^Status: Accepted$/Status: Invalid/' "${temp_root}/ADR-0153-static-rust-and-openstack-release-policy.md"
-if O3K_ADR_ROOT="${temp_root}" bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
-    echo "ADR validator accepted an invalid status" >&2
+| ADR | Subject | Status | Affected Services |
+| --- | --- | --- | --- |
+| [ADR-0001](ADR-0001-test-one.md) | Test One | Accepted | compute |
+| [ADR-0002](ADR-0002-test-two.md) | Test Two | Accepted | network |
+EOF
+
+cat <<'EOF' > "${temp_dir}/docs/NORMATIVE_SOURCES.md"
+# Normative source ownership
+
+## Authority map
+
+| Subject | Normative source | Summary-only documents |
+|---|---|---|
+| Test subject | `docs/adr/ADR-0001-test-one.md` | `README.md` |
+EOF
+
+cat <<'EOF' > "${temp_dir}/README.md"
+# Summary doc
+EOF
+
+# 1. Verify valid mock passes
+python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null
+
+# 2. Test invalid status fails
+sed -i 's/Status: Accepted/Status: InvalidStatus/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then
+    echo "ERROR: Validator accepted invalid status" >&2
     exit 1
 fi
-sed -i 's/^Status: Invalid$/Status: Proposed\nSupersedes: ADR-9999/' "${temp_root}/ADR-0153-static-rust-and-openstack-release-policy.md"
-if O3K_ADR_ROOT="${temp_root}" bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
-    echo "ADR validator accepted a dangling supersession link" >&2
+sed -i 's/Status: InvalidStatus/Status: Accepted/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+
+# 3. Test dangling supersession link fails
+sed -i 's/Supersedes: none/Supersedes: ADR-9999/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then
+    echo "ERROR: Validator accepted dangling supersession link" >&2
     exit 1
 fi
+sed -i 's/Supersedes: ADR-9999/Supersedes: none/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+
+# 4. Test missing affected-services fails
+sed -i 's/Affected-services: compute//' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then
+    echo "ERROR: Validator accepted missing affected-services metadata" >&2
+    exit 1
+fi
+sed -i 's/Superseded-by: none/Superseded-by: none\nAffected-services: compute/' "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+
+# 5. Test duplicate ADR number fails
+cp "${temp_dir}/docs/adr/ADR-0001-test-one.md" "${temp_dir}/docs/adr/ADR-0001-dup.md"
+if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then
+    echo "ERROR: Validator accepted duplicate ADR number" >&2
+    exit 1
+fi
+rm "${temp_dir}/docs/adr/ADR-0001-dup.md"
+
+# 6. Test broken link fails
+cat <<'EOF' >> "${temp_dir}/docs/adr/ADR-0001-test-one.md"
+[Broken Link](non-existent-file.md)
+EOF
+if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/dev/null 2>&1; then
+    echo "ERROR: Validator accepted broken markdown link" >&2
+    exit 1
+fi
+
+echo "All ADR governance validation checks and negative test cases passed successfully!"

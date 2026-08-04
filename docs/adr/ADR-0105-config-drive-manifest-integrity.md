@@ -1,8 +1,10 @@
 # ADR-0105 — Verify config-drive manifest integrity before destructive use
 
-## Status
-
-Accepted for the portable config-drive slice.
+Status: Accepted for the portable config-drive slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, governance
 
 ## Context
 

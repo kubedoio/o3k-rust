@@ -1,6 +1,10 @@
 # ADR-0125 — Release only the losing placement decision in a create race
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
 ## Context
 

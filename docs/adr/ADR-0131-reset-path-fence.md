@@ -1,8 +1,12 @@
 # ADR-0131 — Fence reset paths before service or filesystem mutation
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
-Accepted for the repository-side implementation of issue #90. This does not
+#90. This does not
 claim a clean Debian installation or host lifecycle result.
 
 ## Decision

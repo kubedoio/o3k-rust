@@ -1,8 +1,10 @@
 # ADR-0163 — Product profiles and deployment posture
 
 Status: Proposed
-
 Date: 2026-08-04
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 ## Context
 

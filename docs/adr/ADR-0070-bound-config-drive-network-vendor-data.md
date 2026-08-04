@@ -1,6 +1,10 @@
 # ADR-0070 — Bound config-drive network and vendor data
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, storage, governance
 
 ## Context
 

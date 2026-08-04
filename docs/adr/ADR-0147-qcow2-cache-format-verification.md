@@ -1,8 +1,12 @@
 # ADR-0147 — Verify qcow2 format before cache publication
 
-## Status
+Status: Accepted for the repository-side issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: image, governance
 
-Accepted for the repository-side issue #79 image-cache boundary.
+#79 image-cache boundary.
 
 ## Context
 

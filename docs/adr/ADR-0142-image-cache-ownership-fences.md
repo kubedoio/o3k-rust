@@ -1,6 +1,10 @@
 # ADR-0142 — Fence image cache directories and temporary artifacts
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, image, governance
 
 The image cache rejects symlinked or non-directory cache roots, `base`, and
 `overlays` children before creating or publishing artifacts. Existing overlays

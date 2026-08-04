@@ -1,8 +1,10 @@
 # ADR-0083 — Restrict systemd cleanup to the default system layout
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 ## Context
 

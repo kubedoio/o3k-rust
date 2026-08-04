@@ -1,8 +1,10 @@
 # ADR-0096 — Validate clean-install inputs before mutation
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

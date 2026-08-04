@@ -1,8 +1,10 @@
 # ADR-0049 — Upload the guest image and wait for CLI lifecycle evidence
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, cli, governance
 
 ## Context
 

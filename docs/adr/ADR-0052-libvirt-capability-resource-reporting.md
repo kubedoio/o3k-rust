@@ -1,6 +1,10 @@
 # ADR-0052: Report libvirt compute capacity through the agent contract
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, placement, governance
 
 ## Context
 

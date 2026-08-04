@@ -1,8 +1,10 @@
 # ADR-0010: Isolated DHCP ownership boundary
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 ## Decision
 

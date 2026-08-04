@@ -1,6 +1,10 @@
 # ADR-0006 — `o3k-compute` agent boundary and protocol
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Context
 

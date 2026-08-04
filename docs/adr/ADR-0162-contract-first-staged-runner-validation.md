@@ -1,8 +1,10 @@
 # ADR-0162 — Contract-first development and staged runner validation
 
 Status: Proposed
-
 Date: 2026-08-04
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, governance
 
 ## Context
 

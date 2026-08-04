@@ -1,8 +1,10 @@
 # ADR-0161 — Keystone trust root and service identity
 
 Status: Proposed
-
 Date: 2026-08-04
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, governance
 
 ## Context
 

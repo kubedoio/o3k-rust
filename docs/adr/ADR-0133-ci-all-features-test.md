@@ -1,8 +1,12 @@
 # ADR-0133 — Exercise every Cargo feature in normal CI
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, cli, governance
 
-Accepted for the repository-side implementation of issue #78. This does not
+#78. This does not
 claim agent-backed libvirt lifecycle or real-host execution.
 
 ## Decision

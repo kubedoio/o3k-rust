@@ -1,6 +1,10 @@
 # ADR-0071 — Serialize per-instance console mutations
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: placement, governance
 
 ## Context
 

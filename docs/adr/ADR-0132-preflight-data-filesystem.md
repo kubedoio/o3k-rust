@@ -1,8 +1,12 @@
 # ADR-0132 — Measure the configured data filesystem during preflight
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
-Accepted for the repository-side implementation of issue #89. This does not
+#89. This does not
 claim a clean Ubuntu installation or real TestLab lifecycle.
 
 ## Decision

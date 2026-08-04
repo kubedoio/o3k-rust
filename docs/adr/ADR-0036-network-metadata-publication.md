@@ -1,8 +1,10 @@
 # ADR-0036 — Isolate network metadata publication temporary files
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, governance
 
 ## Context
 

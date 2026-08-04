@@ -1,8 +1,12 @@
 # ADR-0101 — Bind release readiness to approved human review
 
-## Status
+Status: Accepted for the repository-side implementation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
-Accepted for the repository-side implementation of issue #93. This ADR does
+#93. This ADR does
 not assert that the alpha release is ready or that a human review exists.
 
 ## Context

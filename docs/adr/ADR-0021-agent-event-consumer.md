@@ -1,8 +1,10 @@
 # ADR-0021 — Live agent-event consumer boundary
 
-## Status
-
-Accepted for the alpha control-plane integration slice.
+Status: Accepted for the alpha control-plane integration slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, identity, governance
 
 ## Context
 

@@ -1,8 +1,10 @@
 # ADR-0160 — Service topology and execution boundaries
 
 Status: Proposed
-
 Date: 2026-08-04
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, storage, image, placement, identity, governance
 
 ## Context
 

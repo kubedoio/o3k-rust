@@ -1,8 +1,12 @@
 # ADR-0090 — Roll back in-memory Placement mutations on publication failure
 
-## Status
+Status: Accepted for the portable issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, governance
 
-Accepted for the portable issue #82 Placement lifecycle slice.
+#82 Placement lifecycle slice.
 
 ## Context
 

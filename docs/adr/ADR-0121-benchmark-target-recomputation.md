@@ -1,8 +1,12 @@
 # ADR-0121 — Recompute benchmark target results at the release gate
 
-## Status
+Status: Accepted for the repository-side preparation of issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
-Accepted for the repository-side preparation of issue #91. This does not claim
+#91. This does not claim
 that real-host measurements exist or pass.
 
 ## Context

@@ -1,8 +1,10 @@
 # ADR-0042 — Do not label libvirt preflight as lifecycle readiness
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, cli, governance
 
 ## Context
 

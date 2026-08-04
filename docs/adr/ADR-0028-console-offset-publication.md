@@ -1,8 +1,10 @@
 # ADR-0028 — Bounded console offset reads
 
-## Status
-
-Accepted for the durable console-service slice.
+Status: Accepted for the durable console-service slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
 ## Context
 

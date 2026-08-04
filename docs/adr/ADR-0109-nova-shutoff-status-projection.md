@@ -1,8 +1,12 @@
 # ADR-0109 — Project powered-off libvirt domains as Nova `SHUTOFF`
 
-## Status
+Status: Accepted for the portable issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, cli, governance
 
-Accepted for the portable issue #83 observed-state slice.
+#83 observed-state slice.
 
 ## Context
 

@@ -1,6 +1,10 @@
 # ADR-0140 — Fence managed TAPs, DHCP leases, and port MACs
 
 Status: accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
 O3K network discovery and reuse now query detailed link metadata and require
 `tun type tap` in addition to the expected MAC and managed bridge. A

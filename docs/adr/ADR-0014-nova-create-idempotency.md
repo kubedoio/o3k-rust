@@ -1,8 +1,11 @@
 # ADR-0014 — Deterministic Nova create retries
 
-## Status
+Status: Accepted for the durable fake/provider lifecycle foundation; provider-agent
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, governance
 
-Accepted for the durable fake/provider lifecycle foundation; provider-agent
 dispatch and dependent-resource cleanup remain separate issue #47 work.
 
 ## Decision

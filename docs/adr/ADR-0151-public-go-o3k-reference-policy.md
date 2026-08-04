@@ -1,6 +1,10 @@
 # ADR-0151 — Public Go O3K as a non-normative reference
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: identity, cli, governance
 
 ## Context
 

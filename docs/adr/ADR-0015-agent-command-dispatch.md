@@ -1,8 +1,10 @@
 # ADR-0015 — Agent command dispatch boundary
 
-## Status
-
-Accepted for the alpha lifecycle slice.
+Status: Accepted for the alpha lifecycle slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, identity, governance
 
 ## Context
 

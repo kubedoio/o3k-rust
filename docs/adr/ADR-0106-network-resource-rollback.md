@@ -1,8 +1,12 @@
 # ADR-0106 — Roll back O3K-created host-network resources
 
-## Status
+Status: Accepted for the bounded portable issue
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, governance
 
-Accepted for the bounded portable issue #81 network-safety slice.
+#81 network-safety slice.
 
 ## Context
 
@@ -32,4 +36,3 @@ interfaces remain protected by the existing bridge-kind and TAP-ownership
 fences. A failed cleanup is observable and requires reconciliation or operator
 action. This decision does not claim real-host bridge/TAP, guest connectivity,
 DHCP, restart, or cleanup acceptance; those remain host-gated issue #81 work.
-

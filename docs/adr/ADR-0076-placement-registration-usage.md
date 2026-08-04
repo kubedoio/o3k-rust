@@ -1,6 +1,10 @@
 # ADR-0076 — Reconcile usage during provider registration
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: network, placement, governance
 
 ## Context
 

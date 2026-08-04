@@ -1,6 +1,10 @@
 # ADR-0123 — Keep the protobuf compatibility baseline off the checkout branch
 
 Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: governance
 
 ## Context
 

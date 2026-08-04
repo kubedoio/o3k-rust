@@ -1,8 +1,10 @@
 # ADR-0075 — Harden OpenStack CLI lifecycle evidence
 
-## Status
-
-Accepted
+Status: Accepted
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: cli, governance
 
 ## Context
 

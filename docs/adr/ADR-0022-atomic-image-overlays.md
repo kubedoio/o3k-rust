@@ -1,8 +1,10 @@
 # ADR-0022 — Atomic image-overlay publication
 
-## Status
-
-Accepted for the portable image-cache slice.
+Status: Accepted for the portable image-cache slice.
+Date: 2026-08-01
+Supersedes: none
+Superseded-by: none
+Affected-services: compute, network, image, governance
 
 ## Context
 
