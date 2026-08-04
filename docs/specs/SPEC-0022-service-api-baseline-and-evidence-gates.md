@@ -2,57 +2,79 @@
 
 Status: Proposed
 
-Primary reference profile: OpenStack 2026.1 Gazpacho
+Primary OpenStack reference: 2026.1 Gazpacho
 
-Backward reference profile: OpenStack 2025.2 Flamingo where explicitly listed
+Backward reference: 2025.2 Flamingo where explicitly listed
 
-Related decisions:
+Related decisions and specifications:
 
 - [ADR-0160](../adr/ADR-0160-service-topology-and-execution-boundaries.md)
 - [ADR-0162](../adr/ADR-0162-contract-first-staged-runner-validation.md)
+- [ADR-0163](../adr/ADR-0163-product-profiles-and-deployment-posture.md)
+- [SPEC-0024](SPEC-0024-product-profiles-and-claims.md)
 
 ## Purpose
 
 O3K implements declared OpenStack-compatible profiles, not entire upstream
-services. This specification defines how a profile is frozen, implemented,
-tested, advertised, and released.
+services. This specification defines how an API profile is frozen, implemented,
+tested, advertised, and released within an O3K product profile.
 
-The baseline prevents two failure modes:
+The baseline prevents:
 
 - discovering fundamental API requirements one endpoint at a time on a
   privileged runner;
-- delaying all integration until an undefined goal of “complete Nova,
-  Neutron, Cinder, and Keystone” is reached.
+- delaying all integration until undefined complete OpenStack parity;
+- presenting an external-hosted service as an O3K implementation;
+- promoting behavior verified in one product profile into another;
+- advertising database, footprint, edge, metadata, or microversion claims that
+  exceed executable evidence.
+
+## Product-profile binding
+
+Every compatibility record belongs to one or more product profiles from
+`compatibility/product-profiles.yaml`:
+
+- `openstack-service-testbed`;
+- `native-rust-testlab`;
+- `small-edge-cloud`;
+- later explicitly accepted profiles.
+
+The same HTTP operation may have different dependencies and evidence in
+different profiles. For example, `volumev3` may identify an `external-hosted`
+Cinder endpoint in the service-testbed profile while later identifying an
+`o3k-implemented` native Cinder profile. These claims must never be conflated.
 
 ## Compatibility record
 
 Every advertised operation has a machine-readable record containing:
 
-- profile ID and service type;
+- product profile ID;
+- service type and ownership mode (`o3k-implemented` or `external-hosted`);
 - operation ID;
 - HTTP method and canonical path;
-- API version, microversion range, or extension;
+- upstream reference release and service API;
+- upstream reference maximum where relevant;
+- O3K advertised, implemented, and verified version or microversion windows;
 - auth scope and policy ID;
-- required request headers, path/query parameters, and body fields;
+- required request headers, parameters, and body fields;
 - response headers, status code, body fields, and error envelopes;
 - supported and explicitly unsupported fields;
 - idempotency behavior;
 - domain state transition;
 - cross-service dependencies;
-- provider capability requirement;
+- provider or external-service capability requirement;
+- database and execution-profile requirements;
 - official public reference;
 - public client/SDK/Tempest evidence;
-- portable test IDs;
-- component-runner evidence;
-- full-cloud evidence;
+- portable, process, component, full-profile, and release evidence IDs;
 - known deviations and release claim.
 
 A route without this record is unsupported. A record without executable
-evidence is planned or implemented, not verified.
+evidence is specified or implemented, not verified.
 
 ## Evidence states
 
-Each operation and workflow records these independent states:
+Each operation and workflow records independent states:
 
 ```text
 missing
@@ -61,30 +83,34 @@ implemented
 portable-contract-verified
 process-verified
 component-real-host-verified
-full-cloud-verified
+full-profile-verified
 release-claimed
 ```
 
-A later state requires all earlier states. `skipped`, `ready`, unit-test-only,
-or fake-provider-only results cannot be promoted to real-host verification.
+A later state requires all earlier applicable states. `skipped`, `ready`, unit-
+test-only, fake-provider-only, or documentation-only results cannot be promoted
+to real-host verification.
 
-## TestLab core profile
+## Native ephemeral-root TestLab baseline
 
-The first ephemeral-root TestLab profile is intentionally bounded.
+The first native TestLab profile is intentionally bounded.
 
 ### Identity / Keystone-compatible
 
-Required operations and behavior:
+Required behavior:
 
-- version discovery for the advertised identity root;
+- version discovery;
 - project-scoped password authentication;
 - `X-Subject-Token` issuance;
 - token expiry and verification;
-- service catalog for enabled profile services;
+- catalog for enabled profile services;
 - project ID/path consistency;
+- durable ID/name separation;
 - generic auth failure and redaction.
 
-Required semantics are further defined in SPEC-0020.
+The hosted-service profile additionally requires service users, services,
+regions, endpoints, and public token validation as defined in SPEC-0020 and
+SPEC-0023.
 
 ### Image / Glance-compatible
 
@@ -92,17 +118,13 @@ Required operations:
 
 - create image metadata;
 - upload content;
-- list images;
-- show image;
-- authenticated content download;
-- delete image.
+- list, show, authenticated download, and delete.
 
 Required behavior:
 
-- size and checksum validation;
-- supported disk/container formats;
+- size, checksum, and format validation;
 - queued/saving/active or documented equivalent transitions;
-- immutable active content for the profile;
+- immutable active content in the profile;
 - project visibility;
 - missing/inactive-image rejection before compute dispatch;
 - no host path exposure.
@@ -118,14 +140,12 @@ Required operations:
 Required behavior:
 
 - flat provider-network profile;
-- IPv4 subnet, gateway, allocation pool, and DNS validation;
+- IPv4 subnet, gateway, pool, and DNS validation;
 - stable MAC and fixed-IP ownership;
-- network/subnet/port dependency rules;
-- port binding intent and selected host;
-- conflict detection;
-- complete cleanup.
+- dependency and port-binding intent;
+- selected host, conflict detection, and complete cleanup.
 
-Not included in the first profile:
+Not included:
 
 - routers;
 - floating IPs;
@@ -135,19 +155,18 @@ Not included in the first profile:
 
 ### Placement-compatible
 
-Required operations or equivalent internal/public profile behavior:
+Required operations or equivalent declared behavior:
 
 - resource-provider registration and discovery;
 - VCPU, MEMORY_MB, and DISK_GB inventory;
 - usage and available capacity;
 - generation-protected inventory update;
-- candidate selection required by the scheduler;
+- scheduler candidate selection;
 - allocation create/show/delete;
 - capacity and generation conflict responses.
 
-If public Placement endpoints are advertised, their exact operations must be
-listed in the compatibility manifest. Internal-only behavior must not be
-advertised as public Placement parity.
+Public Placement parity is advertised only for operations listed in the
+manifest.
 
 ### Compute / Nova-compatible
 
@@ -158,14 +177,14 @@ Required operations:
 - server create/list/detail/show/delete;
 - server stop/start/hard reboot;
 - console-log retrieval;
-- version discovery and the selected microversion range.
+- version discovery and the selected verified microversion window.
 
 Required create validation:
 
 - token/project path;
 - active image;
 - immutable flavor snapshot;
-- owned keypair when requested;
+- owned keypair where requested;
 - valid network/port dependencies;
 - Placement capacity;
 - idempotency identity;
@@ -180,126 +199,159 @@ Required lifecycle behavior:
 - console output is real, bounded, authorized, and path-safe;
 - restart preserves resource identity.
 
-Not included in the first profile:
+Not included:
 
-- resize;
-- rebuild;
-- rescue;
-- live migration;
-- evacuation;
-- server groups;
-- NUMA or PCI passthrough;
+- resize, rebuild, rescue, live migration, evacuation;
+- server groups, NUMA, PCI passthrough;
 - full Nova extension parity.
 
-### Volume / Cinder-compatible
+### Guest metadata
 
-The first ephemeral-root TestLab profile does not require Cinder and does not
-advertise `volumev3`.
+The first native alpha uses config-drive/cloud-init only. Metadata HTTP is
+unsupported and unadvertised until a separate security/networking profile and
+real guest-isolation evidence exist.
 
-The later persistent-volume profile requires a separately frozen baseline.
-Minimum planned operations:
+### Native volume / Cinder-compatible
 
-- volume type list/show and operator-managed create where selected;
-- volume create/list/show/delete;
-- attachment create/show/update/delete or the selected Cinder attachment
-  sequence;
-- Nova volume attach/detach surface required by the client workflow;
-- backend capability and availability evidence.
+The first ephemeral-root profile does not require or advertise native Cinder.
 
-Minimum planned behavior:
+A later O3K-owned persistent-volume profile freezes its own operations,
+including selected volume types, volumes, attachments, Nova attach/detach,
+backend capabilities, `StorageProvider`, and real storage evidence.
 
-- project ownership and policy;
-- size and type validation;
-- idempotent backend create/delete;
-- attachment state machine;
-- secret-safe connection information;
-- local LVM reference backend before optional Ceph RBD;
-- timeout/unknown-outcome recovery;
-- no boot-from-volume claim until separately specified and verified.
+No boot-from-volume claim is made until separately specified and verified.
+
+## OpenStack service-testbed baseline
+
+A hosted-service profile freezes only the satellite operations required by the
+selected real OpenStack service.
+
+For external Cinder, the profile includes the selected:
+
+- service-user authentication;
+- public Identity token validation;
+- services, regions, endpoints, and dynamic catalog behavior;
+- Glance image access;
+- Nova volume-attachment operations;
+- typed outbound Cinder attachment sequence;
+- optional Neutron or Placement operations required by the selected test.
+
+The external Cinder endpoint uses `ownership_mode: external-hosted`. It retains
+its own database, message bus, processes, backend, migrations, upgrades, and
+health. See SPEC-0023.
+
+## Small edge-cloud baseline
+
+The edge profile reuses only operations verified for its declared topology and
+adds profile-specific requirements for:
+
+- approximately 10–20 hypervisors;
+- multi-host inventory, scheduling, allocations, and host binding;
+- enrollment, epochs, heartbeat, reconnect, and resync;
+- failure-safe retry and fencing;
+- backup, restore, upgrade, rollback, and diagnostics;
+- selected network and storage execution;
+- database, policy, quota, performance, and availability limits.
+
+An operation verified in a single-node TestLab is not automatically edge-
+verified.
 
 ## Service module definition of complete
 
-A logical service module is ready for integration only when:
+A logical O3K service module is ready for integration only when:
 
-1. its advertised profile is frozen;
+1. the product and API profiles are frozen;
 2. HTTP contracts and discovery are generated or validated;
-3. domain state machines and invariants are tested;
-4. store migrations and conformance tests pass;
-5. policy declarations fail closed;
-6. dependencies and compensation rules are executable;
-7. a stateful fake provider covers success and required failure modes;
-8. process-level OpenStack client tests pass;
-9. compatibility inventory and known deviations are current.
+3. domain invariants are tested;
+4. migrations and store conformance pass;
+5. policy fails closed;
+6. dependencies and compensation are executable;
+7. a stateful provider or external-service fake covers required outcomes;
+8. process-level public client tests pass;
+9. compatibility inventory and deviations are current.
 
-This definition does not require every upstream endpoint.
+This does not require every upstream endpoint.
 
-## Portable simulated-cloud gate
+## Portable profile gates
 
-Before the full runner, the following public workflow must pass against real
-O3K HTTP APIs, stores, state machines, scheduler, and reconciler with only
-provider execution faked:
+Before privileged integration, the selected public workflow passes against real
+O3K HTTP APIs, stores, identity, scheduler, operations, and reconciler with only
+execution or external services faked.
+
+Native TestLab example:
 
 ```text
 discover
 -> authenticate
--> create image and upload bytes
--> create network/subnet/port
--> create flavor and keypair
--> create server
--> observe ACTIVE-equivalent fake state
--> console
--> stop/start/reboot
--> optional volume create/attach/detach profile
+-> image lifecycle
+-> network/subnet/port
+-> flavor/keypair
+-> server create and observed state
+-> console and actions
 -> delete
 -> restart/replay and cleanup
 ```
 
-The gate also injects failure after every persisted phase and verifies reverse
-compensation, unknown outcomes, duplicate delivery, project isolation, and
-foreign-state preservation.
+External-service testbed example:
 
-## Component real-host gates
+```text
+create service project/user/roles
+-> register external-hosted endpoint
+-> service-user authentication
+-> public token validation
+-> selected satellite APIs
+-> external service workflow
+-> failure compensation and cleanup
+```
 
-### Compute component gate
+Every persisted phase receives failure, duplicate, timeout, restart, project-
+isolation, and compensation testing.
 
-Required evidence:
+## Component and full-profile gates
 
-- exact source commit and host capabilities;
+### Compute component
+
+- exact source and host capabilities;
 - real image transfer and digest;
-- `qemu-img` format/backing-chain inspection;
-- config-drive attachment;
+- `qemu-img` and backing-chain evidence;
+- config-drive attachment and guest consumption;
 - deterministic owned libvirt XML;
-- `virsh list --all` evidence during a bounded pre-cleanup hold point;
-- domain start, inspect, stop, start, reboot, console, and delete;
-- no compute-owned leak or foreign-domain change.
+- bounded `virsh list --all` diagnostic evidence;
+- lifecycle, console, restart, and complete cleanup;
+- no foreign-domain change.
 
-### Network component gate
+### Network component
 
-Required evidence:
-
-- selected port ID, MAC, fixed IP, subnet, and host;
+- selected port, MAC, fixed IP, subnet, and host;
 - owned TAP and bridge membership;
-- DHCP configuration and lease or equivalent binding evidence;
-- guest or isolated namespace connectivity test;
-- restart reconciliation;
-- no network-owned leak or foreign-link change.
+- DHCP or equivalent binding evidence;
+- guest or namespace connectivity;
+- restart reconciliation and cleanup;
+- no foreign-link change.
 
-### Storage component gate
+### Native storage component
 
-Required only for the persistent-volume profile:
+Required only for the native persistent-volume profile:
 
-- selected backend and capability;
-- real volume create/show/delete;
+- backend capability;
+- real volume lifecycle;
 - attachment preparation and teardown;
-- bounded secret-safe evidence;
+- secret-safe evidence;
 - restart reconciliation;
-- no storage-owned leak or foreign-volume change.
+- no foreign-volume change.
 
-## Full-cloud gate
+### External-service component
 
-The full-cloud gate runs only after the relevant component gates pass.
+Required for a hosted service:
 
-For the ephemeral-root profile:
+- selected external version and dependencies;
+- service-user auth and public token validation;
+- catalog discovery;
+- selected public workflow;
+- exact O3K/external failure boundary;
+- redaction and cleanup across explicitly managed test resources.
+
+### Full native profile
 
 ```text
 Keystone
@@ -308,30 +360,22 @@ Keystone
 -> Placement
 -> Nova
 -> o3k-compute/libvirt
--> guest boot and console
--> restart matrix
--> delete and complete cleanup
+-> guest boot, console, restart, delete, cleanup
 ```
 
-For the persistent-volume profile, Cinder and `o3k-storage` are added only
-after the storage component gate passes.
+### Full edge profile
 
-The full-cloud workflow must use public OpenStack APIs and standard clients. It
-must not repair state through direct database updates or unadvertised operator
-shortcuts.
+Adds supported host count, multi-host scheduling, fencing, backup/restore,
+upgrade, failure, database, policy, network, storage, and operational evidence.
+
+All full-profile workflows use public APIs and standard clients. Direct database
+repair or unadvertised operator shortcuts are forbidden.
 
 ## Diagnostic mode
 
-Protected component and full-cloud workflows support an opt-in diagnostic mode
-that:
-
-- is manual and trusted-runner only;
-- records the exact source SHA;
-- pauses after the failing or requested phase for a bounded duration;
-- emits redacted commands for inspecting owned state;
-- always performs ownership-checked cleanup after timeout or cancellation;
-- never uploads tokens, passwords, private keys, user-data, connection
-  information, or unrestricted daemon environments.
+Protected workflows may support an opt-in trusted diagnostic mode that records
+the exact source SHA, pauses for a bounded interval, exposes redacted owned-
+resource inspection commands, and always performs ownership-checked cleanup.
 
 Diagnostic mode is not passing evidence by itself.
 
@@ -340,29 +384,36 @@ Diagnostic mode is not passing evidence by itself.
 A baseline change requires:
 
 - issue and rationale;
+- product profile;
 - official public source;
-- compatibility inventory update;
-- spec and contract change;
+- compatibility and product-profile manifest update;
+- spec/contract change;
 - portable tests before implementation completion;
-- known-deviation and release-impact assessment;
-- human review when public API, auth, persistent state, or privileged execution
-  changes.
+- deviation and release-impact assessment;
+- human review for public API, auth, persistent state, privileged execution,
+  external-service trust, database, or product claims.
 
-LLM agents must not expand the profile because an adjacent endpoint appears
-easy to implement.
+LLM agents must not expand a profile because an adjacent endpoint appears easy.
 
 ## Release claims
 
 Release documentation names:
 
-- the primary OpenStack reference release;
-- per-service API versions and microversion ranges;
-- verified operations;
-- portable-only operations;
-- known deviations;
-- unsupported services and extensions;
-- component and full-cloud evidence IDs.
+- product profile;
+- O3K-implemented and external-hosted services;
+- primary reference release;
+- per-service versions and verified microversions;
+- verified and portable-only operations;
+- database support state;
+- metadata mechanism;
+- footprint measurement state;
+- known deviations and unsupported integrations;
+- component and full-profile evidence IDs.
 
-“O3K supports Gazpacho” is not a valid standalone claim. The valid claim is the
-published operation-level compatibility profile tested against Gazpacho-era
-specifications and clients.
+Invalid standalone claims include:
+
+- “O3K supports Gazpacho.”
+- “O3K implements Cinder” when only external Cinder is hosted.
+- “O3K runs in 50 MB” without a profile-specific measurement.
+- “PostgreSQL is supported for production” without an adapter and conformance.
+- “O3K connects to OpenStack” without a defined integration profile.
