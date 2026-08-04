@@ -31,6 +31,20 @@ For OpenStack compatibility questions specifically, use this source priority:
 3. O3K Rust ADRs, contracts, tests, and black-box evidence;
 4. public Go O3K as a non-normative secondary reference.
 
+## Normative source ownership
+
+Read `docs/NORMATIVE_SOURCES.md` before changing architecture, identity,
+workflows, compatibility manifests, execution protocols, or deployment
+profiles.
+
+- Summary documents explain intent and link to normative sources.
+- Do not copy a field-level contract, compensation state machine, or
+  authorization rule into multiple summaries.
+- When a summary conflicts with the named normative source, correct the summary.
+- An external-hosted service must never be described as O3K-implemented.
+- Runtime and release claims require executable evidence even when the spec is
+  accepted.
+
 ## Mandatory reading order
 
 Before editing code, read:
@@ -39,11 +53,12 @@ Before editing code, read:
 2. `docs/PROJECT_CHARTER.md`;
 3. `docs/CLEAN_IMPLEMENTATION.md`;
 4. `docs/ARCHITECTURE.md`;
-5. `docs/TEST_STRATEGY.md`;
-6. the relevant ADR, SPEC, compatibility profile, and execution contract;
-7. the assigned issue.
+5. `docs/NORMATIVE_SOURCES.md`;
+6. `docs/TEST_STRATEGY.md`;
+7. the relevant ADR, SPEC, compatibility profile, and execution contract;
+8. the assigned issue.
 
-For identity, service topology, provider boundaries, cross-service workflows, or runner changes, also read:
+For identity, service topology, provider boundaries, cross-service workflows, hosted-service profiles, or runner changes, also read:
 
 - `docs/adr/ADR-0160-service-topology-and-execution-boundaries.md`;
 - `docs/adr/ADR-0161-keystone-trust-and-service-identity.md`;
@@ -51,6 +66,7 @@ For identity, service topology, provider boundaries, cross-service workflows, or
 - `docs/specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md`;
 - `docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md`;
 - `docs/specs/SPEC-0022-service-api-baseline-and-evidence-gates.md`;
+- `docs/specs/SPEC-0023-external-cinder-service-under-test.md` when an external service is involved;
 - `contracts/execution-boundaries.md`.
 
 ## Issue-driven rule
@@ -61,6 +77,7 @@ For identity, service topology, provider boundaries, cross-service workflows, or
 - Do not expand scope because a nearby improvement looks easy.
 - Missing requirements must become an issue or spec amendment.
 - An endpoint outside the accepted compatibility profile must not be implemented opportunistically.
+- Do not create a micro-issue when the work is an acceptance criterion of an existing coherent issue.
 
 ## Required agent plan
 
@@ -71,8 +88,9 @@ Before code changes, post or record:
 - contracts and specs affected;
 - public reference inputs, pinned revisions, and provenance records;
 - the declared service/API profile operation being implemented;
+- whether the service is `o3k-implemented` or `external-hosted`;
 - cross-service dependencies and compensation phases;
-- the required evidence tier: portable, process, component real-host, full-cloud, or release;
+- the required evidence tier: portable, process, component real-host, hosted-service, full-cloud, or release;
 - tests to add first;
 - known uncertainties;
 - explicit non-goals.
@@ -84,16 +102,19 @@ Before code changes, post or record:
 - Logical service/provider separation must precede process separation.
 - Do not introduce a new daemon without an accepted ADR covering privilege, identity, protocol, failure domain, deployment, restart, and cleanup.
 - Keystone-compatible identity is the common trust and discovery root, not the transaction coordinator for servers, ports, volumes, or allocations.
-- Never use a display name where a durable project, user, service, resource, or provider ID is required.
+- Never use a display name where a durable project, user, service, endpoint, resource, or provider ID is required.
 - Cinder and `o3k-storage` do not block the first ephemeral-root libvirt guest.
+- A real external Cinder deployment retains its own database, message bus, service processes, backend, migrations, and upgrades.
 
 ## Compatibility-profile rules
 
-- O3K targets an operation-level profile, not complete OpenStack service parity.
+- O3K targets operation-level profiles, not complete OpenStack service parity.
 - Every public operation requires a compatibility record with method, path, API version or microversion, auth scope, request/response/error contract, state transition, dependencies, provider capability, tests, and known deviations.
 - A route without the required profile record is unsupported even when partial implementation exists.
-- Catalog entries advertise only implemented and enabled service profiles.
-- Do not advertise `volumev3`, advanced Neutron, or broad microversion ranges before their declared gates pass.
+- Catalog entries advertise only implemented and enabled profiles.
+- Catalog and manifests distinguish `o3k-implemented` services from `external-hosted` services.
+- Separate the upstream reference maximum, O3K advertised range, implemented range, and verified range.
+- Do not advertise `volumev3`, advanced Neutron, metadata HTTP, or broad microversion ranges before their declared gates pass.
 - Official OpenStack specifications and public client behavior remain normative.
 
 ## Evidence-ladder rules
@@ -102,10 +123,10 @@ Work proceeds in this order unless an accepted issue explicitly justifies otherw
 
 1. ADR/SPEC/contract and compatibility-profile validation;
 2. domain, store, migration, and policy tests;
-3. stateful provider conformance tests;
+3. stateful provider or external-service conformance tests;
 4. portable simulated-cloud integration;
 5. process-level client tests;
-6. compute/network/storage component real-host gate;
+6. compute/network/storage component or hosted-service real-host gate;
 7. full-cloud real-host gate;
 8. restart/failure matrix;
 9. release gate.
@@ -117,14 +138,14 @@ Rules:
 - Do not delay all real execution until an undefined goal of complete Nova, Neutron, Cinder, or Keystone parity.
 - Component real-host gates must preserve inspectable owned state through a bounded protected diagnostic hold before cleanup when diagnosis requires it.
 - A fake-provider, skipped, ready, or repository-only result is not real-host evidence.
-- Record implementation, portable evidence, component evidence, full-cloud evidence, and remaining acceptance independently.
+- Record implementation, portable evidence, component or hosted-service evidence, full-cloud evidence, and remaining acceptance independently.
 
 ## Implementation rules
 
 - Prefer explicit domain types over strings and maps.
 - Model lifecycle transitions as validated state machines.
 - Keep HTTP/OpenStack representations outside the core domain.
-- Keep provider-specific types outside the core domain.
+- Keep provider-specific and external-service client types outside the core domain.
 - Use one normalized typed `AuthContext` for all service authorization.
 - Preserve original user/project audit context and authenticated service identity for cross-service work.
 - Use idempotency keys or deterministic operation identities for retriable mutations.
@@ -134,7 +155,7 @@ Rules:
 - Observe before retrying destructive or duplicating mutations.
 - Avoid `unsafe`; each use requires a dedicated ADR, safety comments, tests, and reviewer approval.
 - Avoid global mutable state.
-- Never log secrets, tokens, image credentials, private keys, connection information, user-data, or unredacted provider payloads.
+- Never log secrets, tokens, image credentials, private keys, connection information, user-data, connector data, or unredacted provider payloads.
 - Every background task must have shutdown, retry, backoff, reconnect, and observability behavior.
 - New dependencies require justification, license compatibility, maintenance review, and minimal feature selection.
 
@@ -157,12 +178,12 @@ A change is incomplete until it has appropriate tests:
 
 - domain invariant tests;
 - protocol/contract tests;
-- provider fake and conformance tests;
+- provider or external-service fake and conformance tests;
 - cross-service compensation tests;
 - failure-path tests;
 - regression tests for bugs;
 - process-level tests;
-- component or full-cloud integration tests when required by the evidence tier.
+- component, hosted-service, or full-cloud integration tests when required by the evidence tier.
 
 Mocks that only repeat implementation expectations are not evidence. Prefer stateful fakes, real databases, real processes, and black-box HTTP tests. Do not mock away the exact execution boundary that an issue is supposed to prove.
 
@@ -174,7 +195,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
-Run additional contract, simulated-cloud, process, component, or integration commands named by the issue. Report commands and results in the PR.
+Run additional contract, simulated-cloud, process, component, hosted-service, or integration commands named by the issue. Report commands and results in the PR.
 
 ## PR response format
 
@@ -183,14 +204,14 @@ Every agent-authored PR description must include:
 - **Issue:** linked issue;
 - **Intent:** one paragraph;
 - **Design:** important choices and rejected alternatives;
-- **Profile:** service operations and evidence tier affected;
+- **Profile:** service ownership, operations, and evidence tier affected;
 - **Contracts:** changed or unchanged;
 - **Workflow:** dependencies, phases, and compensation affected;
 - **Tests:** exact commands and important cases;
-- **Evidence:** portable, component, full-cloud, or release status;
+- **Evidence:** portable, component, hosted-service, full-cloud, or release status;
 - **Risks:** unresolved concerns;
 - **Provenance:** public sources and AI tools used;
-- **Follow-ups:** separate issues, not hidden TODOs.
+- **Follow-ups:** separate coherent issues, not hidden TODOs or field-level micro-issues.
 
 When the public Go O3K repository is consulted, the PR must additionally record:
 
@@ -204,7 +225,7 @@ Go behavior is requirements and comparison evidence only. Official OpenStack spe
 ## Definition of done
 
 - acceptance criteria satisfied;
-- compatibility profile and evidence tier identified;
+- compatibility profile, service ownership, and evidence tier identified;
 - tests fail before/fix after when practical;
 - formatting, lint, unit, and relevant integration tests pass;
 - contracts, traceability, and documentation updated;
