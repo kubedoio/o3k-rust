@@ -106,6 +106,57 @@ PY
     exit 1
 fi
 
+# Stale host-resource check: a prior aborted run may have left a run-owned VG,
+# loop device, MariaDB database/user, or RabbitMQ user/vhost behind. Any such
+# resource must fail the run before mutation so a fresh run never collides with
+# a half-cleaned predecessor. Names use the run-owned o3k- prefixes.
+python3 - "${RESULT_PATH}" <<'PY'
+import json, subprocess, sys, time
+
+def run(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, check=True).stdout
+    except Exception:
+        return ""
+
+stale = []
+
+for vg in run(["vgs", "--noheadings", "-o", "vg_name"]).split():
+    vg = vg.strip()
+    if vg.startswith("o3k-vg-"):
+        stale.append({"resource": "lvm_vg", "name": vg})
+for line in run(["losetup", "-a"]).splitlines():
+    if "o3k" in line:
+        stale.append({"resource": "loop_device", "name": line.split(":", 1)[0]})
+for db in run(["mysql", "-N", "-e", "SHOW DATABASES;"]).split():
+    db = db.strip()
+    if db.startswith("o3k_cinder_"):
+        stale.append({"resource": "mariadb_database", "name": db})
+for user in run(["mysql", "-N", "-e", "SELECT User FROM mysql.user;"]).split():
+    user = user.strip()
+    if user.startswith("o3k_cinder_"):
+        stale.append({"resource": "mariadb_user", "name": user})
+for vhost in run(["rabbitmqctl", "list_vhosts"]).splitlines()[1:]:
+    vhost = vhost.strip()
+    if vhost.startswith("o3k_cinder_"):
+        stale.append({"resource": "rabbitmq_vhost", "name": vhost})
+for user in run(["rabbitmqctl", "list_users"]).splitlines()[1:]:
+    user = user.split()[0] if user.split() else ""
+    if user.startswith("o3k_cinder_"):
+        stale.append({"resource": "rabbitmq_user", "name": user})
+
+if stale:
+    with open(sys.argv[1], "w", encoding="utf-8") as output:
+        json.dump({"artifact_type": "real-cinder-workflow-result", "status": "blocked",
+                   "reason": "stale_run_owned_host_resources",
+                   "stale_host_resources": stale,
+                   "redacted": True, "finished_at": int(time.time())},
+                  output, indent=2)
+        output.write("\n")
+    print("real-cinder stale run-owned host resources detected", file=sys.stderr)
+    raise SystemExit(1)
+PY
+
 python3 - "${RESULT_PATH}" <<PY
 import json, sys, time
 with open("${RESULT_PATH}", "w", encoding="utf-8") as output:

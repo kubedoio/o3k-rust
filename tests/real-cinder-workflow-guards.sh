@@ -114,6 +114,67 @@ PY
 rm -rf "${STATE_BASE}/stale-run"
 bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"
 
+# Stale run-owned host resources block (a prior aborted run left a VG, loop
+# device, database/user, or RabbitMQ user/vhost behind). Fake host tooling is
+# injected so the test is deterministic and does not depend on real host state.
+FAKE_HOST_BIN="${WORK_DIR}/fake-host-bin"
+mkdir -p "${FAKE_HOST_BIN}"
+cat > "${FAKE_HOST_BIN}/vgs" <<'SH'
+#!/usr/bin/env bash
+if [[ "${O3K_FAKE_STALE_VG:-false}" == true ]]; then echo '  o3k-vg-stale'; fi
+SH
+cat > "${FAKE_HOST_BIN}/losetup" <<'SH'
+#!/usr/bin/env bash
+if [[ "${O3K_FAKE_STALE_LOOP:-false}" == true ]]; then echo '/dev/loop9: [0]:4096 (/var/lib/o3k-cinder-testbed/x/o3k-vg-x.img)'; fi
+SH
+cat > "${FAKE_HOST_BIN}/mysql" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == *"SHOW DATABASES"* && "${O3K_FAKE_STALE_DB:-false}" == true ]]; then echo 'o3k_cinder_stale'; fi
+if [[ "$*" == *"SELECT User FROM mysql.user"* && "${O3K_FAKE_STALE_DB_USER:-false}" == true ]]; then echo 'o3k_cinder_stale'; fi
+SH
+cat > "${FAKE_HOST_BIN}/rabbitmqctl" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == *"list_vhosts"* && "${O3K_FAKE_STALE_RABBIT:-false}" == true ]]; then echo -e 'Listing vhosts ...\no3k_cinder_stale'; fi
+if [[ "$*" == *"list_users"* && "${O3K_FAKE_STALE_RABBIT:-false}" == true ]]; then echo -e 'Listing users ...\no3k_cinder_stale\t[]'; fi
+SH
+chmod +x "${FAKE_HOST_BIN}"/*
+
+export O3K_FAKE_STALE_VG=true
+if PATH="${FAKE_HOST_BIN}:${PATH}" bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"; then
+    echo "stale run-owned LVM VG was accepted" >&2
+    exit 1
+fi
+python3 - "${ARTIFACT_DIR}/real-cinder-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked", value
+assert value["reason"] == "stale_run_owned_host_resources", value
+assert any(r["resource"] == "lvm_vg" and r["name"] == "o3k-vg-stale" for r in value["stale_host_resources"]), value
+PY
+unset O3K_FAKE_STALE_VG
+
+export O3K_FAKE_STALE_LOOP=true O3K_FAKE_STALE_DB=true O3K_FAKE_STALE_DB_USER=true O3K_FAKE_STALE_RABBIT=true
+if PATH="${FAKE_HOST_BIN}:${PATH}" bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"; then
+    echo "stale run-owned host resources were accepted" >&2
+    exit 1
+fi
+python3 - "${ARTIFACT_DIR}/real-cinder-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked" and value["reason"] == "stale_run_owned_host_resources", value
+kinds = {r["resource"] for r in value["stale_host_resources"]}
+assert kinds == {"loop_device", "mariadb_database", "mariadb_user", "rabbitmq_vhost", "rabbitmq_user"}, kinds
+PY
+unset O3K_FAKE_STALE_LOOP O3K_FAKE_STALE_DB O3K_FAKE_STALE_DB_USER O3K_FAKE_STALE_RABBIT
+
+# Clean host resources: guard is ready again.
+bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"
+python3 - "${ARTIFACT_DIR}/real-cinder-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "ready", value
+PY
+
 # Post-run guard passes on clean evidence.
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 export O3K_STATE_ROOT="${STATE_BASE}/run-1"
