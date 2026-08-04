@@ -201,7 +201,7 @@ apt-get install -y -qq \
 echo "==> Creating isolated Cinder virtual environment..."
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/pip" install --upgrade pip wheel setuptools
-"${VENV_DIR}/bin/pip" install "cinder==${CINDER_PYPI_PIN}" "pymysql" "cryptography"
+"${VENV_DIR}/bin/pip" install "cinder==${CINDER_PYPI_PIN}" "pymysql" "cryptography" "python-memcached"
 CINDER_MANAGE="${VENV_DIR}/bin/cinder-manage"
 if [ ! -x "${CINDER_MANAGE}" ]; then
   echo "ERROR: cinder-manage not found in venv"
