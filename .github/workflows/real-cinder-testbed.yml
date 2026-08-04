@@ -105,5 +105,15 @@ jobs:
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-before.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-after.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/evidence.yaml
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-cinder-environment.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/keystone-hosted-service-result.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-volume-lifecycle.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/nova-cinder-attachment-result.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/compute-block-device-result.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/guest-device-observation.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/attachment-restart-recovery.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-cinder-cleanup-result.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-result.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/tempest-cinder-summary.json
           if-no-files-found: warn
           retention-days: 14
