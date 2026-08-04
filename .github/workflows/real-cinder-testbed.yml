@@ -85,7 +85,6 @@ jobs:
             printf 'profile=%s\n' "gazpacho"
             state_root="/var/lib/o3k-cinder-testbed/${GITHUB_RUN_ID}"
             if sudo -n test -d "${state_root}"; then
-              evidence="$(sudo -n sh -c 'printf "%s" "$1"' _ "${state_root}" 2>/dev/null)"
               sudo -n find "${state_root}" -maxdepth 2 -name 'evidence.yaml' -printf '%p\n' 2>/dev/null || true
               sudo -n find "${state_root}" -maxdepth 2 -name 'evidence.yaml' -exec sudo -n grep -aE 'cinder_version|cinder_pin|evidence_tiers|profile:|release_series|codename' {} \; 2>/dev/null || true
             else
