@@ -1,0 +1,16 @@
+{
+  "artifact_type": "compute-agent-mtls",
+  "evidence": {
+    "command_state": "accepted",
+    "observation_state": "succeeded",
+    "provider_resource_id": "fake-30fde650-ada2-572f-b8ef-e4d2323ce742",
+    "redacted": true,
+    "status": "passed",
+    "transport": "mutual_tls"
+  },
+  "finished_at": 1785878508,
+  "reason": "mTLS command acceptance and observation completed",
+  "redacted": true,
+  "scope": "agent-provider-to-control-plane-to-agent-protocol",
+  "status": "passed"
+}

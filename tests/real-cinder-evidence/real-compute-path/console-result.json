@@ -1,0 +1,13 @@
+{
+  "artifact_type": "openstack-cli-console-result",
+  "assertion": "cirros_boot_marker",
+  "finished_at": 1785878368,
+  "marker_found": true,
+  "polling": {
+    "attempts": 1,
+    "max_attempts": 40
+  },
+  "reason": "CirrOS boot marker found",
+  "redacted": true,
+  "status": "passed"
+}
