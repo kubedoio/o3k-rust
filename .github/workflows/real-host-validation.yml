@@ -36,8 +36,8 @@ jobs:
           O3K_PROVIDER: agent
           # Scoped info filters keep protected evidence readable without
           # logging payloads; secrets remain excluded by the redacted fields.
-          O3K_LOG_FILTER: warn,o3k_api=info,o3k_compute_agent=info
-          O3K_COMPUTE_LOG_FILTER: warn,o3k_compute=info,o3k_compute_agent=info,o3k_libvirt=info
+          O3K_LOG_FILTER: debug
+          O3K_COMPUTE_LOG_FILTER: debug
           O3K_AGENT_INSPECT_PROBE_ENABLED: true
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
         run: bash scripts/bootstrap-disposable-testlab.sh

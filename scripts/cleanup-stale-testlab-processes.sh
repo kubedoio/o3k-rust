@@ -57,4 +57,19 @@ for base_dir in "${STATE_BASES[@]}"; do
   done
 done
 
+if command -v virsh >/dev/null 2>&1; then
+  for domain in $(sudo -n virsh -c qemu:///system list --all --name 2>/dev/null | grep '^o3k-' || true); do
+    echo "stale cleanup: destroying orphaned domain ${domain}"
+    sudo -n virsh -c qemu:///system destroy "$domain" >/dev/null 2>&1 || true
+    sudo -n virsh -c qemu:///system undefine "$domain" --remove-all-storage >/dev/null 2>&1 || true
+  done
+fi
+
+if command -v ip >/dev/null 2>&1; then
+  for link in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d'@' -f1 | grep '^o3k-' || true); do
+    echo "stale cleanup: removing orphaned network link ${link}"
+    sudo -n ip link delete "$link" >/dev/null 2>&1 || true
+  done
+fi
+
 echo "stale cleanup: complete"
