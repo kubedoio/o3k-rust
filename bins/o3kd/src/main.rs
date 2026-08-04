@@ -503,7 +503,7 @@ async fn run_agent_inspect_probe(
     // The probe starts when o3kd starts, but the lifecycle server is created
     // later. Use a long deadline so the probe can wait for the resource file
     // to appear and then for the inspect operation to reach a terminal state.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let mut resource_id: Option<Uuid> = None;
     while tokio::time::Instant::now() < deadline {
         let candidate = match (fixed_resource_id, resource_file) {
