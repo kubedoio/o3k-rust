@@ -258,6 +258,7 @@ for index, profile in enumerate(profiles):
                     "unsupported_operations",
                     "portable_contract_status",
                     "protected_runner_status",
+                    "version_pin",
                 ),
             )
             string(service["name"], f"{external_path}.name")
@@ -276,6 +277,19 @@ for index, profile in enumerate(profiles):
             string(service["protected_runner_status"], f"{external_path}.protected_runner_status")
             if service["protected_runner_status"] not in protected_values:
                 fail(f"{external_path}.protected_runner_status", "unknown evidence state")
+            version_pin = service.get("version_pin")
+            if version_pin is None:
+                fail(f"{external_path}.version_pin", "external-hosted services must declare a version pin")
+            version_pin = mapping(version_pin, f"{external_path}.version_pin", ("cinder", "cinder_tempest_plugin", "source"))
+            string(version_pin["cinder"], f"{external_path}.version_pin.cinder")
+            if not re.fullmatch(r"\d+\.\d+\.\d+", version_pin["cinder"]):
+                fail(f"{external_path}.version_pin.cinder", "must be a dotted numeric Cinder version")
+            string(version_pin["cinder_tempest_plugin"], f"{external_path}.version_pin.cinder_tempest_plugin")
+            if not re.fullmatch(r"\d+\.\d+\.\d+", version_pin["cinder_tempest_plugin"]):
+                fail(f"{external_path}.version_pin.cinder_tempest_plugin", "must be a dotted numeric plugin version")
+            string(version_pin["source"], f"{external_path}.version_pin.source")
+            if version_pin["source"] not in {"pypi", "kolla", "apt", "git"}:
+                fail(f"{external_path}.version_pin.source", "unknown pinned install source")
             external_names.append(service["name"])
         if len(external_names) != len(set(external_names)):
             fail(f"{path}.external_hosted_services", "external-hosted service IDs must be unique")

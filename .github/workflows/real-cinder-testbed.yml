@@ -1,0 +1,110 @@
+name: Real Cinder service-testbed
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-real-cinder-testbed
+  cancel-in-progress: false
+
+jobs:
+  real-cinder:
+    name: Protected real Gazpacho Cinder service-testbed
+    if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'
+    timeout-minutes: 120
+    # Configure this environment to require maintainer approval and to attach
+    # the required secrets. Never runs from fork pull requests.
+    environment: o3k-real-cinder-testbed
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    steps:
+      - name: Check out the canonical repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify immutable source checkout
+        run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+
+      - name: Probe runner capabilities
+        id: capabilities
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-cinder-workflow-artifacts
+          O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: bash scripts/real-host-capability-probe.sh
+
+      - name: Pre-run host and capability guard
+        id: guard
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-cinder-workflow-artifacts
+          O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-cinder-workflow-artifacts/runner-capabilities.json
+          O3K_CINDER_STATE_BASE: /var/lib/o3k-cinder-testbed
+          O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
+          O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_HEAD_REF: ${{ github.head_ref }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/real-cinder-pre-run-guard.sh
+
+      - name: Run the real Cinder service-testbed profile
+        id: cinder
+        if: steps.guard.outputs.ready == 'true'
+        continue-on-error: true
+        env:
+          O3K_STATE_ROOT: /var/lib/o3k-cinder-testbed/${{ github.run_id }}
+          O3K_CINDER_PROFILE: gazpacho
+          # Ephemeral secrets are generated inside the runner and masked with
+          # ::add-mask::; nothing is sourced from repository literals.
+        run: sudo bash scripts/real-cinder-testbed-runner.sh --keep
+
+      - name: Post-run resource-leak and foreign-state guard
+        if: always()
+        env:
+          O3K_REAL_HOST_ARTIFACT_DIR: target/real-cinder-workflow-artifacts
+          O3K_REAL_HOST_WORKFLOW_STEP_STATUS: ${{ steps.cinder.outcome || 'skipped' }}
+          O3K_STATE_ROOT: /var/lib/o3k-cinder-testbed/${{ github.run_id }}
+        run: bash scripts/real-cinder-post-run-guard.sh
+
+      - name: Collect redacted evidence manifest
+        if: always()
+        run: |
+          output=target/real-cinder-workflow-artifacts/evidence-summary.log
+          {
+            printf 'artifact_type=real-cinder-evidence-summary\n'
+            printf 'source_commit=%s\n' "${GITHUB_SHA}"
+            printf 'run_id=%s\n' "${GITHUB_RUN_ID}"
+            printf 'profile=%s\n' "gazpacho"
+            state_root="/var/lib/o3k-cinder-testbed/${GITHUB_RUN_ID}"
+            if sudo -n test -d "${state_root}"; then
+              evidence="$(sudo -n sh -c 'printf "%s" "$1"' _ "${state_root}" 2>/dev/null)"
+              sudo -n find "${state_root}" -maxdepth 2 -name 'evidence.yaml' -printf '%p\n' 2>/dev/null || true
+              sudo -n find "${state_root}" -maxdepth 2 -name 'evidence.yaml' -exec sudo -n grep -aE 'cinder_version|cinder_pin|evidence_tiers|profile:|release_series|codename' {} \; 2>/dev/null || true
+            else
+              printf 'state_root=absent\n'
+            fi
+          } >"${output}"
+          chmod 0644 "${output}"
+
+      - name: Upload redacted real-Cinder artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: real-cinder-workflow-artifacts
+          path: |
+            target/real-cinder-workflow-artifacts/runner-capabilities.json
+            target/real-cinder-workflow-artifacts/real-cinder-workflow-result.json
+            target/real-cinder-workflow-artifacts/evidence-summary.log
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-before.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-after.json
+            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/evidence.yaml
+          if-no-files-found: warn
+          retention-days: 14

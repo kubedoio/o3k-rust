@@ -46,6 +46,8 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test protected real-Cinder workflow guards
+        run: bash tests/real-cinder-workflow-guards.sh
       - name: Test CI workflow contracts
         run: bash tests/ci-workflow.sh
       - name: Test OpenAPI contract governance
