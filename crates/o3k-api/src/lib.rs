@@ -21,9 +21,10 @@ use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
 use o3k_provider::{ConfigDriveRequest, InstanceAction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::net::Ipv4Addr;
+use uuid::Uuid;
 
 /// The public console request and the agent observation must share one
 /// bounded budget.  The protected real-host harness allows fifteen seconds
@@ -163,6 +164,14 @@ pub fn router_with_state(state: AppState) -> Router {
         .route(
             "/v2.1/{project_id}/servers/{id}/action",
             post(server_action),
+        )
+        .route(
+            "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments",
+            get(list_volume_attachments).post(attach_volume),
+        )
+        .route(
+            "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}",
+            get(show_volume_attachment).delete(delete_volume_attachment),
         )
         .layer(axum::middleware::from_fn(microversion_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(
@@ -2480,8 +2489,195 @@ async fn server_action(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct VolumeAttachmentRequest {
+    #[serde(rename = "volumeAttachment")]
+    volume_attachment: VolumeAttachmentRequestPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct VolumeAttachmentRequestPayload {
+    #[serde(rename = "volumeId")]
+    volume_id: String,
+    device: Option<String>,
+    tag: Option<String>,
+    #[serde(default)]
+    delete_on_termination: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct VolumeAttachmentResponse {
+    #[serde(rename = "volumeAttachment")]
+    volume_attachment: VolumeAttachmentDetails,
+}
+
+#[derive(Debug, Serialize)]
+struct VolumeAttachmentsResponse {
+    #[serde(rename = "volumeAttachments")]
+    volume_attachments: Vec<VolumeAttachmentDetails>,
+}
+
+#[derive(Debug, Serialize)]
+struct VolumeAttachmentDetails {
+    id: String,
+    #[serde(rename = "serverId")]
+    server_id: String,
+    #[serde(rename = "volumeId")]
+    volume_id: String,
+    device: String,
+    tag: Option<String>,
+    delete_on_termination: bool,
+}
+
+fn map_volume_attachment(record: o3k_store::VolumeAttachmentRecord) -> VolumeAttachmentDetails {
+    VolumeAttachmentDetails {
+        id: record.id.to_string(),
+        server_id: record.server_id.to_string(),
+        volume_id: record.volume_id.to_string(),
+        device: record.device,
+        tag: record.tag,
+        delete_on_termination: record.delete_on_termination,
+    }
+}
+
+async fn attach_volume(
+    State(state): State<AppState>,
+    Path((project_id, server_id)): Path<(String, String)>,
+    Json(request): Json<VolumeAttachmentRequest>,
+) -> impl IntoResponse {
+    let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Ok(volume_uuid) = Uuid::parse_str(&request.volume_attachment.volume_id) else {
+        return compute_error(ComputeError::InvalidRequest).into_response();
+    };
+    let Some(compute) = state.compute else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service unavailable",
+        )
+        .into_response();
+    };
+
+    match compute
+        .attach_volume(
+            &project_id,
+            server_uuid,
+            volume_uuid,
+            request.volume_attachment.device,
+            request.volume_attachment.tag,
+            request.volume_attachment.delete_on_termination,
+        )
+        .await
+    {
+        Ok(record) => (
+            StatusCode::OK,
+            Json(VolumeAttachmentResponse {
+                volume_attachment: map_volume_attachment(record),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error).into_response(),
+    }
+}
+
+async fn list_volume_attachments(
+    State(state): State<AppState>,
+    Path((project_id, server_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Some(compute) = state.compute else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service unavailable",
+        )
+        .into_response();
+    };
+
+    match compute
+        .list_volume_attachments(&project_id, server_uuid)
+        .await
+    {
+        Ok(records) => (
+            StatusCode::OK,
+            Json(VolumeAttachmentsResponse {
+                volume_attachments: records.into_iter().map(map_volume_attachment).collect(),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error).into_response(),
+    }
+}
+
+async fn show_volume_attachment(
+    State(state): State<AppState>,
+    Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Some(compute) = state.compute else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service unavailable",
+        )
+        .into_response();
+    };
+
+    match compute
+        .get_volume_attachment(&project_id, server_uuid, attachment_uuid)
+        .await
+    {
+        Ok(record) => (
+            StatusCode::OK,
+            Json(VolumeAttachmentResponse {
+                volume_attachment: map_volume_attachment(record),
+            }),
+        )
+            .into_response(),
+        Err(error) => compute_error(error).into_response(),
+    }
+}
+
+async fn delete_volume_attachment(
+    State(state): State<AppState>,
+    Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
+) -> impl IntoResponse {
+    let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
+        return compute_error(ComputeError::NotFound).into_response();
+    };
+    let Some(compute) = state.compute else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service unavailable",
+        )
+        .into_response();
+    };
+
+    match compute
+        .detach_volume(&project_id, server_uuid, attachment_uuid)
+        .await
+    {
+        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Err(error) => compute_error(error).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::{
         CONSOLE_AGENT_DISPATCH_TIMEOUT, Server, server_response, should_query_live_console,
     };

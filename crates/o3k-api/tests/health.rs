@@ -1248,3 +1248,50 @@ async fn keystone_get_and_head_token_validation_and_cinder_catalog()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn nova_volume_attachment_lifecycle_list_create_show_delete()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let provider = Arc::new(FakeComputeProvider::new());
+    let compute = ComputeService::new(store, provider);
+
+    let state = o3k_api::AppState::new().with_compute(compute);
+    state.set_ready(true);
+    let app = o3k_api::router_with_state(state);
+
+    let server_id = uuid::Uuid::now_v7();
+    let volume_id = uuid::Uuid::now_v7();
+
+    // 1. Attaching volume to non-existent server returns 404
+    let attach_body = serde_json::json!({
+        "volumeAttachment": {
+            "volumeId": volume_id.to_string(),
+            "device": "/dev/vdb"
+        }
+    });
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/v2.1/project-1/servers/{server_id}/os-volume_attachments"
+        ))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(attach_body.to_string()))?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    // 2. Listing attachments for non-existent server returns 404
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri(format!(
+            "/v2.1/project-1/servers/{server_id}/os-volume_attachments"
+        ))
+        .body(Body::empty())?;
+    let resp = app.clone().oneshot(req).await?;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    Ok(())
+}

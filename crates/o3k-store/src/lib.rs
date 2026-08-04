@@ -67,6 +67,17 @@ pub struct KeypairRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VolumeAttachmentRecord {
+    pub id: Uuid,
+    pub server_id: Uuid,
+    pub volume_id: Uuid,
+    pub device: String,
+    pub tag: Option<String>,
+    pub delete_on_termination: bool,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationState {
     Pending,
@@ -609,6 +620,35 @@ impl SqliteStore {
         rows.iter().map(resource_from_row).collect()
     }
 
+    fn volume_attachment_from_row(row: &SqliteRow) -> Result<VolumeAttachmentRecord, StoreError> {
+        let id_str: String = row.try_get("id").map_err(StoreError::Database)?;
+        let server_id_str: String = row.try_get("server_id").map_err(StoreError::Database)?;
+        let volume_id_str: String = row.try_get("volume_id").map_err(StoreError::Database)?;
+        let device: String = row.try_get("device").map_err(StoreError::Database)?;
+        let tag: Option<String> = row.try_get("tag").map_err(StoreError::Database)?;
+        let delete_on_termination_int: i32 = row
+            .try_get("delete_on_termination")
+            .map_err(StoreError::Database)?;
+        let created_at: String = row.try_get("created_at").map_err(StoreError::Database)?;
+
+        let id = Uuid::parse_str(&id_str)
+            .map_err(|_| StoreError::Corrupt("invalid volume attachment id".to_owned()))?;
+        let server_id = Uuid::parse_str(&server_id_str)
+            .map_err(|_| StoreError::Corrupt("invalid server id".to_owned()))?;
+        let volume_id = Uuid::parse_str(&volume_id_str)
+            .map_err(|_| StoreError::Corrupt("invalid volume id".to_owned()))?;
+
+        Ok(VolumeAttachmentRecord {
+            id,
+            server_id,
+            volume_id,
+            device,
+            tag,
+            delete_on_termination: delete_on_termination_int != 0,
+            created_at,
+        })
+    }
+
     async fn verify_integrity(&self) -> Result<(), StoreError> {
         let result: String = sqlx::query_scalar("PRAGMA integrity_check")
             .fetch_one(&self.pool)
@@ -618,15 +658,93 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 9 {
+        if table_count != 10 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
         Ok(())
+    }
+
+    pub async fn insert_volume_attachment(
+        &self,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO volume_attachments (id, server_id, volume_id, device, tag, delete_on_termination, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(record.id.to_string())
+        .bind(record.server_id.to_string())
+        .bind(record.volume_id.to_string())
+        .bind(&record.device)
+        .bind(&record.tag)
+        .bind(if record.delete_on_termination { 1 } else { 0 })
+        .bind(&record.created_at)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(err)) if err.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(err) => Err(StoreError::Database(err)),
+        }
+    }
+
+    pub async fn list_volume_attachments(
+        &self,
+        server_id: Uuid,
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? ORDER BY created_at",
+        )
+        .bind(server_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        rows.iter().map(Self::volume_attachment_from_row).collect()
+    }
+
+    pub async fn get_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? AND id = ?",
+        )
+        .bind(server_id.to_string())
+        .bind(attachment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn delete_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM volume_attachments WHERE server_id = ? AND id = ?")
+            .bind(server_id.to_string())
+            .bind(attachment_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        if result.rows_affected() == 0 {
+            Err(StoreError::ResourceNotFound)
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {
