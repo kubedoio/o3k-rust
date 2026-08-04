@@ -286,3 +286,6 @@ for source in target["sources"]:
     assert re.match(r"https://(docs\.openstack\.org|releases\.openstack\.org|blog\.rust-lang\.org)/", source), source
 print("validated static Rust 1.97.1, schema-checked OpenStack profiles, unique services, and version templates")
 PY
+
+bash tests/portable-service-testbed-gate.sh
+
