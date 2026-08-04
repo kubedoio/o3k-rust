@@ -229,6 +229,10 @@ rabbitmqctl add_vhost "${MQ_VHOST}" 2>/dev/null || true
 rabbitmqctl set_permissions -p "${MQ_VHOST}" "${MQ_USER}" ".*" ".*" ".*"
 rabbitmqctl set_user_tags "${MQ_USER}" administrator 2>/dev/null || true
 
+echo "==> Verifying the run-owned RabbitMQ user and vhost..."
+rabbitmqctl list_vhosts 2>/dev/null | tail -n +2 | grep -qw "${MQ_VHOST}" || { echo "ERROR: run-owned vhost was not created"; exit 1; }
+rabbitmqctl list_users 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -qw "${MQ_USER}" || { echo "ERROR: run-owned user was not created"; exit 1; }
+
 echo "==> Provisioning run-owned LVM test backend (loop device)..."
 truncate -s 4G "${LOOP_FILE}"
 LOOP_DEV=$(losetup --find --show "${LOOP_FILE}")
@@ -270,6 +274,11 @@ target_protocol = iscsi
 target_helper = tgtadm
 iscsi_ip_address = 127.0.0.1
 volume_clear = none
+# The volume service is launched from the pinned venv as root (no systemd
+# cinder account). Use sudo directly for LVM commands instead of the
+# distribution cinder-rootwrap filters, which target the packaged Cinder
+# version and reject the venv's command paths.
+root_helper = sudo
 # The first supported O3K attachment profile does not carry secret-bearing
 # connection information (for example CHAP credentials) across the compute
 # boundary; targets that require authentication are rejected by the control
