@@ -10,7 +10,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use md5::{Digest as Md5Digest, Md5};
 use sqlx::{
     Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
+    sqlite::{
+        SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
+    },
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -21,6 +23,37 @@ pub use artifact_transfer::{
     ArtifactTransferRecord, ArtifactTransferState, ArtifactTransferUpdate,
     MAX_ARTIFACT_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_ARTIFACT_TRANSFER_RETRIES,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DatabaseHealth {
+    pub status: String,
+    pub journal_mode: String,
+    pub foreign_keys: bool,
+    pub integrity_check: String,
+    pub page_count: i64,
+    pub page_size: i64,
+    pub wal_checkpoint_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalCheckpointMode {
+    Passive,
+    Full,
+    Restart,
+    Truncate,
+}
+
+impl WalCheckpointMode {
+    #[must_use]
+    pub fn as_pragma_str(&self) -> &'static str {
+        match self {
+            Self::Passive => "PASSIVE",
+            Self::Full => "FULL",
+            Self::Restart => "RESTART",
+            Self::Truncate => "TRUNCATE",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeypairRecord {
@@ -422,32 +455,45 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
-        let options = SqliteConnectOptions::from_str(database_url).map_err(StoreError::Database)?;
-        let max_connections = if database_url == "sqlite::memory:" {
-            1
-        } else {
-            5
-        };
+        let is_memory = database_url == "sqlite::memory:" || database_url == "sqlite://:memory:";
+        let mut options =
+            SqliteConnectOptions::from_str(database_url).map_err(StoreError::Database)?;
+        let max_connections = if is_memory { 1 } else { 5 };
+
+        options = options
+            .create_if_missing(true)
+            .foreign_keys(true)
+            .busy_timeout(Duration::from_secs(5));
+
+        if !is_memory {
+            options = options
+                .journal_mode(SqliteJournalMode::Wal)
+                .synchronous(SqliteSynchronous::Normal);
+        }
+
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
-            .connect_with(
-                options
-                    .create_if_missing(true)
-                    .foreign_keys(true)
-                    .busy_timeout(Duration::from_secs(5)),
-            )
+            .acquire_timeout(Duration::from_secs(5))
+            .connect_with(options)
             .await
             .map_err(StoreError::Database)?;
+
         sqlx::migrate!()
             .run(&pool)
             .await
             .map_err(StoreError::Migration)?;
+
         let store = Self { pool };
         store.verify_integrity().await?;
         Ok(store)
     }
 
     pub async fn connect_file(path: &Path) -> Result<Self, StoreError> {
+        if path.as_os_str().is_empty() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                "database path cannot be empty".into(),
+            )));
+        }
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -459,6 +505,91 @@ impl SqliteStore {
         }
         let url = format!("sqlite://{}", path.display());
         Self::connect(&url).await
+    }
+
+    pub async fn journal_mode(&self) -> Result<String, StoreError> {
+        let row = sqlx::query("PRAGMA journal_mode")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let mode: String = row.get(0);
+        Ok(mode)
+    }
+
+    pub async fn checkpoint(&self, mode: WalCheckpointMode) -> Result<(), StoreError> {
+        let sql = format!("PRAGMA wal_checkpoint({})", mode.as_pragma_str());
+        sqlx::query(&sql)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn database_health(&self) -> Result<DatabaseHealth, StoreError> {
+        let journal_mode = self.journal_mode().await?;
+
+        let fk_row = sqlx::query("PRAGMA foreign_keys")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let fk_int: i64 = fk_row.get(0);
+        let foreign_keys = fk_int != 0;
+
+        let integrity_row = sqlx::query("PRAGMA quick_check")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let integrity_check: String = integrity_row.get(0);
+
+        let page_count_row = sqlx::query("PRAGMA page_count")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let page_count: i64 = page_count_row.get(0);
+
+        let page_size_row = sqlx::query("PRAGMA page_size")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let page_size: i64 = page_size_row.get(0);
+
+        let wal_status = if journal_mode.eq_ignore_ascii_case("wal") {
+            Some("active".to_owned())
+        } else {
+            None
+        };
+
+        let status = if integrity_check.eq_ignore_ascii_case("ok") {
+            "ok".to_owned()
+        } else {
+            "degraded".to_owned()
+        };
+
+        Ok(DatabaseHealth {
+            status,
+            journal_mode,
+            foreign_keys,
+            integrity_check,
+            page_count,
+            page_size,
+            wal_checkpoint_status: wal_status,
+        })
+    }
+
+    pub async fn backup_to_file(&self, destination: &Path) -> Result<(), StoreError> {
+        if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
+        let dest_str = destination.display().to_string();
+        let query_str = format!("VACUUM INTO '{}'", dest_str.replace('\'', "''"));
+        sqlx::query(&query_str)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
     }
 
     /// Lists all resources of one kind across projects for restart
@@ -2084,5 +2215,149 @@ mod tests {
         ));
         fs::remove_file(path)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn wal_mode_and_foreign_keys_enabled_for_persistent_database()
+    -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!("/tmp/o3k-store-wal-{}.sqlite", Uuid::now_v7()));
+        let store = SqliteStore::connect_file(&path).await?;
+        assert_eq!(store.journal_mode().await?, "wal");
+
+        let health = store.database_health().await?;
+        assert_eq!(health.status, "ok");
+        assert_eq!(health.journal_mode, "wal");
+        assert!(health.foreign_keys);
+        assert_eq!(health.integrity_check, "ok");
+        assert_eq!(health.wal_checkpoint_status.as_deref(), Some("active"));
+
+        store.checkpoint(WalCheckpointMode::Passive).await?;
+        store.checkpoint(WalCheckpointMode::Truncate).await?;
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_memory_database_uses_memory_journal_mode() -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        assert_eq!(store.journal_mode().await?, "memory");
+        let health = store.database_health().await?;
+        assert_eq!(health.journal_mode, "memory");
+        assert!(health.wal_checkpoint_status.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_and_wal_lock_contention() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-wal-concurrent-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
+        let blob = [
+            0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0,
+            32,
+        ]
+        .into_iter()
+        .chain([7_u8; 32])
+        .collect::<Vec<_>>();
+        let encoded = BASE64.encode(&blob);
+
+        let mut handles = Vec::new();
+
+        for i in 0..5 {
+            let store = store.clone();
+            let encoded = encoded.clone();
+            let handle = tokio::spawn(async move {
+                let (_, fingerprint, canonical) =
+                    validate_public_key(&format!("ssh-ed25519 {encoded} user-{i}"))?;
+                let keypair = KeypairRecord {
+                    id: Uuid::now_v7(),
+                    user_id: format!("user-{i}"),
+                    project_id: "project-concurrent".to_owned(),
+                    name: format!("key-{i}"),
+                    key_type: "ssh-ed25519".to_owned(),
+                    public_key: canonical,
+                    fingerprint,
+                    created_at: "2024-01-01T00:00:00Z".to_owned(),
+                };
+                store.insert_keypair(&keypair).await
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let res = handle.await?;
+            assert!(res.is_ok());
+        }
+
+        let health = store.database_health().await?;
+        assert_eq!(health.status, "ok");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_produces_consistent_database() -> Result<(), Box<dyn Error>> {
+        let src_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-src-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let backup_path = PathBuf::from(format!(
+            "/tmp/o3k-store-backup-dst-{}.sqlite",
+            Uuid::now_v7()
+        ));
+
+        let store = SqliteStore::connect_file(&src_path).await?;
+        let blob = [
+            0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0,
+            32,
+        ]
+        .into_iter()
+        .chain([7_u8; 32])
+        .collect::<Vec<_>>();
+        let encoded = BASE64.encode(&blob);
+
+        let (_, fingerprint, canonical) =
+            validate_public_key(&format!("ssh-ed25519 {encoded} user-backup"))?;
+        let keypair = KeypairRecord {
+            id: Uuid::now_v7(),
+            user_id: "user-backup".to_owned(),
+            project_id: "project-backup".to_owned(),
+            name: "key-backup".to_owned(),
+            key_type: "ssh-ed25519".to_owned(),
+            public_key: canonical,
+            fingerprint,
+            created_at: "2024-01-01T00:00:00Z".to_owned(),
+        };
+        store.insert_keypair(&keypair).await?;
+
+        store.backup_to_file(&backup_path).await?;
+
+        let restored_store = SqliteStore::connect_file(&backup_path).await?;
+        let fetched = restored_store
+            .get_keypair("user-backup", "project-backup", "key-backup")
+            .await?;
+        assert_eq!(fetched, keypair);
+
+        let _ = fs::remove_file(&src_path);
+        let _ = fs::remove_file(format!("{}-wal", src_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", src_path.display()));
+        let _ = fs::remove_file(&backup_path);
+        let _ = fs::remove_file(format!("{}-wal", backup_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", backup_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_database_path_returns_error() {
+        let result = SqliteStore::connect_file(Path::new("")).await;
+        assert!(result.is_err());
     }
 }
