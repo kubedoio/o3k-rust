@@ -14,7 +14,7 @@ being copied into multiple summaries and drifting independently.
 | Declared API operations and evidence gates | `docs/specs/SPEC-0022-service-api-baseline-and-evidence-gates.md` plus machine-readable compatibility manifests | `README.md`, `docs/PRODUCT_REQUIREMENTS.md`, `docs/ROADMAP.md` |
 | External OpenStack service-under-test profile | `docs/specs/SPEC-0023-external-cinder-service-under-test.md` | `README.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT_CHARTER.md`, `docs/ROADMAP.md` |
 | Compute/network/storage execution authority and protocol invariants | `contracts/execution-boundaries.md` and accepted protobuf contracts | `docs/ARCHITECTURE.md`, `AGENTS.md` |
-| LLM/coding workflow | `AGENTS.md`, `docs/LLM_DEVELOPMENT.md`, and accepted issue scope | PR templates and examples |
+| LLM/coding workflow and profile-selection rules | `AGENTS.md`, `docs/LLM_DEVELOPMENT.md`, accepted ADRs/specs, and accepted issue scope | PR templates and examples |
 
 ## Rules
 
