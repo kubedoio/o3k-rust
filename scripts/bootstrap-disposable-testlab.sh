@@ -388,7 +388,20 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
       "$(printf '%q' "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID")" >>"$o3kd_env_tmp"
   fi
   printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"$o3kd_env_tmp"
-  printf 'O3K_AGENT_INSPECT_PROBE_PROJECT_ID=admin\n' >>"$o3kd_env_tmp"
+  # The durable project ID for the TestLab lifecycle context is "bootstrap-project".
+  # This is the project_id field in the issued token (distinct from the project *name*
+  # "admin" used by the CLI OS_PROJECT_NAME / OS_USERNAME bootstrap context). The
+  # compute service enforces project isolation by comparing resource.project_id to the
+  # caller's project_id argument: passing the project name instead of the project ID
+  # produces a store-level NotFound on every probe call.
+  printf 'O3K_AGENT_INSPECT_PROBE_PROJECT_ID=bootstrap-project\n' >>"$o3kd_env_tmp"
+  # Scope the o3kd log filter so that o3k_compute, o3k_reconciler, o3k_compute_agent,
+  # and o3k_libvirt diagnostics remain visible during probe runs without enabling
+  # global H2/SQLx debug noise that floods the log with raw frame data.
+  _probe_log_base="${O3K_LOG_FILTER:-warn}"
+  printf 'O3K_LOG_FILTER=%s\n' \
+    "$(printf '%q' "${_probe_log_base},o3k_compute=info,o3k_reconciler=info,o3k_compute_agent=info,o3k_libvirt=info")" \
+    >>"$o3kd_env_tmp"
 fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
