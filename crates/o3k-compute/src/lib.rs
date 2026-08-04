@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use o3k_cinder::CinderClient;
 use o3k_compute_agent::{
     Availability, CreateCommandSpec, LifecycleCommand, NetworkAttachmentSpec, NodeRegistry,
     NodeSnapshot, build_block_device_command, build_create_command, build_lifecycle_command,
@@ -29,6 +30,10 @@ use std::{
 use thiserror::Error;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+pub mod attachment;
+
+pub use attachment::AttachmentOrchestrator;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Flavor {
@@ -93,6 +98,8 @@ pub enum ComputeError {
     Provider(#[from] ProviderError),
     #[error("compute scheduler error")]
     Scheduler(#[from] SchedulerError),
+    #[error("compute service is unavailable or misconfigured")]
+    Unavailable,
 }
 
 #[derive(Clone)]
@@ -102,6 +109,8 @@ pub struct ComputeService {
     journal: OperationJournal<SqliteStore, ProviderBackend>,
     scheduler: Option<Scheduler>,
     agent_registry: Option<NodeRegistry>,
+    cinder: Option<Arc<CinderClient>>,
+    attachments: AttachmentOrchestrator,
 }
 
 #[derive(Clone)]
@@ -1939,6 +1948,30 @@ impl ComputeProvider for ProviderBackend {
     async fn get_operation(&self, id: Uuid) -> Result<Operation, ProviderError> {
         self.0.get_operation(id).await
     }
+    async fn collect_connector(&self, resource_id: Uuid) -> Result<ConnectorInfo, ProviderError> {
+        self.0.collect_connector(resource_id).await
+    }
+    async fn attach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        self.0.attach_block_device(resource_id, device).await
+    }
+    async fn detach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        self.0.detach_block_device(resource_id, device).await
+    }
+    async fn observe_block_device(
+        &self,
+        resource_id: Uuid,
+        volume_id: &str,
+    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
+        self.0.observe_block_device(resource_id, volume_id).await
+    }
 }
 
 fn requests_match_with_keypair_migration(
@@ -1963,13 +1996,36 @@ impl ComputeService {
     {
         let provider = Arc::new(provider.into());
         let journal = OperationJournal::new(store.clone(), provider.clone(), 3);
+        let attachments = AttachmentOrchestrator::new(store.clone(), provider.clone(), None);
         Self {
             store,
             provider,
             journal,
             scheduler: None,
             agent_registry: None,
+            cinder: None,
+            attachments,
         }
+    }
+
+    /// Configures the outbound Cinder client used for the durable attachment
+    /// lifecycle. External-hosted volume attachment requires it.
+    #[must_use]
+    pub fn with_cinder_client(mut self, cinder: Arc<CinderClient>) -> Self {
+        self.cinder = Some(cinder.clone());
+        self.attachments =
+            AttachmentOrchestrator::new(self.store.clone(), self.provider.clone(), Some(cinder));
+        self
+    }
+
+    #[must_use]
+    pub fn cinder_client(&self) -> Option<Arc<CinderClient>> {
+        self.cinder.clone()
+    }
+
+    #[must_use]
+    pub fn attachment_orchestrator(&self) -> AttachmentOrchestrator {
+        self.attachments.clone()
     }
 
     #[must_use]
@@ -2633,42 +2689,16 @@ impl ComputeService {
         delete_on_termination: bool,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-
-        let device = match device {
-            Some(d) if !d.trim().is_empty() => {
-                if d.starts_with("/dev/") {
-                    d
-                } else {
-                    format!("/dev/{d}")
-                }
-            }
-            _ => {
-                let existing = self.store.list_volume_attachments(server_id).await?;
-                let count = existing.len();
-                let letter = (b'b' + count as u8) as char;
-                format!("/dev/vd{letter}")
-            }
-        };
-
-        let record = VolumeAttachmentRecord {
-            id: volume_id,
-            server_id,
-            volume_id,
-            device,
-            tag,
-            delete_on_termination,
-            created_at: format!("{:?}", SystemTime::now()),
-        };
-
-        self.store
-            .insert_volume_attachment(&record)
+        self.attachments
+            .attach(
+                project_id,
+                server_id,
+                volume_id,
+                device,
+                tag,
+                delete_on_termination,
+            )
             .await
-            .map_err(|err| match err {
-                StoreError::ResourceAlreadyExists => ComputeError::Conflict,
-                other => ComputeError::Store(other),
-            })?;
-
-        Ok(record)
     }
 
     pub async fn list_volume_attachments(
@@ -2700,13 +2730,9 @@ impl ComputeService {
         attachment_id: Uuid,
     ) -> Result<(), ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-        self.store
-            .delete_volume_attachment(server_id, attachment_id)
+        self.attachments
+            .detach(project_id, server_id, attachment_id)
             .await
-            .map_err(|err| match err {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })
     }
 
     /// Revalidates and inspects an already-created server through the

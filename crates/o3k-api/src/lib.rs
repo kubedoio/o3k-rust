@@ -1723,6 +1723,11 @@ fn compute_error(error: ComputeError) -> axum::response::Response {
                 "compute service is unavailable",
             )
         }
+        ComputeError::Unavailable => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "compute service is unavailable",
+        ),
     }
 }
 

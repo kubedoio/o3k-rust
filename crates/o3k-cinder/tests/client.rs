@@ -192,10 +192,7 @@ async fn attachment_lifecycle_validates_token_through_keystone()
     );
 
     client.terminate_attachment(project, &attachment.id).await?;
-    assert_eq!(
-        fake.attachment_status(&attachment.id).as_deref(),
-        Some("deleted")
-    );
+    assert!(!fake.attachment_ids().contains(&attachment.id));
 
     client.delete_volume(project, &volume.id).await?;
     assert!(fake.volume_ids().is_empty());

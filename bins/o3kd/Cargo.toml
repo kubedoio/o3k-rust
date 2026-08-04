@@ -13,6 +13,7 @@ workspace = true
 async-trait.workspace = true
 axum.workspace = true
 o3k-api = { path = "../../crates/o3k-api" }
+o3k-cinder = { path = "../../crates/o3k-cinder" }
 o3k-compute = { path = "../../crates/o3k-compute" }
 o3k-console = { path = "../../crates/o3k-console" }
 o3k-config-drive = { path = "../../crates/o3k-config-drive" }

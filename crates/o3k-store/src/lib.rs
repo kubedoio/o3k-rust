@@ -76,6 +76,19 @@ pub struct VolumeAttachmentRecord {
     pub tag: Option<String>,
     pub delete_on_termination: bool,
     pub created_at: String,
+    pub status: String,
+    pub operation_id: Option<Uuid>,
+    pub idempotency_key: Option<String>,
+    pub cinder_attachment_id: Option<String>,
+    pub connector_host: Option<String>,
+    pub connector_ip: Option<String>,
+    pub connector_initiator: Option<String>,
+    pub driver_volume_type: Option<String>,
+    pub target_iqn: Option<String>,
+    pub target_portal: Option<String>,
+    pub target_lun: Option<u32>,
+    pub connection_info_digest: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -707,6 +720,34 @@ impl SqliteStore {
             .try_get("delete_on_termination")
             .map_err(StoreError::Database)?;
         let created_at: String = row.try_get("created_at").map_err(StoreError::Database)?;
+        let status: String = row.try_get("status").map_err(StoreError::Database)?;
+        let operation_id: Option<String> =
+            row.try_get("operation_id").map_err(StoreError::Database)?;
+        let idempotency_key: Option<String> = row
+            .try_get("idempotency_key")
+            .map_err(StoreError::Database)?;
+        let cinder_attachment_id: Option<String> = row
+            .try_get("cinder_attachment_id")
+            .map_err(StoreError::Database)?;
+        let connector_host: Option<String> = row
+            .try_get("connector_host")
+            .map_err(StoreError::Database)?;
+        let connector_ip: Option<String> =
+            row.try_get("connector_ip").map_err(StoreError::Database)?;
+        let connector_initiator: Option<String> = row
+            .try_get("connector_initiator")
+            .map_err(StoreError::Database)?;
+        let driver_volume_type: Option<String> = row
+            .try_get("driver_volume_type")
+            .map_err(StoreError::Database)?;
+        let target_iqn: Option<String> = row.try_get("target_iqn").map_err(StoreError::Database)?;
+        let target_portal: Option<String> =
+            row.try_get("target_portal").map_err(StoreError::Database)?;
+        let target_lun: Option<i64> = row.try_get("target_lun").map_err(StoreError::Database)?;
+        let connection_info_digest: Option<String> = row
+            .try_get("connection_info_digest")
+            .map_err(StoreError::Database)?;
+        let error: Option<String> = row.try_get("error").map_err(StoreError::Database)?;
 
         let id = Uuid::parse_str(&id_str)
             .map_err(|_| StoreError::Corrupt("invalid volume attachment id".to_owned()))?;
@@ -723,6 +764,28 @@ impl SqliteStore {
             tag,
             delete_on_termination: delete_on_termination_int != 0,
             created_at,
+            status,
+            operation_id: operation_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|_| StoreError::Corrupt("invalid attachment operation id".to_owned()))?,
+            idempotency_key,
+            cinder_attachment_id,
+            connector_host,
+            connector_ip,
+            connector_initiator,
+            driver_volume_type,
+            target_iqn,
+            target_portal,
+            target_lun: target_lun
+                .map(|value| {
+                    u32::try_from(value)
+                        .map_err(|_| StoreError::Corrupt("invalid attachment lun".to_owned()))
+                })
+                .transpose()?,
+            connection_info_digest,
+            error,
         })
     }
 
@@ -752,7 +815,7 @@ impl SqliteStore {
         record: &VolumeAttachmentRecord,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "INSERT INTO volume_attachments (id, server_id, volume_id, device, tag, delete_on_termination, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO volume_attachments (id, server_id, volume_id, device, tag, delete_on_termination, created_at, status, operation_id, idempotency_key, cinder_attachment_id, connector_host, connector_ip, connector_initiator, driver_volume_type, target_iqn, target_portal, target_lun, connection_info_digest, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.id.to_string())
         .bind(record.server_id.to_string())
@@ -761,6 +824,19 @@ impl SqliteStore {
         .bind(&record.tag)
         .bind(if record.delete_on_termination { 1 } else { 0 })
         .bind(&record.created_at)
+        .bind(&record.status)
+        .bind(record.operation_id.map(|id| id.to_string()))
+        .bind(&record.idempotency_key)
+        .bind(&record.cinder_attachment_id)
+        .bind(&record.connector_host)
+        .bind(&record.connector_ip)
+        .bind(&record.connector_initiator)
+        .bind(&record.driver_volume_type)
+        .bind(&record.target_iqn)
+        .bind(&record.target_portal)
+        .bind(record.target_lun.map(i64::from))
+        .bind(&record.connection_info_digest)
+        .bind(&record.error)
         .execute(&self.pool)
         .await;
 
@@ -773,17 +849,138 @@ impl SqliteStore {
         }
     }
 
+    /// Advances (or regresses) an attachment's durable phase. Phase is
+    /// persisted before the matching external side effect.
+    pub async fn update_volume_attachment_phase(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        sqlx::query("UPDATE volume_attachments SET status = ?, error = ? WHERE id = ?")
+            .bind(status)
+            .bind(error)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        self.get_volume_attachment_by_id(id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
+    /// Persists the non-secret outcome data observed after an external step.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_volume_attachment_outcome(
+        &self,
+        id: Uuid,
+        status: &str,
+        cinder_attachment_id: Option<&str>,
+        connector_host: Option<&str>,
+        connector_ip: Option<&str>,
+        connector_initiator: Option<&str>,
+        driver_volume_type: Option<&str>,
+        target_iqn: Option<&str>,
+        target_portal: Option<&str>,
+        target_lun: Option<u32>,
+        connection_info_digest: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        sqlx::query(
+            "UPDATE volume_attachments SET status = ?, cinder_attachment_id = COALESCE(?, cinder_attachment_id), connector_host = ?, connector_ip = ?, connector_initiator = ?, driver_volume_type = ?, target_iqn = ?, target_portal = ?, target_lun = ?, connection_info_digest = ?, device = COALESCE(?, device) WHERE id = ?",
+        )
+        .bind(status)
+        .bind(cinder_attachment_id)
+        .bind(connector_host)
+        .bind(connector_ip)
+        .bind(connector_initiator)
+        .bind(driver_volume_type)
+        .bind(target_iqn)
+        .bind(target_portal)
+        .bind(target_lun.map(i64::from))
+        .bind(connection_info_digest)
+        .bind(device)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        self.get_volume_attachment_by_id(id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
+    pub async fn get_volume_attachment_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn get_volume_attachment_by_volume(
+        &self,
+        volume_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE volume_id = ?")
+            .bind(volume_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn get_volume_attachment_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE idempotency_key = ?")
+            .bind(idempotency_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    /// Lists non-terminal attachments for restart reconciliation.
+    pub async fn list_volume_attachments_by_status(
+        &self,
+        terminal: &[&str],
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
+        if terminal.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let query = format!(
+            "SELECT * FROM volume_attachments WHERE status NOT IN ({placeholders}) ORDER BY created_at"
+        );
+        let mut builder = sqlx::query(&query);
+        for status in terminal {
+            builder = builder.bind(status);
+        }
+        let rows = builder
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(Self::volume_attachment_from_row).collect()
+    }
+
     pub async fn list_volume_attachments(
         &self,
         server_id: Uuid,
     ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? ORDER BY created_at",
-        )
-        .bind(server_id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
+        let rows =
+            sqlx::query("SELECT * FROM volume_attachments WHERE server_id = ? ORDER BY created_at")
+                .bind(server_id.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
 
         rows.iter().map(Self::volume_attachment_from_row).collect()
     }
@@ -793,14 +990,12 @@ impl SqliteStore {
         server_id: Uuid,
         attachment_id: Uuid,
     ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
-        let row = sqlx::query(
-            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? AND id = ?",
-        )
-        .bind(server_id.to_string())
-        .bind(attachment_id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE server_id = ? AND id = ?")
+            .bind(server_id.to_string())
+            .bind(attachment_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
 
         row.map(|r| Self::volume_attachment_from_row(&r))
             .transpose()

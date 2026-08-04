@@ -287,6 +287,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_scheduler(scheduler)
             .with_agent_registry(registry.clone());
     }
+    if let (Some(cinder_password), Ok(cinder_endpoint)) = (
+        config.cinder_password(),
+        std::env::var("O3K_CINDER_ENDPOINT"),
+    ) {
+        let catalog_endpoint = format!("http://{}", config.listen_addr);
+        let cinder_client = Arc::new(o3k_cinder::CinderClient::new(
+            o3k_cinder::CinderClientConfig {
+                keystone_endpoint: catalog_endpoint,
+                cinder_endpoint,
+                username: "cinder".to_owned(),
+                password: o3k_identity::Secret::new(cinder_password.expose().to_owned()),
+                domain_name: "Default".to_owned(),
+            },
+        ));
+        compute_service = compute_service.with_cinder_client(cinder_client);
+        info!("external Cinder attachment client enabled");
+    }
     let inventory_task = agent_control_enabled
         .then(|| o3k_compute::spawn_agent_inventory_publisher(registry.clone(), placement.clone()));
     let compute_ready = if config.provider == o3k_config::Provider::Agent && agent_control_enabled {

@@ -392,6 +392,31 @@ impl CinderClient {
         CinderAttachment::parse(&value)
     }
 
+    /// Lists attachments, used to observe the volume's attachment state after
+    /// an unknown create outcome when the attachment id is not known.
+    pub async fn list_attachments(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<CinderAttachment>, CinderError> {
+        let url = format!(
+            "{}/v3/{}/attachments",
+            self.config.cinder_endpoint.trim_end_matches('/'),
+            project_id
+        );
+        let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
+        if !status.is_success() {
+            return Err(status_error(status));
+        }
+        let attachments = value
+            .get("attachments")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| CinderError::Protocol("attachments array is missing".to_owned()))?
+            .iter()
+            .map(CinderAttachment::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(attachments)
+    }
+
     /// Provides connector information and returns the secret-safe connection
     /// information.
     pub async fn update_attachment_connector(

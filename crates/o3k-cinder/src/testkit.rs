@@ -84,8 +84,6 @@ pub struct FakeCinderState {
     /// Optional Keystone endpoint used to validate incoming tokens through the
     /// public Identity API. When absent, any non-empty token is accepted.
     pub keystone_endpoint: Option<String>,
-    next_volume_index: Arc<Mutex<u64>>,
-    next_attachment_index: Arc<Mutex<u64>>,
 }
 
 impl FakeCinderState {
@@ -95,18 +93,7 @@ impl FakeCinderState {
             attachments: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(FaultConfig::default())),
             keystone_endpoint,
-            next_volume_index: Arc::new(Mutex::new(1)),
-            next_attachment_index: Arc::new(Mutex::new(1)),
         }
-    }
-
-    fn next_index(&self, counter: &Arc<Mutex<u64>>) -> u64 {
-        let mut value = counter
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let current = *value;
-        *value = value.saturating_add(1);
-        current
     }
 
     pub fn volume_ids(&self) -> Vec<String> {
@@ -206,7 +193,10 @@ fn connection_info_for(driver_volume_type: &str) -> Value {
 /// Builds the fake Cinder v3 router.
 pub fn router(state: FakeCinderState) -> Router {
     Router::new()
-        .route("/v3/{project_id}/attachments", post(create_attachment))
+        .route(
+            "/v3/{project_id}/attachments",
+            post(create_attachment).get(list_attachments),
+        )
         .route(
             "/v3/{project_id}/attachments/{attachment_id}",
             get(show_attachment),
@@ -302,10 +292,7 @@ async fn create_attachment(
             json!({"error": {"message": "volume not found"}}),
         );
     }
-    let id = format!(
-        "attachment-{:08}",
-        state.next_index(&state.next_attachment_index)
-    );
+    let id = format!("attachment-{:08}", uuid::Uuid::now_v7().to_string());
     let attachment = FakeAttachment {
         id: id.clone(),
         volume_id: volume_id.clone(),
@@ -359,6 +346,25 @@ async fn show_attachment(
             "connection_info": attachment.connection_info
         }}),
     )
+}
+
+async fn list_attachments(
+    State(state): State<FakeCinderState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorize(&state, &headers).await {
+        return js(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+    }
+    let attachments: Vec<Value> = state
+        .attachments
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .values()
+        .map(|attachment| {
+            json!({"id": attachment.id, "status": attachment.status.as_str(), "volume_id": attachment.volume_id, "connection_info": attachment.connection_info})
+        })
+        .collect();
+    js(StatusCode::OK, json!({"attachments": attachments}))
 }
 
 async fn update_attachment(
@@ -452,13 +458,13 @@ async fn attachment_action(
             .attachments
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(attachment) = attachments.get_mut(&attachment_id) else {
+        let Some(attachment) = attachments.remove(&attachment_id) else {
             return js(
                 StatusCode::NOT_FOUND,
                 json!({"error": {"message": "attachment not found"}}),
             );
         };
-        attachment.status = AttachmentStatus::Deleted;
+        let _ = attachment;
         return js(
             StatusCode::OK,
             json!({"attachment": {"id": attachment_id, "status": "deleted"}}),
@@ -506,7 +512,7 @@ async fn create_volume(
     let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let size = value["volume"]["size"].as_u64().unwrap_or(0);
     let name = value["volume"]["name"].as_str().map(str::to_owned);
-    let id = format!("volume-{:08}", state.next_index(&state.next_volume_index));
+    let id = uuid::Uuid::now_v7().to_string();
     let volume = FakeVolume {
         id: id.clone(),
         name: name.clone(),
@@ -634,4 +640,114 @@ pub mod faults {
     pub fn reject_unknown_driver(faults: &FaultConfig) -> bool {
         faults.reject_unknown_driver
     }
+}
+
+/// Starts a keystone-compatible token endpoint backed by the real O3K
+/// identity implementation together with a fake Cinder server that validates
+/// caller tokens through that endpoint. Returns the client and fake state.
+pub async fn start_testbed()
+-> Result<(crate::CinderClient, FakeCinderState, std::net::SocketAddr), String> {
+    let identity = o3k_identity::testkit::test_service("http://127.0.0.1:8080")
+        .await
+        .map_err(|_| "identity service".to_owned())?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| format!("bind keystone: {error}"))?;
+    let keystone = listener
+        .local_addr()
+        .map_err(|error| format!("local addr: {error}"))?;
+
+    fn subject_response(
+        status: axum::http::StatusCode,
+        subject: Option<String>,
+        value: serde_json::Value,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let mut response = (status, axum::Json(value)).into_response();
+        if let Some(subject) = subject
+            && let Ok(header) = axum::http::HeaderValue::from_str(&subject)
+        {
+            response.headers_mut().insert(
+                axum::http::header::HeaderName::from_static("x-subject-token"),
+                header,
+            );
+        }
+        response
+    }
+
+    let app = axum::Router::new()
+        .route(
+            "/v3/auth/tokens",
+            axum::routing::post({
+                let identity = identity.clone();
+                move |body: axum::body::Bytes| {
+                    let identity = identity.clone();
+                    async move {
+                        let request: o3k_identity::TokenRequest =
+                            match serde_json::from_slice(&body) {
+                                Ok(request) => request,
+                                Err(_) => {
+                                    return subject_response(
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        None,
+                                        json!({"error": {"code": 400, "title": "Bad Request", "message": "invalid authentication request"}}),
+                                    );
+                                }
+                            };
+                        match identity.issue(&request, std::time::SystemTime::now()) {
+                            Ok((token, response)) => subject_response(
+                                axum::http::StatusCode::CREATED,
+                                Some(token),
+                                serde_json::to_value(response).unwrap_or_default(),
+                            ),
+                            Err(_) => subject_response(
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                None,
+                                json!({"error": {"code": 401, "title": "Unauthorized", "message": "The request has not been authenticated."}}),
+                            ),
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
+            "/v3/auth/tokens",
+            axum::routing::get({
+                let identity = identity.clone();
+                move |headers: axum::http::HeaderMap| {
+                    let identity = identity.clone();
+                    async move {
+                        let token = headers
+                            .get("x-subject-token")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default();
+                        match identity.verify_details(token, std::time::SystemTime::now()) {
+                            Ok(response) => subject_response(
+                                axum::http::StatusCode::OK,
+                                Some(token.to_owned()),
+                                serde_json::to_value(response).unwrap_or_default(),
+                            ),
+                            Err(_) => subject_response(
+                                axum::http::StatusCode::NOT_FOUND,
+                                None,
+                                json!({"error": {"code": 404, "title": "Not Found", "message": "Could not find token"}}),
+                            ),
+                        }
+                    }
+                }
+            }),
+        );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let keystone_endpoint = format!("http://{keystone}");
+    let (fake, cinder_addr) = start_fake_cinder(Some(keystone_endpoint.clone())).await?;
+    let client = crate::CinderClient::new(crate::CinderClientConfig {
+        keystone_endpoint,
+        cinder_endpoint: format!("http://{cinder_addr}"),
+        username: "cinder".to_owned(),
+        password: o3k_identity::Secret::new("password".to_owned()),
+        domain_name: "Default".to_owned(),
+    });
+    Ok((client, fake, cinder_addr))
 }

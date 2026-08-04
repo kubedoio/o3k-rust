@@ -1016,6 +1016,7 @@ name = "o3k-compute"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "o3k-cinder",
  "o3k-compute-agent",
  "o3k-placement",
  "o3k-provider",
@@ -1254,6 +1255,7 @@ dependencies = [
  "axum",
  "o3k-api",
  "o3k-cellhv",
+ "o3k-cinder",
  "o3k-compute",
  "o3k-compute-agent",
  "o3k-config",
