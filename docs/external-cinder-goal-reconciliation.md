@@ -344,3 +344,30 @@ service.
 
 These are the precise items the deferred external-Cinder work must resolve
 before #420/#421/#424/#429 can close.
+
+### Resolution progress (2026-08-04, PR #462 + #463 pending)
+
+Three of the documented real-service defects have been fixed at their root
+cause and the real run now progresses materially further:
+
+1. **python-memcached** (PR #460, merged) — cinder-api initializes its token
+   cache and becomes reachable.
+2. **cinder-volume LVM root helper** (PR #462) — `root_helper = sudo` for the
+   root-launched venv volume service; LVM driver initialization now succeeds
+   ("Driver initialization completed successfully") and the volume group is
+   seen.
+3. **keystonemiddleware EndpointNotFound** (PR #463) — O3K's catalog only
+   advertised the `public` interface; keystoneauth1 defaults to `internal` and
+   raised `EndpointNotFound: internal endpoint for identity service not
+   found`. O3K now seeds every service endpoint under public, internal, and
+   admin interfaces (matching standard Keystone), with a regression test. The
+   error moved from a 500 EndpointNotFound to a 503 "Keystone service is
+   temporarily unavailable", which indicates cinder-api's keystonemiddleware
+   now resolves the identity endpoint but cannot complete the validation
+   request against O3K (no O3K-side request was observed).
+
+Remaining: the 503 `KeystoneUnavailable` during cinder-api token validation —
+a cinder-api keystonemiddleware-to-O3K connectivity/negotiation detail that
+requires the real Cinder process to inspect (identity_uri / interface URL
+negotiation). This is the sole remaining defect before the real volume
+lifecycle can be proven.

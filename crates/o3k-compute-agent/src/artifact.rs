@@ -1142,7 +1142,7 @@ mod tests {
         let (store, mut offer, content) = fixture(&root);
         offer.kind = proto::ArtifactKind::ConfigDriveIso as i32;
         offer.format = "iso".to_owned();
-        offer.expires_at_unix_ms = crate::unix_ms() + 50;
+        offer.expires_at_unix_ms = crate::unix_ms() + 5_000;
         store.begin(&offer).unwrap();
         for (index, data) in content.chunks(4).enumerate() {
             store

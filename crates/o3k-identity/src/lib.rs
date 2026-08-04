@@ -628,17 +628,24 @@ pub async fn seed_identity_defaults(
                 created_at: now.clone(),
             })
             .await?;
-        store
-            .insert_keystone_endpoint(&o3k_store::KeystoneEndpointRecord {
-                id: format!("endpoint-{id}"),
-                service_id: id.to_owned(),
-                interface: "public".to_owned(),
-                url,
-                region: "RegionOne".to_owned(),
-                enabled: true,
-                created_at: now.clone(),
-            })
-            .await?;
+        // Keystone advertises each endpoint under the public, internal, and
+        // admin interfaces pointing at the same URL for a single-node control
+        // plane. Cinder's keystonemiddleware (keystoneauth1) negotiates the
+        // catalog by interface and raises EndpointNotFound when the requested
+        // interface (default internal) is absent, so all three are required.
+        for interface in ["public", "internal", "admin"] {
+            store
+                .insert_keystone_endpoint(&o3k_store::KeystoneEndpointRecord {
+                    id: format!("endpoint-{id}-{interface}"),
+                    service_id: id.to_owned(),
+                    interface: interface.to_owned(),
+                    url: url.clone(),
+                    region: "RegionOne".to_owned(),
+                    enabled: true,
+                    created_at: now.clone(),
+                })
+                .await?;
+        }
     }
 
     Ok(())
@@ -1552,6 +1559,36 @@ mod tests {
                 ),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn catalog_advertises_identity_under_all_interfaces() -> Result<(), AuthError> {
+        // Cinder's keystonemiddleware (keystoneauth1) negotiates the catalog by
+        // interface and defaults to internal; if it is absent it raises
+        // EndpointNotFound and every Cinder API request fails with HTTP 500.
+        // This validates the production seed path (seed_identity_defaults),
+        // which must advertise public, internal, and admin interfaces.
+        let service = testkit::test_service("http://127.0.0.1:8080").await?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (_, response) = service.issue(&admin_request(), now)?;
+        let identity = response
+            .token
+            .catalog
+            .iter()
+            .find(|item| item.service_type == "identity")
+            .ok_or(AuthError::InvalidToken)?;
+        let interfaces: Vec<&str> = identity
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.interface.as_str())
+            .collect();
+        for required in ["public", "internal", "admin"] {
+            assert!(
+                interfaces.contains(&required),
+                "identity catalog must advertise the {required} interface; got {interfaces:?}"
+            );
+        }
         Ok(())
     }
 
