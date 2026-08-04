@@ -107,6 +107,7 @@ jobs:
           # dispatch budget so the API can return a terminal error response.
           O3K_TESTLAB_CONSOLE_REQUEST_TIMEOUT_SECONDS: 25
           O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE: ${{ github.workspace }}/target/real-host-workflow-artifacts/agent-inspect-resource-id
+          O3K_AGENT_INSPECT_PROBE_OUTPUT: /var/lib/o3k-testlab/${{ github.run_id }}/agent-inspect-probe.json
         run: bash tests/testlab-libvirt.sh
 
       - name: Run compute-agent mTLS command evidence

@@ -388,6 +388,7 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
       "$(printf '%q' "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID")" >>"$o3kd_env_tmp"
   fi
   printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"$o3kd_env_tmp"
+  printf 'O3K_AGENT_INSPECT_PROBE_PROJECT_ID=admin\n' >>"$o3kd_env_tmp"
 fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"

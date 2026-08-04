@@ -411,7 +411,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         task.abort();
         let _ = task.await;
     }
-    if let Some(task) = inspect_probe_task {
+    if let Some(mut task) = inspect_probe_task
+        && tokio::time::timeout(std::time::Duration::from_secs(5), &mut task)
+            .await
+            .is_err()
+    {
         task.abort();
         let _ = task.await;
     }
@@ -453,8 +457,8 @@ fn agent_inspect_probe_from_env(
     let resource_id = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_ID").ok();
     let resource_file = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE").ok();
     let output = std::env::var("O3K_AGENT_INSPECT_PROBE_OUTPUT").ok()?;
-    let project_id = std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID")
-        .unwrap_or_else(|_| "bootstrap-project".to_owned());
+    let project_id =
+        std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID").unwrap_or_else(|_| "admin".to_owned());
     if resource_id
         .as_deref()
         .is_none_or(|value| value.trim().is_empty())
