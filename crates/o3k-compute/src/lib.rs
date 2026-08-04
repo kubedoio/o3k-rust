@@ -3,13 +3,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use o3k_compute_agent::{
     Availability, CreateCommandSpec, LifecycleCommand, NetworkAttachmentSpec, NodeRegistry,
-    NodeSnapshot, build_create_command, build_lifecycle_command,
+    NodeSnapshot, build_block_device_command, build_create_command, build_lifecycle_command,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    Capabilities, ComputeProvider, ConfigDriveRequest, CreateInstanceRequest,
-    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
+    BlockDeviceAttachment, BlockDeviceObservation, Capabilities, ComputeProvider,
+    ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest, DeleteInstanceRequest, Instance,
+    InstanceAction, Operation, ProviderError,
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
@@ -265,6 +266,52 @@ impl AgentComputeProvider {
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
         self
+    }
+
+    /// Resolves the fenced agent bound to a server resource.
+    pub async fn agent_for_server(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<(NodeSnapshot, String), ProviderError> {
+        let binding = {
+            let state = self.state.read().await;
+            state
+                .bindings
+                .values()
+                .find(|binding| binding.resource_id == resource_id.to_string())
+                .cloned()
+        };
+        let binding = binding.ok_or(ProviderError::NotFound)?;
+        let agent = self.selected_agent(&binding.agent_id).await?;
+        if agent.agent_epoch != binding.agent_epoch {
+            return Err(ProviderError::StaleState);
+        }
+        Ok((agent, binding.resource_id))
+    }
+
+    /// Persists and dispatches a block-device command, waiting for the bound
+    /// observation. A timeout is an unknown outcome requiring observation
+    /// before retry.
+    pub async fn dispatch_block_device_and_wait(
+        &self,
+        command: o3k_provider_contract::compute_proto::Command,
+        operation_id: Uuid,
+        timeout: Duration,
+    ) -> Result<o3k_provider_contract::compute_proto::BlockDeviceObservation, ProviderError> {
+        self.persist_pending_command(&command, operation_id).await?;
+        self.registry
+            .dispatch_command_and_wait(command, timeout)
+            .await
+            .map_err(|error| match error {
+                o3k_compute_agent::AgentError::Protocol(message)
+                    if message.contains("observation timed out") =>
+                {
+                    ProviderError::UnknownOutcome { operation_id }
+                }
+                other => map_agent_error(other),
+            })?
+            .block_device
+            .ok_or(ProviderError::Terminal)
     }
 
     #[must_use]
@@ -759,6 +806,7 @@ fn durable_inspect_error(error: &ProviderError) -> (o3k_store::OperationState, &
         ProviderError::Conflict => (o3k_store::OperationState::Failed, "conflict"),
         ProviderError::Capacity => (o3k_store::OperationState::Failed, "capacity"),
         ProviderError::Terminal => (o3k_store::OperationState::Failed, "terminal"),
+        ProviderError::UnsupportedBlockDevice(_) => (o3k_store::OperationState::Failed, "terminal"),
     }
 }
 
@@ -1703,6 +1751,147 @@ impl ComputeProvider for AgentComputeProvider {
             .get(&id)
             .cloned()
             .ok_or(ProviderError::NotFound)
+    }
+
+    async fn collect_connector(&self, resource_id: Uuid) -> Result<ConnectorInfo, ProviderError> {
+        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
+        let operation_id = Uuid::now_v7();
+        let command = build_block_device_command(
+            o3k_compute_agent::BlockDeviceCommand::CollectConnector,
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            &binding_resource,
+        )
+        .map_err(map_agent_error)?;
+        let observation = self
+            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
+            .await?;
+        Ok(ConnectorInfo {
+            host: observation.host_name,
+            ip: observation.ip_address,
+            platform: "x86_64".to_owned(),
+            os_type: "linux".to_owned(),
+            multipath: false,
+            initiator: (!observation.initiator.is_empty()).then_some(observation.initiator),
+        })
+    }
+
+    async fn attach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
+        let operation_id = Uuid::now_v7();
+        let command = build_block_device_command(
+            o3k_compute_agent::BlockDeviceCommand::Attach {
+                device: o3k_provider_contract::compute_proto::AttachDiskCommand {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    target_iqn: device.target_iqn.clone().unwrap_or_default(),
+                    target_portal: device.target_portal.clone().unwrap_or_default(),
+                    target_lun: device.target_lun.unwrap_or(0),
+                    device_path: device.local_path.clone().unwrap_or_default(),
+                    multipath: device.multipath,
+                    initiator: device.initiator.clone().unwrap_or_default(),
+                },
+            },
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            &binding_resource,
+        )
+        .map_err(map_agent_error)?;
+        let observation = self
+            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
+            .await?;
+        Ok(BlockDeviceObservation {
+            volume_id: observation.volume_id,
+            attachment_id: observation.attachment_id,
+            driver_volume_type: observation.driver_volume_type,
+            device_path: (!observation.device_path.is_empty()).then_some(observation.device_path),
+            host_path: (!observation.host_path.is_empty()).then_some(observation.host_path),
+            attached: observation.attached,
+            found: observation.found,
+        })
+    }
+
+    async fn detach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
+        let operation_id = Uuid::now_v7();
+        let command = build_block_device_command(
+            o3k_compute_agent::BlockDeviceCommand::Detach {
+                device: o3k_provider_contract::compute_proto::DetachDiskCommand {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    target_iqn: device.target_iqn.clone().unwrap_or_default(),
+                    target_portal: device.target_portal.clone().unwrap_or_default(),
+                    target_lun: device.target_lun.unwrap_or(0),
+                    device_path: device.local_path.clone().unwrap_or_default(),
+                    multipath: device.multipath,
+                    initiator: device.initiator.clone().unwrap_or_default(),
+                },
+            },
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            &binding_resource,
+        )
+        .map_err(map_agent_error)?;
+        let observation = self
+            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
+            .await?;
+        Ok(BlockDeviceObservation {
+            volume_id: observation.volume_id,
+            attachment_id: observation.attachment_id,
+            driver_volume_type: observation.driver_volume_type,
+            device_path: (!observation.device_path.is_empty()).then_some(observation.device_path),
+            host_path: (!observation.host_path.is_empty()).then_some(observation.host_path),
+            attached: observation.attached,
+            found: observation.found,
+        })
+    }
+
+    async fn observe_block_device(
+        &self,
+        resource_id: Uuid,
+        volume_id: &str,
+    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
+        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
+        let operation_id = Uuid::now_v7();
+        let command = build_block_device_command(
+            o3k_compute_agent::BlockDeviceCommand::Observe {
+                volume_id: volume_id.to_owned(),
+                attachment_id: String::new(),
+            },
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &operation_id.to_string(),
+            &binding_resource,
+        )
+        .map_err(map_agent_error)?;
+        let observation = self
+            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
+            .await?;
+        if !observation.found {
+            return Ok(None);
+        }
+        Ok(Some(BlockDeviceObservation {
+            volume_id: observation.volume_id,
+            attachment_id: observation.attachment_id,
+            driver_volume_type: observation.driver_volume_type,
+            device_path: (!observation.device_path.is_empty()).then_some(observation.device_path),
+            host_path: (!observation.host_path.is_empty()).then_some(observation.host_path),
+            attached: observation.attached,
+            found: observation.found,
+        }))
     }
 }
 
@@ -4562,7 +4751,7 @@ mod tests {
         apply_agent_provider_event(
             &state,
             None,
-            o3k_compute_agent::AgentEvent::Observation(proto::Observation {
+            o3k_compute_agent::AgentEvent::Observation(Box::new(proto::Observation {
                 agent_id: "node-a".to_owned(),
                 agent_epoch: "epoch-1".to_owned(),
                 resource_id: "server-a".to_owned(),
@@ -4574,7 +4763,7 @@ mod tests {
                 observed_at_unix_ms: 1,
                 redacted_message: "running".to_owned(),
                 ..Default::default()
-            }),
+            })),
         )
         .await;
         let provider = AgentComputeProvider {

@@ -335,6 +335,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .cinder_password()
                         .map(|secret| o3k_identity::Secret::new(secret.expose().to_owned())),
                     cinder_endpoint: std::env::var("O3K_CINDER_ENDPOINT").ok(),
+                    pbkdf2_iterations: 0,
                 },
             )
             .await?;

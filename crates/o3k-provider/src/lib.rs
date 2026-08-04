@@ -66,6 +66,57 @@ pub struct DeleteInstanceRequest {
     pub idempotency_key: String,
 }
 
+/// Compute connector description required by the Cinder connector-update flow.
+/// Mirrors the os-brick connector shape. The `initiator` is the iSCSI
+/// initiator name when the host supports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorInfo {
+    pub host: String,
+    pub ip: String,
+    pub platform: String,
+    pub os_type: String,
+    pub multipath: bool,
+    pub initiator: Option<String>,
+}
+
+/// Bounded, non-secret block-device attachment description dispatched to the
+/// compute execution boundary. Secret-bearing connection information never
+/// enters this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockDeviceAttachment {
+    pub volume_id: String,
+    pub attachment_id: String,
+    pub driver_volume_type: String,
+    #[serde(default)]
+    pub target_iqn: Option<String>,
+    #[serde(default)]
+    pub target_portal: Option<String>,
+    #[serde(default)]
+    pub target_lun: Option<u32>,
+    #[serde(default)]
+    pub local_path: Option<String>,
+    #[serde(default)]
+    pub device_path: Option<String>,
+    #[serde(default)]
+    pub multipath: bool,
+    #[serde(default)]
+    pub initiator: Option<String>,
+}
+
+/// Observation of a compute-side block device after attach/detach/observe.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockDeviceObservation {
+    pub volume_id: String,
+    pub attachment_id: String,
+    pub driver_volume_type: String,
+    #[serde(default)]
+    pub device_path: Option<String>,
+    #[serde(default)]
+    pub host_path: Option<String>,
+    pub attached: bool,
+    pub found: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceAction {
     Start,
@@ -141,6 +192,8 @@ pub enum ProviderError {
     StaleState,
     #[error("provider fake storage is unavailable")]
     Storage,
+    #[error("provider does not support block-device attachment for this connector")]
+    UnsupportedBlockDevice(String),
 }
 
 impl ProviderError {
@@ -154,6 +207,7 @@ impl ProviderError {
             Self::Retryable => ErrorCategory::Retryable,
             Self::UnknownOutcome { .. } => ErrorCategory::UnknownOutcome,
             Self::Terminal | Self::StaleState | Self::Storage => ErrorCategory::Terminal,
+            Self::UnsupportedBlockDevice(_) => ErrorCategory::InvalidRequest,
         }
     }
 }
@@ -198,6 +252,43 @@ pub trait ComputeProvider: Send + Sync {
         idempotency_key: &str,
     ) -> Result<Operation, ProviderError>;
     async fn get_operation(&self, provider_operation_id: Uuid) -> Result<Operation, ProviderError>;
+    /// Collects the compute connector description for the given server.
+    async fn collect_connector(&self, _resource_id: Uuid) -> Result<ConnectorInfo, ProviderError> {
+        Err(ProviderError::UnsupportedBlockDevice(
+            "connector collection".to_owned(),
+        ))
+    }
+    /// Attaches a block device to the given server through the compute
+    /// execution boundary.
+    async fn attach_block_device(
+        &self,
+        _resource_id: Uuid,
+        _device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        Err(ProviderError::UnsupportedBlockDevice(
+            "block-device attachment".to_owned(),
+        ))
+    }
+    /// Detaches a block device from the given server.
+    async fn detach_block_device(
+        &self,
+        _resource_id: Uuid,
+        _device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        Err(ProviderError::UnsupportedBlockDevice(
+            "block-device detach".to_owned(),
+        ))
+    }
+    /// Observes whether a block device is currently attached to the server.
+    async fn observe_block_device(
+        &self,
+        _resource_id: Uuid,
+        _volume_id: &str,
+    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
+        Err(ProviderError::UnsupportedBlockDevice(
+            "block-device observation".to_owned(),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +312,7 @@ struct FakeState {
     instances: HashMap<String, Instance>,
     operations: HashMap<Uuid, Operation>,
     idempotency: HashMap<String, (Uuid, String)>,
+    block_devices: HashMap<(String, String), BlockDeviceObservation>,
 }
 
 impl Default for FakeComputeProvider {
@@ -247,6 +339,7 @@ impl FakeComputeProvider {
                 instances: HashMap::new(),
                 operations: HashMap::new(),
                 idempotency: HashMap::new(),
+                block_devices: HashMap::new(),
             })),
         }
     }
@@ -286,6 +379,22 @@ impl FakeComputeProvider {
         self.inner
             .lock()
             .map(|state| state.instances.len())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn attached_volume_count(&self, resource_id: Uuid) -> usize {
+        self.inner
+            .lock()
+            .map(|state| {
+                state
+                    .block_devices
+                    .iter()
+                    .filter(|((resource, _), observation)| {
+                        *resource == resource_id.to_string() && observation.attached
+                    })
+                    .count()
+            })
             .unwrap_or_default()
     }
 
@@ -570,6 +679,118 @@ impl ComputeProvider for FakeComputeProvider {
             .cloned()
             .ok_or(ProviderError::NotFound)
     }
+
+    async fn collect_connector(&self, resource_id: Uuid) -> Result<ConnectorInfo, ProviderError> {
+        match self.lock()?.failure {
+            FailureInjection::Terminal => return Err(ProviderError::Terminal),
+            FailureInjection::Transient => return Err(ProviderError::Retryable),
+            _ => {}
+        }
+        let _ = resource_id;
+        Ok(ConnectorInfo {
+            host: "fake-compute-host".to_owned(),
+            ip: "10.0.0.5".to_owned(),
+            platform: "x86_64".to_owned(),
+            os_type: "linux".to_owned(),
+            multipath: false,
+            initiator: Some("iqn.1993-08.org.debian:01:o3k-fake".to_owned()),
+        })
+    }
+
+    async fn attach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        let mut state = self.lock()?;
+        match state.failure {
+            FailureInjection::Terminal => return Err(ProviderError::Terminal),
+            FailureInjection::Transient => return Err(ProviderError::Retryable),
+            FailureInjection::StaleState => return Err(ProviderError::StaleState),
+            _ => {}
+        }
+        if device.driver_volume_type != "iscsi" && device.driver_volume_type != "local" {
+            return Err(ProviderError::UnsupportedBlockDevice(format!(
+                "unsupported driver_volume_type {}",
+                device.driver_volume_type
+            )));
+        }
+        let key = (resource_id.to_string(), device.volume_id.clone());
+        // Idempotent: an already-attached device is returned unchanged.
+        if let Some(existing) = state.block_devices.get(&key)
+            && existing.attached
+        {
+            return Ok(existing.clone());
+        }
+        let host_path = if device.driver_volume_type == "iscsi" {
+            Some(format!(
+                "/dev/sd{}",
+                ["b", "c", "d", "e"][device.target_lun.unwrap_or(0) as usize % 4]
+            ))
+        } else {
+            device.local_path.clone()
+        };
+        let observation = BlockDeviceObservation {
+            volume_id: device.volume_id.clone(),
+            attachment_id: device.attachment_id.clone(),
+            driver_volume_type: device.driver_volume_type.clone(),
+            device_path: device.device_path.clone(),
+            host_path,
+            attached: true,
+            found: true,
+        };
+        state.block_devices.insert(key, observation.clone());
+        Ok(observation)
+    }
+
+    async fn detach_block_device(
+        &self,
+        resource_id: Uuid,
+        device: &BlockDeviceAttachment,
+    ) -> Result<BlockDeviceObservation, ProviderError> {
+        let mut state = self.lock()?;
+        match state.failure {
+            FailureInjection::Terminal => return Err(ProviderError::Terminal),
+            FailureInjection::Transient => return Err(ProviderError::Retryable),
+            _ => {}
+        }
+        let key = (resource_id.to_string(), device.volume_id.clone());
+        // Repeated detach is idempotent and succeeds with a not-found marker.
+        let observation = match state.block_devices.get(&key) {
+            Some(existing) => BlockDeviceObservation {
+                volume_id: device.volume_id.clone(),
+                attachment_id: device.attachment_id.clone(),
+                driver_volume_type: device.driver_volume_type.clone(),
+                device_path: existing.device_path.clone(),
+                host_path: existing.host_path.clone(),
+                attached: false,
+                found: false,
+            },
+            None => BlockDeviceObservation {
+                volume_id: device.volume_id.clone(),
+                attachment_id: device.attachment_id.clone(),
+                driver_volume_type: device.driver_volume_type.clone(),
+                device_path: device.device_path.clone(),
+                host_path: None,
+                attached: false,
+                found: false,
+            },
+        };
+        state.block_devices.remove(&key);
+        Ok(observation)
+    }
+
+    async fn observe_block_device(
+        &self,
+        resource_id: Uuid,
+        volume_id: &str,
+    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
+        Ok(self
+            .lock()?
+            .block_devices
+            .get(&(resource_id.to_string(), volume_id.to_owned()))
+            .cloned())
+    }
 }
 
 pub async fn run_compute_conformance(provider: &dyn ComputeProvider) -> Result<(), ProviderError> {
@@ -779,5 +1000,84 @@ mod tests {
     #[tokio::test]
     async fn conformance_suite_runs_against_fake() -> Result<(), ProviderError> {
         run_conformance(&FakeComputeProvider::new()).await
+    }
+}
+
+#[cfg(test)]
+mod block_device_tests {
+    use super::*;
+
+    fn attachment() -> BlockDeviceAttachment {
+        BlockDeviceAttachment {
+            volume_id: "volume-1".to_owned(),
+            attachment_id: "attachment-1".to_owned(),
+            driver_volume_type: "iscsi".to_owned(),
+            target_iqn: Some("iqn.2026-01.example.com:volume-1".to_owned()),
+            target_portal: Some("10.0.0.10:3260".to_owned()),
+            target_lun: Some(1),
+            local_path: None,
+            device_path: Some("/dev/vdb".to_owned()),
+            multipath: false,
+            initiator: Some("iqn.1993-08.org.debian:01:o3k-compute".to_owned()),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_detach_observe_is_idempotent_and_clean() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let resource_id = Uuid::now_v7();
+        let device = attachment();
+
+        let connector = provider.collect_connector(resource_id).await?;
+        assert_eq!(connector.host, "fake-compute-host");
+        assert!(connector.initiator.is_some());
+
+        let attached = provider.attach_block_device(resource_id, &device).await?;
+        assert!(attached.attached);
+        assert!(attached.host_path.is_some());
+
+        let again = provider.attach_block_device(resource_id, &device).await?;
+        assert!(again.attached);
+
+        let observed = provider
+            .observe_block_device(resource_id, "volume-1")
+            .await?;
+        assert!(observed.is_some_and(|observation| observation.attached));
+
+        let detached = provider.detach_block_device(resource_id, &device).await?;
+        assert!(!detached.attached);
+
+        // Repeated detach is idempotent.
+        let again = provider.detach_block_device(resource_id, &device).await?;
+        assert!(!again.attached);
+
+        let observed = provider
+            .observe_block_device(resource_id, "volume-1")
+            .await?;
+        assert!(observed.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unsupported_connector_is_rejected_explicitly() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let mut device = attachment();
+        device.driver_volume_type = "rbd".to_owned();
+        let error = match provider.attach_block_device(Uuid::now_v7(), &device).await {
+            Err(error) => error,
+            Ok(_) => return Err(ProviderError::Terminal),
+        };
+        assert!(matches!(error, ProviderError::UnsupportedBlockDevice(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_device_observation_returns_none() -> Result<(), ProviderError> {
+        let provider = FakeComputeProvider::new();
+        let observed = provider
+            .observe_block_device(Uuid::now_v7(), "volume-missing")
+            .await?;
+        assert!(observed.is_none());
+        Ok(())
     }
 }
