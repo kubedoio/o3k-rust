@@ -2141,6 +2141,27 @@ impl ComputeService {
         })
     }
 
+    /// Drives durable attachment recovery after restart or an unknown outcome.
+    ///
+    /// The attachment orchestrator persists every phase before executing an
+    /// external side effect. On restart, in-flight or unknown-outcome records
+    /// must converge by observing the Cinder and compute boundaries rather than
+    /// re-running mutations blindly. This bounded periodic task is the
+    /// production caller for `AttachmentOrchestrator::reconcile`.
+    pub fn spawn_attachment_reconciler(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = service.attachment_orchestrator().reconcile().await {
+                    tracing::warn!(%error, "attachment reconcile pass failed");
+                }
+            }
+        })
+    }
+
     #[must_use]
     pub fn flavors(&self) -> Vec<Flavor> {
         vec![
@@ -5147,6 +5168,20 @@ mod tests {
 
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_reconciler_starts_and_shuts_down_cleanly()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let service = service("reconcile").await?;
+        let task = service.spawn_attachment_reconciler(1);
+        // The reconciler is a bounded background task that periodically calls
+        // AttachmentOrchestrator::reconcile. Prove it starts and can be aborted
+        // cleanly; the convergence behavior itself is covered by the
+        // attachment.rs restart tests.
+        task.abort();
+        let _ = task.await;
         Ok(())
     }
 }

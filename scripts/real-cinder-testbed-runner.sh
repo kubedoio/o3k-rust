@@ -251,6 +251,11 @@ target_protocol = iscsi
 target_helper = tgtadm
 iscsi_ip_address = 127.0.0.1
 volume_clear = none
+# The first supported O3K attachment profile does not carry secret-bearing
+# connection information (for example CHAP credentials) across the compute
+# boundary; targets that require authentication are rejected by the control
+# plane. Disable CHAP so the real iSCSI target is accepted.
+chap_authentication = False
 EOF
 
 echo "==> Running cinder-manage db sync..."
