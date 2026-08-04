@@ -1,0 +1,82 @@
+schema_version: 1
+status: proposed
+normative_spec: docs/specs/SPEC-0024-product-profiles-and-claims.md
+profiles:
+  - id: openstack-service-testbed
+    maturity: specified
+    user_outcome: run a selected real OpenStack service without a complete DevStack or full OpenStack control plane
+    o3k_owned_capabilities:
+      - identity
+      - service-catalog
+      - token-validation
+      - declared-satellite-apis
+      - portable-or-real-execution-as-selected
+    external_hosted_services:
+      - selected-service-under-test
+    database:
+      default: sqlite
+      production_target: postgres
+      postgres_support: planned
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+    evidence_state: specified
+  - id: native-rust-testlab
+    maturity: implemented-partial
+    user_outcome: run a declared OpenStack-compatible workflow using O3K-owned Rust service implementations
+    o3k_owned_capabilities:
+      - identity
+      - image
+      - compute
+      - network
+      - placement
+    external_hosted_services: []
+    database:
+      default: sqlite
+      production_target: postgres
+      postgres_support: planned
+    execution_boundaries:
+      - o3k-compute
+      - embedded-network-provider
+    native_volume_profile: planned
+    release_blocking_for_first_alpha: true
+    footprint_claim: unmeasured-target-approximately-50mb
+    evidence_state: implemented
+  - id: small-edge-cloud
+    maturity: planned
+    target_hypervisors:
+      minimum: 10
+      maximum: 20
+    user_outcome: operate a lightweight multi-host O3K cloud and integrate explicitly selected external OpenStack services
+    o3k_owned_capabilities:
+      - control-plane
+      - multi-host-placement
+      - compute-scheduling
+      - reconciliation
+      - declared-network-and-storage-profiles
+    external_hosted_services:
+      - optional-and-profile-specific
+    database:
+      default_for_single_controller: sqlite-with-documented-limits
+      production_target: postgres
+      postgres_support: planned
+    execution_boundaries:
+      - o3k-compute
+      - future-o3k-network
+      - future-o3k-storage
+    cross_cloud_support: requires-separate-profile
+    release_blocking_for_first_alpha: false
+    footprint_claim: unmeasured
+    evidence_state: planned
+claim_rules:
+  approximate_50mb:
+    type: target
+    requires_profile_specific_measurement: true
+  postgres_for_production:
+    type: production_profile_target
+    support_status: planned
+    may_be_claimed_supported_only_after_adapter_and_conformance: true
+  openstack_release_compatibility:
+    type: operation-level
+    blanket_release_parity_forbidden: true
+  external_hosted_service:
+    must_not_be_claimed_o3k_implemented: true
