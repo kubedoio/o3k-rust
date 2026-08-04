@@ -257,7 +257,8 @@ osapi_volume_listen_port = ${CINDER_PORT}
 connection = mysql+pymysql://${DB_USER}:${DB_PW}@127.0.0.1/${DB_NAME}
 [keystone_authtoken]
 www_authenticate_uri = http://127.0.0.1:${O3K_PORT}/
-auth_url = http://127.0.0.1:${O3K_PORT}/
+auth_url = http://127.0.0.1:${O3K_PORT}/v3
+identity_uri = http://127.0.0.1:${O3K_PORT}/v3
 memcached_servers = 127.0.0.1:11211
 auth_type = password
 project_domain_name = Default
