@@ -1859,12 +1859,24 @@ impl ComputeService {
                             tracing::warn!(
                                 agent_id = %observation.agent_id,
                                 agent_epoch = %observation.agent_epoch,
+                                current_epoch = ?current_epoch,
                                 "ignored observation from a replaced agent epoch"
                             );
                             continue;
                         }
                         if let Err(error) = service.apply_agent_observation(&observation).await {
-                            tracing::warn!(%error, "agent resource observation rejected");
+                            tracing::warn!(
+                                %error,
+                                operation_id = %observation.operation_id,
+                                resource_id = %observation.resource_id,
+                                agent_id = %observation.agent_id,
+                                agent_epoch = %observation.agent_epoch,
+                                operation_state = observation.operation_state,
+                                state = observation.state,
+                                provider_resource_id = %observation.provider_resource_id,
+                                observation_sequence = observation.observation_sequence,
+                                "agent resource observation rejected"
+                            );
                         }
                     }
                     Ok(_) => {}
