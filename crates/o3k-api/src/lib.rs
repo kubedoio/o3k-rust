@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{Path, State, rejection::JsonRejection},
-    http::{HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -114,7 +114,10 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/placement/", get(placement_discovery))
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
-        .route("/v3/auth/tokens", post(issue_token))
+        .route(
+            "/v3/auth/tokens",
+            post(issue_token).get(validate_token).head(check_token),
+        )
         .route("/v2/images", get(list_images).post(create_image))
         .route("/v2/images/{id}", get(show_image).delete(delete_image))
         .route(
@@ -528,6 +531,89 @@ async fn issue_token(
                 "The request has not been authenticated.",
             )
         }
+    }
+}
+
+async fn validate_token(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(service) = state.identity else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "identity is not configured",
+        );
+    };
+
+    let token = headers
+        .get("x-subject-token")
+        .or_else(|| headers.get("x-auth-token"))
+        .and_then(|v| v.to_str().ok());
+
+    let Some(token) = token else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "X-Subject-Token header is required",
+        );
+    };
+
+    match service.verify_details(token, SystemTime::now()) {
+        Ok(response) => {
+            let Ok(subject_token) = HeaderValue::from_str(token) else {
+                return keystone_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error",
+                    "token could not be encoded",
+                );
+            };
+            (
+                StatusCode::OK,
+                [
+                    (
+                        header::HeaderName::from_static("x-subject-token"),
+                        subject_token,
+                    ),
+                    (header::VARY, HeaderValue::from_static("X-Auth-Token")),
+                ],
+                Json(response),
+            )
+                .into_response()
+        }
+        Err(_) => keystone_error(StatusCode::NOT_FOUND, "Not Found", "Could not find token"),
+    }
+}
+
+async fn check_token(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    let Some(service) = state.identity else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+
+    let token = headers
+        .get("x-subject-token")
+        .or_else(|| headers.get("x-auth-token"))
+        .and_then(|v| v.to_str().ok());
+
+    let Some(token) = token else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    match service.verify(token, SystemTime::now()) {
+        Ok(_) => {
+            let Ok(subject_token) = HeaderValue::from_str(token) else {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            };
+            (
+                StatusCode::OK,
+                [
+                    (
+                        header::HeaderName::from_static("x-subject-token"),
+                        subject_token,
+                    ),
+                    (header::VARY, HeaderValue::from_static("X-Auth-Token")),
+                ],
+            )
+                .into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
