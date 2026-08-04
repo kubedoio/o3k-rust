@@ -113,42 +113,6 @@ cat > "${CONF}" <<EOF
 transport_url = rabbit://cinder:${MQ_PW}@127.0.0.1:5672/
 auth_strategy = keystone
 enabled_backends = lvm-1
-glance_api_servers = http://127.0.0.1:${O3K_PORT}
-service_token_roles_required = False
-[DEFAULT]
-rpc_backend = rabbit
-osapi_volume_listen = 127.0.0.1
-osapi_volume_listen_port = ${CINDER_PORT}
-[database]
-connection = mysql+pymysql://cinder:${DB_PW}@127.0.0.1/cinder
-[keystone_authtoken]
-www_authenticate_uri = http://127.0.0.1:${O3K_PORT}/
-auth_url = http://127.0.0.1:${O3K_PORT}/
-memcached_servers = 127.0.0.1:11211
-auth_type = password
-project_domain_name = Default
-user_domain_name = Default
-project_name = service
-username = cinder
-password = ${CINDER_SERVICE_PW}
-service_token_roles = service
-service_token_roles_required = False
-[lvm-1]
-volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
-volume_group = o3k-vg
-target_protocol = iscsi
-target_helper = tgtadm
-iscsi_ip_address = 127.0.0.1
-volume_clear = none
-EOF
-# token hashing (PEP 417)
-sed -i '/^\[DEFAULT\]/,$d' "${CONF}" 2>/dev/null || true
-# Rebuild with a single [DEFAULT] section
-cat > "${CONF}" <<EOF
-[DEFAULT]
-transport_url = rabbit://cinder:${MQ_PW}@127.0.0.1:5672/
-auth_strategy = keystone
-enabled_backends = lvm-1
 glance_api_servers = http://127.0.0.1:${O3K_PORT}/
 rpc_backend = rabbit
 osapi_volume_listen = 127.0.0.1

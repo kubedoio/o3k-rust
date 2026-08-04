@@ -124,11 +124,12 @@ service_keys = (
     "portable_contract_status",
     "protected_runner_status",
 )
-profile_keys = ("id", "purpose", "release_series", "codename", "release_source", "services")
+profile_keys = ("id", "purpose", "release_series", "codename", "release_source", "services", "external_hosted_services")
 known_releases = {"2026.1": "Gazpacho", "2025.2": "Flamingo"}
 required_services = {"identity", "image", "network", "compute", "placement"}
 status_values = {"missing", "partial", "planned", "implemented", "portable-contract-verified"}
 protected_values = {"not-verified", "portable-only", "protected-runner-verified"}
+external_hosted_names = {"volumev3"}
 
 manifest_path = root / "compatibility/openstack-targets.yaml"
 try:
@@ -238,6 +239,46 @@ for index, profile in enumerate(profiles):
         fail(f"{path}.services", "service IDs must be unique")
     if set(service_names) != required_services:
         fail(f"{path}.services", f"must contain exactly {sorted(required_services)}")
+
+    external = profile.get("external_hosted_services")
+    if external is not None:
+        exact(external, list, f"{path}.external_hosted_services")
+        external_names = []
+        for external_index, service in enumerate(external):
+            external_path = f"{path}.external_hosted_services[{external_index}]"
+            service = mapping(
+                service,
+                external_path,
+                (
+                    "name",
+                    "service_ownership",
+                    "api_major",
+                    "documentation_base",
+                    "supported_extensions",
+                    "unsupported_operations",
+                    "portable_contract_status",
+                    "protected_runner_status",
+                ),
+            )
+            string(service["name"], f"{external_path}.name")
+            if service["name"] not in external_hosted_names:
+                fail(f"{external_path}.name", "unknown external-hosted service")
+            string(service["service_ownership"], f"{external_path}.service_ownership")
+            if service["service_ownership"] != "external-hosted":
+                fail(f"{external_path}.service_ownership", "must be external-hosted")
+            string(service["api_major"], f"{external_path}.api_major")
+            string(service["documentation_base"], f"{external_path}.documentation_base")
+            string_list(service["supported_extensions"], f"{external_path}.supported_extensions")
+            string_list(service["unsupported_operations"], f"{external_path}.unsupported_operations")
+            string(service["portable_contract_status"], f"{external_path}.portable_contract_status")
+            if service["portable_contract_status"] not in status_values:
+                fail(f"{external_path}.portable_contract_status", "unknown evidence state")
+            string(service["protected_runner_status"], f"{external_path}.protected_runner_status")
+            if service["protected_runner_status"] not in protected_values:
+                fail(f"{external_path}.protected_runner_status", "unknown evidence state")
+            external_names.append(service["name"])
+        if len(external_names) != len(set(external_names)):
+            fail(f"{path}.external_hosted_services", "external-hosted service IDs must be unique")
 
 if len(profile_ids) != len(set(profile_ids)):
     fail("manifest.profiles", "profile IDs must be unique")
