@@ -2469,14 +2469,18 @@ impl ComputeService {
         } else {
             return Err(ComputeError::Conflict);
         }
-        let _reference = self
-            .store
-            .get_provider_reference(id, "compute")
-            .await
-            .map_err(|error| match error {
-                StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+        let _reference = match self.store.get_provider_reference(id, "compute").await {
+            Ok(reference) => reference,
+            Err(StoreError::ProviderReferenceNotFound) => self
+                .store
+                .get_provider_reference(id, "compute-agent")
+                .await
+                .map_err(|error| match error {
+                    StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?,
+            Err(other) => return Err(ComputeError::Store(other)),
+        };
         if idempotency_key.trim().is_empty() {
             return Err(ComputeError::InvalidRequest);
         }
