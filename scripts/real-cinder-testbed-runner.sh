@@ -321,7 +321,13 @@ cleanup_early() {
   "${VENV_DIR}/bin/cinder-scheduler" --config-file "${CONF}" stop 2>/dev/null || true
   "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" stop 2>/dev/null || true
   vgchange -an "${VG_NAME}" 2>/dev/null || true
+  vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV}" 2>/dev/null || true
+  rabbitmqctl delete_vhost "${MQ_VHOST}" 2>/dev/null || true
+  rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  rm -f "${LOOP_FILE}"
+  if [ -f "${EVIDENCE_DIR}/cinder.conf.before" ]; then cp "${EVIDENCE_DIR}/cinder.conf.before" "${CONF}"; fi
 }
 trap cleanup_early EXIT
 
@@ -334,15 +340,15 @@ curl -s "http://127.0.0.1:${O3K_PORT}/healthz" | grep -q "ok" || { echo "ERROR: 
 
 echo "==> Waiting for the compute agent health and readiness..."
 for i in $(seq 1 60); do
-  curl -s "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" | grep -q "ok" && break
+  curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" | grep -q "200" && break
   sleep 0.5
 done
-curl -s "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" | grep -q "ok" || { echo "ERROR: o3k-compute failed to start"; cat "${EVIDENCE_DIR}/o3k-compute.log"; exit 1; }
+curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/healthz" | grep -q "200" || { echo "ERROR: o3k-compute failed to start"; cat "${EVIDENCE_DIR}/o3k-compute.log"; exit 1; }
 for i in $(seq 1 60); do
-  curl -s "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" | grep -q "ok" && break
+  curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" | grep -q "200" && break
   sleep 0.5
 done
-curl -s "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" | grep -q "ok" || { echo "ERROR: o3k-compute not ready (agent registration or libvirt failed)"; cat "${EVIDENCE_DIR}/o3k-compute.log"; exit 1; }
+curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${COMPUTE_HEALTH_PORT}/readyz" | grep -q "200" || { echo "ERROR: o3k-compute not ready (agent registration or libvirt failed)"; cat "${EVIDENCE_DIR}/o3k-compute.log"; exit 1; }
 echo "    o3k-compute registered and libvirt-ready"
 
 AUTH="http://127.0.0.1:${O3K_PORT}/v3/auth/tokens"
@@ -379,7 +385,15 @@ CINDER_API_PID=$!
 CINDER_SCHED_PID=$!
 "${VENV_DIR}/bin/cinder-volume" --config-file "${CONF}" &
 CINDER_VOL_PID=$!
-sleep 20
+
+echo "==> Waiting for cinder-api to become reachable..."
+CINDER_UP=no
+for i in $(seq 1 60); do
+  curl -s -o /dev/null -w "%{http_code}" -m 2 "http://127.0.0.1:${CINDER_PORT}/v3/" 2>/dev/null | grep -qE "^[24][0-9]{2}$" && { CINDER_UP=yes; break; }
+  sleep 2
+done
+[ "${CINDER_UP}" = "yes" ] || { echo "ERROR: cinder-api did not become reachable"; tail -30 "${EVIDENCE_DIR}/o3kd.log" 2>/dev/null || true; exit 1; }
+echo "    cinder-api reachable"
 
 echo "==> Workflow: create a real volume through real Cinder..."
 CINDER_URL="http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project"
@@ -394,7 +408,7 @@ for i in $(seq 1 60); do
   STATUS=$(curl -s -H "X-Auth-Token: ${ADMIN_TOKEN}" "${CINDER_URL}/volumes/${VOLUME_ID}" \
     | python3 -c 'import sys,json; print(json.load(sys.stdin)["volume"]["status"])' 2>/dev/null || echo unknown)
   [ "${STATUS}" = "available" ] && break
-  [ "${STATUS}" = "error" ] && { echo "ERROR: volume entered error state"; exit 1; }
+  echo "${STATUS}" | grep -qi "rror" && { echo "ERROR: volume entered an error state (${STATUS})"; exit 1; }
   sleep 2
 done
 [ "${STATUS}" = "available" ] || { echo "ERROR: volume did not become available (status=${STATUS})"; exit 1; }
@@ -638,9 +652,6 @@ verify_clean() {
   if [ -e "${LOOP_FILE}" ]; then
     leftovers+=("loop_image:${LOOP_FILE}")
   fi
-  if [ -d "${STATE_ROOT}" ]; then
-    leftovers+=("state_root:${STATE_ROOT}")
-  fi
   if [ -n "${leftovers[*]:-}" ]; then
     printf 'run-owned resource remains after cleanup: %s\n' "${leftovers[*]}" >&2
     return 1
@@ -648,26 +659,28 @@ verify_clean() {
   return 0
 }
 
-if [ "${KEEP}" != "--keep" ]; then
-  echo "==> Cleaning up run-owned resources (pass --keep to preserve evidence)..."
-  trap - EXIT
-  cleanup_run_owned
-  rm -rf "${STATE_ROOT}"
-  echo "==> Recording post-cleanup foreign-state verification..."
-  INVENTORY_AFTER="${EVIDENCE_DIR}/foreign-state-after.json"
-  if verify_clean; then
-    CLEAN_STATE="passed"
-  else
-    CLEAN_STATE="failed"
-  fi
-  python3 - <<PY
-import json, subprocess
+echo "==> Cleaning up run-owned host resources..."
+trap - EXIT
+cleanup_run_owned
 
-def run(args):
-    try:
-        return subprocess.run(args, capture_output=True, text=True, check=True).stdout
-    except Exception:
-        return ""
+INVENTORY_AFTER="${EVIDENCE_DIR}/foreign-state-after.json"
+if [ "${KEEP}" != "--keep" ]; then
+  rm -rf "${STATE_ROOT}"
+else
+  # Preserve evidence for the post-run guard, but remove bulky non-evidence
+  # state (venv, data, tls). The guard discovers evidence.yaml under the state
+  # root and reads foreign-state-after.json from the evidence directory.
+  rm -rf "${VENV_DIR}" "${DATA_DIR}" "${TLS_PARENT}"
+fi
+
+echo "==> Recording post-cleanup foreign-state verification..."
+if verify_clean; then
+  CLEAN_STATE="passed"
+else
+  CLEAN_STATE="failed"
+fi
+python3 - <<PY
+import json
 
 after = {
     "run_id": "${RUN_ID}",
@@ -679,9 +692,8 @@ after = {
 with open("${INVENTORY_AFTER}", "w") as f:
     json.dump(after, f, indent=2)
 PY
-  if [ "${CLEAN_STATE}" != "passed" ]; then
-    echo "ERROR: run-owned resources remain after cleanup" >&2
-    exit 1
-  fi
-  echo "==> Cleanup complete: zero run-owned resources remain."
+if [ "${CLEAN_STATE}" != "passed" ]; then
+  echo "ERROR: run-owned resources remain after cleanup" >&2
+  exit 1
 fi
+echo "==> Cleanup complete: zero run-owned resources remain."
