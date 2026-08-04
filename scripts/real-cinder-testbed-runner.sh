@@ -246,7 +246,7 @@ echo "==> Writing run-owned cinder.conf..."
 CONF="${STATE_ROOT}/cinder.conf"
 cat > "${CONF}" <<EOF
 [DEFAULT]
-transport_url = rabbit://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}
+transport_url = amqp://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}
 auth_strategy = keystone
 enabled_backends = lvm-1
 glance_api_servers = http://127.0.0.1:${O3K_PORT}/
