@@ -528,6 +528,42 @@ if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
         || { echo "agent inspect probe resource file is invalid" >&2; exit 1; }
     printf '%s\n' "${SERVER_ID}" >"${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
     chmod 0644 "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE}"
+    # Synchronize with the live process-boundary probe: wait for it to
+    # reach a terminal result before any destructive lifecycle action.
+    # The probe dispatches inspect through the real compute-service
+    # boundary while the server is still ACTIVE.
+    if [[ -n "${O3K_AGENT_INSPECT_PROBE_OUTPUT:-}" ]]; then
+        probe_output="${O3K_AGENT_INSPECT_PROBE_OUTPUT}"
+        probe_deadline="${O3K_AGENT_INSPECT_PROBE_DEADLINE_SECONDS:-60}"
+        probe_waited=0
+        while [[ "${probe_waited}" -lt "${probe_deadline}" ]]; do
+            if [[ -f "${probe_output}" ]]; then
+                probe_status=$(python3 - "${probe_output}" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        d = json.load(f)
+    print(d.get("status", "unknown"))
+except Exception:
+    print("unknown")
+PY
+                )
+                if [[ "${probe_status}" == "passed" ]]; then
+                    echo "agent inspect probe passed"
+                    break
+                elif [[ "${probe_status}" == "failed" ]]; then
+                    echo "agent inspect probe failed" >&2
+                    exit 1
+                fi
+            fi
+            sleep 1
+            probe_waited=$((probe_waited + 1))
+        done
+        if [[ "${probe_waited}" -ge "${probe_deadline}" ]]; then
+            echo "agent inspect probe timed out after ${probe_deadline}s" >&2
+            exit 1
+        fi
+    fi
 fi
 openstack server show "${SERVER_ID}" -f json >"${ARTIFACT_DIR}/server-show.json"
 python3 - "${ARTIFACT_DIR}/server-show.json" "${ARTIFACT_DIR}/server-show-evidence.json" <<'PY'
