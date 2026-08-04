@@ -271,6 +271,10 @@ CONF="${STATE_ROOT}/cinder.conf"
 cat > "${CONF}" <<EOF
 [DEFAULT]
 transport_url = rabbit://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}
+# Scope the RPC control exchange and queue names by run ID so this Cinder
+# deployment never collides with any foreign Cinder services that may already
+# be consuming the default exchange on the same broker.
+control_exchange = cinder-${RUN_SLUG}
 auth_strategy = keystone
 enabled_backends = lvm-1
 glance_api_servers = http://127.0.0.1:${O3K_PORT}/
