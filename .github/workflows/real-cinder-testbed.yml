@@ -118,3 +118,17 @@ jobs:
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-cinder-runner-result.json
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Remove run-owned state root
+        if: always()
+        run: |
+          state_root="/var/lib/o3k-cinder-testbed/${GITHUB_RUN_ID}"
+          # The pre-run guard blocks on stale run-owned state, so a completed
+          # run must not leave its state root behind. Artifacts were already
+          # uploaded; only the run-owned state root is removed.
+          if sudo -n test -d "${state_root}"; then
+            sudo -n rm -rf "${state_root}"
+            echo "removed run-owned state root ${state_root}"
+          else
+            echo "state root already absent"
+          fi

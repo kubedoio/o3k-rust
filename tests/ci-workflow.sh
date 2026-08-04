@@ -73,6 +73,16 @@ assert "Bootstrap disposable TestLab" in real_host_text
 assert "scripts/bootstrap-disposable-testlab.sh" in real_host_text
 assert "scripts/cleanup-disposable-testlab.sh" in real_host_text
 assert "disposable-testlab-bootstrap.json" in real_host_text
+real_cinder = pathlib.Path(sys.argv[1]).parent / "real-cinder-testbed.yml"
+real_cinder_text = real_cinder.read_text(encoding="utf-8")
+assert "if: github.repository == 'kubedoio/o3k-rust' && github.ref == 'refs/heads/main'" in real_cinder_text
+assert "scripts/real-cinder-testbed-runner.sh --keep" in real_cinder_text
+assert "scripts/real-cinder-pre-run-guard.sh" in real_cinder_text
+assert "scripts/real-cinder-post-run-guard.sh" in real_cinder_text
+assert "Remove run-owned state root" in real_cinder_text
+assert "real-cinder-environment.json" in real_cinder_text
+assert "tempest-cinder-summary.json" in real_cinder_text
+assert "real-cinder-runner-result.json" in real_cinder_text
 PY
 
 echo "CI workflow contract tests passed"
