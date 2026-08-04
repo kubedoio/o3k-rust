@@ -1,0 +1,26 @@
+name: Mock Cinder Component Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  cinder-mock:
+    name: Mock Cinder Component Test (not a real Cinder deployment)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
+        with:
+          toolchain: 1.97.1
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils
+
+      - name: Run mock Cinder component test
+        run: bash scripts/component-cinder-mock.sh

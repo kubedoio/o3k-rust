@@ -990,10 +990,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-cinder"
+version = "0.1.0-alpha.0"
+dependencies = [
+ "axum",
+ "base64",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "o3k-identity",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "o3k-compute"
 version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
+ "o3k-cinder",
  "o3k-compute-agent",
  "o3k-placement",
  "o3k-provider",
@@ -1107,10 +1130,12 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "base64",
  "hmac",
+ "o3k-store",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 
@@ -1230,6 +1255,7 @@ dependencies = [
  "axum",
  "o3k-api",
  "o3k-cellhv",
+ "o3k-cinder",
  "o3k-compute",
  "o3k-compute-agent",
  "o3k-config",

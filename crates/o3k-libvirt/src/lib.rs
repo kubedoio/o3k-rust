@@ -20,6 +20,7 @@ use virt::{connect::Connect, domain::Domain, stream::Stream};
 
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
 pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
+pub const O3K_DISK_NAMESPACE: &str = "urn:o3k:compute:block-device";
 
 // These values are the stable public libvirt virDomainState values. Keep the
 // projection explicit: treating every non-active domain as stopped would turn
@@ -238,6 +239,57 @@ pub fn discover_domain_xml(name: &str, xml: &str) -> DiscoveryResult {
             reason,
         },
     }
+}
+
+/// Builds the deterministic libvirt `<disk>` XML for a hotplugged block
+/// device. The `o3k:disk` metadata binds the host device to a durable O3K
+/// volume/attachment identity so detach and observe can find it.
+pub fn build_attach_disk_xml(
+    volume_id: &str,
+    attachment_id: &str,
+    host_path: &str,
+    device: &str,
+) -> Result<String, LibvirtError> {
+    if volume_id.trim().is_empty()
+        || attachment_id.trim().is_empty()
+        || host_path.trim().is_empty()
+        || device.trim().is_empty()
+        || device.starts_with('/')
+    {
+        return Err(LibvirtError::new(
+            ErrorCategory::InvalidRequest,
+            "attach disk identity or target is invalid",
+        ));
+    }
+    Ok(format!(
+        r#"<disk type="block" device="disk">
+  <driver name="qemu" type="raw" cache="none"/>
+  <source dev="{host_path}"/>
+  <target dev="{device}" bus="virtio"/>
+  <metadata>
+    <o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="{volume_id}" attachment_id="{attachment_id}"/>
+  </metadata>
+</disk>"#
+    ))
+}
+
+/// Extracts the O3K-owned disk volume identities from a domain XML document.
+pub fn owned_disk_volume_ids(xml: &str) -> Vec<String> {
+    let mut volumes = Vec::new();
+    let mut search_from = 0;
+    while let Some(marker_start) = xml[search_from..].find("<o3k:disk") {
+        let start = search_from + marker_start;
+        let Some(end) = xml[start..].find('>') else {
+            break;
+        };
+        let end = start + end;
+        let tag = &xml[start..end];
+        if let Some(volume_id) = attr(tag, "volume_id") {
+            volumes.push(volume_id);
+        }
+        search_from = end + 1;
+    }
+    volumes
 }
 
 pub fn discover_domain_xmls(domains: &[(String, String)]) -> Vec<DiscoveryResult> {
@@ -646,6 +698,39 @@ impl LibvirtAdapter {
         run_blocking(move || backend_list(&uri, &prefix)).await
     }
 
+    /// Hotplugs a block device into the domain and records durable volume
+    /// identity in the disk metadata.
+    pub async fn attach_disk(
+        &self,
+        name: String,
+        volume_id: String,
+        attachment_id: String,
+        host_path: String,
+        device: String,
+    ) -> Result<(), LibvirtError> {
+        let xml = build_attach_disk_xml(&volume_id, &attachment_id, &host_path, &device)?;
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_attach_disk(&uri, &name, &xml)).await
+    }
+
+    /// Detaches the O3K-owned disk for the given volume from the domain.
+    pub async fn detach_disk(&self, name: String, volume_id: String) -> Result<bool, LibvirtError> {
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_detach_disk(&uri, &name, &volume_id)).await
+    }
+
+    /// Observes whether an O3K-owned disk for the volume is attached to the
+    /// domain. The result is derived from the durable disk metadata, never
+    /// from a host path or guest observation.
+    pub async fn observe_disk(
+        &self,
+        name: String,
+        volume_id: String,
+    ) -> Result<bool, LibvirtError> {
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_observe_disk(&uri, &name, &volume_id)).await
+    }
+
     async fn domain_action(&self, name: String, action: DomainAction) -> Result<(), LibvirtError> {
         let uri = self.config.uri.clone();
         run_blocking(move || backend_action(&uri, &name, action)).await
@@ -857,6 +942,123 @@ fn backend_list(uri: &str, prefix: &str) -> Result<Vec<String>, LibvirtError> {
         })
         .collect::<Vec<_>>();
     Ok(managed_domain_names(&inspected, prefix))
+}
+
+#[cfg(feature = "libvirt")]
+const VIR_DOMAIN_DEVICE_MODIFY_LIVE: u32 = 1;
+#[cfg(feature = "libvirt")]
+const VIR_DOMAIN_DEVICE_MODIFY_CONFIG: u32 = 2;
+
+#[cfg(feature = "libvirt")]
+fn backend_attach_disk(uri: &str, name: &str, disk_xml: &str) -> Result<(), LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    domain
+        .attach_device_flags(
+            disk_xml,
+            VIR_DOMAIN_DEVICE_MODIFY_LIVE | VIR_DOMAIN_DEVICE_MODIFY_CONFIG,
+        )
+        .map_err(|_| {
+            LibvirtError::new(ErrorCategory::OperationFailed, "block-device attach failed")
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "libvirt")]
+fn backend_detach_disk(uri: &str, name: &str, volume_id: &str) -> Result<bool, LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain XML inspection failed",
+        )
+    })?;
+    let volumes = owned_disk_volume_ids(&xml);
+    let matching: Vec<&String> = volumes
+        .iter()
+        .filter(|value| value.as_str() == volume_id)
+        .collect();
+    if matching.is_empty() {
+        // Already detached or never attached; idempotent success.
+        return Ok(false);
+    }
+    let disk_xml = owned_disk_xml_for_volume(&xml, volume_id).ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "attached disk metadata is malformed",
+        )
+    })?;
+    domain
+        .detach_device_flags(
+            &disk_xml,
+            VIR_DOMAIN_DEVICE_MODIFY_LIVE | VIR_DOMAIN_DEVICE_MODIFY_CONFIG,
+        )
+        .map_err(|_| {
+            LibvirtError::new(ErrorCategory::OperationFailed, "block-device detach failed")
+        })?;
+    Ok(true)
+}
+
+#[cfg(feature = "libvirt")]
+fn backend_observe_disk(uri: &str, name: &str, volume_id: &str) -> Result<bool, LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain XML inspection failed",
+        )
+    })?;
+    Ok(owned_disk_volume_ids(&xml)
+        .iter()
+        .any(|value| value == volume_id))
+}
+
+#[cfg(not(feature = "libvirt"))]
+fn backend_attach_disk(_uri: &str, _name: &str, _disk_xml: &str) -> Result<(), LibvirtError> {
+    Err(LibvirtError::new(
+        ErrorCategory::Unavailable,
+        "libvirt hotplug is unavailable in this build",
+    ))
+}
+
+#[cfg(not(feature = "libvirt"))]
+fn backend_detach_disk(_uri: &str, _name: &str, _volume_id: &str) -> Result<bool, LibvirtError> {
+    Err(LibvirtError::new(
+        ErrorCategory::Unavailable,
+        "libvirt hotplug is unavailable in this build",
+    ))
+}
+
+#[cfg(not(feature = "libvirt"))]
+fn backend_observe_disk(_uri: &str, _name: &str, _volume_id: &str) -> Result<bool, LibvirtError> {
+    Err(LibvirtError::new(
+        ErrorCategory::Unavailable,
+        "libvirt hotplug is unavailable in this build",
+    ))
+}
+
+/// Locates the full `<disk>` XML element owning the given volume identity.
+#[cfg(feature = "libvirt")]
+fn owned_disk_xml_for_volume(xml: &str, volume_id: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(marker_start) = xml[search_from..].find("<disk") {
+        let start = search_from + marker_start;
+        let Some(close) = xml[start..].find("</disk>") else {
+            break;
+        };
+        let end = start + close + "</disk>".len();
+        let element = &xml[start..end];
+        if element.contains("o3k:disk") && element.contains(&format!("volume_id=\"{volume_id}\"")) {
+            return Some(element.to_owned());
+        }
+        search_from = end;
+    }
+    None
 }
 
 #[cfg(feature = "libvirt")]
@@ -1852,6 +2054,73 @@ mod tests {
 
         let result = provider.create_instance(request).await;
         assert_eq!(result, Err(o3k_provider::ProviderError::InvalidRequest));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod block_device_tests {
+    use super::*;
+
+    #[test]
+    fn attach_disk_xml_binds_durable_volume_identity() -> Result<(), LibvirtError> {
+        let xml = build_attach_disk_xml("volume-1", "attachment-1", "/dev/sdb", "vdb")?;
+        assert!(xml.contains("<disk type=\"block\" device=\"disk\">"));
+        assert!(xml.contains("<source dev=\"/dev/sdb\"/>"));
+        assert!(xml.contains("<target dev=\"vdb\" bus=\"virtio\"/>"));
+        assert!(xml.contains("volume_id=\"volume-1\""));
+        assert!(xml.contains("attachment_id=\"attachment-1\""));
+        assert!(xml.contains(O3K_DISK_NAMESPACE));
+        Ok(())
+    }
+
+    #[test]
+    fn attach_disk_xml_rejects_invalid_targets() {
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "").is_err());
+        assert!(build_attach_disk_xml("v", "a", "", "vdb").is_err());
+        assert!(build_attach_disk_xml("v", "", "/dev/sdb", "vdb").is_err());
+        assert!(build_attach_disk_xml("", "a", "/dev/sdb", "vdb").is_err());
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "/dev/vdb").is_err());
+    }
+
+    #[test]
+    fn owned_disk_volume_ids_extracts_only_o3k_disks() {
+        let xml = format!(
+            r#"<domain>
+  <devices>
+    <disk type="file" device="disk"><source file="/var/lib/o3k/root.qcow2"/><target dev="vda" bus="virtio"/></disk>
+    <disk type="block" device="disk">
+      <source dev="/dev/sdb"/>
+      <target dev="vdb" bus="virtio"/>
+      <metadata><o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="volume-1" attachment_id="attachment-1"/></metadata>
+    </disk>
+  </devices>
+</domain>"#
+        );
+        let volumes = owned_disk_volume_ids(&xml);
+        assert_eq!(volumes, vec!["volume-1".to_owned()]);
+
+        let foreign = owned_disk_volume_ids("<domain><disk type='file'/></domain>");
+        assert!(foreign.is_empty());
+    }
+
+    #[test]
+    fn owned_disk_xml_for_volume_finds_whole_element() -> Result<(), LibvirtError> {
+        let xml = format!(
+            r#"<domain><devices>
+  <disk type="block" device="disk">
+    <driver name="qemu" type="raw"/>
+    <source dev="/dev/sdb"/>
+    <target dev="vdb" bus="virtio"/>
+    <metadata><o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="volume-2" attachment_id="attachment-2"/></metadata>
+  </disk>
+</devices></domain>"#
+        );
+        let element = owned_disk_xml_for_volume(&xml, "volume-2")
+            .ok_or_else(|| LibvirtError::new(ErrorCategory::NotFound, "disk element missing"))?;
+        assert!(element.contains("<source dev=\"/dev/sdb\"/>"));
+        assert!(element.ends_with("</disk>"));
+        assert!(owned_disk_xml_for_volume(&xml, "volume-missing").is_none());
         Ok(())
     }
 }

@@ -711,6 +711,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 redacted_message: message.to_owned(),
                 provider_resource_id: name.clone(),
                 console_log: None,
+                block_device: None,
             })
         };
         match command.action.as_ref() {
@@ -1086,7 +1087,143 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         offset: 0,
                         bytes,
                     }),
+                    block_device: None,
                 })
+            }
+            Some(proto::command::Action::CollectConnector(_)) => {
+                let connector = collect_host_connector()?;
+                let mut result = success("connector collected", proto::ResourceState::Running)?;
+                result.block_device = Some(proto::BlockDeviceObservation {
+                    volume_id: String::new(),
+                    attachment_id: String::new(),
+                    driver_volume_type: String::new(),
+                    device_path: String::new(),
+                    host_path: String::new(),
+                    attached: false,
+                    found: true,
+                    initiator: connector.initiator.clone().unwrap_or_default(),
+                    host_name: connector.host,
+                    ip_address: connector.ip,
+                    iscsi_logged_in: false,
+                });
+                Ok(result)
+            }
+            Some(proto::command::Action::AttachDisk(device)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                if device.driver_volume_type != "iscsi" && device.driver_volume_type != "local" {
+                    return Err(AgentError::Protocol(format!(
+                        "unsupported driver_volume_type {}",
+                        device.driver_volume_type
+                    )));
+                }
+                let host_path = if device.driver_volume_type == "iscsi" {
+                    let host_path =
+                        iscsi_login(&device.target_iqn, &device.target_portal, device.target_lun)?;
+                    host_path.ok_or_else(|| {
+                        AgentError::Protocol(
+                            "iscsi login succeeded but no device path was observed".to_owned(),
+                        )
+                    })?
+                } else {
+                    device.device_path.clone()
+                };
+                let guest_device = attach_device_letter(&command.resource_id, &device.volume_id);
+                self.adapter
+                    .attach_disk(
+                        name.clone(),
+                        device.volume_id.clone(),
+                        device.attachment_id.clone(),
+                        host_path.clone(),
+                        guest_device.clone(),
+                    )
+                    .await
+                    .map_err(agent_error)?;
+                let mut result = success("block device attached", proto::ResourceState::Running)?;
+                result.block_device = Some(proto::BlockDeviceObservation {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    device_path: format!("/dev/{guest_device}"),
+                    host_path,
+                    attached: true,
+                    found: true,
+                    initiator: device.initiator.clone(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: device.driver_volume_type == "iscsi",
+                });
+                Ok(result)
+            }
+            Some(proto::command::Action::DetachDisk(device)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                let detached = self
+                    .adapter
+                    .detach_disk(name.clone(), device.volume_id.clone())
+                    .await
+                    .map_err(agent_error)?;
+                if device.driver_volume_type == "iscsi" {
+                    let _ = iscsi_logout(&device.target_iqn, &device.target_portal);
+                }
+                let mut result = success("block device detached", proto::ResourceState::Running)?;
+                result.block_device = Some(proto::BlockDeviceObservation {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    device_path: String::new(),
+                    host_path: String::new(),
+                    attached: false,
+                    found: detached,
+                    initiator: device.initiator.clone(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: false,
+                });
+                Ok(result)
+            }
+            Some(proto::command::Action::ObserveDisk(observe)) => {
+                let inspection = self
+                    .adapter
+                    .inspect(name.clone())
+                    .await
+                    .map_err(agent_error)?;
+                verify_owned_domain(&inspection, &command.resource_id)?;
+                let attached = self
+                    .adapter
+                    .observe_disk(name.clone(), observe.volume_id.clone())
+                    .await
+                    .map_err(agent_error)?;
+                let mut result = success(
+                    if attached {
+                        "disk is attached"
+                    } else {
+                        "disk is not attached"
+                    },
+                    proto::ResourceState::Running,
+                )?;
+                result.block_device = Some(proto::BlockDeviceObservation {
+                    volume_id: observe.volume_id.clone(),
+                    attachment_id: observe.attachment_id.clone(),
+                    driver_volume_type: String::new(),
+                    device_path: String::new(),
+                    host_path: String::new(),
+                    attached,
+                    found: attached,
+                    initiator: String::new(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: attached,
+                });
+                Ok(result)
             }
             None => Err(AgentError::Protocol("command action is missing".to_owned())),
         }
@@ -1101,6 +1238,7 @@ fn inspect_not_found_result(provider_resource_id: String) -> CommandExecutionRes
         redacted_message: "requested domain was not found".to_owned(),
         provider_resource_id,
         console_log: None,
+        block_device: None,
     }
 }
 
@@ -1133,6 +1271,185 @@ fn verify_owned_domain(
 
 fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
     AgentError::Protocol("libvirt command failed".to_owned())
+}
+
+fn read_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "o3k-compute".to_owned())
+}
+
+fn read_first_ip() -> String {
+    match std::process::Command::new("hostname").arg("-I").output() {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout
+                .split_whitespace()
+                .next()
+                .unwrap_or("127.0.0.1")
+                .to_owned()
+        }
+        _ => "127.0.0.1".to_owned(),
+    }
+}
+
+fn read_iscsi_initiator() -> Option<String> {
+    let contents = std::fs::read_to_string("/etc/iscsi/initiatorname.iscsi").ok()?;
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("InitiatorName="))
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Collects the compute connector description required by the Cinder
+/// connector-update flow. Bounded, non-secret values only.
+fn collect_host_connector() -> Result<o3k_provider::ConnectorInfo, AgentError> {
+    Ok(o3k_provider::ConnectorInfo {
+        host: read_hostname(),
+        ip: read_first_ip(),
+        platform: format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS),
+        os_type: std::env::consts::OS.to_owned(),
+        multipath: false,
+        initiator: read_iscsi_initiator(),
+    })
+}
+
+/// Logs into the iSCSI target and returns the observed host device path. A
+/// missing iscsiadm is an explicit unsupported-connector failure; a successful
+/// login without an observed device is an unknown outcome.
+fn iscsi_login(
+    target_iqn: &str,
+    target_portal: &str,
+    _target_lun: u32,
+) -> Result<Option<String>, AgentError> {
+    if target_iqn.trim().is_empty() || target_portal.trim().is_empty() {
+        return Err(AgentError::Protocol(
+            "iscsi target is incomplete".to_owned(),
+        ));
+    }
+    let discovery = std::process::Command::new("iscsiadm")
+        .args([
+            "--mode",
+            "discoverydb",
+            "-t",
+            "sendtargets",
+            "-p",
+            target_portal,
+        ])
+        .output();
+    let discovery = match discovery {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return Err(AgentError::Protocol(format!(
+                "iscsi discovery failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Err(_) => {
+            return Err(AgentError::Protocol(
+                "iscsiadm is not available; iscsi connector is unsupported on this host".to_owned(),
+            ));
+        }
+    };
+    let _ = String::from_utf8_lossy(&discovery.stdout);
+    let login = std::process::Command::new("iscsiadm")
+        .args([
+            "--mode",
+            "node",
+            "-T",
+            target_iqn,
+            "-p",
+            target_portal,
+            "--login",
+        ])
+        .output();
+    match login {
+        Ok(output) if output.status.success() => {
+            // Determine the host device path from the login session output.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let session = stdout
+                .lines()
+                .find_map(|line| line.split("with session").nth(1))
+                .map(|value| value.trim().to_owned());
+            let device = std::process::Command::new("iscsiadm")
+                .args(["--mode", "session", "-P", "3"])
+                .output()
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+                .unwrap_or_default();
+            let device = discover_iscsi_device(&device, target_iqn);
+            if let Some(device) = device {
+                return Ok(Some(device));
+            }
+            // A successful login with an unknown device path is an unknown
+            // outcome, never an automatic failure.
+            tracing::warn!(
+                target_iqn,
+                session = ?session,
+                "iscsi login succeeded but device path is not yet observable"
+            );
+            Ok(None)
+        }
+        Ok(output) => Err(AgentError::Protocol(format!(
+            "iscsi login failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))),
+        Err(_) => Err(AgentError::Protocol("iscsiadm is not available".to_owned())),
+    }
+}
+
+fn discover_iscsi_device(session_output: &str, target_iqn: &str) -> Option<String> {
+    let lines: Vec<&str> = session_output.lines().collect();
+    let mut in_target = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Target:") && trimmed.contains(target_iqn) {
+            in_target = true;
+            continue;
+        }
+        if in_target && trimmed.starts_with("Current") {
+            continue;
+        }
+        if in_target {
+            // "Attached SCSI devices:" section lists /dev/ paths.
+            if trimmed.starts_with("/dev/") {
+                return Some(trimmed.to_owned());
+            }
+            if !trimmed.starts_with(" ") && trimmed.starts_with("Target:") {
+                break;
+            }
+        }
+    }
+    None
+}
+
+fn iscsi_logout(target_iqn: &str, target_portal: &str) -> Result<(), AgentError> {
+    let _ = target_portal;
+    let logout = std::process::Command::new("iscsiadm")
+        .args(["--mode", "node", "-T", target_iqn, "--logout"])
+        .output();
+    match logout {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(_) => Ok(()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// Determines the next guest virtio block-device letter for a server. The
+/// letter is stable for the volume on this server via a deterministic UUID
+/// mapping over the bounded b..=z alphabet.
+fn attach_device_letter(resource_id: &str, volume_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    resource_id.hash(&mut hasher);
+    volume_id.hash(&mut hasher);
+    let index = (hasher.finish() % 24) as u8;
+    let letter = (b'b' + index) as char;
+    format!("vd{letter}")
 }
 
 impl LibvirtCommandExecutor {

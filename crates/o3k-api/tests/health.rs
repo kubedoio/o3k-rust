@@ -1,13 +1,12 @@
 use axum::body::Body;
 use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
-use o3k_identity::{Secret, TokenService};
+use o3k_identity::testkit::test_service;
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use o3k_network::NetworkService;
 use o3k_provider::{FailureInjection, FakeComputeProvider};
 use o3k_store::SqliteStore;
 use serde_json::Value;
-use std::time::Duration;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -25,15 +24,7 @@ async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error:
 #[tokio::test]
 async fn registered_agent_console_reads_fall_back_to_durable_cache()
 -> Result<(), Box<dyn std::error::Error>> {
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let identity = test_service("http://127.0.0.1:8080").await?;
     let store_path = std::path::PathBuf::from(format!(
         "/tmp/o3k-api-agent-console-{}.sqlite",
         uuid::Uuid::now_v7()
@@ -176,15 +167,7 @@ async fn readiness_reports_startup_failure() -> Result<(), Box<dyn std::error::E
 #[tokio::test]
 async fn keystone_password_scope_returns_signed_subject_token()
 -> Result<(), Box<dyn std::error::Error>> {
-    let service = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let service = test_service("http://127.0.0.1:8080").await?;
     let body = serde_json::json!({
         "auth": {
             "identity": {
@@ -215,7 +198,7 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert!(
         body["token"]["catalog"]
             .as_array()
-            .is_some_and(|items| items.len() == 5)
+            .is_some_and(|items| items.len() == 6)
     );
     Ok(())
 }
@@ -265,16 +248,7 @@ async fn keystone_discovery_exposes_v3_without_fallback_warning()
 #[tokio::test]
 async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
 -> Result<(), Box<dyn std::error::Error>> {
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?
-    .with_catalog_endpoint("http://testlab.example.invalid/");
+    let identity = test_service("http://testlab.example.invalid/").await?;
     let body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let response = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(identity))
         .oneshot(
@@ -300,7 +274,7 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
             ))
         })
         .collect();
-    assert_eq!(services.len(), 5);
+    assert_eq!(services.len(), 6);
     assert_eq!(services["identity"], "http://testlab.example.invalid/v3");
     assert_eq!(services["image"], "http://testlab.example.invalid/v2");
     assert_eq!(services["network"], "http://testlab.example.invalid/v2.0");
@@ -312,21 +286,17 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
         services["placement"],
         "http://testlab.example.invalid/placement"
     );
+    assert_eq!(
+        services["volumev3"],
+        "http://127.0.0.1:8776/v3/bootstrap-project"
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn keystone_invalid_password_is_generic_unauthorized()
 -> Result<(), Box<dyn std::error::Error>> {
-    let service = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let service = test_service("http://127.0.0.1:8080").await?;
     let request = Request::builder()
         .method(Method::POST)
         .uri("/v3/auth/tokens")
@@ -344,15 +314,7 @@ async fn keystone_invalid_password_is_generic_unauthorized()
 #[tokio::test]
 async fn keystone_rejects_missing_scope_and_wrong_project_without_leaking_credentials()
 -> Result<(), Box<dyn std::error::Error>> {
-    let service = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let service = test_service("http://127.0.0.1:8080").await?;
     for body in [
         serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}}}}),
         serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"other-project"}}}}),
@@ -383,15 +345,7 @@ async fn keystone_rejects_missing_scope_and_wrong_project_without_leaking_creden
 async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!("/tmp/o3k-api-images-{}", std::process::id()));
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let identity = test_service("http://127.0.0.1:8080").await?;
     let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES)?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
@@ -527,15 +481,7 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!("/tmp/o3k-api-network-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let identity = test_service("http://127.0.0.1:8080").await?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_network(NetworkService::open(&root)?);
@@ -691,15 +637,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         std::process::id()
     ));
     let _ = std::fs::remove_file(&path);
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?;
+    let identity = test_service("http://127.0.0.1:8080").await?;
     let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider.clone());
@@ -1142,17 +1080,7 @@ async fn keystone_get_and_head_token_validation_and_cinder_catalog()
 -> Result<(), Box<dyn std::error::Error>> {
     use tower::ServiceExt;
 
-    let identity = TokenService::new(
-        "bootstrap-user".to_owned(),
-        "admin".to_owned(),
-        Secret::new("password".to_owned()),
-        "bootstrap-project".to_owned(),
-        "admin".to_owned(),
-        Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
-        Duration::from_secs(3600),
-    )?
-    .with_catalog_endpoint("http://127.0.0.1:18080")
-    .with_cinder_endpoint("http://127.0.0.1:8776");
+    let identity = test_service("http://127.0.0.1:18080").await?;
 
     let state = o3k_api::AppState::new().with_identity(identity);
     state.set_ready(true);

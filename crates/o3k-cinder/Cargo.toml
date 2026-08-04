@@ -1,5 +1,5 @@
 [package]
-name = "o3k-identity"
+name = "o3k-cinder"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,14 +10,21 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+axum.workspace = true
 base64.workspace = true
-hmac.workspace = true
-o3k-store = { path = "../o3k-store" }
+bytes = "1"
+http.workspace = true
+http-body-util = "0.1"
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+o3k-identity = { path = "../o3k-identity" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+tower.workspace = true

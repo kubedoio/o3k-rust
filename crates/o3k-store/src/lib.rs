@@ -76,6 +76,96 @@ pub struct VolumeAttachmentRecord {
     pub tag: Option<String>,
     pub delete_on_termination: bool,
     pub created_at: String,
+    pub status: String,
+    pub operation_id: Option<Uuid>,
+    pub idempotency_key: Option<String>,
+    pub cinder_attachment_id: Option<String>,
+    pub connector_host: Option<String>,
+    pub connector_ip: Option<String>,
+    pub connector_initiator: Option<String>,
+    pub driver_volume_type: Option<String>,
+    pub target_iqn: Option<String>,
+    pub target_portal: Option<String>,
+    pub target_lun: Option<u32>,
+    pub connection_info_digest: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneDomainRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneProjectRecord {
+    pub id: String,
+    pub domain_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneUserRecord {
+    pub id: String,
+    pub domain_id: String,
+    pub name: String,
+    pub password_hash: String,
+    pub email: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneRoleRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneRoleAssignmentRecord {
+    pub id: String,
+    pub user_id: String,
+    pub project_id: String,
+    pub role_id: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneServiceRecord {
+    pub id: String,
+    pub name: String,
+    pub r#type: String,
+    pub description: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneEndpointRecord {
+    pub id: String,
+    pub service_id: String,
+    pub interface: String,
+    pub url: String,
+    pub region: String,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneRegionRecord {
+    pub id: String,
+    pub description: Option<String>,
+    pub parent_region_id: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,6 +720,34 @@ impl SqliteStore {
             .try_get("delete_on_termination")
             .map_err(StoreError::Database)?;
         let created_at: String = row.try_get("created_at").map_err(StoreError::Database)?;
+        let status: String = row.try_get("status").map_err(StoreError::Database)?;
+        let operation_id: Option<String> =
+            row.try_get("operation_id").map_err(StoreError::Database)?;
+        let idempotency_key: Option<String> = row
+            .try_get("idempotency_key")
+            .map_err(StoreError::Database)?;
+        let cinder_attachment_id: Option<String> = row
+            .try_get("cinder_attachment_id")
+            .map_err(StoreError::Database)?;
+        let connector_host: Option<String> = row
+            .try_get("connector_host")
+            .map_err(StoreError::Database)?;
+        let connector_ip: Option<String> =
+            row.try_get("connector_ip").map_err(StoreError::Database)?;
+        let connector_initiator: Option<String> = row
+            .try_get("connector_initiator")
+            .map_err(StoreError::Database)?;
+        let driver_volume_type: Option<String> = row
+            .try_get("driver_volume_type")
+            .map_err(StoreError::Database)?;
+        let target_iqn: Option<String> = row.try_get("target_iqn").map_err(StoreError::Database)?;
+        let target_portal: Option<String> =
+            row.try_get("target_portal").map_err(StoreError::Database)?;
+        let target_lun: Option<i64> = row.try_get("target_lun").map_err(StoreError::Database)?;
+        let connection_info_digest: Option<String> = row
+            .try_get("connection_info_digest")
+            .map_err(StoreError::Database)?;
+        let error: Option<String> = row.try_get("error").map_err(StoreError::Database)?;
 
         let id = Uuid::parse_str(&id_str)
             .map_err(|_| StoreError::Corrupt("invalid volume attachment id".to_owned()))?;
@@ -646,6 +764,28 @@ impl SqliteStore {
             tag,
             delete_on_termination: delete_on_termination_int != 0,
             created_at,
+            status,
+            operation_id: operation_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()
+                .map_err(|_| StoreError::Corrupt("invalid attachment operation id".to_owned()))?,
+            idempotency_key,
+            cinder_attachment_id,
+            connector_host,
+            connector_ip,
+            connector_initiator,
+            driver_volume_type,
+            target_iqn,
+            target_portal,
+            target_lun: target_lun
+                .map(|value| {
+                    u32::try_from(value)
+                        .map_err(|_| StoreError::Corrupt("invalid attachment lun".to_owned()))
+                })
+                .transpose()?,
+            connection_info_digest,
+            error,
         })
     }
 
@@ -658,14 +798,15 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 10 {
+        if table_count != 18 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
+
         Ok(())
     }
 
@@ -674,7 +815,7 @@ impl SqliteStore {
         record: &VolumeAttachmentRecord,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
-            "INSERT INTO volume_attachments (id, server_id, volume_id, device, tag, delete_on_termination, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO volume_attachments (id, server_id, volume_id, device, tag, delete_on_termination, created_at, status, operation_id, idempotency_key, cinder_attachment_id, connector_host, connector_ip, connector_initiator, driver_volume_type, target_iqn, target_portal, target_lun, connection_info_digest, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.id.to_string())
         .bind(record.server_id.to_string())
@@ -683,6 +824,19 @@ impl SqliteStore {
         .bind(&record.tag)
         .bind(if record.delete_on_termination { 1 } else { 0 })
         .bind(&record.created_at)
+        .bind(&record.status)
+        .bind(record.operation_id.map(|id| id.to_string()))
+        .bind(&record.idempotency_key)
+        .bind(&record.cinder_attachment_id)
+        .bind(&record.connector_host)
+        .bind(&record.connector_ip)
+        .bind(&record.connector_initiator)
+        .bind(&record.driver_volume_type)
+        .bind(&record.target_iqn)
+        .bind(&record.target_portal)
+        .bind(record.target_lun.map(i64::from))
+        .bind(&record.connection_info_digest)
+        .bind(&record.error)
         .execute(&self.pool)
         .await;
 
@@ -695,17 +849,138 @@ impl SqliteStore {
         }
     }
 
+    /// Advances (or regresses) an attachment's durable phase. Phase is
+    /// persisted before the matching external side effect.
+    pub async fn update_volume_attachment_phase(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        sqlx::query("UPDATE volume_attachments SET status = ?, error = ? WHERE id = ?")
+            .bind(status)
+            .bind(error)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        self.get_volume_attachment_by_id(id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
+    /// Persists the non-secret outcome data observed after an external step.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_volume_attachment_outcome(
+        &self,
+        id: Uuid,
+        status: &str,
+        cinder_attachment_id: Option<&str>,
+        connector_host: Option<&str>,
+        connector_ip: Option<&str>,
+        connector_initiator: Option<&str>,
+        driver_volume_type: Option<&str>,
+        target_iqn: Option<&str>,
+        target_portal: Option<&str>,
+        target_lun: Option<u32>,
+        connection_info_digest: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        sqlx::query(
+            "UPDATE volume_attachments SET status = ?, cinder_attachment_id = COALESCE(?, cinder_attachment_id), connector_host = ?, connector_ip = ?, connector_initiator = ?, driver_volume_type = ?, target_iqn = ?, target_portal = ?, target_lun = ?, connection_info_digest = ?, device = COALESCE(?, device) WHERE id = ?",
+        )
+        .bind(status)
+        .bind(cinder_attachment_id)
+        .bind(connector_host)
+        .bind(connector_ip)
+        .bind(connector_initiator)
+        .bind(driver_volume_type)
+        .bind(target_iqn)
+        .bind(target_portal)
+        .bind(target_lun.map(i64::from))
+        .bind(connection_info_digest)
+        .bind(device)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        self.get_volume_attachment_by_id(id)
+            .await?
+            .ok_or(StoreError::ResourceNotFound)
+    }
+
+    pub async fn get_volume_attachment_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn get_volume_attachment_by_volume(
+        &self,
+        volume_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE volume_id = ?")
+            .bind(volume_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn get_volume_attachment_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE idempotency_key = ?")
+            .bind(idempotency_key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    /// Lists non-terminal attachments for restart reconciliation.
+    pub async fn list_volume_attachments_by_status(
+        &self,
+        terminal: &[&str],
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
+        if terminal.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = terminal.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let query = format!(
+            "SELECT * FROM volume_attachments WHERE status NOT IN ({placeholders}) ORDER BY created_at"
+        );
+        let mut builder = sqlx::query(&query);
+        for status in terminal {
+            builder = builder.bind(status);
+        }
+        let rows = builder
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter().map(Self::volume_attachment_from_row).collect()
+    }
+
     pub async fn list_volume_attachments(
         &self,
         server_id: Uuid,
     ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? ORDER BY created_at",
-        )
-        .bind(server_id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
+        let rows =
+            sqlx::query("SELECT * FROM volume_attachments WHERE server_id = ? ORDER BY created_at")
+                .bind(server_id.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
 
         rows.iter().map(Self::volume_attachment_from_row).collect()
     }
@@ -715,14 +990,12 @@ impl SqliteStore {
         server_id: Uuid,
         attachment_id: Uuid,
     ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
-        let row = sqlx::query(
-            "SELECT id, server_id, volume_id, device, tag, delete_on_termination, created_at FROM volume_attachments WHERE server_id = ? AND id = ?",
-        )
-        .bind(server_id.to_string())
-        .bind(attachment_id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(StoreError::Database)?;
+        let row = sqlx::query("SELECT * FROM volume_attachments WHERE server_id = ? AND id = ?")
+            .bind(server_id.to_string())
+            .bind(attachment_id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
 
         row.map(|r| Self::volume_attachment_from_row(&r))
             .transpose()
@@ -745,6 +1018,417 @@ impl SqliteStore {
         } else {
             Ok(())
         }
+    }
+
+    pub async fn insert_keystone_domain(
+        &self,
+        domain: &KeystoneDomainRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_domains (id, name, description, enabled, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, enabled=excluded.enabled")
+            .bind(&domain.id)
+            .bind(&domain.name)
+            .bind(&domain.description)
+            .bind(if domain.enabled { 1 } else { 0 })
+            .bind(&domain.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn get_keystone_domain_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<KeystoneDomainRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, name, description, enabled, created_at FROM keystone_domains WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(row.map(|r| KeystoneDomainRecord {
+            id: r.get("id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn insert_keystone_project(
+        &self,
+        project: &KeystoneProjectRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_projects (id, domain_id, name, description, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description, enabled=excluded.enabled")
+            .bind(&project.id)
+            .bind(&project.domain_id)
+            .bind(&project.name)
+            .bind(&project.description)
+            .bind(if project.enabled { 1 } else { 0 })
+            .bind(&project.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn get_keystone_project_by_name(
+        &self,
+        domain_id: &str,
+        name: &str,
+    ) -> Result<Option<KeystoneProjectRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, description, enabled, created_at FROM keystone_projects WHERE domain_id = ? AND name = ?")
+            .bind(domain_id)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(row.map(|r| KeystoneProjectRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn insert_keystone_user(&self, user: &KeystoneUserRecord) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_users (id, domain_id, name, password_hash, email, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET password_hash=excluded.password_hash, enabled=excluded.enabled")
+            .bind(&user.id)
+            .bind(&user.domain_id)
+            .bind(&user.name)
+            .bind(&user.password_hash)
+            .bind(&user.email)
+            .bind(if user.enabled { 1 } else { 0 })
+            .bind(&user.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn get_keystone_user_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<KeystoneUserRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, password_hash, email, enabled, created_at FROM keystone_users WHERE name = ?")
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(row.map(|r| KeystoneUserRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            password_hash: r.get("password_hash"),
+            email: r.get("email"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn insert_keystone_role(&self, role: &KeystoneRoleRecord) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_roles (id, name, description, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description")
+            .bind(&role.id)
+            .bind(&role.name)
+            .bind(&role.description)
+            .bind(&role.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn get_keystone_role_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<KeystoneRoleRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, description, created_at FROM keystone_roles WHERE name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        Ok(row.map(|r| KeystoneRoleRecord {
+            id: r.get("id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn insert_keystone_role_assignment(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_role_assignments (id, user_id, project_id, role_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, project_id, role_id) DO NOTHING")
+            .bind(&assignment.id)
+            .bind(&assignment.user_id)
+            .bind(&assignment.project_id)
+            .bind(&assignment.role_id)
+            .bind(&assignment.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn list_user_role_names(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let rows = sqlx::query("SELECT r.name FROM keystone_roles r JOIN keystone_role_assignments ra ON r.id = ra.role_id WHERE ra.user_id = ? AND ra.project_id = ?")
+            .bind(user_id)
+            .bind(project_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(rows.into_iter().map(|r| r.get("name")).collect())
+    }
+
+    pub async fn insert_keystone_service(
+        &self,
+        service: &KeystoneServiceRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_services (id, name, type, description, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, enabled=excluded.enabled")
+            .bind(&service.id)
+            .bind(&service.name)
+            .bind(&service.r#type)
+            .bind(&service.description)
+            .bind(if service.enabled { 1 } else { 0 })
+            .bind(&service.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn list_keystone_services(&self) -> Result<Vec<KeystoneServiceRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, type, description, enabled, created_at FROM keystone_services WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneServiceRecord {
+                id: r.get("id"),
+                name: r.get("name"),
+                r#type: r.get("type"),
+                description: r.get("description"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn insert_keystone_endpoint(
+        &self,
+        endpoint: &KeystoneEndpointRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_endpoints (id, service_id, interface, url, region, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET url=excluded.url, enabled=excluded.enabled")
+            .bind(&endpoint.id)
+            .bind(&endpoint.service_id)
+            .bind(&endpoint.interface)
+            .bind(&endpoint.url)
+            .bind(&endpoint.region)
+            .bind(if endpoint.enabled { 1 } else { 0 })
+            .bind(&endpoint.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn list_keystone_endpoints(&self) -> Result<Vec<KeystoneEndpointRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, service_id, interface, url, region, enabled, created_at FROM keystone_endpoints WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneEndpointRecord {
+                id: r.get("id"),
+                service_id: r.get("service_id"),
+                interface: r.get("interface"),
+                url: r.get("url"),
+                region: r.get("region"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_regions(&self) -> Result<Vec<KeystoneRegionRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, description, parent_region_id, enabled, created_at FROM keystone_regions WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRegionRecord {
+                id: r.get("id"),
+                description: r.get("description"),
+                parent_region_id: r.get("parent_region_id"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn insert_keystone_region(
+        &self,
+        region: &KeystoneRegionRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_regions (id, description, parent_region_id, enabled, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET description=excluded.description, parent_region_id=excluded.parent_region_id, enabled=excluded.enabled")
+            .bind(&region.id)
+            .bind(&region.description)
+            .bind(&region.parent_region_id)
+            .bind(if region.enabled { 1 } else { 0 })
+            .bind(&region.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn list_keystone_domains(&self) -> Result<Vec<KeystoneDomainRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, description, enabled, created_at FROM keystone_domains WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneDomainRecord {
+                id: r.get("id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_projects(&self) -> Result<Vec<KeystoneProjectRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, domain_id, name, description, enabled, created_at FROM keystone_projects WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneProjectRecord {
+                id: r.get("id"),
+                domain_id: r.get("domain_id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_users(&self) -> Result<Vec<KeystoneUserRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, domain_id, name, password_hash, email, enabled, created_at FROM keystone_users WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneUserRecord {
+                id: r.get("id"),
+                domain_id: r.get("domain_id"),
+                name: r.get("name"),
+                password_hash: r.get("password_hash"),
+                email: r.get("email"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_roles(&self) -> Result<Vec<KeystoneRoleRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, description, created_at FROM keystone_roles")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRoleRecord {
+                id: r.get("id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_role_assignments(
+        &self,
+    ) -> Result<Vec<KeystoneRoleAssignmentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, project_id, role_id, created_at FROM keystone_role_assignments",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRoleAssignmentRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                role_id: r.get("role_id"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn get_keystone_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<KeystoneUserRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, password_hash, email, enabled, created_at FROM keystone_users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(row.map(|r| KeystoneUserRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            password_hash: r.get("password_hash"),
+            email: r.get("email"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn get_keystone_project_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<KeystoneProjectRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, description, enabled, created_at FROM keystone_projects WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(row.map(|r| KeystoneProjectRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
     }
 
     pub async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {

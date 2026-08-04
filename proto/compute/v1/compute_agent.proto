@@ -166,6 +166,10 @@ message Command {
     RebootCommand reboot = 14;
     DeleteCommand delete = 15;
     ConsoleLogCommand console_log = 16;
+    CollectConnectorCommand collect_connector = 17;
+    AttachDiskCommand attach_disk = 18;
+    DetachDiskCommand detach_disk = 19;
+    ObserveDiskCommand observe_disk = 20;
   }
 }
 
@@ -228,6 +232,43 @@ message ConsoleLogCommand {
   uint32 max_bytes = 2;
 }
 
+// Collects the compute connector description (host, IP, iSCSI initiator)
+// required by the Cinder connector-update flow.
+message CollectConnectorCommand {}
+
+// Bounded block-device attach command. Secret-bearing connection information
+// (for example CHAP credentials) is never carried across the agent boundary
+// in the first supported profile; targets that require it are rejected by the
+// control plane before dispatch.
+message AttachDiskCommand {
+  string volume_id = 1;
+  string attachment_id = 2;
+  string driver_volume_type = 3;
+  string target_iqn = 4;
+  string target_portal = 5;
+  uint32 target_lun = 6;
+  string device_path = 7;
+  bool multipath = 8;
+  string initiator = 9;
+}
+
+message DetachDiskCommand {
+  string volume_id = 1;
+  string attachment_id = 2;
+  string driver_volume_type = 3;
+  string target_iqn = 4;
+  string target_portal = 5;
+  uint32 target_lun = 6;
+  string device_path = 7;
+  bool multipath = 8;
+  string initiator = 9;
+}
+
+message ObserveDiskCommand {
+  string volume_id = 1;
+  string attachment_id = 2;
+}
+
 // Canonical semantic payload used for Command.payload_fingerprint_sha256.
 message CanonicalCommandPayload {
   string operation_id = 1;
@@ -240,6 +281,10 @@ message CanonicalCommandPayload {
     RebootCommand reboot = 7;
     DeleteCommand delete = 8;
     ConsoleLogCommand console_log = 9;
+    CollectConnectorCommand collect_connector = 10;
+    AttachDiskCommand attach_disk = 11;
+    DetachDiskCommand detach_disk = 12;
+    ObserveDiskCommand observe_disk = 13;
   }
 }
 
@@ -307,6 +352,7 @@ message Observation {
   uint64 console_log_offset = 13;
   bool console_log_complete = 14;
   bool console_log_truncated = 15;
+  BlockDeviceObservation block_device = 16;
 }
 
 enum ResourceState {
@@ -317,6 +363,25 @@ enum ResourceState {
   RESOURCE_STATE_DELETING = 4;
   RESOURCE_STATE_DELETED = 5;
   RESOURCE_STATE_ERROR = 6;
+}
+
+// Bounded block-device observation returned for collect-connector, attach,
+// detach, and observe-disk commands. It carries only the non-secret data
+// required for reconciliation.
+message BlockDeviceObservation {
+  string volume_id = 1;
+  string attachment_id = 2;
+  string driver_volume_type = 3;
+  // Guest path as seen inside the domain (for example /dev/vdb).
+  string device_path = 4;
+  // Host path of the attached block device (for example /dev/sdb).
+  string host_path = 5;
+  bool attached = 6;
+  bool found = 7;
+  string initiator = 8;
+  string host_name = 9;
+  string ip_address = 10;
+  bool iscsi_logged_in = 11;
 }
 
 message ObservationAck {

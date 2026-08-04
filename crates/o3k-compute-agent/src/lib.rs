@@ -294,7 +294,7 @@ pub fn parse_authorized_agents(value: &str) -> Result<Vec<AuthorizedAgent>, Agen
 pub enum AgentEvent {
     CommandAccepted(proto::CommandAccepted),
     Operation(proto::OperationUpdate),
-    Observation(proto::Observation),
+    Observation(Box<proto::Observation>),
     ArtifactAck(proto::ArtifactAck),
     ArtifactStatus(proto::ArtifactStatus),
     Error(proto::ProtocolError),
@@ -685,7 +685,7 @@ impl NodeRegistry {
                             && observation.resource_id == resource_id
                             && observation.operation_id == operation_id =>
                     {
-                        return Ok(observation);
+                        return Ok(*observation);
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -995,6 +995,17 @@ fn validate_command_action(command: &proto::Command) -> Result<(), AgentError> {
             | proto::command::Action::Stop(_)
             | proto::command::Action::Delete(_),
         ) => Ok(()),
+        Some(proto::command::Action::CollectConnector(_)) => Ok(()),
+        Some(proto::command::Action::AttachDisk(device)) => validate_attach_disk(device),
+        Some(proto::command::Action::DetachDisk(device)) => validate_detach_disk(device),
+        Some(proto::command::Action::ObserveDisk(observe)) => {
+            if !valid_reference(&observe.volume_id) || !valid_reference(&observe.attachment_id) {
+                return Err(AgentError::Protocol(
+                    "observe disk command identity is invalid".to_owned(),
+                ));
+            }
+            Ok(())
+        }
         None => Err(AgentError::Protocol(
             "command action is required".to_owned(),
         )),
@@ -1023,6 +1034,18 @@ fn canonical_action(action: &proto::command::Action) -> proto::canonical_command
         }
         proto::command::Action::ConsoleLog(value) => {
             proto::canonical_command_payload::Action::ConsoleLog(*value)
+        }
+        proto::command::Action::CollectConnector(value) => {
+            proto::canonical_command_payload::Action::CollectConnector(*value)
+        }
+        proto::command::Action::AttachDisk(value) => {
+            proto::canonical_command_payload::Action::AttachDisk(value.clone())
+        }
+        proto::command::Action::DetachDisk(value) => {
+            proto::canonical_command_payload::Action::DetachDisk(value.clone())
+        }
+        proto::command::Action::ObserveDisk(value) => {
+            proto::canonical_command_payload::Action::ObserveDisk(value.clone())
         }
     }
 }
@@ -1291,7 +1314,11 @@ pub fn build_lifecycle_command(
             proto::command::Action::Delete(value)
         }
         proto::canonical_command_payload::Action::Create(_)
-        | proto::canonical_command_payload::Action::ConsoleLog(_) => {
+        | proto::canonical_command_payload::Action::ConsoleLog(_)
+        | proto::canonical_command_payload::Action::CollectConnector(_)
+        | proto::canonical_command_payload::Action::AttachDisk(_)
+        | proto::canonical_command_payload::Action::DetachDisk(_)
+        | proto::canonical_command_payload::Action::ObserveDisk(_) => {
             return Err(AgentError::Protocol(
                 "unsupported lifecycle command action".to_owned(),
             ));
@@ -1373,6 +1400,166 @@ pub fn build_console_log_command(
 
 const fn o3k_console_limit() -> usize {
     64 * 1024
+}
+
+/// Block-device commands dispatched to the compute execution boundary.
+pub enum BlockDeviceCommand {
+    CollectConnector,
+    Attach {
+        device: proto::AttachDiskCommand,
+    },
+    Detach {
+        device: proto::DetachDiskCommand,
+    },
+    Observe {
+        volume_id: String,
+        attachment_id: String,
+    },
+}
+
+fn valid_disk_reference(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte.is_ascii_whitespace() || byte == b'/')
+}
+
+fn validate_attach_disk(device: &proto::AttachDiskCommand) -> Result<(), AgentError> {
+    if !valid_reference(&device.volume_id)
+        || !valid_reference(&device.attachment_id)
+        || !valid_disk_reference(&device.driver_volume_type)
+    {
+        return Err(AgentError::Protocol(
+            "attach disk command identity is invalid".to_owned(),
+        ));
+    }
+    match device.driver_volume_type.as_str() {
+        "iscsi" => {
+            if !valid_disk_reference(&device.target_iqn)
+                || !valid_disk_reference(&device.target_portal)
+            {
+                return Err(AgentError::Protocol(
+                    "attach disk iscsi target is incomplete".to_owned(),
+                ));
+            }
+        }
+        "local" => {
+            if !valid_disk_reference(device.device_path.as_str()) {
+                return Err(AgentError::Protocol(
+                    "attach disk local path is missing".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(AgentError::Protocol(
+                "attach disk driver volume type is unsupported".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_detach_disk(device: &proto::DetachDiskCommand) -> Result<(), AgentError> {
+    if !valid_reference(&device.volume_id)
+        || !valid_reference(&device.attachment_id)
+        || !valid_disk_reference(&device.driver_volume_type)
+    {
+        return Err(AgentError::Protocol(
+            "detach disk command identity is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Builds a deterministic, fenced block-device command for the selected agent.
+/// Only non-secret bounded connection data crosses the agent boundary.
+pub fn build_block_device_command(
+    action: BlockDeviceCommand,
+    agent_id: &str,
+    agent_epoch: &str,
+    operation_id: &str,
+    resource_id: &str,
+) -> Result<proto::Command, AgentError> {
+    if !valid_reference(agent_id)
+        || !valid_reference(agent_epoch)
+        || !valid_reference(operation_id)
+        || !valid_reference(resource_id)
+    {
+        return Err(AgentError::Protocol(
+            "block-device command identity is invalid".to_owned(),
+        ));
+    }
+    let (action_name, canonical_action, command_action) = match action {
+        BlockDeviceCommand::CollectConnector => (
+            "collect-connector",
+            proto::canonical_command_payload::Action::CollectConnector(
+                proto::CollectConnectorCommand {},
+            ),
+            proto::command::Action::CollectConnector(proto::CollectConnectorCommand {}),
+        ),
+        BlockDeviceCommand::Attach { device } => {
+            validate_attach_disk(&device)?;
+            (
+                "attach-disk",
+                proto::canonical_command_payload::Action::AttachDisk(device.clone()),
+                proto::command::Action::AttachDisk(device),
+            )
+        }
+        BlockDeviceCommand::Detach { device } => {
+            validate_detach_disk(&device)?;
+            (
+                "detach-disk",
+                proto::canonical_command_payload::Action::DetachDisk(device.clone()),
+                proto::command::Action::DetachDisk(device),
+            )
+        }
+        BlockDeviceCommand::Observe {
+            volume_id,
+            attachment_id,
+        } => {
+            if !valid_reference(&volume_id) || !valid_reference(&attachment_id) {
+                return Err(AgentError::Protocol(
+                    "observe disk command identity is invalid".to_owned(),
+                ));
+            }
+            (
+                "observe-disk",
+                proto::canonical_command_payload::Action::ObserveDisk(proto::ObserveDiskCommand {
+                    volume_id: volume_id.clone(),
+                    attachment_id: attachment_id.clone(),
+                }),
+                proto::command::Action::ObserveDisk(proto::ObserveDiskCommand {
+                    volume_id,
+                    attachment_id,
+                }),
+            )
+        }
+    };
+    let canonical = proto::CanonicalCommandPayload {
+        operation_id: operation_id.to_owned(),
+        resource_id: resource_id.to_owned(),
+        action: Some(canonical_action),
+    };
+    let digest = Sha256::digest(canonical.encode_to_vec());
+    let payload_fingerprint_sha256 = hex_digest(&digest);
+    let idempotency_key = format!("{action_name}:{resource_id}:{operation_id}");
+    Ok(proto::Command {
+        command_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:block-device-command:{agent_id}:{operation_id}").as_bytes(),
+        )
+        .to_string(),
+        operation_id: operation_id.to_owned(),
+        idempotency_key,
+        agent_id: agent_id.to_owned(),
+        agent_epoch: agent_epoch.to_owned(),
+        resource_id: resource_id.to_owned(),
+        deadline_unix_ms: unix_ms().saturating_add(60_000),
+        protocol_version: Some(PROTOCOL_VERSION),
+        payload_fingerprint_sha256,
+        action: Some(command_action),
+    })
 }
 
 fn valid_reference(value: &str) -> bool {
@@ -1886,7 +2073,7 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                             console_bytes = observation.console_log_bytes.len(),
                             "agent observation forwarded"
                         );
-                        registry.publish_event(AgentEvent::Observation(observation));
+                        registry.publish_event(AgentEvent::Observation(Box::new(observation)));
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
                         if !matches_stream_identity(
@@ -2078,7 +2265,7 @@ pub struct AgentClient {
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandExecutionResult {
     pub state: i32,
     pub error_category: i32,
@@ -2088,6 +2275,7 @@ pub struct CommandExecutionResult {
     pub redacted_message: String,
     pub provider_resource_id: String,
     pub console_log: Option<ConsoleLogResult>,
+    pub block_device: Option<proto::BlockDeviceObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2627,6 +2815,9 @@ fn decode_execution_result(
         } else {
             None
         },
+        // Block-device observations are not persisted in the journal; the
+        // control plane must re-observe after an agent restart.
+        block_device: None,
     };
     validate_execution_result(&result)?;
     Ok(result)
@@ -2692,6 +2883,7 @@ struct FakeResource {
 pub struct FakeCommandExecutor {
     resources: Arc<Mutex<HashMap<String, FakeResource>>>,
     failure_stage: Arc<Mutex<Option<FakeFailureStage>>>,
+    block_devices: Arc<Mutex<HashMap<(String, String), proto::BlockDeviceObservation>>>,
 }
 
 impl FakeCommandExecutor {
@@ -2876,7 +3068,125 @@ impl CommandExecutor for FakeCommandExecutor {
                         complete: end == resource.console_log.len(),
                         truncated: end < resource.console_log.len(),
                     }),
+                    block_device: None,
                 })
+            }
+            Some(proto::command::Action::CollectConnector(_)) => {
+                let observation = proto::BlockDeviceObservation {
+                    volume_id: String::new(),
+                    attachment_id: String::new(),
+                    driver_volume_type: String::new(),
+                    device_path: String::new(),
+                    host_path: String::new(),
+                    attached: false,
+                    found: true,
+                    initiator: "iqn.1993-08.org.debian:01:o3k-fake".to_owned(),
+                    host_name: "fake-compute-host".to_owned(),
+                    ip_address: "10.0.0.5".to_owned(),
+                    iscsi_logged_in: false,
+                };
+                let mut result =
+                    fake_success(provider_resource_id, proto::ResourceState::Running as i32);
+                result.block_device = Some(observation);
+                Ok(result)
+            }
+            Some(proto::command::Action::AttachDisk(device)) => {
+                if device.driver_volume_type != "iscsi" && device.driver_volume_type != "local" {
+                    return Err(AgentError::Protocol(
+                        "fake attach disk driver volume type is unsupported".to_owned(),
+                    ));
+                }
+                let key = (resource_key.clone(), device.volume_id.clone());
+                let mut block_devices = self
+                    .block_devices
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?;
+                // Idempotent: an already-attached device is returned unchanged.
+                if let Some(existing) = block_devices.get(&key) {
+                    let mut result =
+                        fake_success(provider_resource_id, proto::ResourceState::Running as i32);
+                    result.block_device = Some(existing.clone());
+                    return Ok(result);
+                }
+                let host_path = if device.driver_volume_type == "iscsi" {
+                    format!(
+                        "/dev/sd{}",
+                        ["b", "c", "d", "e"][device.target_lun as usize % 4]
+                    )
+                } else {
+                    device.device_path.clone()
+                };
+                let observation = proto::BlockDeviceObservation {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    device_path: device.device_path.clone(),
+                    host_path,
+                    attached: true,
+                    found: true,
+                    initiator: device.initiator.clone(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: true,
+                };
+                block_devices.insert(key, observation.clone());
+                let mut result =
+                    fake_success(provider_resource_id, proto::ResourceState::Running as i32);
+                result.block_device = Some(observation);
+                Ok(result)
+            }
+            Some(proto::command::Action::DetachDisk(device)) => {
+                let key = (resource_key.clone(), device.volume_id.clone());
+                let mut block_devices = self
+                    .block_devices
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?;
+                let previous = block_devices.remove(&key);
+                // Repeated detach is idempotent.
+                let observation = proto::BlockDeviceObservation {
+                    volume_id: device.volume_id.clone(),
+                    attachment_id: device.attachment_id.clone(),
+                    driver_volume_type: device.driver_volume_type.clone(),
+                    device_path: previous
+                        .as_ref()
+                        .map_or_else(String::new, |value| value.device_path.clone()),
+                    host_path: String::new(),
+                    attached: false,
+                    found: previous.is_some(),
+                    initiator: device.initiator.clone(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: false,
+                };
+                let mut result =
+                    fake_success(provider_resource_id, proto::ResourceState::Running as i32);
+                result.block_device = Some(observation);
+                Ok(result)
+            }
+            Some(proto::command::Action::ObserveDisk(observe)) => {
+                let key = (resource_key.clone(), observe.volume_id.clone());
+                let attached = self
+                    .block_devices
+                    .lock()
+                    .map_err(|_| AgentError::Protocol("fake executor lock failed".to_owned()))?
+                    .contains_key(&key);
+                let observation = proto::BlockDeviceObservation {
+                    volume_id: observe.volume_id.clone(),
+                    attachment_id: observe.attachment_id.clone(),
+                    driver_volume_type: String::new(),
+                    device_path: String::new(),
+                    host_path: String::new(),
+                    attached,
+                    found: attached,
+                    initiator: String::new(),
+                    host_name: String::new(),
+                    ip_address: String::new(),
+                    iscsi_logged_in: attached,
+                };
+                let mut result =
+                    fake_success(provider_resource_id, proto::ResourceState::Running as i32);
+                result.block_device = Some(observation);
+                Ok(result)
             }
             None => Err(Self::failure()),
         }
@@ -2899,6 +3209,7 @@ fn fake_success(provider_resource_id: String, resource_state: i32) -> CommandExe
         redacted_message: "fake operation succeeded".to_owned(),
         provider_resource_id,
         console_log: None,
+        block_device: None,
     }
 }
 
@@ -2912,6 +3223,10 @@ fn command_action_name(command: &proto::Command) -> &'static str {
         Some(proto::command::Action::Delete(_)) => "delete",
         Some(proto::command::Action::Create(_)) => "create",
         Some(proto::command::Action::ConsoleLog(_)) => "console_log",
+        Some(proto::command::Action::CollectConnector(_)) => "collect_connector",
+        Some(proto::command::Action::AttachDisk(_)) => "attach_disk",
+        Some(proto::command::Action::DetachDisk(_)) => "detach_disk",
+        Some(proto::command::Action::ObserveDisk(_)) => "observe_disk",
         None => "missing",
     }
 }
@@ -2939,6 +3254,7 @@ fn observation_from_result(
         console_log_offset: console_log.map_or(0, |value| value.offset),
         console_log_complete: console_log.is_some_and(|value| value.complete),
         console_log_truncated: console_log.is_some_and(|value| value.truncated),
+        block_device: result.block_device.clone(),
     }
 }
 
@@ -3549,6 +3865,7 @@ impl AgentClient {
                                             redacted_message: "command outcome is unknown".to_owned(),
                                             provider_resource_id: String::new(),
                                             console_log: None,
+                                            block_device: None,
                                             }
                                         }
                                     };
@@ -4003,13 +4320,13 @@ mod tests {
         // Receiving the dispatched command proves the waiter subscribed before
         // dispatching, so the observation published now cannot be missed.
         let _dispatched = receiver.recv().await.ok_or("dispatched command")??;
-        registry.publish_event(AgentEvent::Observation(proto::Observation {
+        registry.publish_event(AgentEvent::Observation(Box::new(proto::Observation {
             agent_id: "node".to_owned(),
             agent_epoch: "epoch".to_owned(),
             resource_id: "resource-1".to_owned(),
             operation_id: "operation-observe".to_owned(),
             ..Default::default()
-        }));
+        })));
         let observation = waiting.await??;
         assert_eq!(observation.operation_id, "operation-observe");
         Ok(())
@@ -4985,6 +5302,217 @@ mod tests {
         assert_eq!(rejected.agent_id, "node");
         assert_eq!(rejected.agent_epoch, "epoch-1");
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod block_device_tests {
+    use super::*;
+
+    fn attach_device() -> proto::AttachDiskCommand {
+        proto::AttachDiskCommand {
+            volume_id: "volume-1".to_owned(),
+            attachment_id: "attachment-1".to_owned(),
+            driver_volume_type: "iscsi".to_owned(),
+            target_iqn: "iqn.2026-01.example.com:volume-1".to_owned(),
+            target_portal: "10.0.0.10:3260".to_owned(),
+            target_lun: 1,
+            device_path: String::new(),
+            multipath: false,
+            initiator: "iqn.1993-08.org.debian:01:o3k-compute".to_owned(),
+        }
+    }
+
+    #[test]
+    fn block_device_commands_are_bounded_and_deterministic() -> Result<(), AgentError> {
+        let collect = build_block_device_command(
+            BlockDeviceCommand::CollectConnector,
+            "agent-1",
+            "epoch-1",
+            "op-1",
+            "server-1",
+        )?;
+        assert!(collect.payload_fingerprint_sha256.len() == 64);
+        let collect_again = build_block_device_command(
+            BlockDeviceCommand::CollectConnector,
+            "agent-1",
+            "epoch-1",
+            "op-1",
+            "server-1",
+        )?;
+        assert_eq!(collect.command_id, collect_again.command_id);
+        assert_eq!(
+            collect.payload_fingerprint_sha256,
+            collect_again.payload_fingerprint_sha256
+        );
+        validate_command(&collect)?;
+
+        let attach = build_block_device_command(
+            BlockDeviceCommand::Attach {
+                device: attach_device(),
+            },
+            "agent-1",
+            "epoch-1",
+            "op-2",
+            "server-1",
+        )?;
+        validate_command(&attach)?;
+        assert!(matches!(
+            attach.action,
+            Some(proto::command::Action::AttachDisk(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn attach_disk_requires_a_supported_driver_volume_type() {
+        let mut device = attach_device();
+        device.driver_volume_type = "rbd".to_owned();
+        assert!(
+            build_block_device_command(
+                BlockDeviceCommand::Attach { device },
+                "agent-1",
+                "epoch-1",
+                "op-2",
+                "server-1",
+            )
+            .is_err()
+        );
+
+        let mut device = attach_device();
+        device.driver_volume_type = "iscsi".to_owned();
+        device.target_iqn = String::new();
+        assert!(
+            build_block_device_command(
+                BlockDeviceCommand::Attach { device },
+                "agent-1",
+                "epoch-1",
+                "op-2",
+                "server-1",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn detach_and_observe_commands_are_validated() -> Result<(), AgentError> {
+        let detach = build_block_device_command(
+            BlockDeviceCommand::Detach {
+                device: proto::DetachDiskCommand {
+                    volume_id: "volume-1".to_owned(),
+                    attachment_id: "attachment-1".to_owned(),
+                    driver_volume_type: "iscsi".to_owned(),
+                    target_iqn: "iqn.2026-01.example.com:volume-1".to_owned(),
+                    target_portal: "10.0.0.10:3260".to_owned(),
+                    target_lun: 1,
+                    device_path: String::new(),
+                    multipath: false,
+                    initiator: String::new(),
+                },
+            },
+            "agent-1",
+            "epoch-1",
+            "op-3",
+            "server-1",
+        )?;
+        validate_command(&detach)?;
+
+        let observe = build_block_device_command(
+            BlockDeviceCommand::Observe {
+                volume_id: "volume-1".to_owned(),
+                attachment_id: "attachment-1".to_owned(),
+            },
+            "agent-1",
+            "epoch-1",
+            "op-4",
+            "server-1",
+        )?;
+        validate_command(&observe)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_executor_attach_detach_observe_is_idempotent() -> Result<(), AgentError> {
+        let executor = FakeCommandExecutor::default();
+        let server_id = "server-1";
+
+        let attach = build_block_device_command(
+            BlockDeviceCommand::Attach {
+                device: attach_device(),
+            },
+            "agent-1",
+            "epoch-1",
+            "op-attach",
+            server_id,
+        )?;
+        let first = executor.execute(&attach).await?;
+        let observation = first
+            .block_device
+            .ok_or_else(|| AgentError::Protocol("attach observation missing".to_owned()))?;
+        assert!(observation.attached);
+        assert!(observation.host_path.contains("/dev/sd"));
+
+        // Idempotent: a second attach returns success without duplication.
+        let second = executor.execute(&attach).await?;
+        assert_eq!(second.block_device.as_ref().map(|o| o.attached), Some(true));
+
+        let observe = build_block_device_command(
+            BlockDeviceCommand::Observe {
+                volume_id: "volume-1".to_owned(),
+                attachment_id: "attachment-1".to_owned(),
+            },
+            "agent-1",
+            "epoch-1",
+            "op-observe",
+            server_id,
+        )?;
+        let observed = executor.execute(&observe).await?;
+        assert!(observed.block_device.is_some_and(|o| o.attached));
+
+        let detach = build_block_device_command(
+            BlockDeviceCommand::Detach {
+                device: proto::DetachDiskCommand {
+                    volume_id: "volume-1".to_owned(),
+                    attachment_id: "attachment-1".to_owned(),
+                    driver_volume_type: "iscsi".to_owned(),
+                    target_iqn: "iqn.2026-01.example.com:volume-1".to_owned(),
+                    target_portal: "10.0.0.10:3260".to_owned(),
+                    target_lun: 1,
+                    device_path: String::new(),
+                    multipath: false,
+                    initiator: String::new(),
+                },
+            },
+            "agent-1",
+            "epoch-1",
+            "op-detach",
+            server_id,
+        )?;
+        let detached = executor.execute(&detach).await?;
+        assert!(detached.block_device.is_some_and(|o| !o.attached));
+
+        // Repeated detach is idempotent.
+        let again = executor.execute(&detach).await?;
+        assert!(again.block_device.is_some_and(|o| !o.attached));
+
+        let observed_after = executor.execute(&observe).await?;
+        assert!(observed_after.block_device.is_some_and(|o| !o.attached));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_executor_rejects_unsupported_driver_before_dispatch() -> Result<(), AgentError> {
+        let mut device = attach_device();
+        device.driver_volume_type = "nfs".to_owned();
+        let command = build_block_device_command(
+            BlockDeviceCommand::Attach { device },
+            "agent-1",
+            "epoch-1",
+            "op-attach-bad",
+            "server-1",
+        );
+        assert!(command.is_err());
         Ok(())
     }
 }
