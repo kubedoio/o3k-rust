@@ -233,6 +233,30 @@ echo "==> Verifying the run-owned RabbitMQ user and vhost..."
 rabbitmqctl list_vhosts 2>/dev/null | tail -n +2 | grep -qw "${MQ_VHOST}" || { echo "ERROR: run-owned vhost was not created"; exit 1; }
 rabbitmqctl list_users 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -qw "${MQ_USER}" || { echo "ERROR: run-owned user was not created"; exit 1; }
 
+echo "==> Waiting for RabbitMQ to accept the run-owned credentials..."
+MQ_READY=no
+for i in $(seq 1 30); do
+  if "${VENV_DIR}/bin/python" - <<PY 2>/dev/null
+import eventlet
+eventlet.monkey_patch()
+from oslo_config import cfg
+from oslo_messaging import transport, Target, RPCClient
+from oslo_messaging.transport import TransportURL
+CONF = cfg.CONF
+CONF([], project='cinder')
+url = TransportURL.parse(CONF, 'rabbit://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}')
+t = transport.get_transport(CONF, url)
+RPCClient(t, Target(topic='cinder-probe')).cast({}, 'ping')
+PY
+  then
+    MQ_READY=yes
+    break
+  fi
+  sleep 2
+done
+[ "${MQ_READY}" = "yes" ] || { echo "ERROR: RabbitMQ did not accept the run-owned credentials"; exit 1; }
+echo "    run-owned RabbitMQ user and vhost accept connections"
+
 echo "==> Provisioning run-owned LVM test backend (loop device)..."
 truncate -s 4G "${LOOP_FILE}"
 LOOP_DEV=$(losetup --find --show "${LOOP_FILE}")
