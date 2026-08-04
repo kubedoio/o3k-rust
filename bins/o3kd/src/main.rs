@@ -220,6 +220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_path = config.data_dir.join("o3k.sqlite");
     let store = Arc::new(o3k_store::SqliteStore::connect_file(&database_path).await?);
+    let identity_store = store.clone();
     let image_service = o3k_image::ImageService::open(
         config.data_dir.join("images"),
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
@@ -324,20 +325,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spawn_console_event_consumer(registry.clone(), console_service.clone());
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
-            let mut service = o3k_identity::TokenService::new(
-                "bootstrap-user".to_owned(),
-                "admin".to_owned(),
-                o3k_identity::Secret::new(password.expose().to_owned()),
-                "bootstrap-project".to_owned(),
-                "admin".to_owned(),
-                o3k_identity::Secret::new(signing_key.expose().to_owned()),
-                Duration::from_secs(3600),
-            )?
-            .with_catalog_endpoint(format!("http://{}", config.listen_addr));
-            if let Ok(cinder_url) = std::env::var("O3K_CINDER_ENDPOINT") {
-                service = service.with_cinder_endpoint(cinder_url);
-            }
-            Some(service)
+            let catalog_endpoint = format!("http://{}", config.listen_addr);
+            o3k_identity::seed_identity_defaults(
+                &identity_store,
+                &o3k_identity::BootstrapConfig {
+                    catalog_endpoint: catalog_endpoint.clone(),
+                    bootstrap_password: o3k_identity::Secret::new(password.expose().to_owned()),
+                    cinder_password: config
+                        .cinder_password()
+                        .map(|secret| o3k_identity::Secret::new(secret.expose().to_owned())),
+                    cinder_endpoint: std::env::var("O3K_CINDER_ENDPOINT").ok(),
+                },
+            )
+            .await?;
+            Some(
+                o3k_identity::TokenService::load(
+                    identity_store.clone(),
+                    o3k_identity::Secret::new(signing_key.expose().to_owned()),
+                    Duration::from_secs(3600),
+                )
+                .await?
+                .with_catalog_endpoint(catalog_endpoint),
+            )
         }
         _ => None,
     };

@@ -540,6 +540,11 @@ async fn issue_token(
                 "The request has not been authenticated.",
             )
         }
+        Err(AuthError::IdentityUnavailable) => keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "identity is not configured",
+        ),
     }
 }
 

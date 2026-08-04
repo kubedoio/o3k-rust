@@ -1,17 +1,24 @@
 use std::{
     fmt,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
+};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
 
+use o3k_store::{SqliteStore, StoreError};
+
 type HmacSha256 = Hmac<Sha256>;
 
+/// A value that must never be logged or formatted with its contents.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
 
@@ -147,24 +154,251 @@ pub struct EndpointDetails {
     pub region_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ServiceRecord {
+/// Durable domain models for identity resources loaded from the store. IDs are
+/// stable and independent from display names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotDomain {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotProject {
+    pub id: String,
+    pub domain_id: String,
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotUser {
+    pub id: String,
+    pub domain_id: String,
+    pub name: String,
+    pub password_hash: PasswordHash,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRole {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotAssignment {
+    pub user_id: String,
+    pub project_id: String,
+    pub role_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotService {
     pub id: String,
     pub name: String,
     pub service_type: String,
     pub enabled: bool,
-    pub endpoints: Vec<EndpointRecord>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EndpointRecord {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotEndpoint {
     pub id: String,
+    pub service_id: String,
     pub url: String,
     pub interface: String,
     pub region: String,
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotRegion {
+    pub id: String,
+    pub enabled: bool,
+}
+
+/// Immutable identity universe loaded from the durable store. `TokenService`
+/// authenticates and validates against this snapshot; restarting the control
+/// plane reloads it from the durable records, so identity state survives
+/// restart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IdentitySnapshot {
+    pub domains: Vec<SnapshotDomain>,
+    pub projects: Vec<SnapshotProject>,
+    pub users: Vec<SnapshotUser>,
+    pub roles: Vec<SnapshotRole>,
+    pub assignments: Vec<SnapshotAssignment>,
+    pub services: Vec<SnapshotService>,
+    pub endpoints: Vec<SnapshotEndpoint>,
+    pub regions: Vec<SnapshotRegion>,
+}
+
+impl IdentitySnapshot {
+    fn user_by_id(&self, id: &str) -> Option<&SnapshotUser> {
+        self.users.iter().find(|user| user.id == id)
+    }
+
+    fn user_by_name(&self, domain_id: &str, name: &str) -> Option<&SnapshotUser> {
+        self.users
+            .iter()
+            .find(|user| user.domain_id == domain_id && user.name == name)
+    }
+
+    fn project_by_id(&self, id: &str) -> Option<&SnapshotProject> {
+        self.projects.iter().find(|project| project.id == id)
+    }
+
+    fn project_by_name(&self, domain_id: &str, name: &str) -> Option<&SnapshotProject> {
+        self.projects
+            .iter()
+            .find(|project| project.domain_id == domain_id && project.name == name)
+    }
+
+    fn domain_by_id(&self, id: &str) -> Option<&SnapshotDomain> {
+        self.domains.iter().find(|domain| domain.id == id)
+    }
+
+    fn domain_by_name(&self, name: &str) -> Option<&SnapshotDomain> {
+        self.domains.iter().find(|domain| domain.name == name)
+    }
+
+    fn role_names_for(&self, user_id: &str, project_id: &str) -> Vec<(String, String)> {
+        let mut roles: Vec<(String, String)> = self
+            .assignments
+            .iter()
+            .filter(|assignment| {
+                assignment.user_id == user_id && assignment.project_id == project_id
+            })
+            .filter_map(|assignment| {
+                self.roles
+                    .iter()
+                    .find(|role| role.id == assignment.role_id)
+                    .map(|role| (role.id.clone(), role.name.clone()))
+            })
+            .collect();
+        roles.sort();
+        roles.dedup();
+        roles
+    }
+}
+
+/// PBKDF2-HMAC-SHA256 password hash stored as a self-describing string:
+/// `pbkdf2-sha256$<iterations>$<salt_b64>$<dk_b64>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordHash {
+    encoded: Secret,
+}
+
+impl PasswordHash {
+    const ITERATIONS: u32 = 120_000;
+    const DK_LEN: usize = 32;
+
+    pub fn derive(password: &str) -> Result<Self, AuthError> {
+        Self::derive_with_iterations(password, Self::ITERATIONS)
+    }
+
+    fn derive_with_iterations(password: &str, iterations: u32) -> Result<Self, AuthError> {
+        if iterations < 1 {
+            return Err(AuthError::InvalidRequest);
+        }
+        let salt = Uuid::new_v4().as_bytes().to_vec();
+        Ok(Self {
+            encoded: Secret::new(Self::encode(password.as_bytes(), &salt, iterations)?),
+        })
+    }
+
+    fn encode(password: &[u8], salt: &[u8], iterations: u32) -> Result<String, AuthError> {
+        let derived = pbkdf2_sha256(password, salt, iterations, Self::DK_LEN)?;
+        Ok(format!(
+            "pbkdf2-sha256${iterations}${}${}",
+            BASE64.encode(salt),
+            BASE64.encode(derived)
+        ))
+    }
+
+    pub fn encoded(&self) -> &str {
+        self.encoded.expose()
+    }
+
+    pub fn verify(&self, password: &str) -> bool {
+        let parts: Vec<&str> = self.encoded.expose().split('$').collect();
+        if parts.len() != 4 || parts[0] != "pbkdf2-sha256" {
+            return false;
+        }
+        let Ok(iterations) = parts[1].parse::<u32>() else {
+            return false;
+        };
+        let Ok(salt) = BASE64.decode(parts[2]) else {
+            return false;
+        };
+        let Ok(expected) = BASE64.decode(parts[3]) else {
+            return false;
+        };
+        let Ok(derived) = pbkdf2_sha256(password.as_bytes(), &salt, iterations, expected.len())
+        else {
+            return false;
+        };
+        constant_time_eq(&derived, &expected)
+    }
+}
+
+impl fmt::Display for PasswordHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// PKCS#5 PBKDF2 with HMAC-SHA256 PRF (RFC 8018).
+fn pbkdf2_sha256(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    dk_len: usize,
+) -> Result<Vec<u8>, AuthError> {
+    if iterations < 1 || dk_len == 0 {
+        return Err(AuthError::InvalidRequest);
+    }
+    let mut out = Vec::with_capacity(dk_len);
+    let mut block_index: u32 = 1;
+    while out.len() < dk_len {
+        let mut mac =
+            HmacSha256::new_from_slice(password).map_err(|_| AuthError::InvalidRequest)?;
+        mac.update(salt);
+        mac.update(&block_index.to_be_bytes());
+        let mut u = mac.finalize().into_bytes();
+        let mut t = u;
+        for _ in 1..iterations {
+            let mut mac =
+                HmacSha256::new_from_slice(password).map_err(|_| AuthError::InvalidRequest)?;
+            mac.update(&u);
+            u = mac.finalize().into_bytes();
+            for (t_byte, u_byte) in t.iter_mut().zip(u.iter()) {
+                *t_byte ^= *u_byte;
+            }
+        }
+        out.extend_from_slice(&t);
+        block_index = block_index.saturating_add(1);
+        if block_index == 0 {
+            return Err(AuthError::InvalidRequest);
+        }
+    }
+    out.truncate(dk_len);
+    Ok(out)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (l, r) in left.iter().zip(right.iter()) {
+        diff |= l ^ r;
+    }
+    diff == 0
+}
+
+/// Internal authorization context produced from a validated token. Roles and
+/// service-user classification come from the durable snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthContext {
     pub token_id: String,
@@ -193,28 +427,240 @@ pub enum AuthError {
     ExpiredToken,
     #[error("token signing key must be at least 32 bytes")]
     WeakSigningKey,
+    #[error("identity state is not available")]
+    IdentityUnavailable,
+}
+
+/// Configuration for the deterministic TestLab bootstrap identity universe.
+#[derive(Debug, Clone)]
+pub struct BootstrapConfig {
+    /// Public base URL advertised in the durable service catalog.
+    pub catalog_endpoint: String,
+    /// Bootstrap administrator password.
+    pub bootstrap_password: Secret,
+    /// Cinder service-user password. When absent, the Cinder service user is
+    /// not created.
+    pub cinder_password: Option<Secret>,
+    /// External Cinder API base URL. When present, a durable `volumev3`
+    /// service and endpoint are registered.
+    pub cinder_endpoint: Option<String>,
+}
+
+/// Seeds the durable identity universe required by the hosted-service profile.
+/// Idempotent: existing records are updated from configuration, assignments and
+/// roles are inserted when missing. Passwords and secrets are never logged.
+pub async fn seed_identity_defaults(
+    store: &SqliteStore,
+    config: &BootstrapConfig,
+) -> Result<(), StoreError> {
+    let now = now_rfc3339();
+    let default_domain = "default".to_owned();
+
+    store
+        .insert_keystone_domain(&o3k_store::KeystoneDomainRecord {
+            id: default_domain.clone(),
+            name: "Default".to_owned(),
+            description: Some("Default domain".to_owned()),
+            enabled: true,
+            created_at: now.clone(),
+        })
+        .await?;
+
+    store
+        .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
+            id: "bootstrap-project".to_owned(),
+            domain_id: default_domain.clone(),
+            name: "admin".to_owned(),
+            description: Some("TestLab bootstrap project".to_owned()),
+            enabled: true,
+            created_at: now.clone(),
+        })
+        .await?;
+    store
+        .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
+            id: "service-project".to_owned(),
+            domain_id: default_domain.clone(),
+            name: "service".to_owned(),
+            description: Some("Service project for hosted services".to_owned()),
+            enabled: true,
+            created_at: now.clone(),
+        })
+        .await?;
+
+    let admin_hash =
+        PasswordHash::derive(config.bootstrap_password.expose()).map_err(store_auth_error)?;
+    store
+        .insert_keystone_user(&o3k_store::KeystoneUserRecord {
+            id: "bootstrap-user".to_owned(),
+            domain_id: default_domain.clone(),
+            name: "admin".to_owned(),
+            password_hash: admin_hash.encoded().to_owned(),
+            email: None,
+            enabled: true,
+            created_at: now.clone(),
+        })
+        .await?;
+
+    if let Some(cinder_password) = &config.cinder_password {
+        let cinder_hash =
+            PasswordHash::derive(cinder_password.expose()).map_err(store_auth_error)?;
+        store
+            .insert_keystone_user(&o3k_store::KeystoneUserRecord {
+                id: "cinder".to_owned(),
+                domain_id: default_domain.clone(),
+                name: "cinder".to_owned(),
+                password_hash: cinder_hash.encoded().to_owned(),
+                email: None,
+                enabled: true,
+                created_at: now.clone(),
+            })
+            .await?;
+    }
+
+    for (id, name) in [
+        ("admin", "admin"),
+        ("member", "member"),
+        ("service", "service"),
+    ] {
+        store
+            .insert_keystone_role(&o3k_store::KeystoneRoleRecord {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                description: Some(format!("{name} role")),
+                created_at: now.clone(),
+            })
+            .await?;
+    }
+
+    let mut assignments = vec![
+        ("bootstrap-user", "bootstrap-project", "admin"),
+        ("bootstrap-user", "bootstrap-project", "member"),
+    ];
+    if config.cinder_password.is_some() {
+        assignments.extend([
+            ("cinder", "service-project", "service"),
+            ("cinder", "service-project", "admin"),
+            ("cinder", "bootstrap-project", "admin"),
+            ("cinder", "bootstrap-project", "service"),
+        ]);
+    }
+    for (index, (user_id, project_id, role_id)) in assignments.into_iter().enumerate() {
+        store
+            .insert_keystone_role_assignment(&o3k_store::KeystoneRoleAssignmentRecord {
+                id: format!("assignment-{index}"),
+                user_id: user_id.to_owned(),
+                project_id: project_id.to_owned(),
+                role_id: role_id.to_owned(),
+                created_at: now.clone(),
+            })
+            .await?;
+    }
+
+    store
+        .insert_keystone_region(&o3k_store::KeystoneRegionRecord {
+            id: "RegionOne".to_owned(),
+            description: Some("Default region".to_owned()),
+            parent_region_id: None,
+            enabled: true,
+            created_at: now.clone(),
+        })
+        .await?;
+
+    let base = config.catalog_endpoint.trim_end_matches('/').to_owned();
+    let cinder_url = config
+        .cinder_endpoint
+        .as_deref()
+        .map(|endpoint| endpoint.trim_end_matches('/').to_owned());
+
+    let mut services: Vec<(&str, &str, &str, String)> = vec![
+        ("identity", "identity", "identity", format!("{base}/v3")),
+        ("image", "image", "image", format!("{base}/v2")),
+        ("network", "network", "network", format!("{base}/v2.0")),
+        (
+            "compute",
+            "compute",
+            "compute",
+            format!("{base}/v2.1/{{project_id}}"),
+        ),
+        (
+            "placement",
+            "placement",
+            "placement",
+            format!("{base}/placement"),
+        ),
+    ];
+    if let Some(cinder_url) = &cinder_url {
+        services.push((
+            "cinder",
+            "cinder",
+            "volumev3",
+            format!("{cinder_url}/v3/{{project_id}}"),
+        ));
+    }
+
+    for (id, name, service_type, url) in services {
+        store
+            .insert_keystone_service(&o3k_store::KeystoneServiceRecord {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                r#type: service_type.to_owned(),
+                description: Some(format!("{name} service")),
+                enabled: true,
+                created_at: now.clone(),
+            })
+            .await?;
+        store
+            .insert_keystone_endpoint(&o3k_store::KeystoneEndpointRecord {
+                id: format!("endpoint-{id}"),
+                service_id: id.to_owned(),
+                interface: "public".to_owned(),
+                url,
+                region: "RegionOne".to_owned(),
+                enabled: true,
+                created_at: now.clone(),
+            })
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn store_auth_error(_: AuthError) -> StoreError {
+    StoreError::Corrupt("password hashing failed".to_owned())
+}
+
+fn now_rfc3339() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    format_time(seconds).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
 #[derive(Clone)]
 pub struct TokenService {
-    user_id: String,
-    user_name: String,
-    password: Secret,
-    project_id: String,
-    project_name: String,
+    snapshot: IdentitySnapshot,
     signing_key: Secret,
     token_ttl: Duration,
     catalog_endpoint: String,
-    cinder_endpoint: Option<String>,
 }
 
 impl TokenService {
-    pub fn new(
-        user_id: String,
-        user_name: String,
-        password: Secret,
-        project_id: String,
-        project_name: String,
+    /// Loads the durable identity snapshot from the store. The snapshot is
+    /// authoritative for authentication, roles, and the catalog until the
+    /// control plane restarts.
+    pub async fn load(
+        store: Arc<SqliteStore>,
+        signing_key: Secret,
+        token_ttl: Duration,
+    ) -> Result<Self, AuthError> {
+        let snapshot = load_snapshot(&store).await?;
+        Self::from_snapshot(snapshot, signing_key, token_ttl)
+    }
+
+    /// Builds a token service from an explicit identity snapshot. Used by
+    /// tests and by the store-backed constructor.
+    pub fn from_snapshot(
+        snapshot: IdentitySnapshot,
         signing_key: Secret,
         token_ttl: Duration,
     ) -> Result<Self, AuthError> {
@@ -224,20 +670,18 @@ impl TokenService {
         if token_ttl.is_zero() {
             return Err(AuthError::InvalidRequest);
         }
+        if snapshot.domains.is_empty() {
+            return Err(AuthError::IdentityUnavailable);
+        }
         Ok(Self {
-            user_id,
-            user_name,
-            password,
-            project_id,
-            project_name,
+            snapshot,
             signing_key,
             token_ttl,
             catalog_endpoint: "http://127.0.0.1:8080".to_owned(),
-            cinder_endpoint: None,
         })
     }
 
-    /// Set the public base URL advertised in issued service catalogs.
+    /// Set the public base URL advertised in discovery responses.
     #[must_use]
     pub fn with_catalog_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.catalog_endpoint = endpoint.into().trim_end_matches('/').to_owned();
@@ -249,20 +693,9 @@ impl TokenService {
         &self.catalog_endpoint
     }
 
-    /// Set an optional external Cinder endpoint to be advertised in service catalogs.
     #[must_use]
-    pub fn with_cinder_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        let trimmed = endpoint.into().trim_end_matches('/').to_owned();
-        if !trimmed.is_empty() {
-            self.cinder_endpoint = Some(trimmed);
-        } else {
-            self.cinder_endpoint = None;
-        }
-        self
-    }
-
-    pub fn cinder_endpoint(&self) -> Option<&str> {
-        self.cinder_endpoint.as_deref()
+    pub fn snapshot(&self) -> &IdentitySnapshot {
+        &self.snapshot
     }
 
     pub fn issue(
@@ -270,44 +703,39 @@ impl TokenService {
         request: &TokenRequest,
         now: SystemTime,
     ) -> Result<(String, TokenResponse), AuthError> {
-        let user = &request
+        if request.auth.identity.methods != ["password"] {
+            return Err(AuthError::InvalidRequest);
+        }
+        let user_ref = &request
             .auth
             .identity
             .password
             .as_ref()
             .ok_or(AuthError::InvalidRequest)?
             .user;
-        if !valid_domain(user.domain.as_ref()) {
-            return Err(AuthError::InvalidRequest);
-        }
-        if request.auth.identity.methods != ["password"] {
-            return Err(AuthError::InvalidRequest);
-        }
-        if user.password != self.password.expose()
-            || !matches_reference(
-                user.id.as_deref(),
-                user.name.as_deref(),
-                &self.user_id,
-                &self.user_name,
-            )
-        {
+
+        let user = self.resolve_user(user_ref)?;
+        if !user.enabled {
             return Err(AuthError::Unauthorized);
         }
-        let project = request
+        if !user.password_hash.verify(&user_ref.password) {
+            return Err(AuthError::Unauthorized);
+        }
+
+        let project_ref = request
             .auth
             .scope
             .as_ref()
             .and_then(|scope| scope.project.as_ref())
             .ok_or(AuthError::InvalidRequest)?;
-        if !valid_domain(project.domain.as_ref()) {
-            return Err(AuthError::InvalidRequest);
+        let project = self.resolve_project(project_ref)?;
+        if !project.enabled {
+            return Err(AuthError::Unauthorized);
         }
-        if !matches_reference(
-            project.id.as_deref(),
-            project.name.as_deref(),
-            &self.project_id,
-            &self.project_name,
-        ) {
+
+        let roles = self.snapshot.role_names_for(&user.id, &project.id);
+        if roles.is_empty() {
+            // Cross-project scoping fails closed before any token is issued.
             return Err(AuthError::Unauthorized);
         }
 
@@ -320,8 +748,8 @@ impl TokenService {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Claims {
-                sub: self.user_id.clone(),
-                project: self.project_id.clone(),
+                sub: user.id.clone(),
+                project: project.id.clone(),
                 issued,
                 expires,
                 token_id,
@@ -336,7 +764,7 @@ impl TokenService {
         Ok((
             token,
             TokenResponse {
-                token: self.details(issued_at, expires_at),
+                token: self.details(&user.id, &project.id, &roles, issued_at, expires_at)?,
             },
         ))
     }
@@ -374,9 +802,7 @@ impl TokenService {
                 .map_err(|_| AuthError::InvalidToken)?,
         )
         .map_err(|_| AuthError::InvalidToken)?;
-        if claims.sub != self.user_id || claims.project != self.project_id {
-            return Err(AuthError::InvalidToken);
-        }
+
         let now = now
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthError::InvalidToken)?
@@ -384,6 +810,16 @@ impl TokenService {
         if now >= claims.expires {
             return Err(AuthError::ExpiredToken);
         }
+
+        // Validation is fail-closed against the durable identity universe:
+        // the subject user and scoped project must still exist and be enabled.
+        let user = self.snapshot.user_by_id(&claims.sub);
+        let project = self.snapshot.project_by_id(&claims.project);
+        match (user, project) {
+            (Some(user), Some(project)) if user.enabled && project.enabled => {}
+            _ => return Err(AuthError::InvalidToken),
+        }
+
         Ok(VerifiedToken {
             token_id: claims.token_id,
             user_id: claims.sub,
@@ -395,95 +831,229 @@ impl TokenService {
 
     pub fn verify_details(&self, token: &str, now: SystemTime) -> Result<TokenResponse, AuthError> {
         let verified = self.verify(token, now)?;
+        let roles = self
+            .snapshot
+            .role_names_for(&verified.user_id, &verified.project_id);
         let issued_at = format_time(verified.issued)?;
         let expires_at = format_time(verified.expires)?;
         Ok(TokenResponse {
-            token: self.details(issued_at, expires_at),
+            token: self.details(
+                &verified.user_id,
+                &verified.project_id,
+                &roles,
+                issued_at,
+                expires_at,
+            )?,
         })
     }
 
     pub fn auth_context(&self, token: &str, now: SystemTime) -> Result<AuthContext, AuthError> {
         let verified = self.verify(token, now)?;
+        let user = self
+            .snapshot
+            .user_by_id(&verified.user_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let project = self
+            .snapshot
+            .project_by_id(&verified.project_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let domain = self
+            .snapshot
+            .domain_by_id(&project.domain_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let role_names: Vec<String> = self
+            .snapshot
+            .role_names_for(&user.id, &project.id)
+            .into_iter()
+            .map(|(_id, name)| name)
+            .collect();
         Ok(AuthContext {
             token_id: verified.token_id,
-            user_id: verified.user_id,
-            user_name: self.user_name.clone(),
-            project_id: verified.project_id,
-            project_name: self.project_name.clone(),
-            domain_id: "default".to_owned(),
-            domain_name: "Default".to_owned(),
-            roles: vec!["admin".to_owned(), "member".to_owned()],
-            service_user: false,
+            user_id: user.id.clone(),
+            user_name: user.name.clone(),
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            domain_id: domain.id.clone(),
+            domain_name: domain.name.clone(),
+            roles: role_names.clone(),
+            service_user: role_names.iter().any(|role| role == "service"),
             issued_at: verified.issued,
             expires_at: verified.expires,
             audit_id: Uuid::now_v7().to_string(),
         })
     }
 
-    fn details(&self, issued_at: String, expires_at: String) -> TokenDetails {
-        let mut catalog = vec![
-            service(
-                "identity",
-                "identity",
-                "identity",
-                &format!("{}/v3", self.catalog_endpoint),
-            ),
-            service(
-                "image",
-                "image",
-                "image",
-                &format!("{}/v2", self.catalog_endpoint),
-            ),
-            service(
-                "network",
-                "network",
-                "network",
-                &format!("{}/v2.0", self.catalog_endpoint),
-            ),
-            service(
-                "compute",
-                "compute",
-                "compute",
-                &format!("{}/v2.1/{}", self.catalog_endpoint, self.project_id),
-            ),
-            service(
-                "placement",
-                "placement",
-                "placement",
-                &format!("{}/placement", self.catalog_endpoint),
-            ),
-        ];
-
-        if let Some(cinder_url) = &self.cinder_endpoint {
-            catalog.push(service(
-                "cinder",
-                "volumev3",
-                "cinder",
-                &format!("{cinder_url}/v3/{}", self.project_id),
-            ));
+    fn resolve_domain(
+        &self,
+        reference: Option<&DomainReference>,
+    ) -> Result<SnapshotDomain, AuthError> {
+        let Some(reference) = reference else {
+            return self
+                .snapshot
+                .domain_by_name("Default")
+                .or_else(|| self.snapshot.domain_by_id("default"))
+                .cloned()
+                .ok_or(AuthError::Unauthorized);
+        };
+        match (&reference.id, &reference.name) {
+            (Some(id), None) => self
+                .snapshot
+                .domain_by_id(id)
+                .cloned()
+                .ok_or(AuthError::Unauthorized),
+            (None, Some(name)) => self
+                .snapshot
+                .domain_by_name(name)
+                .cloned()
+                .ok_or(AuthError::Unauthorized),
+            (Some(id), Some(name)) => self
+                .snapshot
+                .domain_by_id(id)
+                .filter(|domain| domain.name == *name)
+                .cloned()
+                .ok_or(AuthError::Unauthorized),
+            (None, None) => Err(AuthError::Unauthorized),
         }
+    }
 
-        TokenDetails {
+    fn resolve_user(&self, reference: &UserReference) -> Result<SnapshotUser, AuthError> {
+        let domain = self.resolve_domain(reference.domain.as_ref())?;
+        let user = match (&reference.id, &reference.name) {
+            (Some(id), None) => self.snapshot.user_by_id(id),
+            (None, Some(name)) => self.snapshot.user_by_name(domain.id.as_str(), name),
+            (Some(id), Some(name)) => self
+                .snapshot
+                .user_by_id(id)
+                .filter(|user| user.name == *name && user.domain_id == domain.id),
+            (None, None) => None,
+        };
+        user.cloned()
+            .ok_or(AuthError::Unauthorized)
+            .and_then(|user| {
+                if user.domain_id == domain.id {
+                    Ok(user)
+                } else {
+                    Err(AuthError::Unauthorized)
+                }
+            })
+    }
+
+    fn resolve_project(&self, reference: &ProjectReference) -> Result<SnapshotProject, AuthError> {
+        let domain = self.resolve_domain(reference.domain.as_ref())?;
+        let project = match (&reference.id, &reference.name) {
+            (Some(id), None) => self.snapshot.project_by_id(id),
+            (None, Some(name)) => self.snapshot.project_by_name(domain.id.as_str(), name),
+            (Some(id), Some(name)) => self
+                .snapshot
+                .project_by_id(id)
+                .filter(|project| project.name == *name && project.domain_id == domain.id),
+            (None, None) => None,
+        };
+        project
+            .cloned()
+            .ok_or(AuthError::Unauthorized)
+            .and_then(|project| {
+                if project.domain_id == domain.id {
+                    Ok(project)
+                } else {
+                    Err(AuthError::Unauthorized)
+                }
+            })
+    }
+
+    fn details(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        roles: &[(String, String)],
+        issued_at: String,
+        expires_at: String,
+    ) -> Result<TokenDetails, AuthError> {
+        let user = self
+            .snapshot
+            .user_by_id(user_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let project = self
+            .snapshot
+            .project_by_id(project_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let user_domain = self
+            .snapshot
+            .domain_by_id(&user.domain_id)
+            .ok_or(AuthError::InvalidToken)?;
+        let project_domain = self
+            .snapshot
+            .domain_by_id(&project.domain_id)
+            .ok_or(AuthError::InvalidToken)?;
+
+        let mut role_details: Vec<RoleDetails> = roles
+            .iter()
+            .map(|(id, name)| RoleDetails {
+                id: id.clone(),
+                name: name.clone(),
+            })
+            .collect();
+        role_details.sort_by(|left, right| left.name.cmp(&right.name));
+
+        Ok(TokenDetails {
             expires_at,
             issued_at,
             methods: vec!["password".to_owned()],
             project: ProjectDetails {
-                id: self.project_id.clone(),
-                name: self.project_name.clone(),
-                domain: default_domain(),
+                id: project.id.clone(),
+                name: project.name.clone(),
+                domain: DomainDetails {
+                    id: project_domain.id.clone(),
+                    name: project_domain.name.clone(),
+                },
             },
             user: UserDetails {
-                id: self.user_id.clone(),
-                name: self.user_name.clone(),
-                domain: default_domain(),
+                id: user.id.clone(),
+                name: user.name.clone(),
+                domain: DomainDetails {
+                    id: user_domain.id.clone(),
+                    name: user_domain.name.clone(),
+                },
                 password_expires_at: None,
             },
-            roles: vec![RoleDetails {
-                id: "member".to_owned(),
-                name: "member".to_owned(),
-            }],
-            catalog,
-        }
+            roles: role_details,
+            catalog: self.catalog(project_id),
+        })
+    }
+
+    /// Builds the service catalog from durable service and endpoint records.
+    /// URLs are validated configuration and never derived from request
+    /// headers. The `{project_id}` placeholder is substituted per token scope.
+    fn catalog(&self, project_id: &str) -> Vec<ServiceDetails> {
+        let mut catalog: Vec<ServiceDetails> = self
+            .snapshot
+            .services
+            .iter()
+            .filter(|service| service.enabled)
+            .map(|service| {
+                let endpoints: Vec<EndpointDetails> = self
+                    .snapshot
+                    .endpoints
+                    .iter()
+                    .filter(|endpoint| endpoint.enabled && endpoint.service_id == service.id)
+                    .map(|endpoint| EndpointDetails {
+                        url: endpoint.url.replace("{project_id}", project_id),
+                        interface: endpoint.interface.clone(),
+                        region: endpoint.region.clone(),
+                        region_id: endpoint.region.clone(),
+                    })
+                    .collect();
+                ServiceDetails {
+                    name: service.name.clone(),
+                    service_type: service.service_type.clone(),
+                    id: service.id.clone(),
+                    endpoints,
+                }
+            })
+            .collect();
+        catalog.sort_by(|left, right| left.service_type.cmp(&right.service_type));
+        catalog.retain(|service| !service.endpoints.is_empty());
+        catalog
     }
 }
 
@@ -509,31 +1079,6 @@ struct Claims {
 struct Header {
     alg: String,
     typ: String,
-}
-
-fn matches_reference(
-    id: Option<&str>,
-    name: Option<&str>,
-    expected_id: &str,
-    expected_name: &str,
-) -> bool {
-    match (id, name) {
-        (Some(id), Some(name)) => id == expected_id && name == expected_name,
-        (Some(id), None) => id == expected_id,
-        (None, Some(name)) => name == expected_name,
-        (None, None) => false,
-    }
-}
-
-fn valid_domain(domain: Option<&DomainReference>) -> bool {
-    domain.is_none_or(|domain| {
-        matches_reference(
-            domain.id.as_deref(),
-            domain.name.as_deref(),
-            "default",
-            "Default",
-        )
-    })
 }
 
 fn sign(key: &Secret, input: &[u8]) -> Result<String, AuthError> {
@@ -578,44 +1123,158 @@ fn civil_date(days_since_epoch: u64) -> Result<(i64, u64, u64), AuthError> {
     ))
 }
 
-fn default_domain() -> DomainDetails {
-    DomainDetails {
-        id: "default".to_owned(),
-        name: "Default".to_owned(),
+async fn load_snapshot(store: &SqliteStore) -> Result<IdentitySnapshot, AuthError> {
+    let map_error = |_: StoreError| AuthError::IdentityUnavailable;
+    let domains = store
+        .list_keystone_domains()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotDomain {
+            id: record.id,
+            name: record.name,
+            enabled: record.enabled,
+        })
+        .collect();
+    let projects = store
+        .list_keystone_projects()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotProject {
+            id: record.id,
+            domain_id: record.domain_id,
+            name: record.name,
+            enabled: record.enabled,
+        })
+        .collect();
+    let users = store
+        .list_keystone_users()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotUser {
+            id: record.id,
+            domain_id: record.domain_id,
+            name: record.name,
+            password_hash: PasswordHash::from_encoded(record.password_hash),
+            enabled: record.enabled,
+        })
+        .collect();
+    let roles = store
+        .list_keystone_roles()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotRole {
+            id: record.id,
+            name: record.name,
+        })
+        .collect();
+    let assignments = store
+        .list_keystone_role_assignments()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotAssignment {
+            user_id: record.user_id,
+            project_id: record.project_id,
+            role_id: record.role_id,
+        })
+        .collect();
+    let services = store
+        .list_keystone_services()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotService {
+            id: record.id,
+            name: record.name,
+            service_type: record.r#type,
+            enabled: record.enabled,
+        })
+        .collect();
+    let endpoints = store
+        .list_keystone_endpoints()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotEndpoint {
+            id: record.id,
+            service_id: record.service_id,
+            url: record.url,
+            interface: record.interface,
+            region: record.region,
+            enabled: record.enabled,
+        })
+        .collect();
+    let regions = store
+        .list_keystone_regions()
+        .await
+        .map_err(map_error)?
+        .into_iter()
+        .map(|record| SnapshotRegion {
+            id: record.id,
+            enabled: record.enabled,
+        })
+        .collect();
+    Ok(IdentitySnapshot {
+        domains,
+        projects,
+        users,
+        roles,
+        assignments,
+        services,
+        endpoints,
+        regions,
+    })
+}
+
+impl PasswordHash {
+    /// Parses a previously encoded hash without re-deriving it.
+    fn from_encoded(encoded: String) -> Self {
+        Self {
+            encoded: Secret::new(encoded),
+        }
     }
 }
 
-fn service(name: &str, service_type: &str, id: &str, url: &str) -> ServiceDetails {
-    ServiceDetails {
-        name: name.to_owned(),
-        service_type: service_type.to_owned(),
-        id: id.to_owned(),
-        endpoints: vec![EndpointDetails {
-            url: url.to_owned(),
-            interface: "public".to_owned(),
-            region: "RegionOne".to_owned(),
-            region_id: "RegionOne".to_owned(),
-        }],
-    }
-}
-
-#[cfg(test)]
-mod tests {
+/// Shared test construction helpers for identity-backed integration tests.
+pub mod testkit {
     use super::*;
 
-    fn service() -> Result<TokenService, AuthError> {
-        TokenService::new(
-            "user-1".to_owned(),
-            "admin".to_owned(),
-            Secret::new("password".to_owned()),
-            "project-1".to_owned(),
-            "admin".to_owned(),
+    /// Builds a token service against a fresh in-memory durable store seeded
+    /// with the deterministic bootstrap universe. Bootstrap and Cinder
+    /// passwords are both `password`; the Cinder endpoint is the default
+    /// 8776 port.
+    pub async fn test_service(catalog_endpoint: &str) -> Result<TokenService, AuthError> {
+        let store = Arc::new(
+            SqliteStore::connect("sqlite::memory:")
+                .await
+                .map_err(|_| AuthError::IdentityUnavailable)?,
+        );
+        seed_identity_defaults(
+            &store,
+            &BootstrapConfig {
+                catalog_endpoint: catalog_endpoint.to_owned(),
+                bootstrap_password: Secret::new("password".to_owned()),
+                cinder_password: Some(Secret::new("password".to_owned())),
+                cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+            },
+        )
+        .await
+        .map_err(|_| AuthError::IdentityUnavailable)?;
+        TokenService::load(
+            store,
             Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
             Duration::from_secs(3600),
         )
+        .await
     }
 
-    fn request(password: &str) -> TokenRequest {
+    /// A password authentication request for the bootstrap administrator in
+    /// the bootstrap project.
+    pub fn admin_request(password: &str) -> TokenRequest {
         TokenRequest {
             auth: Auth {
                 identity: Identity {
@@ -640,49 +1299,308 @@ mod tests {
         }
     }
 
+    /// A password authentication request for the Cinder service user scoped
+    /// to the bootstrap project.
+    pub fn cinder_service_request(password: &str) -> TokenRequest {
+        TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["password".to_owned()],
+                    password: Some(PasswordIdentity {
+                        user: UserReference {
+                            id: None,
+                            name: Some("cinder".to_owned()),
+                            domain: None,
+                            password: password.to_owned(),
+                        },
+                    }),
+                },
+                scope: Some(Scope {
+                    project: Some(ProjectReference {
+                        id: None,
+                        name: Some("admin".to_owned()),
+                        domain: None,
+                    }),
+                }),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn service_with_snapshot() -> Result<TokenService, AuthError> {
+        let mut snapshot = IdentitySnapshot {
+            domains: vec![SnapshotDomain {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                enabled: true,
+            }],
+            projects: vec![
+                SnapshotProject {
+                    id: "bootstrap-project".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "admin".to_owned(),
+                    enabled: true,
+                },
+                SnapshotProject {
+                    id: "service-project".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "service".to_owned(),
+                    enabled: true,
+                },
+                SnapshotProject {
+                    id: "other-project".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "other".to_owned(),
+                    enabled: true,
+                },
+            ],
+            users: vec![
+                SnapshotUser {
+                    id: "bootstrap-user".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "admin".to_owned(),
+                    password_hash: PasswordHash::derive("password")?,
+                    enabled: true,
+                },
+                SnapshotUser {
+                    id: "cinder".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "cinder".to_owned(),
+                    password_hash: PasswordHash::derive("password")?,
+                    enabled: true,
+                },
+                SnapshotUser {
+                    id: "disabled-user".to_owned(),
+                    domain_id: "default".to_owned(),
+                    name: "disabled".to_owned(),
+                    password_hash: PasswordHash::derive("password")?,
+                    enabled: false,
+                },
+            ],
+            roles: vec![
+                SnapshotRole {
+                    id: "admin".to_owned(),
+                    name: "admin".to_owned(),
+                },
+                SnapshotRole {
+                    id: "member".to_owned(),
+                    name: "member".to_owned(),
+                },
+                SnapshotRole {
+                    id: "service".to_owned(),
+                    name: "service".to_owned(),
+                },
+            ],
+            assignments: vec![
+                SnapshotAssignment {
+                    user_id: "bootstrap-user".to_owned(),
+                    project_id: "bootstrap-project".to_owned(),
+                    role_id: "admin".to_owned(),
+                },
+                SnapshotAssignment {
+                    user_id: "bootstrap-user".to_owned(),
+                    project_id: "bootstrap-project".to_owned(),
+                    role_id: "member".to_owned(),
+                },
+                SnapshotAssignment {
+                    user_id: "cinder".to_owned(),
+                    project_id: "service-project".to_owned(),
+                    role_id: "service".to_owned(),
+                },
+                SnapshotAssignment {
+                    user_id: "cinder".to_owned(),
+                    project_id: "bootstrap-project".to_owned(),
+                    role_id: "service".to_owned(),
+                },
+            ],
+            services: vec![
+                SnapshotService {
+                    id: "identity".to_owned(),
+                    name: "identity".to_owned(),
+                    service_type: "identity".to_owned(),
+                    enabled: true,
+                },
+                SnapshotService {
+                    id: "cinder".to_owned(),
+                    name: "cinder".to_owned(),
+                    service_type: "volumev3".to_owned(),
+                    enabled: true,
+                },
+            ],
+            endpoints: vec![
+                SnapshotEndpoint {
+                    id: "endpoint-identity".to_owned(),
+                    service_id: "identity".to_owned(),
+                    url: "http://127.0.0.1:8080/v3".to_owned(),
+                    interface: "public".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    enabled: true,
+                },
+                SnapshotEndpoint {
+                    id: "endpoint-cinder".to_owned(),
+                    service_id: "cinder".to_owned(),
+                    url: "http://127.0.0.1:8776/v3/{project_id}".to_owned(),
+                    interface: "public".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    enabled: true,
+                },
+            ],
+            regions: vec![SnapshotRegion {
+                id: "RegionOne".to_owned(),
+                enabled: true,
+            }],
+        };
+        // Deterministic ordering is required for response comparisons.
+        snapshot.services.sort_by(|a, b| a.id.cmp(&b.id));
+        snapshot.endpoints.sort_by(|a, b| a.id.cmp(&b.id));
+        TokenService::from_snapshot(
+            snapshot,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )
+    }
+
+    fn admin_request() -> TokenRequest {
+        testkit::admin_request("password")
+    }
+
+    fn admin_scoped_request(project_name: &str) -> TokenRequest {
+        TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["password".to_owned()],
+                    password: Some(PasswordIdentity {
+                        user: UserReference {
+                            id: None,
+                            name: Some("admin".to_owned()),
+                            domain: None,
+                            password: "password".to_owned(),
+                        },
+                    }),
+                },
+                scope: Some(Scope {
+                    project: Some(ProjectReference {
+                        id: None,
+                        name: Some(project_name.to_owned()),
+                        domain: None,
+                    }),
+                }),
+            },
+        }
+    }
+
     #[test]
     fn password_scope_issues_and_verifies_token() -> Result<(), AuthError> {
-        let service = service()?;
+        let service = service_with_snapshot()?;
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
-        let (token, response) = service.issue(&request("password"), now)?;
+        let (token, response) = service.issue(&admin_request(), now)?;
         assert!(token.split('.').count() == 3);
-        assert_eq!(response.token.project.id, "project-1");
-        assert_eq!(service.verify(&token, now)?.user_id, "user-1");
+        assert_eq!(response.token.project.id, "bootstrap-project");
+        assert_eq!(response.token.user.id, "bootstrap-user");
+        assert_eq!(service.verify(&token, now)?.user_id, "bootstrap-user");
         Ok(())
     }
 
     #[test]
-    fn catalog_uses_configured_endpoint() -> Result<(), AuthError> {
-        let service = service()?.with_catalog_endpoint("http://127.0.0.1:18080/");
-        let (_, response) = service.issue(
-            &request("password"),
-            UNIX_EPOCH + Duration::from_secs(1_000),
-        )?;
-        let urls: Vec<_> = response
+    fn catalog_is_generated_from_durable_endpoint_records() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (_, response) = service.issue(&admin_request(), now)?;
+        let urls: Vec<(String, String)> = response
             .token
             .catalog
             .iter()
-            .flat_map(|item| item.endpoints.iter())
-            .map(|endpoint| endpoint.url.as_str())
+            .map(|item| (item.service_type.clone(), item.endpoints[0].url.clone()))
             .collect();
         assert_eq!(
             urls,
-            [
-                "http://127.0.0.1:18080/v3",
-                "http://127.0.0.1:18080/v2",
-                "http://127.0.0.1:18080/v2.0",
-                "http://127.0.0.1:18080/v2.1/project-1",
-                "http://127.0.0.1:18080/placement",
+            vec![
+                ("identity".to_owned(), "http://127.0.0.1:8080/v3".to_owned()),
+                (
+                    "volumev3".to_owned(),
+                    "http://127.0.0.1:8776/v3/bootstrap-project".to_owned()
+                ),
             ]
         );
         Ok(())
     }
 
     #[test]
-    fn invalid_password_is_not_accepted() -> Result<(), AuthError> {
-        let service = service()?;
+    fn disabled_user_cannot_authenticate() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let request = TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["password".to_owned()],
+                    password: Some(PasswordIdentity {
+                        user: UserReference {
+                            id: None,
+                            name: Some("disabled".to_owned()),
+                            domain: None,
+                            password: "password".to_owned(),
+                        },
+                    }),
+                },
+                scope: Some(Scope {
+                    project: Some(ProjectReference {
+                        id: None,
+                        name: Some("admin".to_owned()),
+                        domain: None,
+                    }),
+                }),
+            },
+        };
         assert!(matches!(
-            service.issue(&request("wrong"), UNIX_EPOCH),
+            service.issue(&request, UNIX_EPOCH),
+            Err(AuthError::Unauthorized)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_password_is_not_accepted() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        assert!(matches!(
+            service.issue(
+                &TokenRequest {
+                    auth: Auth {
+                        identity: Identity {
+                            methods: vec!["password".to_owned()],
+                            password: Some(PasswordIdentity {
+                                user: UserReference {
+                                    id: None,
+                                    name: Some("admin".to_owned()),
+                                    domain: None,
+                                    password: "wrong".to_owned(),
+                                },
+                            }),
+                        },
+                        scope: Some(Scope {
+                            project: Some(ProjectReference {
+                                id: None,
+                                name: Some("admin".to_owned()),
+                                domain: None,
+                            }),
+                        }),
+                    },
+                },
+                UNIX_EPOCH,
+            ),
+            Err(AuthError::Unauthorized)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cross_project_scoping_fails_closed() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        // The bootstrap user has no role in the "other" project.
+        assert!(matches!(
+            service.issue(&admin_scoped_request("other"), UNIX_EPOCH),
             Err(AuthError::Unauthorized)
         ));
         Ok(())
@@ -690,9 +1608,9 @@ mod tests {
 
     #[test]
     fn expired_token_is_rejected() -> Result<(), AuthError> {
-        let service = service()?;
+        let service = service_with_snapshot()?;
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
-        let (token, _) = service.issue(&request("password"), now)?;
+        let (token, _) = service.issue(&admin_request(), now)?;
         assert_eq!(
             service.verify(&token, now + Duration::from_secs(3600)),
             Err(AuthError::ExpiredToken)
@@ -701,45 +1619,145 @@ mod tests {
     }
 
     #[test]
-    fn cinder_endpoint_adds_volumev3_to_catalog() -> Result<(), AuthError> {
-        let service = service()?
-            .with_catalog_endpoint("http://127.0.0.1:8080")
-            .with_cinder_endpoint("http://127.0.0.1:8776");
+    fn malformed_and_tampered_tokens_are_rejected() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
-        let (token, response) = service.issue(&request("password"), now)?;
-
-        let cinder_entry = response
-            .token
-            .catalog
-            .iter()
-            .find(|item| item.service_type == "volumev3")
-            .ok_or(AuthError::InvalidRequest)?;
-        let cinder_url = &cinder_entry.endpoints[0].url;
-        assert_eq!(cinder_url, "http://127.0.0.1:8776/v3/project-1");
-
-        let auth_ctx = service.auth_context(&token, now)?;
-        assert_eq!(auth_ctx.user_id, "user-1");
-        assert_eq!(auth_ctx.project_id, "project-1");
-
-        let verified_details = service.verify_details(&token, now)?;
-        assert_eq!(verified_details.token.project.id, "project-1");
+        let (token, _) = service.issue(&admin_request(), now)?;
+        assert_eq!(
+            service.verify("not-a-token", now),
+            Err(AuthError::InvalidToken)
+        );
+        let mut parts: Vec<&str> = token.split('.').collect();
+        parts[1] = "tampered";
+        assert_eq!(
+            service.verify(&parts.join("."), now),
+            Err(AuthError::InvalidToken)
+        );
         Ok(())
     }
 
     #[test]
-    fn incorrect_project_id_as_display_name_is_rejected() -> Result<(), AuthError> {
-        let service = service()?;
-        let mut req = request("password");
-        if let Some(scope) = req.auth.scope.as_mut() {
-            scope.project = Some(ProjectReference {
-                id: Some("admin".to_owned()), // "admin" is display name, not durable ID ("project-1")
-                name: None,
-                domain: None,
-            });
-        }
+    fn service_user_authentication_and_separation() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, response) = service.issue(&testkit::cinder_service_request("password"), now)?;
+        assert_eq!(response.token.user.id, "cinder");
+        assert_eq!(response.token.project.id, "bootstrap-project");
+        let context = service.auth_context(&token, now)?;
+        assert!(context.service_user);
+        assert!(context.roles.contains(&"service".to_owned()));
+        assert!(!context.roles.contains(&"admin".to_owned()));
+        Ok(())
+    }
+
+    #[test]
+    fn user_token_is_not_a_service_token() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = service.issue(&admin_request(), now)?;
+        let context = service.auth_context(&token, now)?;
+        assert!(!context.service_user);
+        Ok(())
+    }
+
+    #[test]
+    fn secret_and_password_hash_display_are_redacted() -> Result<(), AuthError> {
+        let hash = PasswordHash::derive("hunter2-password")?;
+        assert!(!format!("{hash:?}").contains("hunter2"));
+        assert!(!format!("{hash}").contains("hunter2"));
+        assert!(format!("{hash:?}").contains("redacted"));
+        let secret = Secret::new("super-secret".to_owned());
+        assert!(!format!("{secret:?}").contains("super-secret"));
+        assert!(!format!("{secret}").contains("super-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn password_hash_round_trip_and_wrong_password() -> Result<(), AuthError> {
+        let hash = PasswordHash::derive("correct-password")?;
+        assert!(hash.verify("correct-password"));
+        assert!(!hash.verify("wrong-password"));
+        Ok(())
+    }
+
+    #[test]
+    fn pbkdf2_sha256_matches_rfc6070_vector() -> Result<(), AuthError> {
+        // PBKDF2-HMAC-SHA256 vector: password "password", salt "salt",
+        // 1 iteration, dkLen 32 (cross-checked with hashlib.pbkdf2_hmac).
+        let derived = pbkdf2_sha256(b"password", b"salt", 1, 32)?;
+        let expected: Vec<u8> = vec![
+            0x12, 0x0f, 0xb6, 0xcf, 0xfc, 0xf8, 0xb3, 0x2c, 0x43, 0xe7, 0x22, 0x52, 0x56, 0xc4,
+            0xf8, 0x37, 0xa8, 0x65, 0x48, 0xc9, 0x2c, 0xcc, 0x35, 0x48, 0x08, 0x05, 0x98, 0x7c,
+            0xb7, 0x0b, 0xe1, 0x7b,
+        ];
+        assert_eq!(derived, expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn endpoint_records_survive_reload_from_store() -> Result<(), AuthError> {
+        let store = Arc::new(
+            SqliteStore::connect("sqlite::memory:")
+                .await
+                .map_err(|_| AuthError::IdentityUnavailable)?,
+        );
+        seed_identity_defaults(
+            &store,
+            &BootstrapConfig {
+                catalog_endpoint: "http://127.0.0.1:18080".to_owned(),
+                bootstrap_password: Secret::new("password".to_owned()),
+                cinder_password: Some(Secret::new("password".to_owned())),
+                cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+            },
+        )
+        .await
+        .map_err(|_| AuthError::IdentityUnavailable)?;
+
+        let first = TokenService::load(
+            store.clone(),
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )
+        .await?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (token, _) = first.issue(&testkit::admin_request("password"), now)?;
+
+        // Simulate restart: a fresh service loads the durable records again.
+        let reloaded = TokenService::load(
+            store,
+            Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
+            Duration::from_secs(3600),
+        )
+        .await?;
+        assert_eq!(reloaded.snapshot().services.len(), 6);
+        assert_eq!(reloaded.snapshot().users.len(), 2);
+        assert!(reloaded.snapshot().endpoints.iter().any(|endpoint| {
+            endpoint.service_id == "cinder"
+                && endpoint.url == "http://127.0.0.1:8776/v3/{project_id}"
+        }));
+        // A token issued before restart validates after reload.
+        let verified = reloaded.verify(&token, now)?;
+        assert_eq!(verified.user_id, "bootstrap-user");
+        Ok(())
+    }
+
+    #[test]
+    fn weak_signing_key_is_rejected() -> Result<(), AuthError> {
+        let snapshot = IdentitySnapshot {
+            domains: vec![SnapshotDomain {
+                id: "default".to_owned(),
+                name: "Default".to_owned(),
+                enabled: true,
+            }],
+            ..Default::default()
+        };
         assert!(matches!(
-            service.issue(&req, UNIX_EPOCH + Duration::from_secs(1000)),
-            Err(AuthError::Unauthorized)
+            TokenService::from_snapshot(
+                snapshot,
+                Secret::new("short".to_owned()),
+                Duration::from_secs(3600),
+            ),
+            Err(AuthError::WeakSigningKey)
         ));
         Ok(())
     }

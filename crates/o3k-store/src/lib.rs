@@ -146,6 +146,15 @@ pub struct KeystoneEndpointRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeystoneRegionRecord {
+    pub id: String,
+    pub description: Option<String>,
+    pub parent_region_id: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationState {
     Pending,
@@ -726,12 +735,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 17 {
+        if table_count != 18 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -1061,6 +1070,170 @@ impl SqliteStore {
                 created_at: r.get("created_at"),
             })
             .collect())
+    }
+
+    pub async fn list_keystone_regions(&self) -> Result<Vec<KeystoneRegionRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, description, parent_region_id, enabled, created_at FROM keystone_regions WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRegionRecord {
+                id: r.get("id"),
+                description: r.get("description"),
+                parent_region_id: r.get("parent_region_id"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn insert_keystone_region(
+        &self,
+        region: &KeystoneRegionRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO keystone_regions (id, description, parent_region_id, enabled, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET description=excluded.description, parent_region_id=excluded.parent_region_id, enabled=excluded.enabled")
+            .bind(&region.id)
+            .bind(&region.description)
+            .bind(&region.parent_region_id)
+            .bind(if region.enabled { 1 } else { 0 })
+            .bind(&region.created_at)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn list_keystone_domains(&self) -> Result<Vec<KeystoneDomainRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, description, enabled, created_at FROM keystone_domains WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneDomainRecord {
+                id: r.get("id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_projects(&self) -> Result<Vec<KeystoneProjectRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, domain_id, name, description, enabled, created_at FROM keystone_projects WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneProjectRecord {
+                id: r.get("id"),
+                domain_id: r.get("domain_id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_users(&self) -> Result<Vec<KeystoneUserRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, domain_id, name, password_hash, email, enabled, created_at FROM keystone_users WHERE enabled = 1")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneUserRecord {
+                id: r.get("id"),
+                domain_id: r.get("domain_id"),
+                name: r.get("name"),
+                password_hash: r.get("password_hash"),
+                email: r.get("email"),
+                enabled: r.get::<i32, _>("enabled") != 0,
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_roles(&self) -> Result<Vec<KeystoneRoleRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, name, description, created_at FROM keystone_roles")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRoleRecord {
+                id: r.get("id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_keystone_role_assignments(
+        &self,
+    ) -> Result<Vec<KeystoneRoleAssignmentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, user_id, project_id, role_id, created_at FROM keystone_role_assignments",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| KeystoneRoleAssignmentRecord {
+                id: r.get("id"),
+                user_id: r.get("user_id"),
+                project_id: r.get("project_id"),
+                role_id: r.get("role_id"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn get_keystone_user_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<KeystoneUserRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, password_hash, email, enabled, created_at FROM keystone_users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(row.map(|r| KeystoneUserRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            password_hash: r.get("password_hash"),
+            email: r.get("email"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn get_keystone_project_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<KeystoneProjectRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, domain_id, name, description, enabled, created_at FROM keystone_projects WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(row.map(|r| KeystoneProjectRecord {
+            id: r.get("id"),
+            domain_id: r.get("domain_id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            enabled: r.get::<i32, _>("enabled") != 0,
+            created_at: r.get("created_at"),
+        }))
     }
 
     pub async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {

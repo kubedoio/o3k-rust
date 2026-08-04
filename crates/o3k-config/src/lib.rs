@@ -68,6 +68,7 @@ pub struct Config {
     pub compute_authorized_agents: Option<String>,
     bootstrap_secret: Option<Secret>,
     bootstrap_password: Option<Secret>,
+    cinder_password: Option<Secret>,
     token_signing_key: Option<Secret>,
 }
 
@@ -102,6 +103,7 @@ impl fmt::Debug for Config {
             )
             .field("bootstrap_secret", &self.bootstrap_secret)
             .field("bootstrap_password", &self.bootstrap_password)
+            .field("cinder_password", &self.cinder_password)
             .field("token_signing_key", &self.token_signing_key)
             .finish()
     }
@@ -146,6 +148,10 @@ impl Config {
     #[must_use]
     pub fn bootstrap_password(&self) -> Option<&Secret> {
         self.bootstrap_password.as_ref()
+    }
+
+    pub fn cinder_password(&self) -> Option<&Secret> {
+        self.cinder_password.as_ref()
     }
 
     #[must_use]
@@ -214,6 +220,7 @@ struct PartialConfig {
     cellhv_client_key: Option<String>,
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
+    cinder_password: Option<String>,
     token_signing_key: Option<String>,
     compute_control_addr: Option<String>,
     compute_server_certificate: Option<String>,
@@ -237,6 +244,7 @@ struct FileConfig {
     cellhv_client_key: Option<String>,
     bootstrap_secret: Option<String>,
     bootstrap_password: Option<String>,
+    cinder_password: Option<String>,
     token_signing_key: Option<String>,
     compute_control_addr: Option<String>,
     compute_server_certificate: Option<String>,
@@ -260,6 +268,7 @@ impl From<FileConfig> for PartialConfig {
             cellhv_client_key: file.cellhv_client_key,
             bootstrap_secret: file.bootstrap_secret,
             bootstrap_password: file.bootstrap_password,
+            cinder_password: file.cinder_password,
             token_signing_key: file.token_signing_key,
             compute_control_addr: file.compute_control_addr,
             compute_server_certificate: file.compute_server_certificate,
@@ -312,6 +321,9 @@ impl PartialConfig {
         if other.bootstrap_password.is_some() {
             self.bootstrap_password = other.bootstrap_password;
         }
+        if other.cinder_password.is_some() {
+            self.cinder_password = other.cinder_password;
+        }
         if other.token_signing_key.is_some() {
             self.token_signing_key = other.token_signing_key;
         }
@@ -346,6 +358,7 @@ impl PartialConfig {
             cellhv_client_key: value_from_env(environment, "O3K_CELLHV_CLIENT_KEY"),
             bootstrap_secret: value_from_env(environment, "O3K_BOOTSTRAP_SECRET"),
             bootstrap_password: value_from_env(environment, "O3K_BOOTSTRAP_PASSWORD"),
+            cinder_password: value_from_env(environment, "O3K_CINDER_PASSWORD"),
             token_signing_key: value_from_env(environment, "O3K_TOKEN_SIGNING_KEY"),
             compute_control_addr: value_from_env(environment, "O3K_COMPUTE_CONTROL_ADDR"),
             compute_server_certificate: value_from_env(
@@ -403,6 +416,7 @@ impl PartialConfig {
                 "--bootstrap-password" => {
                     result.bootstrap_password = Some(value("--bootstrap-password")?)
                 }
+                "--cinder-password" => result.cinder_password = Some(value("--cinder-password")?),
                 "--token-signing-key" => {
                     result.token_signing_key = Some(value("--token-signing-key")?)
                 }
@@ -518,6 +532,13 @@ impl PartialConfig {
         {
             return Err(ConfigError::InvalidBootstrapPassword);
         }
+        if self
+            .cinder_password
+            .as_deref()
+            .is_some_and(|password| password.contains(['\n', '\r']))
+        {
+            return Err(ConfigError::InvalidBootstrapPassword);
+        }
         if self.bootstrap_password.is_some()
             && self
                 .token_signing_key
@@ -572,6 +593,7 @@ impl PartialConfig {
             compute_authorized_agents: self.compute_authorized_agents,
             bootstrap_secret: self.bootstrap_secret.map(Secret),
             bootstrap_password: self.bootstrap_password.map(Secret),
+            cinder_password: self.cinder_password.map(Secret),
             token_signing_key: self.token_signing_key.map(Secret),
         })
     }

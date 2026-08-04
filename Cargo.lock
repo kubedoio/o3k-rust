@@ -1107,10 +1107,12 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "base64",
  "hmac",
+ "o3k-store",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 
