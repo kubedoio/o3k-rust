@@ -2,101 +2,331 @@
 
 ## Goals
 
-Tests provide evidence for compatibility, state safety, provider behavior, recovery, and user workflows. Test count and coverage percentage are secondary to meaningful behavioral evidence.
+Tests provide evidence for compatibility, authorization, state safety,
+provider behavior, compensation, recovery, and user workflows. Test count and
+coverage percentage are secondary to meaningful behavioral evidence.
+
+The strategy follows an evidence ladder. Expensive privileged tests verify
+already specified contracts; they are not the primary mechanism for discovering
+missing endpoint requirements.
+
+## Evidence ladder
+
+```text
+spec/schema validation
+-> domain/store/migration tests
+-> API and policy contract tests
+-> provider conformance with stateful fakes
+-> portable simulated cloud
+-> process-level client tests
+-> component real-host gates
+-> full-cloud real-host gate
+-> failure/restart matrix
+-> release gate
+```
+
+Every release-critical issue records implementation, portable evidence,
+component evidence, full-cloud evidence, and remaining acceptance separately.
 
 ## Test layers
 
-### 1. Domain tests
+### 1. Specification and generated-contract validation
+
+Validate:
+
+- ADR/SPEC/contract links and status;
+- service API compatibility manifest;
+- OpenAPI and JSON Schema;
+- protobuf compatibility;
+- generated fixtures and stale-generation checks;
+- requirement-to-test traceability;
+- unsupported and unadvertised operations.
+
+A route that is not present in the declared profile is unsupported regardless
+of implementation presence.
+
+### 2. Domain tests
 
 Fast tests for:
 
-- resource ID and validation rules;
+- typed ID/name separation;
+- resource validation and ownership;
 - lifecycle transition tables;
 - quota and authorization decisions;
 - idempotency and operation-state rules;
+- compensation phase ordering;
 - serialization-independent invariants.
 
-Prefer table-driven and property tests.
+Prefer table-driven, property, and state-machine tests.
 
-### 2. Protocol contract tests
+### 3. Protocol and public API contract tests
 
-For each supported OpenStack operation:
+For every supported OpenStack operation:
 
-- request headers, query, path, and JSON validation;
+- discovery, request headers, query, path, and JSON validation;
+- API version, microversion, and extension behavior;
 - status code and response body;
 - error envelope;
-- token/project scope;
-- advertised version and extensions;
-- unsupported behavior.
+- token, project, role, and service-identity policy;
+- advertised catalog endpoint;
+- supported and explicitly unsupported fields;
+- restart-stable behavior where required.
 
-These tests are black-box and should run against an in-process router and a real server process.
+Run black-box tests against an in-process router and a real server process.
+Use standard OpenStack clients where practical.
 
-### 3. Store tests
+### 4. Store and migration tests
 
-The same behavioral suite runs against every store adapter. Required cases include transaction rollback, uniqueness, concurrent update, migration, restart, and corrupted/partial state handling.
+The same behavioral suite runs against every store adapter. Required cases:
 
-### 4. Provider conformance tests
+- migration from every supported previous schema;
+- transaction rollback;
+- uniqueness and foreign keys;
+- concurrent generation conflict;
+- restart;
+- corrupted/partial state;
+- immutable dependency snapshots;
+- operation and compensation persistence;
+- token and authorization-context persistence boundaries.
 
-All compute/network/storage provider implementations must pass a common suite covering:
+### 5. Provider conformance tests
+
+Compute, network, and storage providers each pass a common domain-specific
+suite plus shared protocol cases.
+
+#### Shared cases
 
 - capability reporting;
+- mTLS identity and agent-epoch fencing;
+- command identity and payload-fingerprint conflict;
 - create/read/delete idempotency;
 - timeout with unknown outcome;
 - duplicate command;
 - partial completion;
-- stale observation;
-- provider unavailable;
+- stale observation and stale generation;
+- provider unavailable and reconnect;
+- bounded redacted errors;
+- ownership ambiguity and foreign-state protection;
 - cleanup after failure.
 
-### 5. Reconciliation tests
+#### Compute cases
+
+- image/config-drive identity;
+- create/inspect/start/stop/reboot/delete;
+- console bounds and authorization;
+- restart discovery;
+- no duplicate domain or artifact leak.
+
+#### Network cases
+
+- realize/inspect/remove port binding;
+- deterministic MAC/fixed-IP identity;
+- TAP/bridge/DHCP reconciliation;
+- no duplicate link/lease;
+- cleanup and foreign-link protection.
+
+#### Storage cases
+
+- create/inspect/delete volume;
+- prepare/terminate attachment;
+- secret-safe connection information;
+- no duplicate backend resource;
+- cleanup and foreign-volume protection.
+
+### 6. Reconciliation and compensation tests
 
 Use deterministic clocks and stateful fakes to test:
 
 - restart after intent persistence;
 - restart after external success but before persistence;
+- restart after compensation begins;
 - bounded retry/backoff;
 - terminal failure;
+- unknown outcome and observe-before-retry;
 - orphan detection;
-- no duplicate external resource creation.
+- reverse-order compensation;
+- retained Placement allocation during unknown outcome;
+- no duplicate external resource creation;
+- stale epoch, stale sequence, and provider-reference conflict.
 
-### 6. End-to-end tests
+### 7. Portable simulated-cloud integration
 
-The alpha gate runs a clean environment and executes:
+Run the complete public workflow with real:
+
+- Keystone-compatible auth and catalog;
+- OpenStack HTTP APIs;
+- durable stores and migrations;
+- policy and project isolation;
+- scheduler and Placement allocations;
+- operation journal and reconciler;
+- cross-service dependency and compensation logic.
+
+Only provider execution is replaced by deterministic stateful compute, network,
+and storage fakes.
+
+Required workflow:
 
 ```text
-install -> token -> image -> network -> flavor -> server
--> restart -> show/list -> delete -> reset
+discover -> token -> image -> network/subnet/port
+-> flavor/keypair -> server -> console -> stop/start/reboot
+-> optional volume/attachment profile -> delete -> restart -> cleanup
 ```
 
-Run the contract suite with the fake provider, then run the release gate with
-libvirt/KVM through `o3k-compute` in a clean Linux integration environment.
-CellHV coverage is optional follow-on provider conformance and does not replace
-the libvirt release evidence.
+Inject failure after every durable workflow phase. Test timeout, unknown
+outcome, duplicate delivery, cross-project access, insufficient capacity,
+stale observations, restart, compensation, and complete cleanup.
 
-### 7. Compatibility matrix
+This gate must pass before the corresponding full-cloud runner is used as a
+release verifier.
 
-Each supported operation links to its executable tests and records known deviations. A route without evidence is unsupported regardless of implementation presence.
+### 8. Process-level tests
 
-## Failure injection
+Start real `o3kd` and provider-agent processes with temporary owned state.
+Verify:
 
-Provider fakes must support scripted delay, timeout, unknown result, transient error, terminal error, stale state, and partial completion. Chaos is controlled and reproducible.
+- startup and readiness ordering;
+- service discovery and OpenStack CLI behavior;
+- registration, heartbeat, administrative state, and reconnect;
+- process restart with durable identity and journal replay;
+- no secret leakage in logs or artifacts;
+- source-bound machine-readable evidence.
+
+### 9. Component real-host gates
+
+#### Compute gate
+
+```text
+image -> authenticated transfer -> base/overlay -> config-drive
+-> libvirt XML/domain -> console -> lifecycle -> cleanup
+```
+
+Evidence includes `virsh list --all`, owned domain XML, QEMU state, backing
+chain, console, agent journal, restart, and cleanup. A protected bounded
+diagnostic hold may preserve the domain before cleanup.
+
+#### Network gate
+
+```text
+port intent -> TAP -> bridge -> DHCP/binding -> connectivity
+-> restart -> cleanup
+```
+
+Evidence includes link ownership, bridge membership, MAC/fixed IP, lease or
+binding, connectivity, restart, and foreign-link preservation.
+
+#### Storage gate
+
+Required for the persistent-volume profile:
+
+```text
+volume intent -> backend resource -> attachment preparation
+-> attach/detach -> delete -> cleanup
+```
+
+Evidence excludes raw secret connection information.
+
+### 10. Full-cloud real-host gate
+
+The ephemeral-root alpha runs:
+
+```text
+install -> discover -> token -> image -> network -> flavor/keypair
+-> Placement -> server -> guest boot -> console
+-> o3kd/o3k-compute/libvirt restart -> lifecycle -> delete -> reset
+```
+
+Use standard public OpenStack APIs only. The profile must prove real
+libvirt/KVM execution through `o3k-compute`, minimum network realization, guest
+metadata, and complete cleanup.
+
+Cinder is added only to the later persistent-volume full-cloud profile after
+its portable and storage-component gates pass.
+
+### 11. Failure and restart matrix
+
+Required real-host scenarios include:
+
+- control-plane crash before and after dispatch;
+- compute/network/storage agent crash before and after mutation;
+- libvirt or backend restart;
+- network interruption;
+- timeout after accepted mutation;
+- duplicate delivery;
+- artifact corruption and checksum mismatch;
+- qemu-img/config-drive/TAP/DHCP/backend failure;
+- disk or capacity exhaustion;
+- repeated delete and partial cleanup.
+
+No scenario may produce a duplicate resource or modify foreign state.
+
+### 12. Compatibility matrix
+
+Every supported operation links to its executable tests and records:
+
+- specified fields and microversion;
+- portable result;
+- component result where applicable;
+- full-cloud result;
+- known deviations;
+- release claim.
+
+## Diagnostic mode
+
+Protected component and full-cloud workflows may expose an opt-in diagnostic
+hold point that:
+
+- runs only on a trusted manual workflow;
+- is source-bound and time-bounded;
+- pauses before destructive cleanup;
+- shows only O3K-owned host resources;
+- uploads redacted evidence;
+- always invokes ownership-checked cleanup on timeout or cancellation.
+
+Diagnostic mode never changes a failed result into passing evidence.
 
 ## Security testing
 
-- authn/authz negative cases;
-- tenant isolation;
+- authn/authz and service-token negative cases;
+- tenant isolation and project ID/name confusion;
+- service catalog omission for unsupported services;
 - secret redaction;
 - malformed and oversized input;
-- path and object-store key safety;
-- dependency and license checks;
+- path, symlink, XML, object-key, and artifact safety;
+- agent certificate/epoch fencing;
+- minimum capabilities and non-root execution;
+- foreign-resource preservation;
+- dependency, advisory, license, SBOM, and provenance checks;
 - unsafe/native boundary tests when introduced.
 
 ## CI gates
 
-Bootstrap CI requires formatting, clippy with warnings denied, the governed
-nextest PR profile, doctests through cargo test, all workspace tests, and
-documentation link checks when added. The pinned nextest profile uses zero
-retries, fails flaky results, has deterministic slow/global timeouts, and emits
-JUnit output. Later gates add cargo-deny, audit, OpenAPI validation, protobuf
-compatibility, E2E, SBOM, and signed artifacts. The deeper profile is defined
-but is not claimed as executed by the PR job.
+### Fast PR gate
+
+- actionlint and workflow validation;
+- formatting;
+- cargo check;
+- Clippy with warnings denied;
+- governed nextest PR profile with zero retries;
+- doctests;
+- affected contract, migration, fixture, shell, and Python tests;
+- generated-file drift.
+
+### Deep portable gate
+
+- full workspace tests;
+- portable simulated cloud;
+- process/restart tests;
+- compatibility target tests;
+- coverage as a diagnostic signal;
+- selected Miri/fuzz/property tests;
+- cargo-deny, cargo-audit, SBOM, and provenance.
+
+### Protected component gates
+
+Run only for changes affecting their actual host execution boundaries.
+
+### Full-cloud and release gates
+
+Run after required portable and component evidence passes. A skipped runner is
+not a pass. Release evidence must be source-bound, redacted, retained, and
+machine-readable.

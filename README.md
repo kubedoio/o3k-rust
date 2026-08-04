@@ -1,167 +1,292 @@
 # O3K Rust
 
-O3K Rust is a clean-slate, Apache-2.0, Rust-based control plane for lightweight OpenStack-compatible test environments, edge clouds, and small private clouds.
+O3K is a lightweight, Rust-native OpenStack-compatible control plane for
+reproducible OpenStack service testbeds, progressively native Rust cloud
+services, and small edge clouds.
 
-The project is owned and developed by Kubedo GmbH. It is not a source-code port of another O3K implementation. It starts from public OpenStack APIs, public standards, publicly documented cloud behavior, and operational lessons learned from building and running cloud, storage, virtualization, and Kubernetes systems.
+The project is owned and developed by Kubedo GmbH and licensed under
+Apache-2.0. It is a clean-slate Rust implementation based on public OpenStack
+APIs, public standards, public client behavior, project ADRs/specifications,
+and independently produced black-box evidence. It is not a source-code port of
+another O3K implementation.
 
-> **Status:** bootstrap / pre-alpha. No production-readiness claim is made.
+> **Status:** pre-alpha. No production-readiness, full OpenStack parity,
+> PostgreSQL support, HA, or fixed footprint claim is made yet.
 
-## Why this project exists
+## Product scope
 
-Traditional OpenStack deployments are powerful, but they can be too large and operationally expensive for integration tests, developer environments, edge sites, training labs, and smaller operators. O3K Rust explores a smaller model:
+O3K has three related product profiles.
 
-- enable only the components required by a scenario;
-- install quickly on a single node, then grow to a small cluster;
-- preserve useful OpenStack API compatibility;
-- use reconciliation instead of fragile procedural orchestration;
-- delegate VM, network, and storage execution to explicit providers;
-- use standard QEMU/KVM through libvirt as the primary real compute backend;
-- integrate naturally with CellHV as an optional provider without making CellHV mandatory;
-- remain understandable enough for operators and LLM agents to reason about safely.
+### 1. OpenStack service testbed
 
-## Experienced ideas that guide the design
+O3K can provide the surrounding OpenStack-compatible services required to run
+and test a selected real OpenStack service without deploying a complete
+DevStack or full OpenStack control plane.
 
-These are project principles derived from practical infrastructure experience. They are not copied implementation details.
+For example, a real external Cinder deployment can use O3K for the declared:
 
-1. **Deployment is part of the product.** A cloud that is difficult to install, reset, reproduce, or upgrade is not suitable for labs or small operators.
-2. **Compatibility must be tested, not claimed.** Endpoint count is not a useful success metric. Real OpenStack CLI, SDK, Terraform, and contract behavior must pass reproducible tests.
-3. **Start with complete workflows.** Token → image → network → flavor → server → delete is more valuable than hundreds of disconnected endpoints.
-4. **Keep the default small.** The initial profile uses one process, SQLite, local image storage, a flat network, and a provider adapter. PostgreSQL, S3, clustering, and advanced networking are opt-in steps.
-5. **Separate API semantics from infrastructure execution.** O3K owns OpenStack-facing resources and orchestration. Compute, storage, and network providers own execution.
-6. **Desired state and observed state must converge.** Operations are idempotent, retryable, observable, and safe after process or node failure.
-7. **Libvirt/KVM is the primary real compute backend.** `o3kd` delegates through a versioned provider contract to `o3k-compute`, which connects locally to `qemu:///system`. CellHV remains an optional provider behind the same contract; neither repository imports the other's internal domain model.
-8. **Failure paths are first-class features.** Restart, timeout, partial completion, duplicate request, stale state, rollback, and cleanup are tested before scale claims.
-9. **Security and operations begin on day one.** Structured audit events, least privilege, secret boundaries, health checks, metrics, tracing, signed releases, and SBOMs are not deferred polish.
-10. **A test environment is the first product.** Edge and SMB production profiles come only after the TestLab workflow is stable and measured.
-11. **Rust is a means, not the product.** Rust is chosen for type safety, shared ecosystem with CellHV, reliable concurrency, and long-term maintainability—not as a substitute for correct cloud behavior.
-12. **No hidden knowledge dependency.** Every implementation decision must be traceable to public specifications, a project ADR, an experiment, or an issue discussion.
+- Keystone-compatible service project, service user, roles, token issuance,
+  public token validation, regions, endpoints, and service catalog;
+- Glance-compatible image access required by the selected workflow;
+- Nova-compatible volume-attachment surface and compute integration;
+- optional Neutron- or Placement-compatible satellite behavior.
 
-## Compatibility and public references
+The external service remains independent. A hosted Cinder deployment still
+requires its own supported database, message bus, Cinder processes, storage
+backend, migrations, upgrades, and operational ownership. Registering an
+external `volumev3` endpoint does not mean O3K implements Cinder.
 
-OpenStack API documentation and published specifications are normative. Public
-OpenStack clients, SDKs, Terraform behavior, and Tempest behavior are the next
-compatibility references; O3K Rust contracts, ADRs, and black-box evidence then
-record the project-specific decisions. The public Apache-2.0
-[Go O3K repository](https://github.com/kubedoio/o3k) is permitted only as a
-non-normative secondary reference for route and extension inventory,
-requirements discovery, request/response field discovery, failure and cleanup
-scenarios, operational lessons, and black-box behavioral comparison.
+See [SPEC-0023](docs/specs/SPEC-0023-external-cinder-service-under-test.md).
 
-The static engineering target is Rust `1.97.1`, with OpenStack `2026.1
-Gazpacho` as the primary profile and `2025.2 Flamingo` as the backward-
-compatibility profile. The service-specific manifest and negotiation rules are
-in [SPEC-0016](docs/specs/SPEC-0016-static-compatibility-target.md).
+### 2. Native Rust OpenStack-compatible cloud
 
-The Go repository must not be mechanically translated into Rust, used to
-override an official OpenStack contract, or used to reproduce its monolithic
-architecture. Any copied or adapted code, test, or fixture requires a pinned
-commit, Apache-2.0 attribution, preserved copyright/NOTICE information, and a
-clear change record. Agents record inspected paths and official sources in the
-issue or pull request. See [ADR-0151](docs/adr/ADR-0151-public-go-o3k-reference-policy.md)
-and [CLEAN_IMPLEMENTATION.md](docs/CLEAN_IMPLEMENTATION.md).
+O3K progressively provides its own Rust-native compatibility profiles for:
 
-## Initial product: O3K TestLab
+- Keystone-compatible identity;
+- Glance-compatible image services;
+- Nova-compatible compute;
+- Neutron-compatible networking;
+- Placement-compatible capacity and allocations;
+- Cinder-compatible volumes and attachments.
 
-The first vertical slice must support this workflow on a clean Linux host:
+Compatibility is declared per service, operation, field, extension, and
+microversion. O3K does not claim complete parity with a named OpenStack release
+because selected routes exist.
 
-1. start O3K with SQLite;
-2. obtain a Keystone-compatible token;
-3. create or discover an image;
-4. create a flat network and subnet;
-5. create a flavor;
-6. create a real server through the libvirt/KVM TestLab path (with the fake provider available for fast contract tests);
-7. list, inspect, stop, start, reboot, and delete the server;
-8. restart O3K and reconcile state;
-9. destroy and recreate the environment reproducibly.
-
-### Initial non-goals
-
-- full OpenStack replacement;
-- all OpenStack extensions or microversions;
-- billing and chargeback;
-- live migration;
-- distributed control-plane consensus;
-- advanced Neutron services;
-- Horizon feature parity;
-- production multi-region operation;
-- direct reuse or translation of non-public implementations.
-
-## Architecture boundary
+The first native real-cloud milestone is an ephemeral-root libvirt TestLab:
 
 ```text
-OpenStack CLI / Terraform / SDKs
-              |
-        O3K Rust API
-              |
-  domain + policy + reconciliation
-              |
-      versioned provider contracts
-        /          |          \
-   compute       network      storage
-     |              |            |
-  libvirt/KVM   flat/local   local/S3
-       |
-     QEMU/KVM
-
-  CellHV (optional provider behind the same boundary for later profiles)
+authenticate
+-> upload image
+-> create network/subnet/port
+-> create flavor/keypair
+-> allocate compute resources
+-> create and boot a QEMU/KVM guest
+-> inspect console and lifecycle
+-> restart and reconcile
+-> delete and prove cleanup
 ```
 
-O3K owns OpenStack-facing identity, catalog, image, network, compute, volume, placement, quota, policy, operation, and reconciliation semantics. Providers expose capabilities and execute bounded operations.
+Native persistent volumes and `o3k-storage` are later milestones and do not
+block the first guest.
+
+### 3. Small edge cloud
+
+O3K is designed to grow into a lightweight control plane for approximately
+10–20 hypervisors.
+
+The target execution topology is:
+
+```text
+                         o3kd
+                           |
+             +-------------+-------------+
+             |             |             |
+       o3k-compute    future o3k-network  future o3k-storage
+       libvirt/KVM    host networking     LVM/Ceph and volumes
+```
+
+Logical `ComputeProvider`, `NetworkProvider`, and `StorageProvider` contracts
+must be stable before new daemons are introduced.
+
+An edge profile may integrate selected external OpenStack services, but
+“connect to another OpenStack” is not one feature. External Keystone, endpoint
+registration, hosted services, external Glance/Cinder/Neutron consumption,
+federation, and cross-cloud resource sharing require separate contracts,
+security decisions, and evidence.
+
+See [ADR-0163](docs/adr/ADR-0163-product-profiles-and-deployment-posture.md) and
+[SPEC-0024](docs/specs/SPEC-0024-product-profiles-and-claims.md).
+
+## Why O3K exists
+
+Traditional OpenStack deployments are powerful, but a complete deployment can
+be too complex and expensive for service integration tests, developer
+workflows, edge sites, training labs, and smaller operators.
+
+O3K aims to:
+
+- enable only the service profiles required by a scenario;
+- replace a full DevStack control plane in selected service-under-test
+  workflows;
+- install quickly on one node and grow deliberately to a small multi-host
+  environment;
+- preserve useful, tested OpenStack API behavior;
+- keep public API semantics separate from privileged host execution;
+- recover through durable desired state, observations, and reconciliation;
+- use standard QEMU/KVM through libvirt as the primary compute backend;
+- integrate naturally with CellHV later through typed provider contracts;
+- remain understandable and auditable for human and LLM-driven development.
+
+## Architectural model
+
+`o3kd` begins as a modular control-plane process containing logically separate
+identity, image, compute, network, volume, and placement modules.
+
+```text
+OpenStack CLI / SDK / Terraform / external OpenStack service
+                            |
+                          o3kd
+                            |
+ identity | image | compute | network | volume | placement
+                            |
+       policy | scheduling | operations | reconciliation
+                            |
+             typed execution/provider contracts
+                 /              |              \
+          o3k-compute     future network    future storage
+          libvirt/KVM      execution          execution
+```
+
+Keystone-compatible identity is the trust and service-discovery root. It is not
+the transaction coordinator for servers, ports, volumes, or allocations.
+
+O3K owns OpenStack-facing IDs, authorization, desired state, scheduling,
+operation journals, compensation, reconciliation, compatibility behavior, and
+mappings to provider-native resources. Execution agents own only bounded host
+mutations and provider observations.
+
+See [Architecture](docs/ARCHITECTURE.md),
+[ADR-0160](docs/adr/ADR-0160-service-topology-and-execution-boundaries.md), and
+[execution-boundary contracts](contracts/execution-boundaries.md).
+
+## Database posture
+
+### SQLite
+
+SQLite is the currently supported default for the minimal TestLab and portable
+simulated-cloud profiles.
+
+Supported SQLite operation requires explicit WAL/concurrency behavior,
+bounded lock handling, migrations, crash/restart testing, backup/restore
+instructions, and documented filesystem constraints.
+
+### PostgreSQL
+
+PostgreSQL is the intended database for production-oriented, stronger
+availability, and possible multi-controller profiles.
+
+PostgreSQL must not be presented as currently supported or installable merely
+because it is the architectural target. A supported claim requires a real
+adapter, store-conformance suite, migrations, transaction semantics,
+backup/restore behavior, and process/failure evidence.
+
+Until those gates pass, the honest statement is:
+
+> SQLite is the supported default. PostgreSQL is the planned
+> production-oriented database profile.
+
+## Resource-footprint target
+
+The minimal O3K control plane targets an approximately **50 MB steady-state
+memory footprint**. This is a target, not an unconditional guarantee.
+
+Every published footprint number must identify:
+
+- the exact product profile;
+- included O3K processes;
+- source commit, build mode, and features;
+- host and measurement method;
+- idle or workload phase;
+- external dependencies reported separately.
+
+External Cinder, RabbitMQ, PostgreSQL, libvirt, QEMU guests, Ceph, LVM, and
+other hosted services are not hidden inside an O3K-only footprint number.
+
+## Compatibility target
+
+Official OpenStack API documentation and published specifications are
+normative. Public OpenStack clients, SDKs, Terraform behavior, and Tempest are
+the next references. O3K ADRs, contracts, and black-box evidence record
+project-specific decisions.
+
+The primary reference release is OpenStack **2026.1 Gazpacho**. OpenStack
+**2025.2 Flamingo** is maintained as a backward-reference profile where
+declared. O3K advertises only the contiguous API/microversion windows that are
+implemented and verified.
+
+See:
+
+- [OpenStack target manifest](compatibility/openstack-targets.yaml);
+- [product profile manifest](compatibility/product-profiles.yaml);
+- [SPEC-0022](docs/specs/SPEC-0022-service-api-baseline-and-evidence-gates.md).
+
+The public Apache-2.0 [Go O3K repository](https://github.com/kubedoio/o3k) may
+be used only as a non-normative secondary reference for requirements discovery,
+route inventory, operational lessons, and behavioral comparison. Mechanical
+translation is prohibited unless separately approved and attributed.
+
+## Development evidence ladder
+
+Development proceeds from cheap, deterministic evidence toward privileged
+integration:
+
+```text
+ADR / SPEC / contract
+-> domain, store, migration, and policy tests
+-> stateful provider conformance
+-> portable simulated cloud
+-> process-level client tests
+-> compute/network/storage component gates
+-> full-profile real-host gate
+-> failure/restart matrix
+-> release gate
+```
+
+The protected full-cloud runner is an integration verifier, not the primary
+mechanism for discovering missing API requirements.
 
 ## Repository layout
 
 ```text
-bins/o3kd/                 O3K server binary
-crates/o3k-api/            HTTP routing and protocol adapters
-crates/o3k-domain/         resource IDs, states, invariants, transitions
-docs/                      product, architecture, ADRs, specs, agent rules
-contracts/openapi/         public HTTP contracts
-proto/provider/v1/         versioned provider contracts
-.github/                   CI and contribution templates
+bins/o3kd/                 O3K control-plane binary
+bins/o3k-compute/          compute execution agent
+crates/o3k-api/            HTTP and OpenStack protocol adapters
+crates/o3k-domain/         resource identities, states, and invariants
+crates/o3k-store/          durable state and migrations
+crates/o3k-network/        network domain/provider foundations
+docs/                      architecture, ADRs, specs, product documents
+contracts/                 public and execution-boundary contracts
+compatibility/             OpenStack targets and product profiles
+proto/provider/v1/         versioned execution protocols
+.github/                   CI and contribution workflows
 ```
 
-The workspace will grow only when a spec and an accepted issue justify a new crate.
+The workspace grows only when a specification and accepted issue justify a new
+boundary.
 
-## LLM-first development model
+## LLM-first development
 
-This project is expected to be implemented primarily by LLM coding agents under human architectural review. LLM-first does **not** mean review-free or specification-free.
+O3K is developed primarily with LLM coding agents under human architectural,
+security, and release review. LLM-first does not mean specification-free,
+review-free, or evidence-free.
 
 Every agent must:
 
-1. read `AGENTS.md` and the relevant specs before changing code;
-2. work from one issue with explicit acceptance criteria;
-3. add or update tests before implementation is accepted;
-4. keep changes small and auditable;
-5. cite the public specification or ADR behind non-obvious behavior;
-6. report uncertainty instead of inventing OpenStack semantics;
-7. never copy non-public code or internal documents;
-8. run formatting, linting, tests, and contract checks;
-9. update compatibility and evidence documents when behavior changes.
+1. read `AGENTS.md` and the relevant normative sources;
+2. identify the product profile and evidence tier being changed;
+3. work from an issue with explicit acceptance criteria;
+4. add the closest useful tests before claiming completion;
+5. preserve compatibility, security, ownership, and failure semantics;
+6. report uncertainty instead of inventing OpenStack behavior;
+7. keep public and non-public provenance boundaries intact;
+8. update compatibility and evidence records when behavior changes.
 
-See [AGENTS.md](AGENTS.md), [docs/LLM_DEVELOPMENT.md](docs/LLM_DEVELOPMENT.md), and [docs/CLEAN_IMPLEMENTATION.md](docs/CLEAN_IMPLEMENTATION.md).
+See [AGENTS.md](AGENTS.md), [LLM development](docs/LLM_DEVELOPMENT.md), and
+[clean implementation rules](docs/CLEAN_IMPLEMENTATION.md).
 
-The proposed governance controls for contract changes, ADRs, toolchains, and
-test evidence are collected in [ADR-0154](docs/adr/ADR-0154-engineering-governance-lifecycle.md)
-and its linked [OpenAPI](docs/specs/SPEC-0017-openapi-contract-governance.md)
-and [toolchain/evidence](docs/specs/SPEC-0018-toolchain-and-test-evidence-governance.md)
-specifications. They describe required gates; they do not claim that missing
-automation or protected-runner evidence already exists.
+## Current release direction
 
-## Build status
+The first public alpha remains the native ephemeral-root TestLab profile. It
+must prove a complete OpenStack CLI lifecycle through O3K-owned identity,
+image, network, placement, compute, `o3k-compute`, and libvirt/QEMU.
 
-The bootstrap workspace provides a health endpoint and domain-state examples only. It intentionally does not claim OpenStack compatibility yet.
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-```
-
-The optional native libvirt feature requires a host with libvirt development
-libraries; the default workspace test intentionally remains portable. The
-project status stays bootstrap/pre-alpha until the real-libvirt release gate
-has passed.
+The external-Cinder service-testbed profile may progress in parallel but does
+not replace or block that first alpha unless a later accepted release decision
+changes the gate.
 
 ## Licensing
 
-O3K Rust is licensed under Apache-2.0. New dependencies must pass the project's license and provenance policy. The O3K name and Kubedo marks are not granted by the Apache-2.0 software license.
+O3K Rust is licensed under Apache-2.0. New dependencies and reused artifacts
+must pass the project license and provenance policy. The O3K name and Kubedo
+marks are not granted by the Apache-2.0 software license.
