@@ -133,9 +133,28 @@ if after is not None:
 if isinstance(preflight.get("environment"), dict):
     result["environment"] = preflight["environment"]
 write_atomic(result_path, result)
+if status == "blocked":
+    leak_status = "blocked"
+    leak_reason = reason
+elif status != "ready":
+    leak_status = "skipped"
+    leak_reason = "prerequisites_skipped"
+elif inventory_status != "available" or after is None or after.get("status") != "available" or result_leaks is None:
+    leak_status = "failed"
+    leak_reason = "owned_inventory_unavailable_after_workflow"
+elif result_leaks["domains"] or result_leaks["network_links"] or result_leaks["openstack"]:
+    leak_status = "failed"
+    leak_reason = "resource_leak_detected"
+elif foreign_state_changed:
+    leak_status = "failed"
+    leak_reason = "foreign_state_changed"
+else:
+    leak_status = "passed"
+    leak_reason = "no_resource_leak_detected"
+
 leak_result = {"artifact_type": "resource-leak-result", "schema_version": 1,
-               "status": final_status, "redacted": True,
-               "finished_at": result["finished_at"], "reason": reason}
+               "status": leak_status, "redacted": True,
+               "finished_at": result["finished_at"], "reason": leak_reason}
 if result_leaks is not None:
     leak_result["leaks"] = result_leaks
 if foreign_state_changed is not None:

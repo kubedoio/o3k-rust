@@ -198,6 +198,9 @@ if [[ "${ready}" != true ]]; then
     exit 0
 fi
 
+GITHUB_RUN_ID="${EXPECTED_RUN_ID:-${GITHUB_RUN_ID:-local-$$}}" RUNNER_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}" \
+  bash "${ROOT_DIR}/scripts/cleanup-stale-testlab-processes.sh" || true
+
 if ! bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${INVENTORY_PATH}"; then
     ready=false
     reason=owned_inventory_unavailable

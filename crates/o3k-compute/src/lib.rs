@@ -4623,4 +4623,30 @@ mod tests {
         assert_eq!(unchanged.contiguous_bytes, 4);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn store_not_found_does_not_dispatch_provider_mutation() -> Result<(), ComputeError> {
+        let database_path =
+            std::env::temp_dir().join(format!("o3k-compute-notfound-{}.sqlite", Uuid::now_v7()));
+        let _ = std::fs::remove_file(&database_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        let service = ComputeService::new(store, provider.clone());
+
+        let non_existent_id = Uuid::now_v7();
+        assert!(matches!(
+            service.delete_server("project-a", non_existent_id).await,
+            Err(ComputeError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .inspect_server("project-a", non_existent_id, "key-1")
+                .await,
+            Err(ComputeError::NotFound)
+        ));
+        assert_eq!(provider.instance_count(), 0);
+
+        let _ = std::fs::remove_file(&database_path);
+        Ok(())
+    }
 }

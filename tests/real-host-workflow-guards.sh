@@ -252,7 +252,8 @@ export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
 import json, sys
-assert json.load(open(sys.argv[1], encoding="utf-8"))["status"] == "passed"
+val = json.load(open(sys.argv[1], encoding="utf-8"))
+assert val["status"] == "passed", f"Line 255 failed, val={val}"
 PY
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/resource-leak-result.json" <<'PY'
 import json, sys
@@ -328,7 +329,37 @@ if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
 fi
 python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
 import json, sys
-assert json.load(open(sys.argv[1], encoding="utf-8"))["status"] == "skipped"
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+assert data.get("status") == "skipped", f"Expected skipped, got {data}"
+PY
+
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/libvirt-result.json" <<'PY'
+import json, sys
+json.dump({"status": "passed", "redacted": True}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/compute-agent-process-mtls-result.json" <<'PY'
+import json, sys
+json.dump({"artifact_type": "compute-agent-process-mtls", "status": "failed",
+           "reason": "process_probe_failed_test", "redacted": True},
+          open(sys.argv[1], "w", encoding="utf-8"))
+PY
+export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
+if bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"; then
+    echo "failed compute agent process probe was accepted as workflow pass" >&2
+    exit 1
+fi
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value.get("status") == "failed", f"Expected failed status, got {value}"
+assert value.get("reason") == "compute_agent_process_probe_failed", f"Expected probe failed reason, got {value}"
+PY
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/resource-leak-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value.get("status") == "passed", f"Expected passed leak status, got {value}"
+assert value.get("reason") == "no_resource_leak_detected", f"Expected no leak reason, got {value}"
 PY
 
 python3 - "${ROOT_DIR}/.github/workflows/real-host-validation.yml" <<'PY'

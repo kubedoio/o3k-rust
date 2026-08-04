@@ -430,6 +430,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// It is deliberately absent unless its output and either a fixed resource ID
 /// or a lifecycle-produced resource-ID file are configured. It records only
 /// command/observation state; it never creates or mutates a provider resource.
+fn validate_inspect_probe_paths(output: Option<&str>, resource_file: Option<&str>) -> bool {
+    let Some(output) = output else {
+        return false;
+    };
+    let output_path = std::path::Path::new(output);
+    if !output_path.is_absolute() || output_path.is_symlink() {
+        return false;
+    }
+    if let Some(resource_file) = resource_file {
+        let path = std::path::Path::new(resource_file);
+        if !path.is_absolute() || path.to_string_lossy().contains("..") || path.is_symlink() {
+            return false;
+        }
+    }
+    true
+}
+
 fn agent_inspect_probe_from_env(
     compute: o3k_compute::ComputeService,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -448,18 +465,12 @@ fn agent_inspect_probe_from_env(
         tracing::warn!("agent inspect probe configuration is incomplete");
         return None;
     }
+    if !validate_inspect_probe_paths(Some(&output), resource_file.as_deref()) {
+        tracing::warn!("agent inspect probe path configuration is invalid");
+        return None;
+    }
     let output = PathBuf::from(output);
-    if !output.is_absolute() || output.is_symlink() {
-        tracing::warn!("agent inspect probe output path is invalid");
-        return None;
-    }
     let resource_file = resource_file.map(PathBuf::from);
-    if resource_file.as_ref().is_some_and(|path| {
-        !path.is_absolute() || path.to_string_lossy().contains("..") || path.is_symlink()
-    }) {
-        tracing::warn!("agent inspect probe resource file is invalid");
-        return None;
-    }
     Some(tokio::spawn(async move {
         let result = run_agent_inspect_probe(
             &compute,
@@ -660,5 +671,21 @@ mod tests {
             .ok_or_else(|| "instance directory should have a parent".to_owned())?;
         assert_eq!(output, parent.join(format!("{server_id}.iso")));
         Ok(())
+    }
+
+    #[test]
+    fn agent_inspect_probe_rejects_invalid_relative_traversal_or_symlinked_paths() {
+        assert!(!super::validate_inspect_probe_paths(
+            Some("relative/path.json"),
+            None
+        ));
+        assert!(!super::validate_inspect_probe_paths(
+            Some("/tmp/valid-output.json"),
+            Some("/tmp/../etc/passwd")
+        ));
+        assert!(super::validate_inspect_probe_paths(
+            Some("/tmp/valid-output.json"),
+            Some("/tmp/valid-resource-file")
+        ));
     }
 }

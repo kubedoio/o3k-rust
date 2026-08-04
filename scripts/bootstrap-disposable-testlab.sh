@@ -173,6 +173,9 @@ sudo -n true 2>/dev/null || fail "passwordless sudo is required"
 sudo -n test -d "$(dirname "$ACCOUNT_LOCK")" || fail "account lock directory is unavailable"
 [[ "$(git -C "$ROOT_DIR" rev-parse HEAD)" == "$SOURCE_COMMIT" ]] || fail "checkout is not immutable"
 
+GITHUB_RUN_ID="$RUN_ID" RUNNER_TEMP="$RUNNER_TEMP" O3K_TESTLAB_STATE_BASE="$SERVICE_STATE_BASE" \
+  bash "$ROOT_DIR/scripts/cleanup-stale-testlab-processes.sh" || true
+
 for port in "$AUTH_PORT" "$CONTROL_PORT" "$COMPUTE_HEALTH_PORT"; do
   ((port >= 1 && port <= 65535)) || fail "invalid service port ${port}"
 done
