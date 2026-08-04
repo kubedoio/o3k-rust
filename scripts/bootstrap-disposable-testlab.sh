@@ -544,6 +544,9 @@ export OS_AUTH_URL="http://127.0.0.1:${AUTH_PORT}/v3" OS_USERNAME=admin OS_PASSW
 openstack token issue >/dev/null 2>&1 || fail "generated password failed OpenStack authentication"
 
 printf 'O3K_TESTLAB_STATE_ROOT=%s\nO3K_REAL_HOST_SERVICE_ACCOUNT=%s\n' "$STATE_ROOT" "$(id -un)" >>"${GITHUB_ENV:-/dev/null}"
+if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
+  printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"${GITHUB_ENV:-/dev/null}"
+fi
 printf 'O3K_REAL_HOST_COMPUTE_BINARY=%s\n' "$STATE_ROOT/bin/o3k-compute" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin\n' >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
