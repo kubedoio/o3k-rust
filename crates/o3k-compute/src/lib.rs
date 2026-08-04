@@ -4653,4 +4653,198 @@ mod tests {
         let _ = std::fs::remove_file(&database_path);
         Ok(())
     }
+
+    /// Regression test: the inspect probe must use the durable project *ID* "bootstrap-project",
+    /// not the project *name* "admin" from the CLI/token context.
+    ///
+    /// The bootstrap token encodes:
+    ///   "project": "admin"                  ← project name (display name only)
+    ///   "project_id": "bootstrap-project"   ← durable ID used by compute service
+    ///
+    /// Passing the project name instead of the project ID causes the compute service to return
+    /// NotFound on every inspect call because `resource.project_id != project_id` at the
+    /// project isolation guard inside `inspect_server`.
+    #[tokio::test]
+    async fn inspect_probe_requires_project_id_not_project_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            std::env::temp_dir().join(format!("o3k-compute-projid-{}.sqlite", Uuid::now_v7()));
+        let placement_path =
+            std::env::temp_dir().join(format!("o3k-compute-projid-pl-{}", Uuid::now_v7()));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
+        placement.register_provider(
+            "node-a",
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4096,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )?;
+        let service = ComputeService::new(store, provider.clone())
+            .with_scheduler(Scheduler::new(placement.clone()));
+
+        // Create a server under the durable project ID used by TestLab.
+        let server = service
+            .create_server(
+                "bootstrap-project",
+                "testlab-server".to_owned(),
+                "cirros-image".to_owned(),
+                Uuid::from_u128(1),
+                vec!["net-1".to_owned()],
+                "testlab-create-key".to_owned(),
+            )
+            .await?;
+
+        // Passing the correct project ID ("bootstrap-project") succeeds.
+        let result = service
+            .inspect_server("bootstrap-project", server.id, "testlab-inspect-key")
+            .await?;
+        assert_eq!(
+            result.state,
+            o3k_provider::OperationState::Succeeded,
+            "inspect with correct project ID must succeed"
+        );
+
+        // Passing the project *name* "admin" (as was hard-coded in the probe by mistake)
+        // must return NotFound and must not dispatch to the provider.
+        let calls_before = provider.instance_count();
+        assert!(
+            matches!(
+                service
+                    .inspect_server("admin", server.id, "wrong-project-name-key")
+                    .await,
+                Err(ComputeError::NotFound)
+            ),
+            "inspect with project name 'admin' instead of project ID must return NotFound"
+        );
+        assert_eq!(
+            provider.instance_count(),
+            calls_before,
+            "wrong project ID must not dispatch a provider mutation"
+        );
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        Ok(())
+    }
+
+    /// Regression test: project isolation is preserved — a server created in
+    /// "bootstrap-project" is invisible to a caller using a different project ID.
+    #[tokio::test]
+    async fn inspect_probe_project_isolation_rejects_foreign_project()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path =
+            std::env::temp_dir().join(format!("o3k-compute-isolation-{}.sqlite", Uuid::now_v7()));
+        let placement_path =
+            std::env::temp_dir().join(format!("o3k-compute-isolation-pl-{}", Uuid::now_v7()));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let provider = Arc::new(FakeComputeProvider::new());
+        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
+        placement.register_provider(
+            "node-a",
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4096,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )?;
+        let service = ComputeService::new(store, provider.clone())
+            .with_scheduler(Scheduler::new(placement.clone()));
+
+        let server = service
+            .create_server(
+                "bootstrap-project",
+                "isolation-server".to_owned(),
+                "cirros-image".to_owned(),
+                Uuid::from_u128(1),
+                vec!["net-1".to_owned()],
+                "isolation-create-key".to_owned(),
+            )
+            .await?;
+
+        // A caller using a different project ID must not reach the server.
+        let calls_before = provider.instance_count();
+        assert!(
+            matches!(
+                service
+                    .inspect_server("other-project", server.id, "isolation-inspect-key")
+                    .await,
+                Err(ComputeError::NotFound)
+            ),
+            "inspect from a foreign project must return NotFound"
+        );
+        assert_eq!(
+            provider.instance_count(),
+            calls_before,
+            "foreign project inspect must not dispatch a provider mutation"
+        );
+
+        // The owning project can still inspect successfully.
+        let owner_result = service
+            .inspect_server("bootstrap-project", server.id, "isolation-owner-key")
+            .await?;
+        assert_eq!(
+            owner_result.state,
+            o3k_provider::OperationState::Succeeded,
+            "inspect from the owning project must succeed"
+        );
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        Ok(())
+    }
 }
