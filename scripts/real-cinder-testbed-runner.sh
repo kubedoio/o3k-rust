@@ -131,6 +131,22 @@ require_root() {
 require_root
 
 # ------------------------------------------------------------------------------
+# Stale run-owned host-state guard. A predecessor that died between server
+# create and cleanup can leave domains, bridges, TAPs, VGs, databases, or
+# message-bus identities behind; this run has a fresh ownership root and must
+# block before mutation rather than collide with resources it does not own.
+# The shared guard (also used by the protected pre-run guard) never deletes
+# anything: clean leftovers deliberately, then rerun. Prior per-run state
+# directories are kept for evidence and do not block local runs.
+# ------------------------------------------------------------------------------
+RUNNER_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! stale_guard_output="$(bash "${RUNNER_SCRIPT_DIR}/real-cinder-stale-state-guard.sh")"; then
+  echo "ERROR: stale run-owned host state detected (clean it deliberately before rerunning):" >&2
+  echo "${stale_guard_output}" >&2
+  exit 1
+fi
+
+# ------------------------------------------------------------------------------
 # Pre-mutation foreign-state inventory. Everything recorded here is either
 # run-unknown (names) or hashed (foreign identities) so cleanup can prove that
 # no foreign state changed and no run-owned resource remains.
