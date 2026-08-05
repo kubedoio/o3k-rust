@@ -847,11 +847,31 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
-                let preparation = prepare_network(command, &self.network, &self.dhcp)?;
+                // Failures that provably happened before libvirt could create
+                // the domain are definitive: the instance does not exist, so
+                // the operation is terminally Failed rather than of unknown
+                // outcome. Unknown-outcome reporting is preserved for
+                // failures after a possible provider side effect (define,
+                // start, or a failed rollback) and for observation errors.
+                let definitive_failure = |error: AgentError| {
+                    Ok(CommandExecutionResult {
+                        state: proto::OperationState::Failed as i32,
+                        error_category: proto::ErrorCategory::Terminal as i32,
+                        resource_state: proto::ResourceState::Error as i32,
+                        redacted_message: error.to_string(),
+                        provider_resource_id: String::new(),
+                        console_log: None,
+                        block_device: None,
+                    })
+                };
+                let preparation = match prepare_network(command, &self.network, &self.dhcp) {
+                    Ok(preparation) => preparation,
+                    Err(error) => return definitive_failure(error),
+                };
                 match self.adapter.inspect(name.clone()).await {
                     Ok(existing) => {
                         if let Err(error) = verify_owned_domain(&existing, &command.resource_id) {
-                            return Err(return_after_network_rollback(
+                            return definitive_failure(return_after_network_rollback(
                                 &self.network,
                                 &self.dhcp,
                                 &preparation,
@@ -878,7 +898,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 ) {
                     Ok(value) => value,
                     Err(error) => {
-                        return Err(return_after_create_rollback(
+                        return definitive_failure(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
@@ -892,7 +912,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let spec = match resolve_create_domain_spec(command, Some(&committed)) {
                     Ok(value) => value,
                     Err(error) => {
-                        return Err(return_after_create_rollback(
+                        return definitive_failure(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
@@ -906,7 +926,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let definition = match o3k_libvirt::build_domain_xml(&spec) {
                     Ok(value) => value,
                     Err(_) => {
-                        return Err(return_after_create_rollback(
+                        return definitive_failure(return_after_create_rollback(
                             &self.network,
                             &self.dhcp,
                             &preparation,
@@ -918,27 +938,68 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     }
                 };
                 let definition_name = definition.name.clone();
-                let console_path = o3k_libvirt::console_log_path(
+                let console_path = match o3k_libvirt::console_log_path(
                     &committed.image.path.to_string_lossy(),
                     &definition_name,
-                )
-                .map_err(|_| AgentError::Protocol("console log path is invalid".to_owned()))?;
-                let console_root =
-                    std::path::Path::new(&console_path)
-                        .parent()
-                        .ok_or_else(|| {
-                            AgentError::Protocol("console log root is invalid".to_owned())
-                        })?;
-                std::fs::create_dir_all(console_root).map_err(|_| {
-                    AgentError::Protocol("console log root could not be created".to_owned())
-                })?;
-                std::fs::OpenOptions::new()
+                ) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return definitive_failure(return_after_create_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            &self.image_materializer,
+                            &self.artifact_root,
+                            &command.resource_id,
+                            agent_error(error),
+                        ));
+                    }
+                };
+                let console_root = match std::path::Path::new(&console_path)
+                    .parent()
+                    .ok_or_else(|| AgentError::Protocol("console log root is invalid".to_owned()))
+                {
+                    Ok(root) => root,
+                    Err(error) => {
+                        return definitive_failure(return_after_create_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            &self.image_materializer,
+                            &self.artifact_root,
+                            &command.resource_id,
+                            error,
+                        ));
+                    }
+                };
+                if let Err(error) = std::fs::create_dir_all(console_root) {
+                    return definitive_failure(return_after_create_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        &self.image_materializer,
+                        &self.artifact_root,
+                        &command.resource_id,
+                        AgentError::Protocol(format!(
+                            "console log root could not be created: {error}"
+                        )),
+                    ));
+                }
+                if let Err(error) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&console_path)
-                    .map_err(|_| {
-                        AgentError::Protocol("console log could not be created".to_owned())
-                    })?;
+                {
+                    return definitive_failure(return_after_create_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        &self.image_materializer,
+                        &self.artifact_root,
+                        &command.resource_id,
+                        AgentError::Protocol(format!("console log could not be created: {error}")),
+                    ));
+                }
                 if let Err(error) = self
                     .adapter
                     .define(o3k_libvirt::DomainDefinition {

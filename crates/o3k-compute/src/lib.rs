@@ -2054,7 +2054,43 @@ impl ComputeService {
         &self,
         update: &o3k_provider_contract::compute_proto::OperationUpdate,
     ) -> Result<o3k_store::OperationState, ComputeError> {
-        Ok(self.journal.apply_agent_update(update).await?)
+        let state = self.journal.apply_agent_update(update).await?;
+        if state == o3k_store::OperationState::Failed {
+            self.compensate_failed_agent_create(update).await?;
+        }
+        Ok(state)
+    }
+
+    /// Applies the same reverse-order compensation as the synchronous create
+    /// path when an agent reports a terminal create failure after the API
+    /// request already returned. Compensation is idempotent: keypair detach
+    /// is a delete-if-present and the placement allocation is released only
+    /// when it is still held, so replayed agent updates are safe.
+    async fn compensate_failed_agent_create(
+        &self,
+        update: &o3k_provider_contract::compute_proto::OperationUpdate,
+    ) -> Result<(), ComputeError> {
+        let operation_id =
+            Uuid::parse_str(&update.operation_id).map_err(|_| ComputeError::InvalidRequest)?;
+        let operation = self.store.get_operation(operation_id).await?;
+        if operation.kind != "create" {
+            return Ok(());
+        }
+        let resource = self.store.get_resource(operation.resource_id).await?;
+        self.store.detach_server_keypair(resource.id).await?;
+        let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+            .map_err(|_| ComputeError::InvalidRequest)?;
+        if let (Some(scheduler), Some(provider_id), Some(allocation_id)) = (
+            self.scheduler.as_ref(),
+            request.placement_provider_id.as_deref(),
+            request.placement_allocation_id.as_deref(),
+        ) && scheduler
+            .validate_allocation(provider_id, allocation_id, &resource.id.to_string())
+            .is_ok()
+        {
+            self.release_placement_allocation(resource.id, &request)?;
+        }
+        Ok(())
     }
 
     pub async fn apply_agent_acceptance(
@@ -3726,6 +3762,127 @@ mod tests {
                 .observed_state,
             "requested"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_failed_create_update_marks_error_and_compensates_idempotently()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-agent-failed-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-agent-failed-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
+        placement.register_provider(
+            "node-a",
+            std::collections::BTreeMap::from([(
+                o3k_placement::VCPU.to_owned(),
+                o3k_placement::Inventory {
+                    total: 4,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                },
+            )]),
+        )?;
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let keypair = service
+            .create_keypair(
+                "user-a",
+                "project-a",
+                "agent-failed-key".to_owned(),
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test".to_owned(),
+            )
+            .await?;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "failed-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: Some("agent-failed-key".to_owned()),
+            keypair_id: Some(keypair.id),
+            network_ids: vec!["network-1".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: "agent-failed".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .attach_server_keypair(request.o3k_server_id, keypair.id)
+            .await?;
+        let generation = placement.provider("node-a")?.generation;
+        placement.allocate(
+            "node-a",
+            "alloc-1",
+            &request.o3k_server_id.to_string(),
+            std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
+            generation,
+        )?;
+
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: request.operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
+            error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            service.apply_agent_update(&update).await?,
+            o3k_store::OperationState::Failed
+        );
+        assert_eq!(
+            service
+                .store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        assert_eq!(
+            service
+                .store
+                .get_server_keypair_name(request.o3k_server_id)
+                .await?,
+            None
+        );
+        assert!(placement.provider("node-a")?.allocations.is_empty());
+        // A replayed delivery of the same terminal update compensates safely.
+        assert_eq!(
+            service.apply_agent_update(&update).await?,
+            o3k_store::OperationState::Failed
+        );
+        assert_eq!(
+            service
+                .store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        std::fs::remove_file(database_path)?;
+        std::fs::remove_dir_all(placement_path)?;
         Ok(())
     }
 
