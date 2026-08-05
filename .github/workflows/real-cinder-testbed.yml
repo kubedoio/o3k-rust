@@ -69,7 +69,8 @@ jobs:
           O3K_CINDER_PROFILE: gazpacho
           # Ephemeral secrets are generated inside the runner and masked with
           # ::add-mask::; nothing is sourced from repository literals.
-        run: sudo bash scripts/real-cinder-testbed-runner.sh --keep
+        run: sudo -E env PATH="${PATH}:/root/.cargo/bin:/home/ubuntu/.cargo/bin" bash scripts/real-cinder-testbed-runner.sh --keep
+
 
       - name: Post-run resource-leak and foreign-state guard
         if: always()
