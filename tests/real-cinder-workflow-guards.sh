@@ -137,6 +137,23 @@ cat > "${FAKE_HOST_BIN}/rabbitmqctl" <<'SH'
 if [[ "$*" == *"list_vhosts"* && "${O3K_FAKE_STALE_RABBIT:-false}" == true ]]; then echo -e 'Listing vhosts ...\no3k_cinder_stale'; fi
 if [[ "$*" == *"list_users"* && "${O3K_FAKE_STALE_RABBIT:-false}" == true ]]; then echo -e 'Listing users ...\no3k_cinder_stale\t[]'; fi
 SH
+cat > "${FAKE_HOST_BIN}/virsh" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == *"list --all --name"* ]]; then
+  echo 'instance-00000001'
+  if [[ "${O3K_FAKE_STALE_DOMAIN:-false}" == true ]]; then echo 'o3k-d50d1159b9b44cf5c3d7'; fi
+fi
+SH
+cat > "${FAKE_HOST_BIN}/ip" <<'SH'
+#!/usr/bin/env bash
+if [[ "$*" == *"-o link show"* ]]; then
+  echo '2: ens3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default qlen 1000\    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff'
+  if [[ "${O3K_FAKE_STALE_LINK:-false}" == true ]]; then
+    echo '9: o3k-br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000\    link/ether b2:d0:21:1f:31:71 brd ff:ff:ff:ff:ff:ff'
+    echo '10: o3ktap-f85a1efb: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master o3k-br0 state UP mode DEFAULT group default qlen 1000\    link/ether 02:03:f3:47:74:2d brd ff:ff:ff:ff:ff:ff'
+  fi
+fi
+SH
 chmod +x "${FAKE_HOST_BIN}"/*
 
 export O3K_FAKE_STALE_VG=true
@@ -167,8 +184,28 @@ assert kinds == {"loop_device", "mariadb_database", "mariadb_user", "rabbitmq_vh
 PY
 unset O3K_FAKE_STALE_LOOP O3K_FAKE_STALE_DB O3K_FAKE_STALE_DB_USER O3K_FAKE_STALE_RABBIT
 
+# Stale run-owned compute leftovers (a predecessor died between server create
+# and cleanup): libvirt domains, bridges, and TAPs must block the run while
+# foreign resources (instance-* domains, host links) never match.
+export O3K_FAKE_STALE_DOMAIN=true O3K_FAKE_STALE_LINK=true
+if PATH="${FAKE_HOST_BIN}:${PATH}" bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"; then
+    echo "stale run-owned compute resources were accepted" >&2
+    exit 1
+fi
+python3 - "${ARTIFACT_DIR}/real-cinder-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "blocked" and value["reason"] == "stale_run_owned_host_resources", value
+kinds = {(r["resource"], r["name"]) for r in value["stale_host_resources"]}
+assert ("libvirt_domain", "o3k-d50d1159b9b44cf5c3d7") in kinds, kinds
+assert ("network_interface", "o3k-br0") in kinds, kinds
+assert ("network_interface", "o3ktap-f85a1efb") in kinds, kinds
+assert not any("instance-" in name or "ens3" in name for _, name in kinds), kinds
+PY
+unset O3K_FAKE_STALE_DOMAIN O3K_FAKE_STALE_LINK
+
 # Clean host resources: guard is ready again.
-bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"
+PATH="${FAKE_HOST_BIN}:${PATH}" bash "${ROOT_DIR}/scripts/real-cinder-pre-run-guard.sh"
 python3 - "${ARTIFACT_DIR}/real-cinder-workflow-result.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))

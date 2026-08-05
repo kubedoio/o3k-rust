@@ -89,74 +89,30 @@ PY
     exit 1
 fi
 
-# Stale-resource check: no prior run-owned Cinder state may exist.
-mapfile -t stale_dirs < <(find "${STATE_BASE}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 20)
-if [[ ${#stale_dirs[@]} -gt 0 ]]; then
+# Stale-resource check: no prior run-owned state may exist. The shared guard
+# (scripts/real-cinder-stale-state-guard.sh) is the single source of the
+# stale-state policy for both this protected path and the local runner; it
+# never deletes anything. Here the state base must be pristine, so stale
+# per-run state directories block as well.
+if ! stale_guard_output="$(bash "${ROOT_DIR}/scripts/real-cinder-stale-state-guard.sh" --include-state-dirs)"; then
     python3 - "${RESULT_PATH}" <<PY
-import json, os, sys, time
-stale_dirs = ${stale_dirs@Q}
-with open("${RESULT_PATH}", "w", encoding="utf-8") as output:
-    json.dump({"artifact_type": "real-cinder-workflow-result", "status": "blocked",
-               "reason": "stale_run_owned_state",
-               "stale_state_dirs": stale_dirs,
-               "redacted": True, "finished_at": int(time.time())},
-              output, indent=2)
+import json, sys, time
+payload = json.loads(r'''${stale_guard_output}''')
+stale = payload.get("stale", [])
+stale_dirs = [entry["name"] for entry in stale if entry.get("resource") == "state_dir"]
+stale_host = [entry for entry in stale if entry.get("resource") != "state_dir"]
+result = {"artifact_type": "real-cinder-workflow-result", "status": "blocked",
+          "reason": "stale_run_owned_state" if stale_dirs else "stale_run_owned_host_resources",
+          "stale_state_dirs": stale_dirs,
+          "stale_host_resources": stale_host,
+          "redacted": True, "finished_at": int(time.time())}
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump(result, output, indent=2)
     output.write("\n")
 PY
     echo "real-cinder stale run-owned state detected under ${STATE_BASE}" >&2
     exit 1
 fi
-
-# Stale host-resource check: a prior aborted run may have left a run-owned VG,
-# loop device, MariaDB database/user, or RabbitMQ user/vhost behind. Any such
-# resource must fail the run before mutation so a fresh run never collides with
-# a half-cleaned predecessor. Names use the run-owned o3k- prefixes.
-python3 - "${RESULT_PATH}" <<'PY'
-import json, subprocess, sys, time
-
-def run(args):
-    try:
-        return subprocess.run(args, capture_output=True, text=True, check=True).stdout
-    except Exception:
-        return ""
-
-stale = []
-
-for vg in run(["vgs", "--noheadings", "-o", "vg_name"]).split():
-    vg = vg.strip()
-    if vg.startswith("o3k-vg-"):
-        stale.append({"resource": "lvm_vg", "name": vg})
-for line in run(["losetup", "-a"]).splitlines():
-    if "o3k" in line:
-        stale.append({"resource": "loop_device", "name": line.split(":", 1)[0]})
-for db in run(["mysql", "-N", "-e", "SHOW DATABASES;"]).split():
-    db = db.strip()
-    if db.startswith("o3k_cinder_"):
-        stale.append({"resource": "mariadb_database", "name": db})
-for user in run(["mysql", "-N", "-e", "SELECT User FROM mysql.user;"]).split():
-    user = user.strip()
-    if user.startswith("o3k_cinder_"):
-        stale.append({"resource": "mariadb_user", "name": user})
-for vhost in run(["rabbitmqctl", "list_vhosts"]).splitlines()[1:]:
-    vhost = vhost.strip()
-    if vhost.startswith("o3k_cinder_"):
-        stale.append({"resource": "rabbitmq_vhost", "name": vhost})
-for user in run(["rabbitmqctl", "list_users"]).splitlines()[1:]:
-    user = user.split()[0] if user.split() else ""
-    if user.startswith("o3k_cinder_"):
-        stale.append({"resource": "rabbitmq_user", "name": user})
-
-if stale:
-    with open(sys.argv[1], "w", encoding="utf-8") as output:
-        json.dump({"artifact_type": "real-cinder-workflow-result", "status": "blocked",
-                   "reason": "stale_run_owned_host_resources",
-                   "stale_host_resources": stale,
-                   "redacted": True, "finished_at": int(time.time())},
-                  output, indent=2)
-        output.write("\n")
-    print("real-cinder stale run-owned host resources detected", file=sys.stderr)
-    raise SystemExit(1)
-PY
 
 python3 - "${RESULT_PATH}" <<PY
 import json, sys, time
