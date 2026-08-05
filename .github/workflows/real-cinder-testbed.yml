@@ -52,7 +52,9 @@ jobs:
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF: ${{ github.ref }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_HEAD_REF: ${{ github.head_ref }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
