@@ -125,7 +125,7 @@ with open(path, "w", encoding="utf-8") as stream:
                "reason": reason, "redacted": True, "source_commit": commit,
                "state_directory": state, "service_account": account,
                "auth_url": f"http://127.0.0.1:{port}/v3", "username": "admin",
-               "project": "admin", "project_id": "bootstrap-project",
+               "project": "admin", "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb",
                "region": "RegionOne", "o3kd_pid": o3kd_pid or None,
                "compute_pid": compute_pid or None,
                "provider": provider,
@@ -388,13 +388,13 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
       "$(printf '%q' "$O3K_AGENT_INSPECT_PROBE_RESOURCE_ID")" >>"$o3kd_env_tmp"
   fi
   printf 'O3K_AGENT_INSPECT_PROBE_OUTPUT=%s/agent-inspect-probe.json\n' "$STATE_ROOT" >>"$o3kd_env_tmp"
-  # The durable project ID for the TestLab lifecycle context is "bootstrap-project".
+  # The durable project ID for the TestLab lifecycle context is "eba29e2d-53de-461d-ae91-ede7402713cb".
   # This is the project_id field in the issued token (distinct from the project *name*
   # "admin" used by the CLI OS_PROJECT_NAME / OS_USERNAME bootstrap context). The
   # compute service enforces project isolation by comparing resource.project_id to the
   # caller's project_id argument: passing the project name instead of the project ID
   # produces a store-level NotFound on every probe call.
-  printf 'O3K_AGENT_INSPECT_PROBE_PROJECT_ID=bootstrap-project\n' >>"$o3kd_env_tmp"
+  printf 'O3K_AGENT_INSPECT_PROBE_PROJECT_ID=eba29e2d-53de-461d-ae91-ede7402713cb\n' >>"$o3kd_env_tmp"
   # Scope the o3kd log filter so that o3k_compute, o3k_reconciler, o3k_compute_agent,
   # and o3k_libvirt diagnostics remain visible during probe runs without enabling
   # global H2/SQLx debug noise that floods the log with raw frame data.

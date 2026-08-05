@@ -26,7 +26,7 @@ expansion are governed by SPEC-0020 and ADR-0161.
 ```text
 user ID:      bootstrap-user
 user name:    admin
-project ID:   bootstrap-project
+project ID:   eba29e2d-53de-461d-ae91-ede7402713cb
 project name: admin
 domain ID:    default
 domain name:  Default
@@ -34,9 +34,17 @@ role ID/name: member
 ```
 
 Project and user names are not internal IDs. In particular, the project name
-`admin` must never be used where the durable project ID `bootstrap-project` is
-required by stores, authorization checks, operations, provider commands, or
-runner probes.
+`admin` must never be used where the durable project ID
+`eba29e2d-53de-461d-ae91-ede7402713cb` is required by stores, authorization
+checks, operations, provider commands, or runner probes.
+
+The durable project ID is a fixed lowercase UUID. External OpenStack services
+route project-scoped URLs through a hex-only `project_id` validation regex
+(for example Cinder's `[DEFAULT] project_id_regex`, default `[0-9a-f\-]+`),
+so a non-hex slug is unrouteable to a real external service (protected run
+30993341589: `POST /v3/bootstrap-project/volumes` returned 404 from real
+Cinder 28.0.0). The ID was amended from the former slug `bootstrap-project`
+to keep O3K-issued tokens addressable by external services under test.
 
 ## Catalog
 

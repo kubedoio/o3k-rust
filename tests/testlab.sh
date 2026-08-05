@@ -67,7 +67,7 @@ O3K_COMPATIBILITY_PASSWORD="${AUTH_PASSWORD}" OS_AUTH_TOKEN="${TOKEN}" \
     python3 "${ROOT_DIR}/tests/compatibility-harness.py" \
     --target rust \
     --base-url "${BASE_URL}" \
-    --project-id bootstrap-project \
+    --project-id eba29e2d-53de-461d-ae91-ede7402713cb \
     --source-commit "$(git -C "${ROOT_DIR}" rev-parse HEAD)" \
     --json-out "${ARTIFACT_DIR}/compatibility/rust.json" \
     --junit-out "${ARTIFACT_DIR}/compatibility/rust.xml"
@@ -84,17 +84,17 @@ curl -fsS -X PUT "${BASE_URL}/v2/images/${IMAGE_ID}/file" -H "x-auth-token: ${TO
 NETWORK_ID="$(json -X POST "${BASE_URL}/v2.0/networks" -H 'content-type: application/json' --data '{"network":{"name":"testlab-network"}}' | field network.id)"
 SUBNET_ID="$(json -X POST "${BASE_URL}/v2.0/subnets" -H 'content-type: application/json' --data "{\"subnet\":{\"name\":\"testlab-subnet\",\"network_id\":\"${NETWORK_ID}\",\"cidr\":\"192.0.2.0/29\"}}" | field subnet.id)"
 PORT_ID="$(json -X POST "${BASE_URL}/v2.0/ports" -H 'content-type: application/json' --data "{\"port\":{\"name\":\"testlab-port\",\"network_id\":\"${NETWORK_ID}\"}}" | field port.id)"
-FLAVOR_ID="$(json "${BASE_URL}/v2.1/bootstrap-project/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
-SERVER_ID="$(json -X POST "${BASE_URL}/v2.1/bootstrap-project/servers" -H 'content-type: application/json' -H 'x-openstack-request-id: testlab-server-create' --data "{\"server\":{\"name\":\"testlab-server\",\"image\":{\"id\":\"${IMAGE_ID}\"},\"flavor\":{\"id\":\"${FLAVOR_ID}\"},\"networks\":[{\"uuid\":\"${PORT_ID}\"}]}}" | field server.id)"
+FLAVOR_ID="$(json "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
+SERVER_ID="$(json -X POST "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers" -H 'content-type: application/json' -H 'x-openstack-request-id: testlab-server-create' --data "{\"server\":{\"name\":\"testlab-server\",\"image\":{\"id\":\"${IMAGE_ID}\"},\"flavor\":{\"id\":\"${FLAVOR_ID}\"},\"networks\":[{\"uuid\":\"${PORT_ID}\"}]}}" | field server.id)"
 
 kill -TERM "${O3KD_PID}"; wait "${O3KD_PID}"; unset O3KD_PID
 O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" --log-filter warn >>"${LOG_FILE}" 2>&1 &
 O3KD_PID=$!
 for _ in $(seq 1 100); do curl -fsS "${BASE_URL}/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
-json "${BASE_URL}/v2.1/bootstrap-project/servers/${SERVER_ID}" >/dev/null
-json "${BASE_URL}/v2.1/bootstrap-project/servers" >/dev/null
+json "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/${SERVER_ID}" >/dev/null
+json "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers" >/dev/null
 
-json -X DELETE "${BASE_URL}/v2.1/bootstrap-project/servers/${SERVER_ID}" >/dev/null
+json -X DELETE "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/${SERVER_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2.0/ports/${PORT_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2.0/subnets/${SUBNET_ID}" >/dev/null
 json -X DELETE "${BASE_URL}/v2.0/networks/${NETWORK_ID}" >/dev/null

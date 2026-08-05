@@ -80,14 +80,14 @@ echo "==> Token obtained: [REDACTED]"
 echo "==> Validating token (GET /v3/auth/tokens)..."
 GET_TOKEN_RESP=$(curl -s -f -H "X-Subject-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/v3/auth/tokens")
 echo "${GET_TOKEN_RESP}" | grep -q "volumev3"
-echo "${GET_TOKEN_RESP}" | grep -q "bootstrap-project"
+echo "${GET_TOKEN_RESP}" | grep -q "eba29e2d-53de-461d-ae91-ede7402713cb"
 
 echo "==> Validating token status (HEAD /v3/auth/tokens)..."
 curl -s -f -I -H "X-Subject-Token: ${TOKEN}" "http://127.0.0.1:${PORT}/v3/auth/tokens" | grep -qi "HTTP/1.1 200 OK"
 
 echo "==> Testing microversion negotiation (compute 2.1 vs 2.95)..."
-curl -s -f -H "X-Auth-Token: ${TOKEN}" -H "OpenStack-API-Version: compute 2.1" "http://127.0.0.1:${PORT}/v2.1/bootstrap-project/servers" | grep -q "servers"
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: ${TOKEN}" -H "OpenStack-API-Version: compute 2.95" "http://127.0.0.1:${PORT}/v2.1/bootstrap-project/servers")
+curl -s -f -H "X-Auth-Token: ${TOKEN}" -H "OpenStack-API-Version: compute 2.1" "http://127.0.0.1:${PORT}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers" | grep -q "servers"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "X-Auth-Token: ${TOKEN}" -H "OpenStack-API-Version: compute 2.95" "http://127.0.0.1:${PORT}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
 if [ "${HTTP_CODE}" -ne 406 ]; then
     echo "ERROR: Expected 406 Not Acceptable for compute 2.95, got ${HTTP_CODE}"
     exit 1

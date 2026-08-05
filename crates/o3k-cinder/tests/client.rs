@@ -156,7 +156,7 @@ fn connector() -> ComputeConnector {
 async fn attachment_lifecycle_validates_token_through_keystone()
 -> Result<(), Box<dyn std::error::Error>> {
     let (client, fake, _cinder_endpoint) = setup().await?;
-    let project = "bootstrap-project";
+    let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
 
     let volume = client.create_volume(project, 1, "vol-1").await?;
     assert_eq!(volume.status, "available");
@@ -200,7 +200,7 @@ async fn attachment_lifecycle_validates_token_through_keystone()
 #[tokio::test]
 async fn connection_info_is_redacted_and_digested() -> Result<(), Box<dyn std::error::Error>> {
     let (client, _fake, _cinder_endpoint) = setup().await?;
-    let project = "bootstrap-project";
+    let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 1, "vol-secret").await?;
     let attachment = client.create_attachment(project, &volume.id).await?;
     let updated = client
@@ -239,7 +239,10 @@ async fn invalid_service_credentials_are_rejected() -> Result<(), Box<dyn std::e
         password: Secret::new("wrong-password".to_owned()),
         domain_name: "Default".to_owned(),
     });
-    let error = match client.create_volume("bootstrap-project", 1, "v").await {
+    let error = match client
+        .create_volume("eba29e2d-53de-461d-ae91-ede7402713cb", 1, "v")
+        .await
+    {
         Err(error) => error,
         Ok(_) => return Err("expected token acquisition failure".into()),
     };
@@ -251,7 +254,7 @@ async fn invalid_service_credentials_are_rejected() -> Result<(), Box<dyn std::e
 #[tokio::test]
 async fn service_unavailable_and_not_found_mapping() -> Result<(), Box<dyn std::error::Error>> {
     let (client, fake, _cinder_endpoint) = setup().await?;
-    let project = "bootstrap-project";
+    let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 1, "v").await?;
 
     fake.set_fault(faults::fail_create_attachment, true);
@@ -287,7 +290,7 @@ async fn service_unavailable_and_not_found_mapping() -> Result<(), Box<dyn std::
 async fn timeout_is_unknown_outcome() -> Result<(), Box<dyn std::error::Error>> {
     let (client, fake, _cinder_endpoint) = setup().await?;
     let client = client.with_timeout(Duration::from_secs(1));
-    let project = "bootstrap-project";
+    let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 1, "v").await?;
     fake.set_fault(faults::timeout_create_attachment, true);
     let error = match client.create_attachment(project, &volume.id).await {
@@ -302,7 +305,7 @@ async fn timeout_is_unknown_outcome() -> Result<(), Box<dyn std::error::Error>> 
 #[tokio::test]
 async fn volume_lifecycle_is_typed() -> Result<(), Box<dyn std::error::Error>> {
     let (client, fake, _cinder_endpoint) = setup().await?;
-    let project = "bootstrap-project";
+    let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 2, "typed-vol").await?;
     let volumes = client.list_volumes(project).await?;
     assert_eq!(volumes.len(), 1);
@@ -324,7 +327,7 @@ async fn fake_rejects_unvalidated_token() -> Result<(), Box<dyn std::error::Erro
     let response = axum::http::Request::builder()
         .method("GET")
         .uri(format!(
-            "http://{cinder_address}/v3/bootstrap-project/volumes"
+            "http://{cinder_address}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/volumes"
         ))
         .header("x-auth-token", "bogus-token")
         .body(Body::empty())?;

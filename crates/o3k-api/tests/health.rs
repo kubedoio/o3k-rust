@@ -113,7 +113,7 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/v2.1/bootstrap-project/servers")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -135,7 +135,7 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
             Request::builder()
                 .method(Method::POST)
                 .uri(format!(
-                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/action"
                 ))
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -194,7 +194,10 @@ async fn keystone_password_scope_returns_signed_subject_token()
     assert_eq!(subject_token.split('.').count(), 3);
     let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024).await?;
     let body: Value = serde_json::from_slice(&bytes)?;
-    assert_eq!(body["token"]["project"]["id"], "bootstrap-project");
+    assert_eq!(
+        body["token"]["project"]["id"],
+        "eba29e2d-53de-461d-ae91-ede7402713cb"
+    );
     assert!(
         body["token"]["catalog"]
             .as_array()
@@ -280,7 +283,7 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
     assert_eq!(services["network"], "http://testlab.example.invalid/v2.0");
     assert_eq!(
         services["compute"],
-        "http://testlab.example.invalid/v2.1/bootstrap-project"
+        "http://testlab.example.invalid/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb"
     );
     assert_eq!(
         services["placement"],
@@ -288,7 +291,7 @@ async fn keystone_catalog_contains_all_testlab_services_and_consistent_urls()
     );
     assert_eq!(
         services["volumev3"],
-        "http://127.0.0.1:8776/v3/bootstrap-project"
+        "http://127.0.0.1:8776/v3/eba29e2d-53de-461d-ae91-ede7402713cb"
     );
     Ok(())
 }
@@ -646,9 +649,10 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         uuid::Uuid::now_v7()
     ));
     let network_service = NetworkService::open(&network_root)?;
-    let network = network_service.create_network("bootstrap-project", "flat".to_owned())?;
+    let network = network_service
+        .create_network("eba29e2d-53de-461d-ae91-ede7402713cb", "flat".to_owned())?;
     let _subnet = network_service.create_subnet(
-        "bootstrap-project",
+        "eba29e2d-53de-461d-ae91-ede7402713cb",
         network.id,
         "subnet".to_owned(),
         "192.0.2.0/29".to_owned(),
@@ -656,8 +660,11 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         None,
         None,
     )?;
-    let port =
-        network_service.create_port("bootstrap-project", network.id, "server-port".to_owned())?;
+    let port = network_service.create_port(
+        "eba29e2d-53de-461d-ae91-ede7402713cb",
+        network.id,
+        "server-port".to_owned(),
+    )?;
     let port_id = port.id.to_string();
     let expected_fixed_ip = port.fixed_ip.to_string();
     let console = o3k_console::ConsoleService::open(format!(
@@ -688,7 +695,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let flavors = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2.1/bootstrap-project/flavors")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -704,7 +711,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/v2.1/bootstrap-project/flavors")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -723,7 +730,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .uri(format!(
-                    "/v2.1/bootstrap-project/flavors/{custom_flavor_id}"
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors/{custom_flavor_id}"
                 ))
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
@@ -733,7 +740,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let detailed_flavors = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2.1/bootstrap-project/flavors/detail")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors/detail")
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -743,7 +750,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let detailed_servers = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2.1/bootstrap-project/servers/detail")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/detail")
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -753,7 +760,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/v2.1/bootstrap-project/os-keypairs")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(serde_json::json!({"keypair":{"name":"nova-test-key","public_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test"}}).to_string()))?,
@@ -773,7 +780,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let keypair_list = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
-                .uri("/v2.1/bootstrap-project/os-keypairs")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs")
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -792,7 +799,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/v2.1/bootstrap-project/servers")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-openstack-request-id", "nova-test-request")
@@ -817,7 +824,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
             Request::builder()
                 .method(Method::POST)
                 .uri(format!(
-                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/action"
                 ))
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -835,7 +842,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
             Request::builder()
                 .method(Method::POST)
                 .uri(format!(
-                    "/v2.1/bootstrap-project/servers/{server_id}/action"
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/action"
                 ))
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -847,7 +854,9 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/v2.1/bootstrap-project/servers/{server_id}"))
+                .uri(format!(
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}"
+                ))
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -862,7 +871,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
             Request::builder()
                 .method(Method::DELETE)
                 .uri(format!(
-                    "/v2.1/bootstrap-project/flavors/{custom_flavor_id}"
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors/{custom_flavor_id}"
                 ))
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
@@ -873,7 +882,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::DELETE)
-                .uri("/v2.1/bootstrap-project/os-keypairs/nova-test-key")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/os-keypairs/nova-test-key")
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -885,7 +894,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
-                .uri("/v2.1/bootstrap-project/servers")
+                .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header("x-openstack-request-id", "nova-failed-delete-request")
@@ -905,7 +914,9 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/v2.1/bootstrap-project/servers/{second_id}"))
+                .uri(format!(
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{second_id}"
+                ))
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -917,7 +928,9 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         .oneshot(
             Request::builder()
                 .method(Method::DELETE)
-                .uri(format!("/v2.1/bootstrap-project/servers/{server_id}"))
+                .uri(format!(
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}"
+                ))
                 .header("x-auth-token", &token)
                 .body(Body::empty())?,
         )
@@ -947,7 +960,7 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
     assert_eq!(resp.status(), StatusCode::OK);
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(
@@ -966,7 +979,7 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
     );
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .header("OpenStack-API-Version", "compute 2.1")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
@@ -976,7 +989,7 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
     );
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .header("X-OpenStack-Nova-API-Version", "2.1")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
@@ -986,7 +999,7 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
     );
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .header("OpenStack-API-Version", "compute 2.95")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
@@ -995,14 +1008,14 @@ async fn microversion_nova_discovery_and_negotiation() -> Result<(), Box<dyn std
     assert_eq!(json["computeFault"]["code"], 406);
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .header("OpenStack-API-Version", "compute invalid_ver extra_token")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
     let req = Request::builder()
-        .uri("/v2.1/bootstrap-project/flavors")
+        .uri("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors")
         .header("OpenStack-API-Version", "placement 1.28")
         .body(Body::empty())?;
     let resp = o3k_api::router().oneshot(req).await?;
@@ -1146,7 +1159,7 @@ async fn keystone_get_and_head_token_validation_and_cinder_catalog()
         .ok_or("missing volumev3 service entry")?;
     assert_eq!(
         cinder_entry["endpoints"][0]["url"],
-        "http://127.0.0.1:8776/v3/bootstrap-project"
+        "http://127.0.0.1:8776/v3/eba29e2d-53de-461d-ae91-ede7402713cb"
     );
 
     // Verify HEAD /v3/auth/tokens validates token without body
