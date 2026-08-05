@@ -55,6 +55,10 @@ pub struct Server {
     pub key_name: Option<String>,
     pub config_drive: bool,
     pub network_ids: Vec<String>,
+    /// Durable scheduler-selected compute host (placement provider identity),
+    /// projected as Nova's `OS-EXT-SRV-ATTR:host`. `None` only when the create
+    /// intent carries no placement decision.
+    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3230,6 +3234,7 @@ fn server_from_resource(
         key_name: None,
         config_drive: request.config_drive.is_some(),
         network_ids: request.network_ids,
+        host: request.placement_provider_id,
     })
 }
 
@@ -3990,6 +3995,7 @@ mod tests {
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         assert_eq!(intent.placement_provider_id.as_deref(), Some("node-a"));
+        assert_eq!(server.host.as_deref(), Some("node-a"));
         assert_eq!(
             intent.placement_allocation_id.as_deref(),
             Some(format!("allocation-{}", server.id).as_str())
