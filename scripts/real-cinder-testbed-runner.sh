@@ -37,6 +37,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if ! command -v cargo >/dev/null 2>&1; then
+    for cargo_dir in "${HOME}/.cargo/bin" "/root/.cargo/bin" "/home/ubuntu/.cargo/bin" "/usr/local/cargo/bin"; do
+        if [[ -x "${cargo_dir}/cargo" ]]; then
+            export PATH="${cargo_dir}:${PATH}"
+            break
+        fi
+    done
+fi
+
+
 KEEP="${1:-}"
 
 # --- Pinned Cinder profile -----------------------------------------------------
