@@ -84,6 +84,7 @@ pub struct FakeCinderState {
     /// Optional Keystone endpoint used to validate incoming tokens through the
     /// public Identity API. When absent, any non-empty token is accepted.
     pub keystone_endpoint: Option<String>,
+    pub last_openstack_api_version: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeCinderState {
@@ -93,7 +94,15 @@ impl FakeCinderState {
             attachments: Arc::new(Mutex::new(HashMap::new())),
             faults: Arc::new(Mutex::new(FaultConfig::default())),
             keystone_endpoint,
+            last_openstack_api_version: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn last_openstack_api_version(&self) -> Option<String> {
+        self.last_openstack_api_version
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn volume_ids(&self) -> Vec<String> {
@@ -221,6 +230,15 @@ pub fn router(state: FakeCinderState) -> Router {
 }
 
 async fn authorize(state: &FakeCinderState, headers: &HeaderMap) -> bool {
+    if let Some(ver) = headers
+        .get("openstack-api-version")
+        .and_then(|value| value.to_str().ok())
+    {
+        *state
+            .last_openstack_api_version
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(ver.to_owned());
+    }
     let token = headers
         .get("x-auth-token")
         .and_then(|value| value.to_str().ok())

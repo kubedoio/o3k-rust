@@ -163,6 +163,10 @@ async fn attachment_lifecycle_validates_token_through_keystone()
 
     let attachment = client.create_attachment(project, &volume.id).await?;
     assert_eq!(attachment.status, "creating");
+    assert_eq!(
+        fake.last_openstack_api_version().as_deref(),
+        Some("volume 3.44")
+    );
 
     let shown = client.show_attachment(project, &attachment.id).await?;
     assert_eq!(shown.id, attachment.id);

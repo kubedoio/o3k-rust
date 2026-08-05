@@ -37,6 +37,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+if ! command -v cargo >/dev/null 2>&1; then
+    for cargo_dir in "${HOME}/.cargo/bin" "/root/.cargo/bin" "/home/ubuntu/.cargo/bin" "/usr/local/cargo/bin"; do
+        if [[ -x "${cargo_dir}/cargo" ]]; then
+            export PATH="${cargo_dir}:${PATH}"
+            break
+        fi
+    done
+fi
+
 KEEP="${1:-}"
 
 # --- Pinned Cinder profile -----------------------------------------------------
@@ -648,7 +657,10 @@ while [ "$i" -lt 60 ]; do
 done
 echo "O3K_GUEST_DEVICE_MARKER timeout"
 EOF
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --user-data "${DATA_DIR}/o3k-device-probe.user-data" --nic port-id="${PORT_ID}" o3k-real-server -f value -c id)"
+# Bounded wait: an unbounded --wait can burn the whole job timeout and lose
+# the diagnostic window (run 30998323539). Fifteen minutes is generous for a
+# CirrOS boot on KVM; on timeout the failure path preserves the service logs.
+SERVER_ID="$(timeout 900 openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --user-data "${DATA_DIR}/o3k-device-probe.user-data" --nic port-id="${PORT_ID}" o3k-real-server -f value -c id)"
 # OSC's server create --wait writes a newline to stdout after the wait
 # completes (openstackclient compute/v2/server.py app.stdout.write('\n')),
 # which value-mode command substitution preserves as a leading byte. Strip all
@@ -741,7 +753,7 @@ done
 echo "    volume ${VOLUME_ID} is available again"
 
 echo "==> Workflow: delete all run-owned resources and verify cleanup..."
-openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || true
+timeout 300 openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || true
 openstack keypair delete "${KEYPAIR_NAME}" >/dev/null 2>&1 || true
 openstack flavor delete "${FLAVOR_ID}" >/dev/null 2>&1 || true
 openstack port delete "${PORT_ID}" >/dev/null 2>&1 || true

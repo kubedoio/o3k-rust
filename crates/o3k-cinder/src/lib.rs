@@ -44,6 +44,13 @@ use o3k_identity::Secret;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: u64 = 60;
 
+/// Cinder microversion requested for the attachments workflow. The
+/// attachments API (create/show/list/update/delete) exists from 3.27 and the
+/// os-complete action from 3.44 (official Block Storage API reference);
+/// without this header Cinder evaluates the request at microversion 3.0 and
+/// returns 404 for /attachments.
+const CINDER_API_MICROVERSION: &str = "volume 3.44";
+
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
 #[derive(Debug, Error)]
@@ -644,10 +651,15 @@ impl CinderClient {
             .header(header::CONTENT_TYPE, "application/json")
             .header(header::ACCEPT, "application/json");
         if let Some(token) = &token {
-            builder = builder.header(
-                header::HeaderName::from_static("x-auth-token"),
-                token.expose(),
-            );
+            builder = builder
+                .header(
+                    header::HeaderName::from_static("x-auth-token"),
+                    token.expose(),
+                )
+                .header(
+                    header::HeaderName::from_static("openstack-api-version"),
+                    CINDER_API_MICROVERSION,
+                );
         }
         let request_body = body.map_or_else(
             || Full::new(Bytes::new()),
