@@ -379,7 +379,7 @@ impl CinderClient {
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         CinderAttachment::parse(&value)
     }
@@ -399,7 +399,7 @@ impl CinderClient {
         );
         let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         CinderAttachment::parse(&value)
     }
@@ -417,7 +417,7 @@ impl CinderClient {
         );
         let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         let attachments = value
             .get("attachments")
@@ -448,7 +448,7 @@ impl CinderClient {
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         CinderAttachment::parse(&value)
     }
@@ -467,11 +467,11 @@ impl CinderClient {
             attachment_id
         );
         let body = serde_json::json!({"os-complete": null});
-        let (status, _, _) = self
+        let (status, _, value) = self
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         Ok(())
     }
@@ -490,11 +490,11 @@ impl CinderClient {
             attachment_id
         );
         let body = serde_json::json!({"os-terminate": null});
-        let (status, _, _) = self
+        let (status, _, value) = self
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         Ok(())
     }
@@ -516,7 +516,7 @@ impl CinderClient {
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         Volume::parse(&value)
     }
@@ -534,7 +534,7 @@ impl CinderClient {
         );
         let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         Volume::parse(&value)
     }
@@ -547,7 +547,7 @@ impl CinderClient {
         );
         let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         let volumes = value
             .get("volumes")
@@ -570,14 +570,14 @@ impl CinderClient {
             project_id,
             volume_id
         );
-        let (status, _, _) = self
+        let (status, _, value) = self
             .send(Method::DELETE, &url, Some(project_id), None)
             .await?;
         if status == StatusCode::NOT_FOUND {
             return Ok(());
         }
         if !status.is_success() {
-            return Err(status_error(status));
+            return Err(status_error(status, &value));
         }
         Ok(())
     }
@@ -701,16 +701,33 @@ impl CinderClient {
     }
 }
 
-fn status_error(status: StatusCode) -> CinderError {
+fn status_error(status: StatusCode, value: &serde_json::Value) -> CinderError {
+    let msg = value
+        .get("badRequest")
+        .and_then(|v| v.get("message"))
+        .and_then(|m| m.as_str())
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+        })
+        .unwrap_or("");
+    tracing::warn!(%status, %msg, "cinder error response");
+    let detail = if msg.is_empty() {
+        format!("{status}")
+    } else {
+        format!("{status}: {msg}")
+    };
     match status {
-        StatusCode::BAD_REQUEST => CinderError::InvalidRequest(format!("{status}")),
+        StatusCode::BAD_REQUEST => CinderError::InvalidRequest(detail),
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => CinderError::Unauthorized,
-        StatusCode::NOT_FOUND => CinderError::NotFound(format!("{status}")),
-        StatusCode::CONFLICT => CinderError::Conflict(format!("{status}")),
+        StatusCode::NOT_FOUND => CinderError::NotFound(detail),
+        StatusCode::CONFLICT => CinderError::Conflict(detail),
         StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT => {
             CinderError::ServiceUnavailable
         }
-        other => CinderError::UnknownOutcome(format!("unexpected status {other}")),
+        other => CinderError::UnknownOutcome(format!("unexpected status {other}: {msg}")),
     }
 }
 
