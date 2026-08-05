@@ -601,6 +601,9 @@ IMAGE_ID="$(openstack image create o3k-real-image --file "${IMAGE_PATH}" --disk-
 NETWORK_ID="$(openstack network create o3k-real-network -f value -c id)"
 SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 o3k-real-subnet -f value -c id)"
 FLAVOR_ID="$(openstack flavor create o3k-real-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
+# The O3K Nova profile accepts only durable port UUIDs in NIC references
+# (crates/o3k-api create_server network validation), never bare network IDs.
+PORT_ID="$(openstack port create --network "${NETWORK_ID}" o3k-real-port -f value -c id)"
 KEYPAIR_NAME="o3k-real-keypair"
 ssh-keygen -q -t ed25519 -N '' -C o3k-real -f "${DATA_DIR}/o3k-real-keypair" >/dev/null
 chmod 0600 "${DATA_DIR}/o3k-real-keypair"
@@ -629,7 +632,7 @@ while [ "$i" -lt 60 ]; do
 done
 echo "O3K_GUEST_DEVICE_MARKER timeout"
 EOF
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --user-data "${DATA_DIR}/o3k-device-probe.user-data" --nic net-id="${NETWORK_ID}" o3k-real-server -f value -c id)"
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --user-data "${DATA_DIR}/o3k-device-probe.user-data" --nic port-id="${PORT_ID}" o3k-real-server -f value -c id)"
 
 echo "==> Verifying the selected compute host and real libvirt domain..."
 SERVER_STATUS="$(openstack server show "${SERVER_ID}" -f value -c status)"
@@ -720,6 +723,7 @@ echo "==> Workflow: delete all run-owned resources and verify cleanup..."
 openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || true
 openstack keypair delete "${KEYPAIR_NAME}" >/dev/null 2>&1 || true
 openstack flavor delete "${FLAVOR_ID}" >/dev/null 2>&1 || true
+openstack port delete "${PORT_ID}" >/dev/null 2>&1 || true
 openstack subnet delete "${SUBNET_ID}" >/dev/null 2>&1 || true
 openstack network delete "${NETWORK_ID}" >/dev/null 2>&1 || true
 openstack image delete "${IMAGE_ID}" >/dev/null 2>&1 || true
