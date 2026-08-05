@@ -307,6 +307,24 @@ where
             )
             .await?;
 
+        if durable_state == OperationState::Failed && operation.kind == "create" {
+            // A terminally failed create must not leave the resource in its
+            // pre-creation state: clients polling the server would otherwise
+            // wait forever. Projecting ERROR keeps the failure durable and
+            // visible while observations remain the only success projection.
+            let resource = self.store.get_resource(resource_id).await?;
+            self.store
+                .update_resource(
+                    resource_id,
+                    resource.generation,
+                    &resource.desired_state,
+                    "ERROR",
+                    resource.generation,
+                    resource.provider_id.as_deref(),
+                )
+                .await?;
+        }
+
         if durable_state == OperationState::Succeeded {
             let resource = self.store.get_resource(resource_id).await?;
             let provider_id = (!update.provider_resource_id.is_empty())
@@ -1507,6 +1525,53 @@ mod tests {
         assert_eq!(
             store.get_operation(operation_id).await?.state,
             OperationState::UnknownOutcome
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_failed_create_update_marks_resource_error_and_replays_safely()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-create-failed", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
+            error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        // A replayed delivery of the same terminal update stays Failed and
+        // keeps the ERROR projection without reviving the operation.
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Failed
         );
         Ok(())
     }

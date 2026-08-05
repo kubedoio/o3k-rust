@@ -4801,6 +4801,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_failed_result_is_reported_as_failed_not_unknown()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let command = fake_create_command()?;
+        let result = CommandExecutionResult {
+            state: proto::OperationState::Failed as i32,
+            error_category: proto::ErrorCategory::Terminal as i32,
+            resource_state: proto::ResourceState::Error as i32,
+            redacted_message: "definitive pre-definition failure".to_owned(),
+            provider_resource_id: String::new(),
+            console_log: None,
+            block_device: None,
+        };
+        let entry = JournalEntry {
+            command: command.clone(),
+            state: JournalState::Terminal,
+            accepted_sequence: 1,
+            last_sequence: 2,
+            result: Some(result),
+        };
+        let (tx, mut rx) = mpsc::channel(4);
+        replay_journal_entry(&tx, &entry, &command, "agent-1", "epoch-1").await?;
+        drop(tx);
+        let mut bodies = Vec::new();
+        while let Some(request) = rx.recv().await {
+            bodies.push(request.body.ok_or("control request body is missing")?);
+        }
+        assert_eq!(bodies.len(), 2);
+        match &bodies[0] {
+            proto::control_request::Body::Observation(observation) => {
+                assert_eq!(
+                    observation.operation_state,
+                    proto::OperationState::Failed as i32
+                );
+                assert_eq!(observation.state, proto::ResourceState::Error as i32);
+            }
+            _ => return Err("expected observation before operation update".into()),
+        }
+        match &bodies[1] {
+            proto::control_request::Body::Operation(update) => {
+                assert_eq!(update.state, proto::OperationState::Failed as i32);
+                assert_eq!(update.error_category, proto::ErrorCategory::Terminal as i32);
+                assert_eq!(update.operation_sequence, 2);
+            }
+            _ => return Err("expected operation update after observation".into()),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fake_create_failure_cleans_each_owned_stage() -> Result<(), Box<dyn std::error::Error>>
     {
         for stage in [
