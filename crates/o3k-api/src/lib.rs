@@ -1585,6 +1585,11 @@ struct ServerResponse {
     // unconditionally. O3K does not model server metadata yet, so the
     // representation is always the empty object.
     metadata: serde_json::Value,
+    // Nova's extended server attribute reporting the selected compute host.
+    // O3K projects the durable scheduler placement provider identity, never a
+    // display name; null only when no placement decision was recorded.
+    #[serde(rename = "OS-EXT-SRV-ATTR:host")]
+    host: Option<String>,
 }
 #[derive(Serialize)]
 struct IdResponse {
@@ -1629,6 +1634,7 @@ fn server_response(server: Server, network_service: Option<&NetworkService>) -> 
         key_name: server.key_name,
         config_drive: server.config_drive,
         metadata: serde_json::Value::Object(serde_json::Map::new()),
+        host: server.host,
     }
 }
 
@@ -2780,12 +2786,40 @@ mod tests {
             key_name: Some("key".to_owned()),
             config_drive: true,
             network_ids: Vec::new(),
+            host: None,
         };
         let response = server_response(server, None);
         let value = serde_json::to_value(response)?;
         assert_eq!(value.get("config_drive"), Some(&serde_json::json!(true)));
         assert!(value.get("user_data").is_none());
         assert!(value.get("ssh_public_key").is_none());
+        assert_eq!(
+            value.get("OS-EXT-SRV-ATTR:host"),
+            Some(&serde_json::Value::Null)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_response_reports_the_durable_placement_host() -> Result<(), serde_json::Error> {
+        let server = Server {
+            id: Uuid::nil(),
+            name: "server".to_owned(),
+            project_id: "project".to_owned(),
+            flavor_id: Uuid::nil(),
+            image_id: "image".to_owned(),
+            status: "ACTIVE".to_owned(),
+            key_name: None,
+            config_drive: false,
+            network_ids: Vec::new(),
+            host: Some("node-a".to_owned()),
+        };
+        let response = server_response(server, None);
+        let value = serde_json::to_value(response)?;
+        assert_eq!(
+            value.get("OS-EXT-SRV-ATTR:host"),
+            Some(&serde_json::json!("node-a"))
+        );
         Ok(())
     }
 }
