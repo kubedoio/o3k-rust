@@ -244,8 +244,11 @@ where
     }
 
     /// Applies an authenticated compute-agent update to the same durable records
-    /// used by the provider reconciliation loop. Agent messages are deliberately
-    /// not persisted: only a stable category is retained for operator safety.
+    /// used by the provider reconciliation loop. The agent is responsible for
+    /// redacting secrets and connection information before sending a failure
+    /// reason; the control plane persists it only after bounding and
+    /// sanitizing (bounded_agent_failure_message), so durable records and
+    /// operator logs stay free of control characters and unbounded payloads.
     pub async fn apply_agent_update(
         &self,
         update: &agent_proto::OperationUpdate,
@@ -296,6 +299,12 @@ where
         } else {
             None
         };
+        // Persist the agent-reported, contract-redacted failure reason so the
+        // durable record carries an actionable cause; it is bounded and
+        // sanitized before storage. Unknown-outcome and non-failure updates
+        // keep no message.
+        let error_message = (durable_state == OperationState::Failed)
+            .then(|| bounded_agent_failure_message(&update.redacted_message));
         let provider_operation_id = operation.provider_operation_id.as_deref();
         self.store
             .update_operation(
@@ -303,7 +312,7 @@ where
                 durable_state,
                 provider_operation_id,
                 error_category,
-                (durable_state == OperationState::Failed).then_some("agent operation failed"),
+                error_message.as_deref(),
             )
             .await?;
 
@@ -1302,6 +1311,35 @@ fn agent_error_category(value: i32) -> Result<&'static str, ReconcileError> {
     }
 }
 
+/// Maximum length of a persisted agent failure reason. The durable record
+/// stays bounded even if an agent message grows unexpectedly.
+const MAX_AGENT_FAILURE_MESSAGE_LEN: usize = 240;
+
+/// Bounds and sanitizes the agent-reported failure reason for durable storage
+/// and operator logs. The agent contract already redacts secrets; the control
+/// plane additionally neutralizes control characters, truncates to a bounded
+/// length, and falls back to a generic reason when the agent supplied nothing
+/// usable.
+fn bounded_agent_failure_message(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return "agent operation failed".to_owned();
+    }
+    let bounded: String = trimmed
+        .chars()
+        .take(MAX_AGENT_FAILURE_MESSAGE_LEN)
+        .collect();
+    if trimmed.chars().count() > MAX_AGENT_FAILURE_MESSAGE_LEN {
+        format!("{bounded}...")
+    } else {
+        bounded
+    }
+}
+
 fn agent_resource_state(value: i32) -> Result<&'static str, ReconcileError> {
     match agent_proto::ResourceState::try_from(value).map_err(|_| ReconcileError::InvalidIntent)? {
         agent_proto::ResourceState::Creating => Ok("BUILD"),
@@ -1576,6 +1614,59 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn agent_failure_reason_is_sanitized_bounded_and_fallback_safe() {
+        // Redaction contract: control characters never reach durable storage
+        // or operator logs, so a crafted payload cannot forge log lines.
+        assert_eq!(
+            bounded_agent_failure_message("gateway preparation failed:\n\tforeign interface\r\n"),
+            "gateway preparation failed:  foreign interface"
+        );
+        // Truncation: oversized reasons are bounded with an explicit marker.
+        let long = "x".repeat(MAX_AGENT_FAILURE_MESSAGE_LEN + 100);
+        let bounded = bounded_agent_failure_message(&long);
+        assert_eq!(bounded.len(), MAX_AGENT_FAILURE_MESSAGE_LEN + 3);
+        assert!(bounded.ends_with("..."));
+        // Fallback: an empty or whitespace-only reason stays actionable.
+        assert_eq!(bounded_agent_failure_message(""), "agent operation failed");
+        assert_eq!(
+            bounded_agent_failure_message("  \n\t "),
+            "agent operation failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_failed_update_persists_the_bounded_agent_reason() -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-failed-reason", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let update = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
+            error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
+            redacted_message: "gateway preparation failed:\nexisting interface is foreign"
+                .to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store
+                .get_operation(operation_id)
+                .await?
+                .error_message
+                .as_deref(),
+            Some("gateway preparation failed: existing interface is foreign")
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn agent_success_is_durable_and_idempotent() -> Result<(), ReconcileError> {
         let (journal, store, _) = journal("agent-success", 2).await?;
@@ -1742,8 +1833,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_failure_persists_category_without_provider_message() -> Result<(), ReconcileError>
-    {
+    async fn agent_failure_persists_the_contract_redacted_provider_reason()
+    -> Result<(), ReconcileError> {
+        // Contract: the agent redacts secrets and connection information
+        // before sending; the control plane persists the reason bounded and
+        // sanitized instead of withholding it entirely (issue #485).
         let (journal, store, _) = journal("agent-failure", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
@@ -1755,7 +1849,7 @@ mod tests {
             resource_id: request.o3k_server_id.to_string(),
             state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
             error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
-            redacted_message: "secret-provider-detail".to_owned(),
+            redacted_message: "gateway preparation failed: interface is foreign".to_owned(),
             ..Default::default()
         };
         assert_eq!(
@@ -1766,7 +1860,7 @@ mod tests {
         assert_eq!(operation.error_category.as_deref(), Some("terminal"));
         assert_eq!(
             operation.error_message.as_deref(),
-            Some("agent operation failed")
+            Some("gateway preparation failed: interface is foreign")
         );
         Ok(())
     }

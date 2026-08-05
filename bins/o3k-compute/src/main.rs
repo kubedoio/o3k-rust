@@ -854,6 +854,16 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 // failures after a possible provider side effect (define,
                 // start, or a failed rollback) and for observation errors.
                 let definitive_failure = |error: AgentError| {
+                    // The redacted reason is also carried in the result so the
+                    // control plane can persist it; log the same redacted
+                    // string here so host-side diagnosis does not require the
+                    // durable store.
+                    tracing::warn!(
+                        error = %error,
+                        operation_id = %command.operation_id,
+                        resource_id = %command.resource_id,
+                        "create failed definitively; reporting terminal failure"
+                    );
                     Ok(CommandExecutionResult {
                         state: proto::OperationState::Failed as i32,
                         error_category: proto::ErrorCategory::Terminal as i32,
@@ -1404,10 +1414,13 @@ fn iscsi_login(
     let discovery = match discovery {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
-            return Err(AgentError::Protocol(format!(
-                "iscsi discovery failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            // The redacted-message contract forbids raw command output: iscsiadm
+            // stderr can disclose target portals and session details.
+            tracing::debug!(
+                status = ?output.status,
+                "iscsi discovery command exited unsuccessfully"
+            );
+            return Err(AgentError::Protocol("iscsi discovery failed".to_owned()));
         }
         Err(_) => {
             return Err(AgentError::Protocol(
@@ -1454,10 +1467,13 @@ fn iscsi_login(
             );
             Ok(None)
         }
-        Ok(output) => Err(AgentError::Protocol(format!(
-            "iscsi login failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))),
+        Ok(output) => {
+            tracing::debug!(
+                status = ?output.status,
+                "iscsi login command exited unsuccessfully"
+            );
+            Err(AgentError::Protocol("iscsi login failed".to_owned()))
+        }
         Err(_) => Err(AgentError::Protocol("iscsiadm is not available".to_owned())),
     }
 }

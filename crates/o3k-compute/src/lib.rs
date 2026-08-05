@@ -2124,12 +2124,12 @@ impl ComputeService {
                 match events.recv().await {
                     Ok(o3k_compute_agent::AgentEvent::Operation(update)) => {
                         if let Err(error) = service.apply_agent_update(&update).await {
-                            tracing::warn!(%error, "agent operation update rejected");
+                            tracing::warn!(error = ?error, "agent operation update rejected");
                         }
                     }
                     Ok(o3k_compute_agent::AgentEvent::CommandAccepted(accepted)) => {
                         if let Err(error) = service.apply_agent_acceptance(&accepted).await {
-                            tracing::warn!(%error, "agent command acceptance rejected");
+                            tracing::warn!(error = ?error, "agent command acceptance rejected");
                         }
                     }
                     Ok(o3k_compute_agent::AgentEvent::Observation(observation)) => {
@@ -2148,7 +2148,7 @@ impl ComputeService {
                         }
                         if let Err(error) = service.apply_agent_observation(&observation).await {
                             tracing::warn!(
-                                %error,
+                                error = ?error,
                                 operation_id = %observation.operation_id,
                                 resource_id = %observation.resource_id,
                                 agent_id = %observation.agent_id,
