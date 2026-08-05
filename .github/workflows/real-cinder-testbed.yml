@@ -205,28 +205,38 @@ jobs:
           } >"${output}"
           chmod 0644 "${output}"
 
-      - name: Collect redacted service logs and evidence permissions
+      - name: Stage allowlisted redacted evidence and service logs
         # Runs before artifact upload on every path (success, failure, or
         # timeout cancellation). The run-owned state root is root-owned with
-        # 0750 directories, which made the upload fail with EACCES (runs
+        # 0750 directories, which made direct upload fail with EACCES (runs
         # 30993341589 and 30998323539) and the state-root removal then
-        # destroyed the logs needed for diagnosis. Make the run-owned tree
-        # readable and copy redacted service log tails into the workspace so
-        # they survive state-root removal. Long hex strings (48+ chars, the
-        # runner's ephemeral secret shape) are masked.
+        # destroyed the logs needed for diagnosis. Instead of relaxing
+        # permissions on the run-owned tree, copy an explicit allowlist into
+        # the workspace: the foreign-state inventories, the evidence
+        # manifest, and redacted tails of the service logs. Long hex strings
+        # (48+ chars, the runner's ephemeral secret shape) are masked, and
+        # the runner's own secret scan already verified no run secrets appear
+        # in these files before this step executes. Nothing outside the
+        # allowlist is staged, and the state tree is never modified.
         if: always()
         run: |
-          out=target/real-cinder-workflow-artifacts/service-logs
-          mkdir -p "${out}"
+          artifacts=target/real-cinder-workflow-artifacts
+          mkdir -p "${artifacts}/evidence" "${artifacts}/service-logs"
           state="/var/lib/o3k-cinder-testbed/${GITHUB_RUN_ID}"
           if sudo -n test -d "${state}"; then
-            sudo -n chmod -R a+rX "${state}" || true
             while IFS= read -r f; do
-              base="$(basename "$(dirname "${f}")")-$(basename "${f}")"
-              sudo -n cat "${f}" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' | tail -n 400 > "${out}/${base}" || true
-            done < <(sudo -n find "${state}" -maxdepth 2 -type f -name '*.log' 2>/dev/null || true)
+              name="$(echo "${f#"${state}"/}" | tr '/' '-')"
+              case "$(basename "${f}")" in
+                foreign-state-before.json|foreign-state-after.json|evidence.yaml)
+                  sudo -n cat "${f}" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' > "${artifacts}/evidence/${name}" || true
+                  ;;
+                *.log)
+                  sudo -n cat "${f}" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' | tail -n 400 > "${artifacts}/service-logs/${name}" || true
+                  ;;
+              esac
+            done < <(sudo -n find "${state}" -maxdepth 2 -type f \( -name '*.log' -o -name 'foreign-state-*.json' -o -name 'evidence.yaml' \) 2>/dev/null || true)
           fi
-          ls -la "${out}" || true
+          ls -la "${artifacts}/evidence" "${artifacts}/service-logs" || true
 
       - name: Upload redacted real-Cinder artifacts
         if: always()
@@ -239,9 +249,7 @@ jobs:
             target/real-cinder-workflow-artifacts/evidence-summary.log
             target/real-cinder-workflow-artifacts/recovery/**
             target/real-cinder-workflow-artifacts/service-logs/**
-            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-before.json
-            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-after.json
-            /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/evidence.yaml
+            target/real-cinder-workflow-artifacts/evidence/**
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-cinder-environment.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/keystone-hosted-service-result.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/real-volume-lifecycle.json
