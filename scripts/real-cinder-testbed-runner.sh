@@ -176,15 +176,13 @@ if ! command -v cargo >/dev/null 2>&1; then
   for candidate_home in "${SUDO_USER_HOME}" /root /usr/local/cargo; do
     [ -n "${candidate_home}" ] || continue
     if [ -x "${candidate_home}/.cargo/bin/cargo" ]; then
-      export CARGO_HOME="${candidate_home}/.cargo"
       [ -d "${candidate_home}/.rustup" ] && export RUSTUP_HOME="${candidate_home}/.rustup"
-      export PATH="${CARGO_HOME}/bin:${PATH}"
+      export PATH="${candidate_home}/.cargo/bin:${PATH}"
       break
     fi
     if [ -x "${candidate_home}/bin/cargo" ]; then
-      export CARGO_HOME="${candidate_home}"
       [ -d "${candidate_home}/../rustup" ] && export RUSTUP_HOME="${candidate_home}/../rustup"
-      export PATH="${CARGO_HOME}/bin:${PATH}"
+      export PATH="${candidate_home}/bin:${PATH}"
       break
     fi
   done
@@ -193,13 +191,20 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "ERROR: cargo not found in PATH or known rustup locations"
   exit 1
 fi
+# Every build write must stay run-owned. This script runs as root through
+# sudo: a workspace target/ would leave root-owned files that break the next
+# actions/checkout clean phase (run 30991679467), and the invoking user's
+# shared ~/.cargo registry is foreign state that must not gain root-owned
+# files. RUSTUP_HOME stays read-only (toolchain lookup only).
+export CARGO_TARGET_DIR="${STATE_ROOT}/target"
+export CARGO_HOME="${STATE_ROOT}/cargo-home"
 cargo build --manifest-path "${REPO_ROOT}/Cargo.toml" --bin o3kd
 RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --manifest-path "${REPO_ROOT}/Cargo.toml" --features libvirt --bin o3k-compute-bin
 
-O3KD_BIN="${REPO_ROOT}/target/debug/o3kd"
+O3KD_BIN="${CARGO_TARGET_DIR}/debug/o3kd"
 # Package/bin name is o3k-compute-bin (see bins/o3k-compute/Cargo.toml).
-O3K_COMPUTE_BIN="${REPO_ROOT}/target/debug/o3k-compute-bin"
+O3K_COMPUTE_BIN="${CARGO_TARGET_DIR}/debug/o3k-compute-bin"
 
 echo "==> Generating disposable mTLS certificates..."
 # The cert bootstrap only claims an empty, marked parent directory. Use a

@@ -25,6 +25,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          # An earlier run built into the workspace as root (fixed by building
+          # into the run-owned state root instead), leaving root-owned target/
+          # files that make the checkout clean phase fail (run 30991679467).
+          # Skip clean and remove the defect-owned directory explicitly below;
+          # the immutable-source verification still pins the exact SHA.
+          clean: false
+
+      - name: Remove defect-owned root build artifacts from the workspace
+        run: sudo -n rm -rf target
 
       - name: Verify immutable source checkout
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
