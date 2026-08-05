@@ -10,7 +10,7 @@
 #   tempest: 46.0.0 (releases.openstack.org/gazpacho/index.html)
 #   cinder-tempest-plugin: 1.21.0
 #
-# Last checked: 2026-08-04T21:26:44Z
+# Last checked: 2026-08-04T23:32:30Z
 
 tempest:
   version_pinned: true
