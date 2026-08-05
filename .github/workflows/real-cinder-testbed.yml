@@ -205,6 +205,29 @@ jobs:
           } >"${output}"
           chmod 0644 "${output}"
 
+      - name: Collect redacted service logs and evidence permissions
+        # Runs before artifact upload on every path (success, failure, or
+        # timeout cancellation). The run-owned state root is root-owned with
+        # 0750 directories, which made the upload fail with EACCES (runs
+        # 30993341589 and 30998323539) and the state-root removal then
+        # destroyed the logs needed for diagnosis. Make the run-owned tree
+        # readable and copy redacted service log tails into the workspace so
+        # they survive state-root removal. Long hex strings (48+ chars, the
+        # runner's ephemeral secret shape) are masked.
+        if: always()
+        run: |
+          out=target/real-cinder-workflow-artifacts/service-logs
+          mkdir -p "${out}"
+          state="/var/lib/o3k-cinder-testbed/${GITHUB_RUN_ID}"
+          if sudo -n test -d "${state}"; then
+            sudo -n chmod -R a+rX "${state}" || true
+            while IFS= read -r f; do
+              base="$(basename "$(dirname "${f}")")-$(basename "${f}")"
+              sudo -n cat "${f}" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' | tail -n 400 > "${out}/${base}" || true
+            done < <(sudo -n find "${state}" -maxdepth 2 -type f -name '*.log' 2>/dev/null || true)
+          fi
+          ls -la "${out}" || true
+
       - name: Upload redacted real-Cinder artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -215,6 +238,7 @@ jobs:
             target/real-cinder-workflow-artifacts/real-cinder-workflow-result.json
             target/real-cinder-workflow-artifacts/evidence-summary.log
             target/real-cinder-workflow-artifacts/recovery/**
+            target/real-cinder-workflow-artifacts/service-logs/**
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-before.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-after.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/evidence.yaml
