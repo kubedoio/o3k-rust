@@ -281,8 +281,8 @@ echo "==> Recording Cinder version evidence..."
 "${VENV_DIR}/bin/pip" freeze > "${EVIDENCE_DIR}/venv-freeze.txt" 2>/dev/null || true
 dpkg-query -W -f='${Package} ${Version}\n' mariadb-server rabbitmq-server memcached open-iscsi tgt lvm2 python3-openstackclient > "${EVIDENCE_DIR}/installed-packages.txt" 2>/dev/null || true
 
-echo "==> Starting MariaDB, RabbitMQ, memcached..."
-systemctl start mariadb rabbitmq-server memcached 2>/dev/null || service mariadb start
+echo "==> Starting MariaDB, RabbitMQ, memcached, tgt, open-iscsi..."
+systemctl start mariadb rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
 sleep 5
 
 echo "==> Configuring run-owned Cinder database (MariaDB)..."
@@ -381,6 +381,14 @@ root_helper = sudo
 # boundary; targets that require authentication are rejected by the control
 # plane. Disable CHAP so the real iSCSI target is accepted.
 chap_authentication = False
+[privsep]
+helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
+[privsep_entrypoint]
+helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
+[privsep_cinder]
+helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
+[privsep_oslo]
+helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
 EOF
 
 echo "==> Writing run-owned api-paste.ini..."
