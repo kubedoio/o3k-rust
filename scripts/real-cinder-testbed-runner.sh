@@ -633,6 +633,11 @@ done
 echo "O3K_GUEST_DEVICE_MARKER timeout"
 EOF
 SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" --config-drive true --user-data "${DATA_DIR}/o3k-device-probe.user-data" --nic port-id="${PORT_ID}" o3k-real-server -f value -c id)"
+# OSC's server create --wait writes a newline to stdout after the wait
+# completes (openstackclient compute/v2/server.py app.stdout.write('\n')),
+# which value-mode command substitution preserves as a leading byte. Strip all
+# whitespace so the durable server ID stays usable in follow-up calls.
+SERVER_ID="${SERVER_ID//[[:space:]]/}"
 
 echo "==> Verifying the selected compute host and real libvirt domain..."
 SERVER_STATUS="$(openstack server show "${SERVER_ID}" -f value -c status)"
