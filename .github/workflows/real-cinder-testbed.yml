@@ -2,6 +2,14 @@ name: Real Cinder service-testbed
 
 on:
   workflow_dispatch:
+    inputs:
+      recovery_run_id:
+        description: >-
+          Optional protected-run ID whose stale run-owned state is collected
+          (redacted) and removed instead of running the testbed profile.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -42,8 +50,79 @@ jobs:
       - name: Verify immutable source checkout
         run: test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
 
+      - name: "Recovery: collect redacted stale-run diagnostics"
+        # Runs cancelled at the job timeout (run 30998323539) leave the
+        # run-owned state root behind; the pre-run guard then blocks every
+        # later run. Collect redacted diagnostics before cleanup so the root
+        # cause can be proven from evidence, not guessed. Long hex strings
+        # (48+ chars) are masked: runner secrets are ephemeral hex.
+        if: inputs.recovery_run_id != ''
+        env:
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${RECOVERY_RUN_ID}" =~ ^[0-9A-Za-z-]+$ ]] || { echo "invalid run id"; exit 1; }
+          state="/var/lib/o3k-cinder-testbed/${RECOVERY_RUN_ID}"
+          out="target/real-cinder-workflow-artifacts/recovery/${RECOVERY_RUN_ID}"
+          mkdir -p "${out}"
+          while IFS= read -r f; do
+            base="$(basename "${f}")"
+            sudo -n cat "${f}" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' > "${out}/${base}" || true
+          done < <(sudo -n find "${state}" -maxdepth 2 -type f \( -name '*.log' -o -name 'evidence.yaml' \) 2>/dev/null || true)
+          {
+            echo "== virsh list --all =="; sudo -n virsh -c qemu:///system list --all || true
+            echo "== iscsiadm -m session =="; sudo -n iscsiadm -m session || true
+            echo "== vgs =="; sudo -n vgs || true
+            echo "== lvs =="; sudo -n lvs || true
+            echo "== losetup -a =="; sudo -n losetup -a || true
+            echo "== rabbitmqctl list_vhosts =="; sudo -n rabbitmqctl list_vhosts || true
+            echo "== rabbitmqctl list_users =="; sudo -n rabbitmqctl list_users || true
+            echo "== mysql databases and users =="
+            sudo -n mysql -N -e "SHOW DATABASES; SELECT CONCAT(User,'@',Host) FROM mysql.user;" || true
+            echo "== run-owned processes =="; pgrep -a -f "o3k-cinder-testbed/${RECOVERY_RUN_ID}" || true
+          } > "${out}/host-state.txt" 2>&1
+          ls -la "${out}"
+
+      - name: "Recovery: remove the stale run-owned resources"
+        # Ownership-safe: every removed name is derived from the recovered run
+        # ID; libvirt domains are destroyed only when their disks live under
+        # the recovered run's state root (never another profile's o3k-* domain).
+        if: inputs.recovery_run_id != ''
+        env:
+          RECOVERY_RUN_ID: ${{ inputs.recovery_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "${RECOVERY_RUN_ID}" =~ ^[0-9A-Za-z-]+$ ]] || { echo "invalid run id"; exit 1; }
+          state="/var/lib/o3k-cinder-testbed/${RECOVERY_RUN_ID}"
+          slug="$(printf '%s' "${RECOVERY_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
+          vg="o3k-vg-${slug}"
+          db="o3k_cinder_${slug}"
+          sudo -n pkill -f "${state}" 2>/dev/null || true
+          sleep 2
+          sudo -n pkill -9 -f "${state}" 2>/dev/null || true
+          while IFS= read -r dom; do
+            [ -n "${dom}" ] || continue
+            if sudo -n virsh -c qemu:///system dumpxml "${dom}" 2>/dev/null | grep -q "${state}"; then
+              sudo -n virsh -c qemu:///system destroy "${dom}" 2>/dev/null || true
+              sudo -n virsh -c qemu:///system undefine "${dom}" 2>/dev/null || true
+              echo "removed run-owned domain ${dom}"
+            fi
+          done < <(sudo -n virsh -c qemu:///system list --all --name 2>/dev/null | grep '^o3k-' || true)
+          sudo -n vgchange -an "${vg}" 2>/dev/null || true
+          sudo -n vgremove -y "${vg}" 2>/dev/null || true
+          while IFS= read -r loop; do
+            [ -n "${loop}" ] || continue
+            sudo -n losetup -d "${loop}" 2>/dev/null || true
+          done < <(sudo -n losetup -a 2>/dev/null | awk -F: '{print $1, $3}' | grep "${vg}.img" | awk '{print $1}' || true)
+          sudo -n rabbitmqctl delete_vhost "${db}" 2>/dev/null || true
+          sudo -n rabbitmqctl delete_user "${db}" 2>/dev/null || true
+          sudo -n mysql -e "DROP DATABASE IF EXISTS \`${db}\`; DROP USER IF EXISTS '${db}'@'localhost'; DROP USER IF EXISTS '${db}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+          sudo -n rm -rf "${state}"
+          echo "recovery cleanup completed for run ${RECOVERY_RUN_ID}"
+
       - name: Probe runner capabilities
         id: capabilities
+        if: inputs.recovery_run_id == ''
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-cinder-workflow-artifacts
           O3K_REAL_HOST_RUNNER_LABELS: self-hosted,linux,x64,kvm,libvirt,o3k-testlab
@@ -68,6 +147,7 @@ jobs:
 
       - name: Pre-run host and capability guard
         id: guard
+        if: inputs.recovery_run_id == ''
         env:
           O3K_REAL_HOST_ARTIFACT_DIR: target/real-cinder-workflow-artifacts
           O3K_REAL_HOST_CAPABILITY_OUTPUT: target/real-cinder-workflow-artifacts/runner-capabilities.json
@@ -85,7 +165,7 @@ jobs:
 
       - name: Run the real Cinder service-testbed profile
         id: cinder
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.guard.outputs.ready == 'true' && inputs.recovery_run_id == ''
         continue-on-error: true
         env:
           # Base directory only: the runner appends the workflow run ID so the
@@ -134,6 +214,7 @@ jobs:
             target/real-cinder-workflow-artifacts/runner-capabilities.json
             target/real-cinder-workflow-artifacts/real-cinder-workflow-result.json
             target/real-cinder-workflow-artifacts/evidence-summary.log
+            target/real-cinder-workflow-artifacts/recovery/**
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-before.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/foreign-state-after.json
             /var/lib/o3k-cinder-testbed/${{ github.run_id }}/**/evidence.yaml
