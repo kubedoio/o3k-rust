@@ -493,7 +493,7 @@ fn agent_inspect_probe_from_env(
     let resource_file = std::env::var("O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE").ok();
     let output = std::env::var("O3K_AGENT_INSPECT_PROBE_OUTPUT").ok()?;
     let project_id = std::env::var("O3K_AGENT_INSPECT_PROBE_PROJECT_ID")
-        .unwrap_or_else(|_| "bootstrap-project".to_owned());
+        .unwrap_or_else(|_| "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned());
     if resource_id
         .as_deref()
         .is_none_or(|value| value.trim().is_empty())

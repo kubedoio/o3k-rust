@@ -557,7 +557,7 @@ done
 echo "    cinder-api reachable"
 
 echo "==> Workflow: create a real volume through real Cinder..."
-CINDER_URL="http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project"
+CINDER_URL="http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb"
 VOLUME_JSON=$(curl -s -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
   -X POST "${CINDER_URL}/volumes" -d '{"volume":{"size":1,"name":"o3k-real-volume"}}')
 VOLUME_ID=$(echo "${VOLUME_JSON}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["volume"]["id"])' 2>/dev/null || true)

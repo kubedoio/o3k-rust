@@ -759,7 +759,7 @@ mod tests {
     async fn create_volume(h: &TestHarness) -> Result<Uuid, Box<dyn std::error::Error>> {
         let volume = h
             .cinder
-            .create_volume("bootstrap-project", 1, "vol")
+            .create_volume("eba29e2d-53de-461d-ae91-ede7402713cb", 1, "vol")
             .await?;
         Ok(Uuid::parse_str(&volume.id)?)
     }
@@ -773,7 +773,7 @@ mod tests {
             .insert_resource(&ResourceRecord {
                 id: server_id,
                 kind: "compute_instance".to_owned(),
-                project_id: "bootstrap-project".to_owned(),
+                project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                 generation: 1,
                 observed_generation: 1,
                 desired_state: "ACTIVE".to_owned(),
@@ -792,7 +792,7 @@ mod tests {
     async fn attach_happy_path_persists_terminal_attached_state()
     -> Result<(), Box<dyn std::error::Error>> {
         let h = harness().await?;
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         seed_server(&h, server_id).await?;
         let volume = create_volume(&h).await?;
@@ -830,7 +830,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_detach_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
         let h = harness().await?;
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         seed_server(&h, server_id).await?;
         let volume = create_volume(&h).await?;
@@ -854,7 +854,7 @@ mod tests {
     async fn cinder_unavailable_before_create_compensates_cleanly()
     -> Result<(), Box<dyn std::error::Error>> {
         let h = harness().await?;
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         seed_server(&h, server_id).await?;
         let volume = create_volume(&h).await?;
@@ -886,13 +886,13 @@ mod tests {
         let client = Arc::new(client);
         let orchestrator =
             AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         store
             .insert_resource(&o3k_store::ResourceRecord {
                 id: server_id,
                 kind: "compute_instance".to_owned(),
-                project_id: "bootstrap-project".to_owned(),
+                project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                 generation: 1,
                 observed_generation: 1,
                 desired_state: "ACTIVE".to_owned(),
@@ -921,7 +921,7 @@ mod tests {
     async fn compute_attach_success_with_cinder_completion_failure_compensates()
     -> Result<(), Box<dyn std::error::Error>> {
         let h = harness().await?;
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         seed_server(&h, server_id).await?;
         let volume = create_volume(&h).await?;
@@ -949,7 +949,7 @@ mod tests {
         // verify the orchestrator rejects empty/invalid targets before any
         // compute mutation by failing the connector update.
         let h = harness().await?;
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         seed_server(&h, server_id).await?;
         let volume = create_volume(&h).await?;
@@ -982,7 +982,7 @@ mod restart_tests {
         let client = Arc::new(client);
         let orchestrator =
             AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         store
             .insert_resource(&o3k_store::ResourceRecord {
@@ -1029,7 +1029,7 @@ mod restart_tests {
         let client = Arc::new(client);
         let orchestrator =
             AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
-        let project = "bootstrap-project";
+        let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
         store
             .insert_resource(&o3k_store::ResourceRecord {

@@ -4977,12 +4977,12 @@ mod tests {
         Ok(())
     }
 
-    /// Regression test: the inspect probe must use the durable project *ID* "bootstrap-project",
+    /// Regression test: the inspect probe must use the durable project *ID* "eba29e2d-53de-461d-ae91-ede7402713cb",
     /// not the project *name* "admin" from the CLI/token context.
     ///
     /// The bootstrap token encodes:
     ///   "project": "admin"                  ← project name (display name only)
-    ///   "project_id": "bootstrap-project"   ← durable ID used by compute service
+    ///   "project_id": "eba29e2d-53de-461d-ae91-ede7402713cb"   ← durable ID used by compute service
     ///
     /// Passing the project name instead of the project ID causes the compute service to return
     /// NotFound on every inspect call because `resource.project_id != project_id` at the
@@ -5037,7 +5037,7 @@ mod tests {
         // Create a server under the durable project ID used by TestLab.
         let server = service
             .create_server(
-                "bootstrap-project",
+                "eba29e2d-53de-461d-ae91-ede7402713cb",
                 "testlab-server".to_owned(),
                 "cirros-image".to_owned(),
                 Uuid::from_u128(1),
@@ -5046,9 +5046,13 @@ mod tests {
             )
             .await?;
 
-        // Passing the correct project ID ("bootstrap-project") succeeds.
+        // Passing the correct project ID ("eba29e2d-53de-461d-ae91-ede7402713cb") succeeds.
         let result = service
-            .inspect_server("bootstrap-project", server.id, "testlab-inspect-key")
+            .inspect_server(
+                "eba29e2d-53de-461d-ae91-ede7402713cb",
+                server.id,
+                "testlab-inspect-key",
+            )
             .await?;
         assert_eq!(
             result.state,
@@ -5080,7 +5084,7 @@ mod tests {
     }
 
     /// Regression test: project isolation is preserved — a server created in
-    /// "bootstrap-project" is invisible to a caller using a different project ID.
+    /// "eba29e2d-53de-461d-ae91-ede7402713cb" is invisible to a caller using a different project ID.
     #[tokio::test]
     async fn inspect_probe_project_isolation_rejects_foreign_project()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5130,7 +5134,7 @@ mod tests {
 
         let server = service
             .create_server(
-                "bootstrap-project",
+                "eba29e2d-53de-461d-ae91-ede7402713cb",
                 "isolation-server".to_owned(),
                 "cirros-image".to_owned(),
                 Uuid::from_u128(1),
@@ -5158,7 +5162,11 @@ mod tests {
 
         // The owning project can still inspect successfully.
         let owner_result = service
-            .inspect_server("bootstrap-project", server.id, "isolation-owner-key")
+            .inspect_server(
+                "eba29e2d-53de-461d-ae91-ede7402713cb",
+                server.id,
+                "isolation-owner-key",
+            )
             .await?;
         assert_eq!(
             owner_result.state,

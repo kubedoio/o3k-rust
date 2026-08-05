@@ -480,7 +480,7 @@ pub async fn seed_identity_defaults(
 
     store
         .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
-            id: "bootstrap-project".to_owned(),
+            id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
             domain_id: default_domain.clone(),
             name: "admin".to_owned(),
             description: Some("TestLab bootstrap project".to_owned()),
@@ -552,15 +552,23 @@ pub async fn seed_identity_defaults(
     }
 
     let mut assignments = vec![
-        ("bootstrap-user", "bootstrap-project", "admin"),
-        ("bootstrap-user", "bootstrap-project", "member"),
+        (
+            "bootstrap-user",
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            "admin",
+        ),
+        (
+            "bootstrap-user",
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            "member",
+        ),
     ];
     if config.cinder_password.is_some() {
         assignments.extend([
             ("cinder", "service-project", "service"),
             ("cinder", "service-project", "admin"),
-            ("cinder", "bootstrap-project", "admin"),
-            ("cinder", "bootstrap-project", "service"),
+            ("cinder", "eba29e2d-53de-461d-ae91-ede7402713cb", "admin"),
+            ("cinder", "eba29e2d-53de-461d-ae91-ede7402713cb", "service"),
         ]);
     }
     for (index, (user_id, project_id, role_id)) in assignments.into_iter().enumerate() {
@@ -1367,7 +1375,7 @@ mod tests {
             }],
             projects: vec![
                 SnapshotProject {
-                    id: "bootstrap-project".to_owned(),
+                    id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                     domain_id: "default".to_owned(),
                     name: "admin".to_owned(),
                     enabled: true,
@@ -1431,12 +1439,12 @@ mod tests {
             assignments: vec![
                 SnapshotAssignment {
                     user_id: "bootstrap-user".to_owned(),
-                    project_id: "bootstrap-project".to_owned(),
+                    project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                     role_id: "admin".to_owned(),
                 },
                 SnapshotAssignment {
                     user_id: "bootstrap-user".to_owned(),
-                    project_id: "bootstrap-project".to_owned(),
+                    project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                     role_id: "member".to_owned(),
                 },
                 SnapshotAssignment {
@@ -1446,7 +1454,7 @@ mod tests {
                 },
                 SnapshotAssignment {
                     user_id: "cinder".to_owned(),
-                    project_id: "bootstrap-project".to_owned(),
+                    project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
                     role_id: "service".to_owned(),
                 },
             ],
@@ -1532,7 +1540,10 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let (token, response) = service.issue(&admin_request(), now)?;
         assert!(token.split('.').count() == 3);
-        assert_eq!(response.token.project.id, "bootstrap-project");
+        assert_eq!(
+            response.token.project.id,
+            "eba29e2d-53de-461d-ae91-ede7402713cb"
+        );
         assert_eq!(response.token.user.id, "bootstrap-user");
         assert_eq!(service.verify(&token, now)?.user_id, "bootstrap-user");
         Ok(())
@@ -1555,7 +1566,7 @@ mod tests {
                 ("identity".to_owned(), "http://127.0.0.1:8080/v3".to_owned()),
                 (
                     "volumev3".to_owned(),
-                    "http://127.0.0.1:8776/v3/bootstrap-project".to_owned()
+                    "http://127.0.0.1:8776/v3/eba29e2d-53de-461d-ae91-ede7402713cb".to_owned()
                 ),
             ]
         );
@@ -1705,7 +1716,10 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let (token, response) = service.issue(&testkit::cinder_service_request("password"), now)?;
         assert_eq!(response.token.user.id, "cinder");
-        assert_eq!(response.token.project.id, "bootstrap-project");
+        assert_eq!(
+            response.token.project.id,
+            "eba29e2d-53de-461d-ae91-ede7402713cb"
+        );
         let context = service.auth_context(&token, now)?;
         assert!(context.service_user);
         assert!(context.roles.contains(&"service".to_owned()));

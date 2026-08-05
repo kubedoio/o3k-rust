@@ -59,7 +59,7 @@ domain ID:  default
 domain name: Default
 user ID:    bootstrap-user
 user name:  admin
-project ID: bootstrap-project
+project ID: eba29e2d-53de-461d-ae91-ede7402713cb
 project name: admin
 role ID:    member
 role name:  member

@@ -226,32 +226,32 @@ echo "${CATALOG}" | grep -q "127.0.0.1:${CINDER_PORT}"
 
 echo "==> Creating a volume on the mock (token validated by the mock through O3K)..."
 VOLUME_JSON=$(curl -s -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
-  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/volumes" \
+  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/volumes" \
   -d '{"volume":{"size":1,"name":"mock-vol"}}')
 VOLUME_ID=$(echo "${VOLUME_JSON}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["volume"]["id"])')
 [ -n "${VOLUME_ID}" ] || { echo "ERROR: volume id missing"; exit 1; }
 
 echo "==> Creating, updating, completing, and terminating an attachment..."
 ATTACH_JSON=$(curl -s -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
-  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/attachments" \
+  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/attachments" \
   -d "{\"attachment\":{\"volume_id\":\"${VOLUME_ID}\"}}")
 ATTACH_ID=$(echo "${ATTACH_JSON}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["attachment"]["id"])')
 [ -n "${ATTACH_ID}" ] || { echo "ERROR: attachment id missing"; exit 1; }
 
 curl -s -f -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
-  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/attachments/${ATTACH_ID}/update" \
+  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/attachments/${ATTACH_ID}/update" \
   -d '{"attachment":{"connector":{"host":"compute-1","ip":"10.0.0.5","platform":"x86_64","os_type":"linux","multipath":false}}}' > /dev/null
 
 curl -s -f -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
-  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/attachments/${ATTACH_ID}/action" \
+  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/attachments/${ATTACH_ID}/action" \
   -d '{"os-complete": null}' > /dev/null
 
 curl -s -f -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json" \
-  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/attachments/${ATTACH_ID}/action" \
+  -X POST "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/attachments/${ATTACH_ID}/action" \
   -d '{"os-terminate": null}' > /dev/null
 
 echo "==> Deleting the volume and verifying cleanup..."
 curl -s -f -X DELETE -H "X-Auth-Token: ${ADMIN_TOKEN}" \
-  "http://127.0.0.1:${CINDER_PORT}/v3/bootstrap-project/volumes/${VOLUME_ID}" > /dev/null
+  "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/volumes/${VOLUME_ID}" > /dev/null
 
 echo "==> Mock Cinder component test PASSED cleanly."
