@@ -168,3 +168,7 @@ with open("${RESULT_PATH}", "w", encoding="utf-8") as output:
     output.write("\n")
 PY
 echo "ready=true"
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "ready=true" >> "${GITHUB_OUTPUT}"
+fi
+
