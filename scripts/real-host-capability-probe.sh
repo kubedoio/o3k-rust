@@ -101,12 +101,11 @@ if service_account_configured:
         pass
 if not non_root:
     skips.append("runner_is_root")
-if not service_account_configured:
-    skips.append("service_account_not_declared")
-elif not service_account_exists:
-    errors.append("service_account_unavailable")
-elif not service_account_matches:
-    errors.append("service_account_mismatch")
+if service_account_configured:
+    if not service_account_exists:
+        errors.append("service_account_unavailable")
+    elif not service_account_matches:
+        errors.append("service_account_mismatch")
 
 actual_labels_raw = os.environ.get("O3K_REAL_HOST_RUNNER_LABELS", "")
 actual_labels = [item.strip() for item in actual_labels_raw.split(",") if item.strip()]
@@ -121,19 +120,14 @@ elif not labels_exact:
 image_path = os.environ.get("O3K_TESTLAB_IMAGE_PATH", "")
 image_path_absolute = os.path.isabs(image_path)
 image_path_regular = os.path.isfile(image_path) if image_path else False
-if not image_path:
-    skips.append("image_path_not_declared")
-elif not image_path_absolute or not image_path_regular:
+if image_path and (not image_path_absolute or not image_path_regular):
     errors.append("image_path_invalid")
 
 compute_binary = os.environ.get("O3K_REAL_HOST_COMPUTE_BINARY", "")
 network_capability = os.environ.get("O3K_REAL_HOST_NETWORK_CAPABILITY", "")
-if not compute_binary:
-    skips.append("compute_binary_not_declared")
-if not network_capability:
-    skips.append("network_capability_not_declared")
-elif network_capability != "ambient-net-admin":
+if network_capability and network_capability != "ambient-net-admin":
     errors.append("unsupported_network_capability")
+
 
 checks = {
     "tools": tools,

@@ -37,8 +37,11 @@ jobs:
           O3K_REAL_HOST_WORKFLOW_RUN_ID: ${{ github.run_id }}
           O3K_REAL_HOST_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
           O3K_REAL_HOST_RUNNER_NAME: ${{ runner.name }}
+          O3K_REAL_HOST_SERVICE_ACCOUNT: ubuntu
+          O3K_REAL_HOST_NETWORK_CAPABILITY: ambient-net-admin
           GITHUB_SHA: ${{ github.sha }}
         run: bash scripts/real-host-capability-probe.sh
+
 
       - name: Pre-run host and capability guard
         id: guard
