@@ -19,6 +19,24 @@ use uuid::Uuid;
 
 mod artifact_transfer;
 
+/// Maximum attempts for an observation update contended by a concurrent
+/// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so
+/// retries only absorb contention bursts that outlast it; the update is
+/// idempotent, so a retry never double-applies.
+const SQLITE_BUSY_MAX_ATTEMPTS: u32 = 5;
+
+/// Reports whether a sqlx error is a SQLite lock-contention failure:
+/// SQLITE_BUSY (extended code 5) or SQLITE_BUSY_SNAPSHOT (517). sqlx preserves
+/// the extended code, so both variants are matchable here.
+fn is_sqlite_busy(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(database) => {
+            matches!(database.code().as_deref(), Some("5") | Some("517"))
+        }
+        _ => false,
+    }
+}
+
 pub use artifact_transfer::{
     ArtifactTransferRecord, ArtifactTransferState, ArtifactTransferUpdate,
     MAX_ARTIFACT_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_ARTIFACT_TRANSFER_RETRIES,
@@ -1557,6 +1575,106 @@ impl SqliteStore {
         sqlx::query_scalar("SELECT keypairs.name FROM server_keypairs JOIN keypairs ON keypairs.id = server_keypairs.keypair_id WHERE server_keypairs.server_id = ?")
             .bind(server_id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)
     }
+    /// Runs one attempt of the observation update inside a BEGIN IMMEDIATE
+    /// transaction. Errors are rolled back best-effort; the original error
+    /// stays authoritative.
+    async fn apply_observation_update(
+        &self,
+        id: Uuid,
+        update: &ObservationUpdate<'_>,
+    ) -> Result<ResourceRecord, StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome = self
+            .observation_update_in_transaction(&mut connection, id, update)
+            .await;
+        match outcome {
+            Ok(record) => match sqlx::query("COMMIT").execute(&mut *connection).await {
+                Ok(_) => Ok(record),
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    Err(StoreError::Database(error))
+                }
+            },
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn observation_update_in_transaction(
+        &self,
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        id: Uuid,
+        update: &ObservationUpdate<'_>,
+    ) -> Result<ResourceRecord, StoreError> {
+        let ObservationUpdate {
+            expected_generation,
+            desired_state,
+            observed_state,
+            observed_generation,
+            provider_id,
+            agent_epoch,
+            observation_sequence,
+        } = update;
+        let transaction = connection;
+        let resource_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ResourceNotFound)?;
+        let current = resource_from_row(&resource_row)?;
+        if current.generation != *expected_generation {
+            return Err(StoreError::StaleGeneration);
+        }
+        let watermark = sqlx::query(
+            "SELECT agent_epoch, observation_sequence FROM observation_watermarks WHERE resource_id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(StoreError::Database)?;
+        if let Some(watermark) = watermark {
+            let previous_epoch: String = watermark.get("agent_epoch");
+            let previous_sequence: i64 = watermark.get("observation_sequence");
+            if previous_epoch == *agent_epoch
+                && *observation_sequence <= u64::try_from(previous_sequence).unwrap_or(u64::MAX)
+            {
+                // Already applied: committing the read-only transaction is
+                // equivalent to the previous explicit rollback.
+                return Ok(current);
+            }
+        }
+        sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
+            .bind(*desired_state)
+            .bind(*observed_state)
+            .bind(*observed_generation)
+            .bind(*provider_id)
+            .bind(id.to_string())
+            .bind(*expected_generation)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("INSERT INTO observation_watermarks (resource_id, agent_epoch, observation_sequence) VALUES (?, ?, ?) ON CONFLICT(resource_id) DO UPDATE SET agent_epoch = excluded.agent_epoch, observation_sequence = excluded.observation_sequence")
+            .bind(id.to_string())
+            .bind(*agent_epoch)
+            .bind(i64::try_from(*observation_sequence).map_err(|_| StoreError::Corrupt("observation sequence exceeds SQLite range".to_owned()))?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let updated_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        let updated = resource_from_row(&updated_row)?;
+        Ok(updated)
+    }
 }
 
 fn keypair_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<KeypairRecord, StoreError> {
@@ -1768,68 +1886,29 @@ impl DurableStore for SqliteStore {
         id: Uuid,
         update: &ObservationUpdate<'_>,
     ) -> Result<ResourceRecord, StoreError> {
-        let ObservationUpdate {
-            expected_generation,
-            desired_state,
-            observed_state,
-            observed_generation,
-            provider_id,
-            agent_epoch,
-            observation_sequence,
-        } = update;
-        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
-        let resource_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::ResourceNotFound)?;
-        let current = resource_from_row(&resource_row)?;
-        if current.generation != *expected_generation {
-            return Err(StoreError::StaleGeneration);
-        }
-        let watermark = sqlx::query(
-            "SELECT agent_epoch, observation_sequence FROM observation_watermarks WHERE resource_id = ?",
-        )
-        .bind(id.to_string())
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(StoreError::Database)?;
-        if let Some(watermark) = watermark {
-            let previous_epoch: String = watermark.get("agent_epoch");
-            let previous_sequence: i64 = watermark.get("observation_sequence");
-            if previous_epoch == *agent_epoch
-                && *observation_sequence <= u64::try_from(previous_sequence).unwrap_or(u64::MAX)
-            {
-                transaction.rollback().await.map_err(StoreError::Database)?;
-                return Ok(current);
+        // A deferred read-then-write transaction in WAL mode can fail
+        // immediately with SQLITE_BUSY when a concurrent connection holds the
+        // write lock: SQLite declines to invoke the busy handler when waiting
+        // would deadlock a lock promotion (proven by run local-1785957445,
+        // issue #487, where the observation update failed 6ms after start and
+        // the resource stayed `requested` forever). BEGIN IMMEDIATE acquires
+        // the write lock up front so the configured busy_timeout is honoured,
+        // and the bounded retry below absorbs any residual busy window. The
+        // update is transactional and idempotent (generation check plus
+        // watermark dedup), so retrying a failed attempt is safe.
+        let mut backoff = Duration::from_millis(10);
+        for attempt in 0..SQLITE_BUSY_MAX_ATTEMPTS {
+            match self.apply_observation_update(id, update).await {
+                Err(StoreError::Database(error))
+                    if is_sqlite_busy(&error) && attempt + 1 < SQLITE_BUSY_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                outcome => return outcome,
             }
         }
-        sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
-            .bind(*desired_state)
-            .bind(*observed_state)
-            .bind(*observed_generation)
-            .bind(*provider_id)
-            .bind(id.to_string())
-            .bind(*expected_generation)
-            .execute(&mut *transaction)
-            .await
-            .map_err(StoreError::Database)?;
-        sqlx::query("INSERT INTO observation_watermarks (resource_id, agent_epoch, observation_sequence) VALUES (?, ?, ?) ON CONFLICT(resource_id) DO UPDATE SET agent_epoch = excluded.agent_epoch, observation_sequence = excluded.observation_sequence")
-            .bind(id.to_string())
-            .bind(*agent_epoch)
-            .bind(i64::try_from(*observation_sequence).map_err(|_| StoreError::Corrupt("observation sequence exceeds SQLite range".to_owned()))?)
-            .execute(&mut *transaction)
-            .await
-            .map_err(StoreError::Database)?;
-        let updated_row = sqlx::query("SELECT id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id FROM resources WHERE id = ?")
-            .bind(id.to_string())
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(StoreError::Database)?;
-        let updated = resource_from_row(&updated_row)?;
-        transaction.commit().await.map_err(StoreError::Database)?;
-        Ok(updated)
+        unreachable!("the loop returns on the final attempt")
     }
 
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
@@ -3098,6 +3177,67 @@ mod tests {
 
         let health = store.database_health().await?;
         assert_eq!(health.status, "ok");
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observation_update_waits_out_a_concurrent_writer() -> Result<(), Box<dyn Error>> {
+        // Regression test for issue #487 (run local-1785957445): a deferred
+        // read-then-write transaction failed immediately with SQLITE_BUSY
+        // when a concurrent connection held the write lock, and the dropped
+        // observation left the resource stuck in `requested`. BEGIN IMMEDIATE
+        // honours the configured busy_timeout instead of failing immediately.
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-observation-busy-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store = SqliteStore::connect_file(&path).await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-busy".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: Some("provider-1".to_owned()),
+        };
+        store.insert_resource(&resource).await?;
+
+        // Hold the WAL write lock on a second connection long enough that an
+        // immediate-failure implementation would return SQLITE_BUSY first.
+        let lock_url = format!("sqlite://{}", path.display());
+        let holder = tokio::spawn(async move {
+            use sqlx::Connection as _;
+            let mut connection = sqlx::sqlite::SqliteConnection::connect(&lock_url).await?;
+            sqlx::query("BEGIN IMMEDIATE")
+                .execute(&mut connection)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            sqlx::query("COMMIT").execute(&mut connection).await?;
+            Ok::<(), sqlx::Error>(())
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let update = ObservationUpdate {
+            expected_generation: 1,
+            desired_state: "active",
+            observed_state: "running",
+            observed_generation: 1,
+            provider_id: Some("provider-1"),
+            agent_epoch: "epoch-1",
+            observation_sequence: 1,
+        };
+        let updated = store
+            .update_resource_from_observation(resource.id, &update)
+            .await?;
+        assert_eq!(updated.observed_state, "running");
+        assert_eq!(updated.generation, 2);
+        holder.await??;
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(format!("{}-wal", path.display()));
