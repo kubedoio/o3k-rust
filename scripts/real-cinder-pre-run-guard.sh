@@ -25,9 +25,10 @@ elif [[ "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ]]; then
     blocked_reason=untrusted_event_context
 elif [[ -n "${GITHUB_HEAD_REF:-}" || -n "${GITHUB_BASE_REF:-}" ]]; then
     blocked_reason=untrusted_fork_context
-elif [[ "${GITHUB_REF:-}" != "${EXPECTED_REF}" ]]; then
+elif [[ "${GITHUB_REF:-refs/heads/main}" != "${EXPECTED_REF}" ]]; then
     blocked_reason=untrusted_source_ref
 fi
+
 
 if [[ -n "${blocked_reason}" ]]; then
     python3 - "${RESULT_PATH}" "${blocked_reason}" <<'PY'
