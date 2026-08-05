@@ -5,11 +5,30 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+/// Poll interval while waiting for a freshly created TAP address to settle.
+#[cfg(not(test))]
+const TAP_ADDRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const TAP_ADDRESS_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
+/// How long the kernel TAP address must continuously match the requested
+/// address before it is considered stable. An asynchronously applied udev
+/// MAC policy lands within tens of milliseconds of the device add event, so
+/// a 200 ms observation window covers it with an order of magnitude margin.
+#[cfg(not(test))]
+const TAP_ADDRESS_SETTLE_WINDOW: Duration = Duration::from_millis(200);
+#[cfg(test)]
+const TAP_ADDRESS_SETTLE_WINDOW: Duration = Duration::ZERO;
+
+/// Upper bound for address stabilization before the TAP is rolled back.
+const TAP_ADDRESS_STABILIZE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostNetworkConfig {
@@ -327,6 +346,10 @@ mod host_network_tests {
             Response::status(true),
             Response::status(true),
             Response::status(true),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
         ]);
         let manager = HostNetworkManager::with_command_and_ownership(
             HostNetworkConfig {
@@ -410,6 +433,104 @@ mod host_network_tests {
         ));
         fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
         Ok(())
+    }
+
+    #[test]
+    fn tap_address_is_reapplied_after_external_replacement() -> Result<(), HostNetworkError> {
+        // A udev MAC policy write can land after the address was set during
+        // TAP creation. The owner must observe the replacement, re-apply the
+        // requested address, and only then record ownership.
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 1a:8d:9b:1f:2f:b5",
+            ),
+            Response::status(true),
+            Response::output(
+                true,
+                "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
+        ]);
+        let manager = test_manager(command.clone(), None);
+        let spec = TapSpec {
+            instance_id: "instance-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+
+        let name = manager.create_tap(&spec)?;
+        let calls = command.calls();
+        let set_calls = calls
+            .iter()
+            .filter(|args| {
+                args.as_slice() == ["link", "set", "dev", &name, "address", "02:00:00:00:00:01"]
+            })
+            .count();
+        assert_eq!(set_calls, 2, "address must be re-applied after replacement");
+        Ok(())
+    }
+
+    #[test]
+    fn tap_address_reapply_failure_rolls_back_owned_resources() {
+        let mut responses = vec![
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::output(false, ""),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+            Response::status(true),
+        ];
+        // The kernel view never matches the requested address; the second
+        // re-apply fails and the owned TAP and bridge are rolled back.
+        responses.push(Response::output(
+            true,
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 1a:8d:9b:1f:2f:b5",
+        ));
+        responses.push(Response::status(true));
+        responses.push(Response::output(
+            true,
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 1a:8d:9b:1f:2f:b5",
+        ));
+        responses.push(Response::status(false));
+        // Rollback deletes the owned TAP and the owned bridge.
+        responses.push(Response::status(true));
+        responses.push(Response::status(true));
+        let command = FakeNetworkCommand::new(responses);
+        let manager = test_manager(command.clone(), None);
+        let spec = TapSpec {
+            instance_id: "instance-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+
+        assert!(matches!(
+            manager.create_tap(&spec),
+            Err(HostNetworkError::CommandFailed)
+        ));
+        let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
+        let calls = command.calls();
+        let reapplies = calls
+            .iter()
+            .filter(|args| {
+                args.as_slice() == ["link", "set", "dev", &tap, "address", "02:00:00:00:00:01"]
+            })
+            .count();
+        assert!(reapplies >= 2, "address must be re-applied while unstable");
+        assert_eq!(calls[calls.len() - 2], vec!["link", "del", "dev", &tap]);
+        assert_eq!(
+            calls[calls.len() - 1],
+            vec!["link", "del", "dev", "o3k-br0"]
+        );
     }
 
     #[test]
@@ -929,11 +1050,50 @@ impl HostNetworkManager {
         if let Err(error) = setup {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
+        if let Err(error) = self.stabilize_tap_address(&name, &spec.mac) {
+            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
+        }
         if let Err(error) = self.record_tap_ownership(&name, spec) {
             return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
         }
         Ok((name, true))
     }
+    /// Re-applies the requested TAP address until the kernel view stays
+    /// stable across a settle window.
+    ///
+    /// A udev `net_setup_link` policy (for example the
+    /// `MACAddressPolicy=persistent` shipped by `99-default.link`) is applied
+    /// when the device add event is processed. That policy decision is based
+    /// on attributes read when the worker starts, so the policy write can land
+    /// after this process already set the address and silently replace it
+    /// with a policy-derived address. The policy write happens once per add
+    /// event, so observing the requested address across a settle window and
+    /// re-applying it after any replacement converges before ownership is
+    /// recorded.
+    fn stabilize_tap_address(&self, name: &str, mac: &str) -> Result<(), HostNetworkError> {
+        let started = Instant::now();
+        let mut stable_since: Option<Instant> = None;
+        loop {
+            let output = self.command_output(["-d", "link", "show", "dev", name])?;
+            if !output.success {
+                return Err(HostNetworkError::CommandFailed);
+            }
+            if has_link_token(&output.stdout, "link/ether", mac) {
+                let since = stable_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= TAP_ADDRESS_SETTLE_WINDOW {
+                    return Ok(());
+                }
+            } else {
+                stable_since = None;
+                self.run_ip(["link", "set", "dev", name, "address", mac])?;
+            }
+            if started.elapsed() >= TAP_ADDRESS_STABILIZE_TIMEOUT {
+                return Err(HostNetworkError::CommandFailed);
+            }
+            std::thread::sleep(TAP_ADDRESS_POLL_INTERVAL);
+        }
+    }
+
     /// Deletes a TAP only after proving its expected MAC and bridge ownership.
     pub fn delete_tap(&self, spec: &TapSpec) -> Result<(), HostNetworkError> {
         validate_reference(&spec.instance_id)?;
