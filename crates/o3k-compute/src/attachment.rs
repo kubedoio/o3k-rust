@@ -139,7 +139,11 @@ impl AttachmentOrchestrator {
         // Phase: cinder_attachment_created
         self.set_phase(id, STATUS_CINDER_ATTACHMENT_CREATED, None)
             .await?;
-        let cinder_attachment = match cinder.create_attachment(project_id, &volume_id_str).await {
+        let server_id_str = server_id.to_string();
+        let cinder_attachment = match cinder
+            .create_attachment(project_id, &volume_id_str, Some(&server_id_str))
+            .await
+        {
             Ok(attachment) => attachment,
             Err(error) => {
                 self.compensate_after_create(project_id, id, None, &format!("{error}"))

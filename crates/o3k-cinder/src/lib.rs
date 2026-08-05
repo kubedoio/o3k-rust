@@ -363,13 +363,18 @@ impl CinderClient {
         &self,
         project_id: &str,
         volume_id: &str,
+        instance_uuid: Option<&str>,
     ) -> Result<CinderAttachment, CinderError> {
         let url = format!(
             "{}/v3/{}/attachments",
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id
         );
-        let body = serde_json::json!({"attachment": {"volume_id": volume_id}});
+        let mut attachment = serde_json::json!({"volume_id": volume_id});
+        if let Some(instance_uuid) = instance_uuid {
+            attachment["instance_uuid"] = serde_json::json!(instance_uuid);
+        }
+        let body = serde_json::json!({"attachment": attachment});
         let (status, _, value) = self
             .send(Method::POST, &url, Some(project_id), Some(body))
             .await?;

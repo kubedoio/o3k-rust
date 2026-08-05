@@ -161,7 +161,13 @@ async fn attachment_lifecycle_validates_token_through_keystone()
     let volume = client.create_volume(project, 1, "vol-1").await?;
     assert_eq!(volume.status, "available");
 
-    let attachment = client.create_attachment(project, &volume.id).await?;
+    let attachment = client
+        .create_attachment(
+            project,
+            &volume.id,
+            Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
+        )
+        .await?;
     assert_eq!(attachment.status, "creating");
     assert_eq!(
         fake.last_openstack_api_version().as_deref(),
@@ -206,7 +212,13 @@ async fn connection_info_is_redacted_and_digested() -> Result<(), Box<dyn std::e
     let (client, _fake, _cinder_endpoint) = setup().await?;
     let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 1, "vol-secret").await?;
-    let attachment = client.create_attachment(project, &volume.id).await?;
+    let attachment = client
+        .create_attachment(
+            project,
+            &volume.id,
+            Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
+        )
+        .await?;
     let updated = client
         .update_attachment_connector(project, &attachment.id, &connector())
         .await?;
@@ -262,7 +274,14 @@ async fn service_unavailable_and_not_found_mapping() -> Result<(), Box<dyn std::
     let volume = client.create_volume(project, 1, "v").await?;
 
     fake.set_fault(faults::fail_create_attachment, true);
-    let error = match client.create_attachment(project, &volume.id).await {
+    let error = match client
+        .create_attachment(
+            project,
+            &volume.id,
+            Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
+        )
+        .await
+    {
         Err(error) => error,
         Ok(_) => return Err("expected availability failure".into()),
     };
@@ -275,7 +294,13 @@ async fn service_unavailable_and_not_found_mapping() -> Result<(), Box<dyn std::
     assert!(matches!(error, CinderError::NotFound(_)));
 
     fake.set_fault(faults::fail_complete_attachment, true);
-    let attachment = client.create_attachment(project, &volume.id).await?;
+    let attachment = client
+        .create_attachment(
+            project,
+            &volume.id,
+            Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
+        )
+        .await?;
     client
         .update_attachment_connector(project, &attachment.id, &connector())
         .await?;
@@ -297,7 +322,14 @@ async fn timeout_is_unknown_outcome() -> Result<(), Box<dyn std::error::Error>> 
     let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
     let volume = client.create_volume(project, 1, "v").await?;
     fake.set_fault(faults::timeout_create_attachment, true);
-    let error = match client.create_attachment(project, &volume.id).await {
+    let error = match client
+        .create_attachment(
+            project,
+            &volume.id,
+            Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
+        )
+        .await
+    {
         Err(error) => error,
         Ok(_) => return Err("expected timeout".into()),
     };
