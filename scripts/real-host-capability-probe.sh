@@ -153,7 +153,9 @@ checks = {
 }
 
 required_missing = []
-required_missing.extend(name for name, present in tools.items() if not present)
+required_tools = ("virsh", "qemu-img", "ip", "dnsmasq", "setpriv")
+required_missing.extend(name for name in required_tools if not tools.get(name))
+
 if not config_drive_available:
     required_missing.append("config-drive-tooling")
 if kvm_path != "/dev/kvm" or not kvm_present or not kvm_readable or not kvm_character_device:
