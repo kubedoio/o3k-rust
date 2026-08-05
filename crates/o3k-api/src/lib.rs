@@ -1580,6 +1580,11 @@ struct ServerResponse {
     addresses: serde_json::Value,
     key_name: Option<String>,
     config_drive: bool,
+    // Nova servers always carry a metadata object; public clients (for
+    // example openstackclient 6.6 `_prep_server_detail`) pop it
+    // unconditionally. O3K does not model server metadata yet, so the
+    // representation is always the empty object.
+    metadata: serde_json::Value,
 }
 #[derive(Serialize)]
 struct IdResponse {
@@ -1623,6 +1628,7 @@ fn server_response(server: Server, network_service: Option<&NetworkService>) -> 
         addresses: serde_json::Value::Object(addresses),
         key_name: server.key_name,
         config_drive: server.config_drive,
+        metadata: serde_json::Value::Object(serde_json::Map::new()),
     }
 }
 

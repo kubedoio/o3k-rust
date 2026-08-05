@@ -810,6 +810,9 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     let server_json: Value =
         serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 8192).await?)?;
     assert_eq!(server_json["server"]["status"], "ACTIVE");
+    // Public clients (openstackclient 6.6 `_prep_server_detail`) pop the
+    // server metadata object unconditionally; Nova always carries one.
+    assert_eq!(server_json["server"]["metadata"], serde_json::json!({}));
     assert_eq!(
         server_json["server"]["addresses"][network.id.to_string()][0]["addr"],
         expected_fixed_ip
