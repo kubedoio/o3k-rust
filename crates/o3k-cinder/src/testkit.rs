@@ -291,6 +291,7 @@ async fn create_attachment(
     let value: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let volume_id = value["attachment"]["volume_id"]
         .as_str()
+        .or_else(|| value["attachment"]["volume_uuid"].as_str())
         .unwrap_or_default()
         .to_owned();
     if volume_id.is_empty() {

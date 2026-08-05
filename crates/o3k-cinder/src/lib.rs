@@ -370,7 +370,10 @@ impl CinderClient {
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id
         );
-        let mut attachment = serde_json::json!({"volume_id": volume_id});
+        let mut attachment = serde_json::json!({
+            "volume_id": volume_id,
+            "volume_uuid": volume_id,
+        });
         if let Some(instance_uuid) = instance_uuid {
             attachment["instance_uuid"] = serde_json::json!(instance_uuid);
         }
