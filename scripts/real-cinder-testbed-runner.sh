@@ -307,6 +307,7 @@ echo "==> Writing run-owned cinder.conf..."
 CONF="${STATE_ROOT}/cinder.conf"
 cat > "${CONF}" <<EOF
 [DEFAULT]
+api_paste_config = ${STATE_ROOT}/api-paste.ini
 transport_url = rabbit://${MQ_USER}:${MQ_PW}@127.0.0.1:5672/${MQ_VHOST}
 # Scope the RPC control exchange and queue names by run ID so this Cinder
 # deployment never collides with any foreign Cinder services that may already
@@ -350,6 +351,84 @@ root_helper = sudo
 # boundary; targets that require authentication are rejected by the control
 # plane. Disable CHAP so the real iSCSI target is accepted.
 chap_authentication = False
+EOF
+
+echo "==> Writing run-owned api-paste.ini..."
+# A pip-installed Cinder venv does not ship the etc files, and cinder-api
+# aborts with oslo_service.wsgi.ConfigNotFound without a paste-deploy config
+# (protected run 30990650655). Provenance: verbatim upstream Cinder 28.0.0
+# (2026.1 Gazpacho), https://github.com/openstack/cinder branch stable/2026.1,
+# path etc/cinder/api-paste.ini (Apache-2.0). Generated into the run-owned
+# state root; the foreign /etc/cinder tree is never read or written.
+cat > "${STATE_ROOT}/api-paste.ini" <<'EOF'
+#############
+# OpenStack #
+#############
+
+[composite:osapi_volume]
+use = call:cinder.api:root_app_factory
+/: apiversions
+/healthcheck: healthcheck
+/v3: openstack_volume_api_v3
+
+[composite:openstack_volume_api_v3]
+use = call:cinder.api.middleware.auth:pipeline_factory
+noauth = request_id cors http_proxy_to_wsgi faultwrap sizelimit osprofiler noauth apiv3
+noauth_include_project_id = request_id cors http_proxy_to_wsgi faultwrap sizelimit osprofiler noauth_include_project_id apiv3
+keystone = request_id cors http_proxy_to_wsgi faultwrap sizelimit osprofiler authtoken keystonecontext apiv3
+keystone_nolimit = request_id cors http_proxy_to_wsgi faultwrap sizelimit osprofiler authtoken keystonecontext apiv3
+
+[filter:http_proxy_to_wsgi]
+paste.filter_factory = oslo_middleware.http_proxy_to_wsgi:HTTPProxyToWSGI.factory
+
+[filter:cors]
+paste.filter_factory = oslo_middleware.cors:filter_factory
+oslo_config_project = cinder
+
+[filter:faultwrap]
+paste.filter_factory = cinder.api.middleware.fault:FaultWrapper.factory
+
+[filter:osprofiler]
+paste.filter_factory = osprofiler.web:WsgiMiddleware.factory
+
+[filter:noauth]
+paste.filter_factory = cinder.api.middleware.auth:NoAuthMiddleware.factory
+
+[filter:noauth_include_project_id]
+paste.filter_factory = cinder.api.middleware.auth:NoAuthMiddlewareIncludeProjectID.factory
+
+[filter:sizelimit]
+paste.filter_factory = oslo_middleware.sizelimit:RequestBodySizeLimiter.factory
+
+[app:apiv3]
+paste.app_factory = cinder.api.v3.router:APIRouter.factory
+
+[pipeline:apiversions]
+pipeline = request_id cors http_proxy_to_wsgi faultwrap osvolumeversionapp
+
+[app:osvolumeversionapp]
+paste.app_factory = cinder.api.versions:Versions.factory
+
+[pipeline:healthcheck]
+pipeline = request_id healthcheckapp
+
+[app:healthcheckapp]
+paste.app_factory = oslo_middleware:Healthcheck.app_factory
+backends = disable_by_file
+disable_by_file_path = /etc/cinder/healthcheck_disable
+
+##########
+# Shared #
+##########
+
+[filter:keystonecontext]
+paste.filter_factory = cinder.api.middleware.auth:CinderKeystoneContext.factory
+
+[filter:authtoken]
+paste.filter_factory = keystonemiddleware.auth_token:filter_factory
+
+[filter:request_id]
+paste.filter_factory = cinder.api.middleware.request_id:RequestId.factory
 EOF
 
 echo "==> Running cinder-manage db sync..."
