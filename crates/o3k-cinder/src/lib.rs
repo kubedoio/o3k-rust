@@ -371,7 +371,6 @@ impl CinderClient {
             project_id
         );
         let mut attachment = serde_json::json!({
-            "volume_id": volume_id,
             "volume_uuid": volume_id,
         });
         if let Some(instance_uuid) = instance_uuid {
