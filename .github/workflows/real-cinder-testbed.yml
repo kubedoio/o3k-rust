@@ -43,6 +43,16 @@ jobs:
         run: bash scripts/real-host-capability-probe.sh
 
 
+      - name: Remove stale defect-fallback state roots
+        # Runs that lost GITHUB_RUN_ID through bare sudo (run 30987602879)
+        # fell back to local-* state roots and failed before the cleanup trap
+        # was installed. Those directories are O3K-owned defect artifacts
+        # under the O3K state base; remove only that exact pattern so the
+        # pre-run guard's stale-state check sees a clean baseline.
+        run: |
+          sudo -n find /var/lib/o3k-cinder-testbed -mindepth 1 -maxdepth 1 \
+            -type d -name 'local-*' -print -exec rm -rf {} + 2>/dev/null || true
+
       - name: Pre-run host and capability guard
         id: guard
         env:
@@ -65,11 +75,15 @@ jobs:
         if: steps.guard.outputs.ready == 'true'
         continue-on-error: true
         env:
-          O3K_STATE_ROOT: /var/lib/o3k-cinder-testbed/${{ github.run_id }}
+          # Base directory only: the runner appends the workflow run ID so the
+          # state root matches the guard, artifact upload, and cleanup steps.
+          O3K_STATE_ROOT: /var/lib/o3k-cinder-testbed
           O3K_CINDER_PROFILE: gazpacho
           # Ephemeral secrets are generated inside the runner and masked with
           # ::add-mask::; nothing is sourced from repository literals.
-        run: sudo bash scripts/real-cinder-testbed-runner.sh --keep
+        run: >-
+          sudo --preserve-env=GITHUB_RUN_ID,O3K_STATE_ROOT,O3K_CINDER_PROFILE
+          bash scripts/real-cinder-testbed-runner.sh --keep
 
       - name: Post-run resource-leak and foreign-state guard
         if: always()
