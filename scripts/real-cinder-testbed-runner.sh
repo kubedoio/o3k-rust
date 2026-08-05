@@ -94,12 +94,24 @@ DB_USER="o3k_cinder_${RUN_SLUG}"
 MQ_USER="o3k_cinder_${RUN_SLUG}"
 MQ_VHOST="o3k_cinder_${RUN_SLUG}"
 
-STATE_ROOT="${O3K_STATE_ROOT:-/var/lib/o3k-cinder-testbed}/${RUN_ID}"
+STATE_BASE="${O3K_STATE_ROOT:-/var/lib/o3k-cinder-testbed}"
+STATE_ROOT="${STATE_BASE}/${RUN_ID}"
 DATA_DIR="${STATE_ROOT}/data"
 EVIDENCE_DIR="${STATE_ROOT}/evidence-$(date +%s)"
 VENV_DIR="${STATE_ROOT}/venv"
 LOOP_FILE="${DATA_DIR}/${VG_NAME}.img"
 mkdir -p "${EVIDENCE_DIR}" "${DATA_DIR}"
+
+# A failure before the service cleanup trap (installed later, once services
+# exist) must not leave the freshly created run-owned state root behind: the
+# protected pre-run guard blocks every later run on any stale state under the
+# base directory. Only ever removes the exact run-owned state root.
+early_failure_cleanup() {
+  if [ -n "${STATE_ROOT:-}" ] && [ "${STATE_ROOT}" != "${STATE_BASE}" ] && [ -d "${STATE_ROOT}" ]; then
+    rm -rf "${STATE_ROOT}"
+  fi
+}
+trap early_failure_cleanup EXIT
 
 echo "==> Real Cinder service-under-test profile"
 echo "    Profile: ${RELEASE_CODENAME} (${RELEASE_SERIES})"
@@ -156,6 +168,31 @@ EOF
 echo "    foreign-state-before.json recorded"
 
 echo "==> Building O3K binaries..."
+# Under sudo the rustup toolchain is not on secure_path (run 30987602879
+# failed here with "cargo: command not found"). Discover cargo from the
+# invoking user's rustup installation or well-known locations before giving up.
+if ! command -v cargo >/dev/null 2>&1; then
+  SUDO_USER_HOME="$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6 || true)"
+  for candidate_home in "${SUDO_USER_HOME}" /root /usr/local/cargo; do
+    [ -n "${candidate_home}" ] || continue
+    if [ -x "${candidate_home}/.cargo/bin/cargo" ]; then
+      export CARGO_HOME="${candidate_home}/.cargo"
+      [ -d "${candidate_home}/.rustup" ] && export RUSTUP_HOME="${candidate_home}/.rustup"
+      export PATH="${CARGO_HOME}/bin:${PATH}"
+      break
+    fi
+    if [ -x "${candidate_home}/bin/cargo" ]; then
+      export CARGO_HOME="${candidate_home}"
+      [ -d "${candidate_home}/../rustup" ] && export RUSTUP_HOME="${candidate_home}/../rustup"
+      export PATH="${CARGO_HOME}/bin:${PATH}"
+      break
+    fi
+  done
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR: cargo not found in PATH or known rustup locations"
+  exit 1
+fi
 cargo build --manifest-path "${REPO_ROOT}/Cargo.toml" --bin o3kd
 RUSTFLAGS="${RUSTFLAGS:-} -l dylib=virt" \
   cargo build --manifest-path "${REPO_ROOT}/Cargo.toml" --features libvirt --bin o3k-compute-bin
@@ -353,16 +390,17 @@ set -a; . "${STATE_ROOT}/o3k-compute.env"; set +a
 COMPUTE_PID=$!
 
 cleanup_early() {
-  kill -TERM "${COMPUTE_PID}" 2>/dev/null || true
-  wait "${COMPUTE_PID}" 2>/dev/null || true
-  kill -TERM "${O3KD_PID}" 2>/dev/null || true
-  wait "${O3KD_PID}" 2>/dev/null || true
+  kill -TERM "${COMPUTE_PID:-}" 2>/dev/null || true
+  wait "${COMPUTE_PID:-}" 2>/dev/null || true
+  kill -TERM "${O3KD_PID:-}" 2>/dev/null || true
+  wait "${O3KD_PID:-}" 2>/dev/null || true
   "${VENV_DIR}/bin/cinder-volume" --config-file "${CONF}" stop 2>/dev/null || true
   "${VENV_DIR}/bin/cinder-scheduler" --config-file "${CONF}" stop 2>/dev/null || true
   "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" stop 2>/dev/null || true
+  kill -TERM "${CINDER_API_PID:-}" "${CINDER_SCHED_PID:-}" "${CINDER_VOL_PID:-}" 2>/dev/null || true
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
-  losetup -d "${LOOP_DEV}" 2>/dev/null || true
+  losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
   rabbitmqctl delete_vhost "${MQ_VHOST}" 2>/dev/null || true
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
