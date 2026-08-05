@@ -208,11 +208,9 @@ pub fn router(state: FakeCinderState) -> Router {
         )
         .route(
             "/v3/{project_id}/attachments/{attachment_id}",
-            get(show_attachment),
-        )
-        .route(
-            "/v3/{project_id}/attachments/{attachment_id}/update",
-            post(update_attachment),
+            get(show_attachment)
+                .put(update_attachment)
+                .delete(delete_attachment),
         )
         .route(
             "/v3/{project_id}/attachments/{attachment_id}/action",
@@ -429,6 +427,34 @@ async fn update_attachment(
             "connection_info": connection_info
         }}),
     )
+}
+
+async fn delete_attachment(
+    State(state): State<FakeCinderState>,
+    headers: HeaderMap,
+    Path((_project_id, attachment_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if !authorize(&state, &headers).await {
+        return js(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}));
+    }
+    if state.take_fault(|faults| faults.fail_terminate_attachment) {
+        return js(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": {"message": "fake: terminate failed"}}),
+        );
+    }
+    let mut attachments = state
+        .attachments
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(attachment) = attachments.remove(&attachment_id) else {
+        return js(
+            StatusCode::NOT_FOUND,
+            json!({"error": {"message": "attachment not found"}}),
+        );
+    };
+    let _ = attachment;
+    js(StatusCode::OK, json!({}))
 }
 
 async fn attachment_action(

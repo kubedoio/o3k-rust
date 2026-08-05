@@ -440,14 +440,14 @@ impl CinderClient {
         connector: &ComputeConnector,
     ) -> Result<CinderAttachment, CinderError> {
         let url = format!(
-            "{}/v3/{}/attachments/{}/update",
+            "{}/v3/{}/attachments/{}",
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id,
             attachment_id
         );
         let body = serde_json::json!({"attachment": {"connector": connector}});
         let (status, _, value) = self
-            .send(Method::POST, &url, Some(project_id), Some(body))
+            .send(Method::PUT, &url, Some(project_id), Some(body))
             .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
@@ -486,15 +486,17 @@ impl CinderClient {
         attachment_id: &str,
     ) -> Result<(), CinderError> {
         let url = format!(
-            "{}/v3/{}/attachments/{}/action",
+            "{}/v3/{}/attachments/{}",
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id,
             attachment_id
         );
-        let body = serde_json::json!({"os-terminate": null});
         let (status, _, value) = self
-            .send(Method::POST, &url, Some(project_id), Some(body))
+            .send(Method::DELETE, &url, Some(project_id), None)
             .await?;
+        if status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
         if !status.is_success() {
             return Err(status_error(status, &value));
         }
