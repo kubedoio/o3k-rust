@@ -2390,6 +2390,9 @@ async fn server_action(
                                 );
                             }
                         };
+                        if let Ok(op_uuid) = uuid::Uuid::parse_str(&operation_id) {
+                            let _ = service.persist_pending_command(&command, op_uuid).await;
+                        }
                         let dispatch_started = std::time::Instant::now();
                         tracing::info!(
                             server_id = %id,

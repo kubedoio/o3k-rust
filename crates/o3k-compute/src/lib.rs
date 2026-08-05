@@ -523,7 +523,7 @@ impl AgentComputeProvider {
         Ok(operation)
     }
 
-    async fn persist_pending_command(
+    pub async fn persist_pending_command(
         &self,
         command: &o3k_provider_contract::compute_proto::Command,
         operation_id: Uuid,
@@ -547,6 +547,19 @@ impl AgentComputeProvider {
             provider_operation_id: Some(operation_id.to_string()),
             provider_resource_id: None,
         };
+        if store.get_operation(operation_id).await.is_err() {
+            let _ = store
+                .insert_operation(&o3k_store::OperationRecord {
+                    id: operation_id,
+                    resource_id: record.resource_id,
+                    kind: "command".to_owned(),
+                    state: o3k_store::OperationState::Running,
+                    provider_operation_id: Some(operation_id.to_string()),
+                    error_category: None,
+                    error_message: None,
+                })
+                .await;
+        }
         let existing = store
             .insert_agent_command(&record)
             .await
@@ -2030,6 +2043,49 @@ impl ComputeService {
     #[must_use]
     pub fn attachment_orchestrator(&self) -> AttachmentOrchestrator {
         self.attachments.clone()
+    }
+
+    pub async fn persist_pending_command(
+        &self,
+        command: &o3k_provider_contract::compute_proto::Command,
+        operation_id: Uuid,
+    ) -> Result<Option<AgentCommandRecord>, ComputeError> {
+        let record = AgentCommandRecord {
+            command_id: command.command_id.clone(),
+            idempotency_key: command.idempotency_key.clone(),
+            operation_id,
+            resource_id: Uuid::parse_str(&command.resource_id)
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            agent_id: command.agent_id.clone(),
+            agent_epoch: command.agent_epoch.clone(),
+            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+            payload: command.encode_to_vec(),
+            state: AgentCommandState::Pending,
+            accepted_sequence: 0,
+            last_sequence: 0,
+            provider_operation_id: Some(operation_id.to_string()),
+            provider_resource_id: None,
+        };
+        if self.store.get_operation(operation_id).await.is_err() {
+            let _ = self
+                .store
+                .insert_operation(&o3k_store::OperationRecord {
+                    id: operation_id,
+                    resource_id: record.resource_id,
+                    kind: "command".to_owned(),
+                    state: o3k_store::OperationState::Running,
+                    provider_operation_id: Some(operation_id.to_string()),
+                    error_category: None,
+                    error_message: None,
+                })
+                .await;
+        }
+        let existing = self
+            .store
+            .insert_agent_command(&record)
+            .await
+            .map_err(|_| ComputeError::Conflict)?;
+        Ok(Some(existing))
     }
 
     #[must_use]
