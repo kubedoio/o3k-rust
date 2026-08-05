@@ -381,7 +381,9 @@ root_helper = sudo
 # boundary; targets that require authentication are rejected by the control
 # plane. Disable CHAP so the real iSCSI target is accepted.
 chap_authentication = False
-[privsep]
+# oslo_privsep: Cinder's PrivContext registers cfg_section='cinder_sys_admin'.
+# Running as root on the CI runner, so stay as root without privilege dropping.
+[cinder_sys_admin]
 helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
 user = root
 group = root
