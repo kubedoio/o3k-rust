@@ -383,12 +383,9 @@ root_helper = sudo
 chap_authentication = False
 [privsep]
 helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
-[privsep_entrypoint]
-helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
-[privsep_cinder]
-helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
-[privsep_oslo]
-helper_command = sudo ${VENV_DIR}/bin/privsep-helper --config-file ${CONF}
+user = root
+group = root
+capabilities =
 EOF
 
 echo "==> Writing run-owned api-paste.ini..."
