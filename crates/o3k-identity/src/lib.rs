@@ -61,6 +61,12 @@ pub struct Auth {
 pub struct Identity {
     pub methods: Vec<String>,
     pub password: Option<PasswordIdentity>,
+    pub token: Option<TokenIdentity>,
+}
+
+#[derive(Deserialize)]
+pub struct TokenIdentity {
+    pub id: String,
 }
 
 #[derive(Deserialize)]
@@ -737,24 +743,56 @@ impl TokenService {
         request: &TokenRequest,
         now: SystemTime,
     ) -> Result<(String, TokenResponse), AuthError> {
-        if request.auth.identity.methods != ["password"] {
-            return Err(AuthError::InvalidRequest);
-        }
-        let user_ref = &request
+        let user_id = match request
             .auth
             .identity
-            .password
-            .as_ref()
-            .ok_or(AuthError::InvalidRequest)?
-            .user;
-
-        let user = self.resolve_user(user_ref)?;
-        if !user.enabled {
-            return Err(AuthError::Unauthorized);
-        }
-        if !user.password_hash.verify(&user_ref.password) {
-            return Err(AuthError::Unauthorized);
-        }
+            .methods
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            ["password"] => {
+                let user_ref = &request
+                    .auth
+                    .identity
+                    .password
+                    .as_ref()
+                    .ok_or(AuthError::InvalidRequest)?
+                    .user;
+                let user = self.resolve_user(user_ref)?;
+                if !user.enabled {
+                    return Err(AuthError::Unauthorized);
+                }
+                if !user.password_hash.verify(&user_ref.password) {
+                    return Err(AuthError::Unauthorized);
+                }
+                user.id.clone()
+            }
+            // Keystone token re-authentication: a valid presented token is
+            // exchanged for a freshly issued token (used by Cinder's Nova
+            // client and service_auth, which re-authenticate with the
+            // caller's token).
+            ["token"] => {
+                let token_id = &request
+                    .auth
+                    .identity
+                    .token
+                    .as_ref()
+                    .ok_or(AuthError::InvalidRequest)?
+                    .id;
+                let verified = self.verify(token_id, now)?;
+                let user = self
+                    .snapshot
+                    .user_by_id(&verified.user_id)
+                    .ok_or(AuthError::InvalidToken)?;
+                if !user.enabled {
+                    return Err(AuthError::Unauthorized);
+                }
+                user.id.clone()
+            }
+            _ => return Err(AuthError::InvalidRequest),
+        };
 
         let project_ref = request
             .auth
@@ -767,7 +805,7 @@ impl TokenService {
             return Err(AuthError::Unauthorized);
         }
 
-        let roles = self.snapshot.role_names_for(&user.id, &project.id);
+        let roles = self.snapshot.role_names_for(&user_id, &project.id);
         if roles.is_empty() {
             // Cross-project scoping fails closed before any token is issued.
             return Err(AuthError::Unauthorized);
@@ -782,7 +820,7 @@ impl TokenService {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&Claims {
-                sub: user.id.clone(),
+                sub: user_id.clone(),
                 project: project.id.clone(),
                 issued,
                 expires,
@@ -798,7 +836,7 @@ impl TokenService {
         Ok((
             token,
             TokenResponse {
-                token: self.details(&user.id, &project.id, &roles, issued_at, expires_at)?,
+                token: self.details(&user_id, &project.id, &roles, issued_at, expires_at)?,
             },
         ))
     }
@@ -1314,6 +1352,7 @@ pub mod testkit {
             auth: Auth {
                 identity: Identity {
                     methods: vec!["password".to_owned()],
+                    token: None,
                     password: Some(PasswordIdentity {
                         user: UserReference {
                             id: None,
@@ -1334,6 +1373,30 @@ pub mod testkit {
         }
     }
 
+    /// A token re-authentication request exchanging an existing token for a
+    /// freshly issued one (Keystone `methods: ["token"]`; used by Cinder's
+    /// Nova client and service_auth).
+    pub fn token_request(token: &str) -> TokenRequest {
+        TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["token".to_owned()],
+                    token: Some(TokenIdentity {
+                        id: token.to_owned(),
+                    }),
+                    password: None,
+                },
+                scope: Some(Scope {
+                    project: Some(ProjectReference {
+                        id: None,
+                        name: Some("admin".to_owned()),
+                        domain: None,
+                    }),
+                }),
+            },
+        }
+    }
+
     /// A password authentication request for the Cinder service user scoped
     /// to the bootstrap project.
     pub fn cinder_service_request(password: &str) -> TokenRequest {
@@ -1341,6 +1404,7 @@ pub mod testkit {
             auth: Auth {
                 identity: Identity {
                     methods: vec!["password".to_owned()],
+                    token: None,
                     password: Some(PasswordIdentity {
                         user: UserReference {
                             id: None,
@@ -1514,6 +1578,7 @@ mod tests {
             auth: Auth {
                 identity: Identity {
                     methods: vec!["password".to_owned()],
+                    token: None,
                     password: Some(PasswordIdentity {
                         user: UserReference {
                             id: None,
@@ -1546,6 +1611,55 @@ mod tests {
         );
         assert_eq!(response.token.user.id, "bootstrap-user");
         assert_eq!(service.verify(&token, now)?.user_id, "bootstrap-user");
+        Ok(())
+    }
+
+    #[test]
+    fn token_reauthentication_issues_a_fresh_token() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        let (presented, _) = service.issue(&admin_request(), now)?;
+        let (reissued, response) = service.issue(&testkit::token_request(&presented), now)?;
+        assert_ne!(reissued, presented);
+        assert_eq!(response.token.user.id, "bootstrap-user");
+        assert_eq!(
+            response.token.project.id,
+            "eba29e2d-53de-461d-ae91-ede7402713cb"
+        );
+        // The freshly issued token is valid and carries the same identity.
+        assert_eq!(service.verify(&reissued, now)?.user_id, "bootstrap-user");
+        Ok(())
+    }
+
+    #[test]
+    fn token_reauthentication_rejects_invalid_tokens() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(1_000);
+        assert!(matches!(
+            service.issue(&testkit::token_request("not-a-real-token"), now),
+            Err(AuthError::InvalidToken)
+        ));
+        // A missing token identity is an invalid request.
+        let malformed = TokenRequest {
+            auth: Auth {
+                identity: Identity {
+                    methods: vec!["token".to_owned()],
+                    token: None,
+                    password: None,
+                },
+                scope: Some(Scope {
+                    project: Some(ProjectReference {
+                        id: None,
+                        name: Some("admin".to_owned()),
+                        domain: None,
+                    }),
+                }),
+            },
+        };
+        assert!(matches!(
+            service.issue(&malformed, now),
+            Err(AuthError::InvalidRequest)
+        ));
         Ok(())
     }
 
@@ -1610,6 +1724,7 @@ mod tests {
             auth: Auth {
                 identity: Identity {
                     methods: vec!["password".to_owned()],
+                    token: None,
                     password: Some(PasswordIdentity {
                         user: UserReference {
                             id: None,
@@ -1644,6 +1759,7 @@ mod tests {
                     auth: Auth {
                         identity: Identity {
                             methods: vec!["password".to_owned()],
+                            token: None,
                             password: Some(PasswordIdentity {
                                 user: UserReference {
                                     id: None,

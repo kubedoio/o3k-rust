@@ -207,6 +207,93 @@ async fn keystone_password_scope_returns_signed_subject_token()
 }
 
 #[tokio::test]
+async fn keystone_token_reauthentication_exchanges_a_valid_token()
+-> Result<(), Box<dyn std::error::Error>> {
+    let service = test_service("http://127.0.0.1:8080").await?;
+    let router = o3k_api::router_with_state(o3k_api::AppState::new().with_identity(service));
+    let password_body = serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["password"],
+                "password": {"user": {"name": "admin", "password": "password"}}
+            },
+            "scope": {"project": {"name": "admin"}}
+        }
+    });
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(password_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let presented = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("missing subject token"))?
+        .to_str()?
+        .to_owned();
+
+    // Cinder's Nova client re-authenticates with methods: ["token"].
+    let token_body = serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["token"],
+                "token": {"id": presented}
+            },
+            "scope": {"project": {"name": "admin"}}
+        }
+    });
+    let reissued = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(token_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(reissued.status(), StatusCode::CREATED);
+    let reissued_token = reissued
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("missing reissued token"))?
+        .to_str()?;
+    assert_ne!(reissued_token, presented);
+    let bytes = axum::body::to_bytes(reissued.into_body(), 16 * 1024).await?;
+    let body: Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(body["token"]["user"]["id"], "bootstrap-user");
+
+    // An invalid presented token is rejected as unauthorized.
+    let invalid_body = serde_json::json!({
+        "auth": {
+            "identity": {
+                "methods": ["token"],
+                "token": {"id": "bogus-token"}
+            },
+            "scope": {"project": {"name": "admin"}}
+        }
+    });
+    let invalid = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(invalid_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
 async fn keystone_discovery_exposes_v3_without_fallback_warning()
 -> Result<(), Box<dyn std::error::Error>> {
     for uri in ["/", "/v3"] {

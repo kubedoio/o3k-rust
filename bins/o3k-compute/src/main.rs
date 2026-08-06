@@ -1193,8 +1193,18 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     )));
                 }
                 let host_path = if device.driver_volume_type == "iscsi" {
-                    let host_path =
-                        iscsi_login(&device.target_iqn, &device.target_portal, device.target_lun)?;
+                    let chap_auth =
+                        if device.auth_username.is_empty() || device.auth_password.is_empty() {
+                            None
+                        } else {
+                            Some((device.auth_username.as_str(), device.auth_password.as_str()))
+                        };
+                    let host_path = iscsi_login(
+                        &device.target_iqn,
+                        &device.target_portal,
+                        device.target_lun,
+                        chap_auth,
+                    )?;
                     host_path.ok_or_else(|| {
                         AgentError::Protocol(
                             "iscsi login succeeded but no device path was observed".to_owned(),
@@ -1390,45 +1400,98 @@ fn collect_host_connector() -> Result<o3k_provider::ConnectorInfo, AgentError> {
 
 /// Logs into the iSCSI target and returns the observed host device path. A
 /// missing iscsiadm is an explicit unsupported-connector failure; a successful
-/// login without an observed device is an unknown outcome.
+/// login without an observed device is an unknown outcome. The node record is
+/// created when absent (os-brick sequence: show, then `--op new`), and
+/// optional CHAP credentials are applied to the node session before login;
+/// credentials are never logged (the redacted-message contract forbids
+/// logging command arguments or raw iscsiadm output).
 fn iscsi_login(
     target_iqn: &str,
     target_portal: &str,
     _target_lun: u32,
+    chap_auth: Option<(&str, &str)>,
 ) -> Result<Option<String>, AgentError> {
     if target_iqn.trim().is_empty() || target_portal.trim().is_empty() {
         return Err(AgentError::Protocol(
             "iscsi target is incomplete".to_owned(),
         ));
     }
-    let discovery = std::process::Command::new("iscsiadm")
-        .args([
-            "--mode",
-            "discoverydb",
-            "-t",
-            "sendtargets",
-            "-p",
-            target_portal,
-        ])
+    // The node record must exist before CHAP settings can be applied. Show
+    // the node first (os-brick tolerates "no records found") and create the
+    // record only when it is absent.
+    let node_show = std::process::Command::new("iscsiadm")
+        .args(["--mode", "node", "-T", target_iqn, "-p", target_portal])
         .output();
-    let discovery = match discovery {
-        Ok(output) if output.status.success() => output,
-        Ok(output) => {
-            // The redacted-message contract forbids raw command output: iscsiadm
-            // stderr can disclose target portals and session details.
-            tracing::debug!(
-                status = ?output.status,
-                "iscsi discovery command exited unsuccessfully"
-            );
-            return Err(AgentError::Protocol("iscsi discovery failed".to_owned()));
+    match node_show {
+        Ok(output) if output.status.success() => {}
+        Ok(_) | Err(_) => {
+            let node_new = std::process::Command::new("iscsiadm")
+                .args([
+                    "--mode",
+                    "node",
+                    "-T",
+                    target_iqn,
+                    "-p",
+                    target_portal,
+                    "--op",
+                    "new",
+                ])
+                .output();
+            match node_new {
+                Ok(output) if output.status.success() => {}
+                Ok(_) => {
+                    // The redacted-message contract forbids raw command
+                    // output: iscsiadm stderr can disclose target details.
+                    tracing::debug!("iscsi node create command exited unsuccessfully");
+                    return Err(AgentError::Protocol("iscsi node create failed".to_owned()));
+                }
+                Err(_) => {
+                    return Err(AgentError::Protocol(
+                        "iscsiadm is not available; iscsi connector is unsupported on this host"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
-        Err(_) => {
-            return Err(AgentError::Protocol(
-                "iscsiadm is not available; iscsi connector is unsupported on this host".to_owned(),
-            ));
+    }
+    if let Some((username, password)) = chap_auth {
+        // Apply CHAP to the node session before login. Credentials are passed
+        // as arguments and never logged or echoed into errors.
+        let update = std::process::Command::new("iscsiadm")
+            .args([
+                "--mode",
+                "node",
+                "-T",
+                target_iqn,
+                "-p",
+                target_portal,
+                "--op",
+                "update",
+                "-n",
+                "node.session.auth.authmethod",
+                "-v",
+                "CHAP",
+                "-n",
+                "node.session.auth.username",
+                "-v",
+                username,
+                "-n",
+                "node.session.auth.password",
+                "-v",
+                password,
+            ])
+            .output();
+        match update {
+            Ok(output) if output.status.success() => {}
+            Ok(_) => {
+                tracing::debug!("iscsi CHAP update command exited unsuccessfully");
+                return Err(AgentError::Protocol("iscsi CHAP update failed".to_owned()));
+            }
+            Err(_) => {
+                return Err(AgentError::Protocol("iscsiadm is not available".to_owned()));
+            }
         }
-    };
-    let _ = String::from_utf8_lossy(&discovery.stdout);
+    }
     let login = std::process::Command::new("iscsiadm")
         .args([
             "--mode",
@@ -1441,7 +1504,9 @@ fn iscsi_login(
         ])
         .output();
     match login {
-        Ok(output) if output.status.success() => {
+        // Exit 15 means the session already exists, which is a successful
+        // login (os-brick behavior).
+        Ok(output) if output.status.success() || output.status.code() == Some(15) => {
             // Determine the host device path from the login session output.
             let stdout = String::from_utf8_lossy(&output.stdout);
             let session = stdout

@@ -236,10 +236,9 @@ message ConsoleLogCommand {
 // required by the Cinder connector-update flow.
 message CollectConnectorCommand {}
 
-// Bounded block-device attach command. Secret-bearing connection information
-// (for example CHAP credentials) is never carried across the agent boundary
-// in the first supported profile; targets that require it are rejected by the
-// control plane before dispatch.
+// Bounded block-device attach command. CHAP credentials are carried only over
+// the authenticated agent control channel and never appear in logs, evidence,
+// or diagnostics; the agent applies them to the iSCSI node session at login.
 message AttachDiskCommand {
   string volume_id = 1;
   string attachment_id = 2;
@@ -250,6 +249,9 @@ message AttachDiskCommand {
   string device_path = 7;
   bool multipath = 8;
   string initiator = 9;
+  string auth_method = 10;
+  string auth_username = 11;
+  string auth_password = 12;
 }
 
 message DetachDiskCommand {

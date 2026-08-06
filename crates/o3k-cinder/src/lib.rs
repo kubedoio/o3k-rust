@@ -41,6 +41,8 @@ use thiserror::Error;
 
 use o3k_identity::Secret;
 
+pub use o3k_identity::Secret as CinderSecret;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_SKEW: u64 = 60;
 

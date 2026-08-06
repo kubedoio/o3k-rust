@@ -5370,6 +5370,9 @@ mod block_device_tests {
             device_path: String::new(),
             multipath: false,
             initiator: "iqn.1993-08.org.debian:01:o3k-compute".to_owned(),
+            auth_method: "CHAP".to_owned(),
+            auth_username: "chap-user".to_owned(),
+            auth_password: "chap-password".to_owned(),
         }
     }
 

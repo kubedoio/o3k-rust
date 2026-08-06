@@ -284,6 +284,15 @@ impl AttachmentOrchestrator {
             device_path: None,
             multipath: false,
             initiator: connector.initiator.clone(),
+            auth_method: target.auth_method.clone(),
+            auth_username: target
+                .auth_username
+                .as_ref()
+                .map(|value| value.expose().to_owned()),
+            auth_password: target
+                .auth_password
+                .as_ref()
+                .map(|value| value.expose().to_owned()),
         };
         let observation = match self
             .provider
@@ -396,6 +405,11 @@ impl AttachmentOrchestrator {
             device_path: None,
             multipath: false,
             initiator: record.connector_initiator.clone(),
+            // Detach only needs the target identity; CHAP credentials are
+            // never persisted and are not required to log out.
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
         };
 
         // Phase: compute_detach_requested
@@ -650,14 +664,22 @@ fn validate_target(target: &AttachTarget) -> Result<(), ComputeError> {
         }
         _ => return Err(ComputeError::Unavailable),
     }
-    // CHAP-authenticated targets are not supported by the first compute
-    // profile: secret-bearing credentials must never enter the agent protocol
-    // or any durable store.
-    if target.auth_method.is_some()
-        || target.auth_username.is_some()
-        || target.auth_password.is_some()
-    {
-        return Err(ComputeError::InvalidRequest);
+    // CHAP credentials are carried only over the authenticated agent control
+    // channel and applied by the agent to the iSCSI node session at login;
+    // they are never logged or included in diagnostics. Auth fields must be
+    // internally consistent when present.
+    match (
+        target.auth_method.as_deref(),
+        target.auth_username.as_ref(),
+        target.auth_password.as_ref(),
+    ) {
+        (Some(method), Some(_username), Some(_password)) => {
+            if !method.eq_ignore_ascii_case("CHAP") {
+                return Err(ComputeError::InvalidRequest);
+            }
+        }
+        (None, None, None) => {}
+        _ => return Err(ComputeError::InvalidRequest),
     }
     Ok(())
 }
@@ -730,9 +752,64 @@ fn civil_date(days_since_epoch: u64) -> (i64, u64, u64) {
 mod tests {
     use super::*;
     use crate::FakeComputeProvider;
+    use o3k_cinder::CinderSecret;
     use o3k_cinder::testkit::{FaultConfig, faults, start_testbed};
     use o3k_provider::FailureInjection;
     use std::sync::Arc;
+
+    #[test]
+    fn validate_target_accepts_chap_and_rejects_inconsistent_auth() {
+        let base = AttachTarget {
+            driver_volume_type: "iscsi".to_owned(),
+            target_iqn: Some("iqn.2026-01.example.com:volume-1".to_owned()),
+            target_portal: Some("10.0.0.10:3260".to_owned()),
+            target_lun: Some(1),
+            local_path: None,
+            auth_method: Some("CHAP".to_owned()),
+            auth_username: Some(CinderSecret::new("user".to_owned())),
+            auth_password: Some(CinderSecret::new("password".to_owned())),
+        };
+        assert!(validate_target(&base).is_ok());
+
+        let mut without_iqn = base.clone();
+        without_iqn.target_iqn = None;
+        assert!(validate_target(&without_iqn).is_err());
+
+        let mut no_auth = base.clone();
+        no_auth.auth_method = None;
+        no_auth.auth_username = None;
+        no_auth.auth_password = None;
+        assert!(validate_target(&no_auth).is_ok());
+
+        let mut half_auth = base.clone();
+        half_auth.auth_username = None;
+        assert!(validate_target(&half_auth).is_err());
+
+        let mut wrong_method = base.clone();
+        wrong_method.auth_method = Some("NONE".to_owned());
+        assert!(validate_target(&wrong_method).is_err());
+
+        let local = AttachTarget {
+            driver_volume_type: "local".to_owned(),
+            target_iqn: None,
+            target_portal: None,
+            target_lun: None,
+            local_path: Some("/dev/mapper/volume".to_owned()),
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        };
+        assert!(validate_target(&local).is_ok());
+
+        let unknown_driver = AttachTarget {
+            driver_volume_type: "nvmeof".to_owned(),
+            ..base
+        };
+        assert!(matches!(
+            validate_target(&unknown_driver),
+            Err(ComputeError::Unavailable)
+        ));
+    }
 
     struct TestHarness {
         store: Arc<SqliteStore>,
@@ -811,6 +888,19 @@ mod tests {
         assert_eq!(record.driver_volume_type.as_deref(), Some("iscsi"));
         assert_ne!(record.id, volume);
         assert_eq!(h.fake_provider.attached_volume_count(server_id), 1);
+
+        // The fake Cinder mirrors real Cinder 28 and always returns CHAP
+        // credentials; the orchestrator must accept the target and deliver
+        // the credentials to the compute boundary without persisting them.
+        let dispatched = h
+            .fake_provider
+            .last_attached_device()
+            .ok_or("device never dispatched")?;
+        assert_eq!(dispatched.auth_method.as_deref(), Some("CHAP"));
+        assert_eq!(dispatched.auth_username.as_deref(), Some("chap-user"));
+        assert_eq!(dispatched.auth_password.as_deref(), Some("chap-password"));
+        assert!(!format!("{dispatched:?}").contains("chap-password"));
+        assert!(record.target_iqn.is_some());
 
         // Duplicate attach is idempotent.
         let duplicate = h

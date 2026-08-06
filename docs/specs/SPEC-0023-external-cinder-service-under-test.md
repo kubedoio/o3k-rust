@@ -131,6 +131,20 @@ validate user, project, server, and request
 The exact create/update/complete sequence follows the pinned public Cinder API
 and version. It must not be guessed from another implementation.
 
+Real Cinder 28 (LVM + tgtadm) unconditionally creates CHAP-authenticated
+iSCSI targets and returns the credentials in the connection information; the
+legacy `chap_authentication` option does not exist in Cinder 28, so an
+unauthenticated target cannot be requested. The O3K compute attachment
+profile therefore carries CHAP credentials from the attachment orchestrator
+to the compute agent exclusively over the authenticated agent control
+channel, where the agent applies them to the iSCSI node session at login.
+Credentials never appear in logs, evidence, diagnostics, or the public
+Nova/Cinder request bodies, and the durable attachment record stores only the
+connection-information digest. Cinder's Nova client re-authenticates with
+Keystone's `token` auth method (for example when checking attachment data on
+Nova); the identity surface therefore supports `methods: ["token"]` in
+addition to password authentication.
+
 ## Database posture
 
 O3K's database and Cinder's database are independent responsibilities.

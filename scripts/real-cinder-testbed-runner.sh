@@ -405,6 +405,12 @@ osapi_volume_listen = 127.0.0.1
 osapi_volume_listen_port = ${CINDER_PORT}
 [database]
 connection = mysql+pymysql://${DB_USER}:${DB_PW}@127.0.0.1/${DB_NAME}
+# Cinder 28.0.0's LVM driver unconditionally creates CHAP-authenticated
+# iSCSI targets and returns the credentials in the connection info (the
+# legacy chap_authentication option does not exist in Cinder 28; verified
+# against the full 28.0.0 tree). O3K's compute profile carries those
+# credentials to the agent only over the authenticated control channel and
+# never logs them.
 [keystone_authtoken]
 www_authenticate_uri = http://127.0.0.1:${O3K_PORT}/
 auth_url = http://127.0.0.1:${O3K_PORT}/v3
@@ -430,11 +436,6 @@ volume_clear = none
 # distribution cinder-rootwrap filters, which target the packaged Cinder
 # version and reject the venv's command paths.
 root_helper = sudo
-# The first supported O3K attachment profile does not carry secret-bearing
-# connection information (for example CHAP credentials) across the compute
-# boundary; targets that require authentication are rejected by the control
-# plane. Disable CHAP so the real iSCSI target is accepted.
-chap_authentication = False
 # oslo_privsep: Cinder's PrivContext registers cfg_section='cinder_sys_admin'.
 # Running as root on the CI runner, so stay as root without privilege dropping.
 [cinder_sys_admin]
