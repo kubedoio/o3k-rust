@@ -802,6 +802,24 @@ cleanup_early() {
   emit_failure_diagnostics
   emit_partial_evidence
   restore_tgtd_config
+  # Ownership-safe failure-path compute cleanup: the success path deletes the
+  # server through the public API first, but a failed run must not leave its
+  # run-owned libvirt domain behind (the stale-state guard then blocks every
+  # later run). Only o3k- prefixed domains are ever touched.
+  while IFS= read -r dom; do
+    [ -n "${dom}" ] || continue
+    virsh -c qemu:///system destroy "${dom}" 2>/dev/null || true
+    virsh -c qemu:///system undefine "${dom}" 2>/dev/null || true
+    echo "    removed run-owned libvirt domain ${dom}"
+  done < <(virsh -c qemu:///system list --all --name 2>/dev/null | grep '^o3k-' || true)
+  # Run-owned iSCSI sessions from a partially completed attach: log out only
+  # O3K-owned iSCSI node records (iqn.2010-10.org.openstack:volume-*).
+  while IFS= read -r iqn; do
+    [ -n "${iqn}" ] || continue
+    iscsiadm -m node -T "${iqn}" --logout 2>/dev/null || true
+    iscsiadm -m node -T "${iqn}" --op delete 2>/dev/null || true
+    echo "    removed run-owned iSCSI node ${iqn}"
+  done < <(iscsiadm -m node 2>/dev/null | awk '{print $2}' | grep '^iqn.2010-10.org.openstack:volume-' || true)
   kill -TERM "${COMPUTE_PID:-}" 2>/dev/null || true
   wait "${COMPUTE_PID:-}" 2>/dev/null || true
   kill -TERM "${O3KD_PID:-}" 2>/dev/null || true
