@@ -2658,7 +2658,11 @@ async fn list_volume_attachments(
         Ok(records) => (
             StatusCode::OK,
             Json(VolumeAttachmentsResponse {
-                volume_attachments: records.into_iter().map(map_volume_attachment).collect(),
+                volume_attachments: records
+                    .into_iter()
+                    .filter(|r| r.status == "attached")
+                    .map(map_volume_attachment)
+                    .collect(),
             }),
         )
             .into_response(),
@@ -2687,7 +2691,7 @@ async fn show_volume_attachment(
         .await
     {
         for record in records {
-            if record.status != "detached"
+            if record.status == "attached"
                 && (record.id.to_string() == attachment_id
                     || record.volume_id.to_string() == attachment_id
                     || record.cinder_attachment_id.as_deref() == Some(&attachment_id))
