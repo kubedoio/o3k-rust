@@ -2537,11 +2537,11 @@ struct VolumeAttachmentRequest {
 
 #[derive(Debug, Deserialize)]
 struct VolumeAttachmentRequestPayload {
-    #[serde(rename = "volumeId")]
+    #[serde(rename = "volumeId", alias = "volume_id")]
     volume_id: String,
     device: Option<String>,
     tag: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "delete_on_termination")]
     delete_on_termination: bool,
 }
 
