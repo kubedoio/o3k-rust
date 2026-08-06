@@ -2841,15 +2841,10 @@ impl ComputeService {
         attachment_id: Uuid,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-        let record = self
-            .store
+        self.store
             .get_volume_attachment(server_id, attachment_id)
             .await?
-            .ok_or(ComputeError::NotFound)?;
-        if record.status == "detached" {
-            return Err(ComputeError::NotFound);
-        }
-        Ok(record)
+            .ok_or(ComputeError::NotFound)
     }
 
     pub async fn detach_volume(
