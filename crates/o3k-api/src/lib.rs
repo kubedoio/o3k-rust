@@ -2531,7 +2531,7 @@ async fn server_action(
 
 #[derive(Debug, Deserialize)]
 struct VolumeAttachmentRequest {
-    #[serde(rename = "volumeAttachment")]
+    #[serde(rename = "volumeAttachment", alias = "volume_attachment")]
     volume_attachment: VolumeAttachmentRequestPayload,
 }
 
