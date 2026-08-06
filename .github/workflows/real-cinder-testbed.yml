@@ -96,6 +96,24 @@ jobs:
           sudo -n pkill -f "${state}" 2>/dev/null || true
           sleep 2
           sudo -n pkill -9 -f "${state}" 2>/dev/null || true
+          # Run-owned tgt iSCSI targets hold run volume LVs open (backing
+          # stores); delete them first or the VG removal below fails silently
+          # and the stale-state guard keeps blocking later runs.
+          while IFS= read -r tid; do
+            [ -n "${tid}" ] || continue
+            if sudo -n tgtadm --lld iscsi --op delete --mode target --tid "${tid}" 2>/dev/null; then
+              echo "removed run-owned iSCSI target ${tid}"
+            fi
+          done < <(sudo -n tgtadm --lld iscsi --op show --mode target 2>/dev/null \
+              | sed -n 's/^Target \([0-9]*\): iqn.2010-10.org.openstack:volume-.*/\1/p' || true)
+          # Run-owned tgt-admin persistence files (backing-store references an
+          # o3k-vg-); leftovers would be re-created by tgt-admin on the next
+          # run. Foreign persistence files are never touched.
+          stale_pfiles="$(sudo -n grep -l "backing-store /dev/o3k-vg-" /var/lib/cinder/volumes/volume-* 2>/dev/null || true)"
+          if [ -n "${stale_pfiles}" ]; then
+            printf '%s\n' "${stale_pfiles}" | xargs -r sudo -n rm -f \
+              && echo "removed run-owned tgt persistence files"
+          fi
           while IFS= read -r dom; do
             [ -n "${dom}" ] || continue
             sudo -n virsh -c qemu:///system destroy "${dom}" 2>/dev/null || true
@@ -105,8 +123,11 @@ jobs:
           while IFS= read -r vg_name; do
             [ -n "${vg_name}" ] || continue
             sudo -n vgchange -an "${vg_name}" 2>/dev/null || true
-            sudo -n vgremove -y "${vg_name}" 2>/dev/null || true
-            echo "removed run-owned vg ${vg_name}"
+            if sudo -n vgremove -y "${vg_name}" 2>/dev/null; then
+              echo "removed run-owned vg ${vg_name}"
+            else
+              echo "WARNING: could not remove vg ${vg_name} (still in use?)" >&2
+            fi
           done < <(sudo -n vgs --noheadings -o vg_name 2>/dev/null | grep 'o3k-vg-' | tr -d ' ' || true)
           while IFS= read -r loop; do
             [ -n "${loop}" ] || continue
