@@ -122,11 +122,12 @@ jobs:
           done < <(sudo -n virsh -c qemu:///system list --all --name 2>/dev/null | grep '^o3k-' || true)
           while IFS= read -r vg_name; do
             [ -n "${vg_name}" ] || continue
-            sudo -n vgchange -an "${vg_name}" 2>/dev/null || true
-            if sudo -n vgremove -y "${vg_name}" 2>/dev/null; then
+            vg_deact="$(sudo -n vgchange -an "${vg_name}" 2>&1 || true)"
+            vg_remove="$(sudo -n vgremove -y "${vg_name}" 2>&1 || true)"
+            if ! sudo -n vgs --noheadings -o vg_name 2>/dev/null | grep -qw "${vg_name}"; then
               echo "removed run-owned vg ${vg_name}"
             else
-              echo "WARNING: could not remove vg ${vg_name} (still in use?)" >&2
+              echo "WARNING: could not remove vg ${vg_name}: ${vg_deact} ${vg_remove}" >&2
             fi
           done < <(sudo -n vgs --noheadings -o vg_name 2>/dev/null | grep 'o3k-vg-' | tr -d ' ' || true)
           while IFS= read -r loop; do
