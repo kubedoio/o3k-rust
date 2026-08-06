@@ -1555,16 +1555,32 @@ fn discover_iscsi_device(session_output: &str, target_iqn: &str) -> Option<Strin
             in_target = true;
             continue;
         }
-        if in_target && trimmed.starts_with("Current") {
-            continue;
-        }
         if in_target {
-            // "Attached SCSI devices:" section lists /dev/ paths.
-            if trimmed.starts_with("/dev/") {
-                return Some(trimmed.to_owned());
+            if let Some(dev_name) = trimmed
+                .strip_prefix("Attached scsi disk ")
+                .and_then(|s| s.split_whitespace().next())
+            {
+                let path = format!("/dev/{dev_name}");
+                if std::path::Path::new(&path).exists() {
+                    return Some(path);
+                }
             }
-            if !trimmed.starts_with(" ") && trimmed.starts_with("Target:") {
+            if trimmed.starts_with("/dev/") {
+                let dev_path = trimmed.split_whitespace().next().unwrap_or(trimmed);
+                if std::path::Path::new(dev_path).exists() {
+                    return Some(dev_path.to_owned());
+                }
+            }
+            if !line.starts_with(' ') && !line.starts_with('\t') && trimmed.starts_with("Target:") {
                 break;
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/dev/disk/by-path") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains(target_iqn) {
+                return Some(entry.path().to_string_lossy().to_string());
             }
         }
     }
