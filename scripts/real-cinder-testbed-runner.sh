@@ -796,6 +796,24 @@ PY
   eval "${save_opts}"
 }
 
+# Deletes run-owned tgt iSCSI targets and persistence files. The targets
+# hold the run's volume LVs open, so they must go before the VG is
+# deactivated; persistence-file leftovers would be re-created by tgt-admin on
+# the next run. Only O3K-owned target names and run-VG-backed files are
+# touched.
+remove_run_owned_tgt_state() {
+  while IFS= read -r tid; do
+    [ -n "${tid}" ] || continue
+    tgtadm --lld iscsi --op delete --mode target --tid "${tid}" 2>/dev/null && \
+      echo "    removed run-owned iSCSI target ${tid}" || true
+  done < <(tgtadm --lld iscsi --op show --mode target 2>/dev/null \
+      | sed -n 's/^Target \([0-9]*\): iqn.2010-10.org.openstack:volume-.*/\1/p' || true)
+  while IFS= read -r pf; do
+    [ -n "${pf}" ] || continue
+    rm -f "${pf}" && echo "    removed run-owned persistence file $(basename "${pf}")" || true
+  done < <(grep -l "backing-store /dev/${VG_NAME}/" "${CINDER_VOLUMES_DIR}"/volume-* 2>/dev/null || true)
+}
+
 cleanup_early() {
   # Diagnostics and the partial manifest run before anything is torn down so
   # the live service, LVM, tgtd, and database state is provable from evidence.
@@ -828,6 +846,7 @@ cleanup_early() {
   "${VENV_DIR}/bin/cinder-scheduler" --config-file "${CONF}" stop 2>/dev/null || true
   "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" stop 2>/dev/null || true
   kill -TERM "${CINDER_API_PID:-}" "${CINDER_SCHED_PID:-}" "${CINDER_VOL_PID:-}" 2>/dev/null || true
+  remove_run_owned_tgt_state
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
@@ -1247,6 +1266,7 @@ cleanup_run_owned() {
   wait "${CINDER_VOL_PID}" 2>/dev/null || true
   kill -TERM "${O3KD_PID}" 2>/dev/null || true
   wait "${O3KD_PID}" 2>/dev/null || true
+  remove_run_owned_tgt_state
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV}" 2>/dev/null || true
