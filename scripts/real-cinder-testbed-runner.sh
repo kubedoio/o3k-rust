@@ -319,15 +319,21 @@ sleep 5
 # with a run-owned backup and restored on cleanup so foreign state is
 # unchanged after the run.
 configure_tgtd_cinder_include() {
-  [ -f "${TGT_CONF_PATH}" ] || {
-    echo "ERROR: ${TGT_CONF_PATH} does not exist; tgt-admin cannot operate" >&2
-    exit 1
-  }
-  if grep -qs "^include ${CINDER_VOLUMES_DIR}/\*" "${TGT_CONF_PATH}"; then
+  if [ -d "/etc/tgt/conf.d" ]; then
+    TGT_CONF_PATH="/etc/tgt/conf.d/cinder.conf"
+  elif [ -f "/etc/tgt/targets.conf" ]; then
+    TGT_CONF_PATH="/etc/tgt/targets.conf"
+  else
+    TGT_CONF_PATH="/etc/tgt/targets.conf"
+  fi
+  mkdir -p "$(dirname "${TGT_CONF_PATH}")"
+  if [ -f "${TGT_CONF_PATH}" ] && grep -qs "^include ${CINDER_VOLUMES_DIR}/\*" "${TGT_CONF_PATH}"; then
     echo "    ${TGT_CONF_PATH} already includes ${CINDER_VOLUMES_DIR}/*"
     return 0
   fi
-  cp -a "${TGT_CONF_PATH}" "${TGT_CONF_BACKUP}"
+  if [ -f "${TGT_CONF_PATH}" ]; then
+    cp -a "${TGT_CONF_PATH}" "${TGT_CONF_BACKUP}"
+  fi
   printf '\n# O3K run %s: expose Cinder tgt-admin persistence files\ninclude %s/*\n' "${RUN_ID}" "${CINDER_VOLUMES_DIR}" >> "${TGT_CONF_PATH}"
   TGT_CONF_MODIFIED=1
   echo "    appended 'include ${CINDER_VOLUMES_DIR}/*' to ${TGT_CONF_PATH}"
@@ -569,10 +575,15 @@ COMPUTE_PID=$!
 INVENTORY_AFTER="${EVIDENCE_DIR}/foreign-state-after.json"
 
 restore_tgtd_config() {
-  if [ "${TGT_CONF_MODIFIED:-0}" = "1" ] && [ -f "${TGT_CONF_BACKUP}" ]; then
-    cp -a "${TGT_CONF_BACKUP}" "${TGT_CONF_PATH}"
+  if [ "${TGT_CONF_MODIFIED:-0}" = "1" ]; then
+    if [ -f "${TGT_CONF_BACKUP}" ]; then
+      cp -a "${TGT_CONF_BACKUP}" "${TGT_CONF_PATH}"
+      echo "    restored ${TGT_CONF_PATH} from the run-owned backup"
+    elif [ -n "${TGT_CONF_PATH:-}" ] && [ -f "${TGT_CONF_PATH}" ]; then
+      rm -f "${TGT_CONF_PATH}"
+      echo "    removed newly created ${TGT_CONF_PATH}"
+    fi
     TGT_CONF_MODIFIED=0
-    echo "    restored ${TGT_CONF_PATH} from the run-owned backup"
   fi
 }
 

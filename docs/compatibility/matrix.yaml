@@ -233,3 +233,37 @@ entries:
     executable_tests:
       - crates/o3k-api/tests/health.rs::nova_server_lifecycle_uses_project_scoped_envelopes
     status: implemented
+
+  - service: compute
+    operation: server_volume_attachments_list
+    api_version: nova-v2.1
+    microversion: "2.89"
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#list-volume-attachments-for-an-instance
+      - https://docs.openstack.org/nova/latest/reference/api-microversion-history.html#microversion-2-89
+    supported_fields: [attachment_id, bdm_uuid, serverId, volumeId, device, tag, delete_on_termination]
+    known_deviations:
+      - Microversion 2.89 is accepted only for this GET operation while the advertised Nova maximum stays 2.1; every other 2.89 request is rejected with 406 and the version discovery document stays version/min_version = 2.1.
+      - At 2.89 the response emits the upstream 2.89 field set and omits the legacy id field; the 2.1 response shape is unchanged.
+      - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_volume_attachment_lifecycle_list_create_show_delete
+      - crates/o3k-api/tests/health.rs::nova_volume_attachment_list_microversion_289_returns_upstream_fields_without_legacy_id
+    status: implemented
+  - service: compute
+    operation: server_volume_attachments_show
+    api_version: nova-v2.1
+    microversion: "2.89"
+    public_sources:
+      - https://docs.openstack.org/api-ref/compute/#show-a-detail-of-a-volume-attachment
+      - https://docs.openstack.org/nova/latest/reference/api-microversion-history.html#microversion-2-89
+    supported_fields: [attachment_id, bdm_uuid, serverId, volumeId, device, tag, delete_on_termination]
+    known_deviations:
+      - Microversion 2.89 is accepted only for this GET operation while the advertised Nova maximum stays 2.1; every other 2.89 request is rejected with 406 and the version discovery document stays version/min_version = 2.1.
+      - At 2.89 the response emits the upstream 2.89 field set and omits the legacy id field; the 2.1 response shape is unchanged.
+      - At 2.89 the final path segment resolves as the volume id, the O3K attachment id, or the Cinder attachment id (cinder_attachment_id) scoped to the server; anything else is 404 and project isolation is unchanged.
+      - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
+    executable_tests:
+      - crates/o3k-api/tests/health.rs::nova_volume_attachment_lifecycle_list_create_show_delete
+      - crates/o3k-api/tests/health.rs::nova_volume_attachment_show_microversion_289_resolves_volume_and_attachment_ids
+    status: implemented
