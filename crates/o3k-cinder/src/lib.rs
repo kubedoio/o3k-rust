@@ -149,12 +149,18 @@ impl ConnectionInfo {
         self.raw
             .get("driver_volume_type")
             .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                self.raw
+                    .get("data")
+                    .and_then(|d| d.get("driver_volume_type"))
+                    .and_then(serde_json::Value::as_str)
+            })
     }
 
     /// Extracts the typed non-secret target data required to attach through
     /// the compute boundary.
     pub fn attach_target(&self) -> Option<AttachTarget> {
-        let data = self.raw.get("data")?;
+        let data = self.raw.get("data").unwrap_or(&self.raw);
         let auth_username = data
             .get("auth_username")
             .and_then(serde_json::Value::as_str)
@@ -168,12 +174,40 @@ impl ConnectionInfo {
             target_iqn: data
                 .get("target_iqn")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
+                .map(str::to_owned)
+                .or_else(|| {
+                    data.get("target_iqns")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|arr| arr.first())
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
             target_portal: data
                 .get("target_portal")
                 .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-            target_lun: data.get("target_lun").and_then(serde_json::Value::as_u64),
+                .map(str::to_owned)
+                .or_else(|| {
+                    data.get("target_portals")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|arr| arr.first())
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                }),
+            target_lun: data
+                .get("target_lun")
+                .and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                })
+                .or_else(|| {
+                    data.get("target_luns")
+                        .and_then(serde_json::Value::as_array)
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| {
+                            v.as_u64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        })
+                }),
             local_path: data
                 .get("device_path")
                 .and_then(serde_json::Value::as_str)
