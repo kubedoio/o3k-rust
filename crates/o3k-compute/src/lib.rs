@@ -2827,7 +2827,11 @@ impl ComputeService {
         server_id: Uuid,
     ) -> Result<Vec<VolumeAttachmentRecord>, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-        Ok(self.store.list_volume_attachments(server_id).await?)
+        let records = self.store.list_volume_attachments(server_id).await?;
+        Ok(records
+            .into_iter()
+            .filter(|r| r.status != "detached")
+            .collect())
     }
 
     pub async fn get_volume_attachment(
@@ -2837,10 +2841,15 @@ impl ComputeService {
         attachment_id: Uuid,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-        self.store
+        let record = self
+            .store
             .get_volume_attachment(server_id, attachment_id)
             .await?
-            .ok_or(ComputeError::NotFound)
+            .ok_or(ComputeError::NotFound)?;
+        if record.status == "detached" {
+            return Err(ComputeError::NotFound);
+        }
+        Ok(record)
     }
 
     pub async fn detach_volume(

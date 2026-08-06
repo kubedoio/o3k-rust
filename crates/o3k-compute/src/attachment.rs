@@ -427,23 +427,19 @@ impl AttachmentOrchestrator {
                 return Err(map_provider_error(error));
             }
         }
-        self.set_phase(record.id, STATUS_COMPUTE_DETACHED, None)
-            .await?;
+        self.set_phase(record.id, STATUS_DETACHED, None).await?;
 
         // Phase: cinder_attachment_terminated
-        if let Some(cinder_attachment_id) = &record.cinder_attachment_id {
-            self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_TERMINATED, None)
-                .await?;
-            if let Err(error) = cinder
+        if let Some(cinder_attachment_id) = &record.cinder_attachment_id
+            && let Err(error) = cinder
                 .terminate_attachment(project_id, cinder_attachment_id)
                 .await
-            {
-                self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
-                    .await?;
-                return Err(map_cinder_error(error));
+        {
+            match error {
+                o3k_cinder::CinderError::NotFound(_) | o3k_cinder::CinderError::Conflict(_) => {}
+                _ => tracing::warn!(%error, "cinder attachment termination warning"),
             }
         }
-        self.set_phase(record.id, STATUS_DETACHED, None).await?;
         Ok(())
     }
 
