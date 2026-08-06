@@ -101,8 +101,9 @@ jobs:
           # and the stale-state guard keeps blocking later runs.
           while IFS= read -r tid; do
             [ -n "${tid}" ] || continue
-            sudo -n tgtadm --lld iscsi --op delete --mode target --tid "${tid}" 2>/dev/null \
-              && echo "removed run-owned iSCSI target ${tid}" || true
+            if sudo -n tgtadm --lld iscsi --op delete --mode target --tid "${tid}" 2>/dev/null; then
+              echo "removed run-owned iSCSI target ${tid}"
+            fi
           done < <(sudo -n tgtadm --lld iscsi --op show --mode target 2>/dev/null \
               | sed -n 's/^Target \([0-9]*\): iqn.2010-10.org.openstack:volume-.*/\1/p' || true)
           # Run-owned tgt-admin persistence files (backing-store references an
