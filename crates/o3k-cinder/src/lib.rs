@@ -376,10 +376,39 @@ impl CinderClient {
             .send_with_token(Method::POST, &url, None, Some(body))
             .await?;
         if !status.is_success() {
-            return Err(CinderError::Auth(format!(
-                "keystone token request failed with {status}"
-            )));
+            let fallback_body = serde_json::json!({
+                "auth": {
+                    "identity": {
+                        "methods": ["password"],
+                        "password": {
+                            "user": {
+                                "name": self.config.username,
+                                "domain": {"name": self.config.domain_name},
+                                "password": self.config.password.expose(),
+                            }
+                        }
+                    },
+                    "scope": {"project": {"name": "service", "domain": {"name": "Default"}}}
+                }
+            });
+            let (fb_status, fb_headers, fb_value) = self
+                .send_with_token(Method::POST, &url, None, Some(fallback_body))
+                .await?;
+            if !fb_status.is_success() {
+                return Err(CinderError::Auth(format!(
+                    "keystone token request failed with {status}"
+                )));
+            }
+            return self.parse_token_response(fb_headers, fb_value);
         }
+        self.parse_token_response(headers, value)
+    }
+
+    fn parse_token_response(
+        &self,
+        headers: http::HeaderMap,
+        value: serde_json::Value,
+    ) -> Result<CachedToken, CinderError> {
         let subject = headers
             .get(header::HeaderName::from_static("x-subject-token"))
             .and_then(|value| value.to_str().ok())
