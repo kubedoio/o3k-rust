@@ -131,12 +131,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if aid not in ATTACHMENTS:
                 return self._send(404, {"error": {"message": "attachment not found"}})
             ATTACHMENTS[aid]["status"] = "reserved"
+            # Mirrors real Cinder 28 (LVM + tgtadm), which always returns CHAP
+            # credentials for iSCSI targets.
             ATTACHMENTS[aid]["connection_info"] = {
                 "driver_volume_type": "iscsi",
                 "data": {
                     "target_portal": "10.0.0.10:3260",
                     "target_iqn": "iqn.2026-01.example.com:volume",
                     "target_lun": 1,
+                    "auth_method": "CHAP",
+                    "auth_username": "mock-chap-user",
+                    "auth_password": "mock-chap-password",
                 },
             }
             return self._send(200, {"attachment": attachment_json(aid)})
@@ -253,5 +258,11 @@ curl -s -f -H "X-Auth-Token: ${ADMIN_TOKEN}" -H "Content-Type: application/json"
 echo "==> Deleting the volume and verifying cleanup..."
 curl -s -f -X DELETE -H "X-Auth-Token: ${ADMIN_TOKEN}" \
   "http://127.0.0.1:${CINDER_PORT}/v3/eba29e2d-53de-461d-ae91-ede7402713cb/volumes/${VOLUME_ID}" > /dev/null
+
+echo "==> Verifying CHAP credentials never leak into O3K logs..."
+if grep -q "mock-chap-password" "${DATA_DIR}/o3kd.log"; then
+  echo "ERROR: CHAP credentials leaked into o3kd.log" >&2
+  exit 1
+fi
 
 echo "==> Mock Cinder component test PASSED cleanly."

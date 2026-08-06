@@ -182,7 +182,12 @@ fn connection_info_for(driver_volume_type: &str) -> Value {
                 "target_portal": "10.0.0.10:3260",
                 "target_iqn": "iqn.2026-01.example.com:volume-00000001",
                 "target_lun": 1,
-                "access_mode": "rw"
+                "access_mode": "rw",
+                // Mirrors real Cinder 28 (LVM + tgtadm): CHAP credentials are
+                // always generated for iSCSI targets.
+                "auth_method": "CHAP",
+                "auth_username": "chap-user",
+                "auth_password": "chap-password"
             }
         }),
         "local" => json!({

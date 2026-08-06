@@ -79,10 +79,12 @@ pub struct ConnectorInfo {
     pub initiator: Option<String>,
 }
 
-/// Bounded, non-secret block-device attachment description dispatched to the
-/// compute execution boundary. Secret-bearing connection information never
-/// enters this type.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Bounded block-device attachment description dispatched to the compute
+/// execution boundary. CHAP credentials are carried only over the
+/// authenticated agent control channel; callers must never log or persist
+/// these fields outside the run-owned durable journal, and the agent applies
+/// them exclusively to the iSCSI node session at login.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockDeviceAttachment {
     pub volume_id: String,
     pub attachment_id: String,
@@ -101,6 +103,33 @@ pub struct BlockDeviceAttachment {
     pub multipath: bool,
     #[serde(default)]
     pub initiator: Option<String>,
+    #[serde(default)]
+    pub auth_method: Option<String>,
+    #[serde(default)]
+    pub auth_username: Option<String>,
+    #[serde(default)]
+    pub auth_password: Option<String>,
+}
+
+impl std::fmt::Debug for BlockDeviceAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BlockDeviceAttachment")
+            .field("volume_id", &self.volume_id)
+            .field("attachment_id", &self.attachment_id)
+            .field("driver_volume_type", &self.driver_volume_type)
+            .field("target_iqn", &self.target_iqn)
+            .field("target_portal", &self.target_portal)
+            .field("target_lun", &self.target_lun)
+            .field("local_path", &self.local_path)
+            .field("device_path", &self.device_path)
+            .field("multipath", &self.multipath)
+            .field("initiator", &self.initiator)
+            .field("auth_method", &self.auth_method)
+            .field("auth_username", &"<redacted>")
+            .field("auth_password", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Observation of a compute-side block device after attach/detach/observe.
@@ -313,6 +342,7 @@ struct FakeState {
     operations: HashMap<Uuid, Operation>,
     idempotency: HashMap<String, (Uuid, String)>,
     block_devices: HashMap<(String, String), BlockDeviceObservation>,
+    last_attached_device: Option<BlockDeviceAttachment>,
 }
 
 impl Default for FakeComputeProvider {
@@ -340,6 +370,7 @@ impl FakeComputeProvider {
                 operations: HashMap::new(),
                 idempotency: HashMap::new(),
                 block_devices: HashMap::new(),
+                last_attached_device: None,
             })),
         }
     }
@@ -379,6 +410,17 @@ impl FakeComputeProvider {
         self.inner
             .lock()
             .map(|state| state.instances.len())
+            .unwrap_or_default()
+    }
+
+    /// The most recent block-device attachment dispatched to the compute
+    /// boundary (used by tests to prove CHAP credentials arrive at the
+    /// execution boundary without ever being logged).
+    #[must_use]
+    pub fn last_attached_device(&self) -> Option<BlockDeviceAttachment> {
+        self.inner
+            .lock()
+            .map(|state| state.last_attached_device.clone())
             .unwrap_or_default()
     }
 
@@ -716,6 +758,7 @@ impl ComputeProvider for FakeComputeProvider {
             )));
         }
         let key = (resource_id.to_string(), device.volume_id.clone());
+        state.last_attached_device = Some(device.clone());
         // Idempotent: an already-attached device is returned unchanged.
         if let Some(existing) = state.block_devices.get(&key)
             && existing.attached
@@ -1019,6 +1062,9 @@ mod block_device_tests {
             device_path: Some("/dev/vdb".to_owned()),
             multipath: false,
             initiator: Some("iqn.1993-08.org.debian:01:o3k-compute".to_owned()),
+            auth_method: Some("CHAP".to_owned()),
+            auth_username: Some("chap-user".to_owned()),
+            auth_password: Some("chap-password".to_owned()),
         }
     }
 

@@ -191,7 +191,22 @@ async fn attachment_lifecycle_validates_token_through_keystone()
     );
     assert_eq!(target.target_portal.as_deref(), Some("10.0.0.10:3260"));
     assert_eq!(target.target_lun, Some(1));
-    assert_eq!(target.auth_method, None);
+    // Real Cinder 28 always returns CHAP credentials for LVM iSCSI targets;
+    // the client must surface them without ever exposing them through Debug.
+    assert_eq!(target.auth_method.as_deref(), Some("CHAP"));
+    assert_eq!(
+        target.auth_username.as_ref().map(|value| value.expose()),
+        Some("chap-user")
+    );
+    assert_eq!(
+        target.auth_password.as_ref().map(|value| value.expose()),
+        Some("chap-password")
+    );
+    let debug = format!("{target:?}");
+    assert!(
+        !debug.contains("chap-password") && !debug.contains("chap-user"),
+        "{debug}"
+    );
 
     client.complete_attachment(project, &attachment.id).await?;
     assert_eq!(
