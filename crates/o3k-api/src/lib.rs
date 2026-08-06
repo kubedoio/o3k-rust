@@ -2682,27 +2682,15 @@ async fn show_volume_attachment(
         .into_response();
     };
 
-    if let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id)
-        && let Ok(record) = compute
-            .get_volume_attachment(&project_id, server_uuid, attachment_uuid)
-            .await
-    {
-        return (
-            StatusCode::OK,
-            Json(VolumeAttachmentResponse {
-                volume_attachment: map_volume_attachment(record),
-            }),
-        )
-            .into_response();
-    }
-
     if let Ok(records) = compute
         .list_volume_attachments(&project_id, server_uuid)
         .await
     {
         for record in records {
-            if record.volume_id.to_string() == attachment_id
-                || record.cinder_attachment_id.as_deref() == Some(&attachment_id)
+            if record.status != "detached"
+                && (record.id.to_string() == attachment_id
+                    || record.volume_id.to_string() == attachment_id
+                    || record.cinder_attachment_id.as_deref() == Some(&attachment_id))
             {
                 return (
                     StatusCode::OK,
