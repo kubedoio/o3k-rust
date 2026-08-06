@@ -1513,15 +1513,18 @@ fn iscsi_login(
                 .lines()
                 .find_map(|line| line.split("with session").nth(1))
                 .map(|value| value.trim().to_owned());
-            let device = std::process::Command::new("iscsiadm")
-                .args(["--mode", "session", "-P", "3"])
-                .output()
-                .ok()
-                .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
-                .unwrap_or_default();
-            let device = discover_iscsi_device(&device, target_iqn);
-            if let Some(device) = device {
-                return Ok(Some(device));
+            for _ in 0..10 {
+                let device = std::process::Command::new("iscsiadm")
+                    .args(["--mode", "session", "-P", "3"])
+                    .output()
+                    .ok()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+                    .unwrap_or_default();
+                let device = discover_iscsi_device(&device, target_iqn);
+                if let Some(device) = device {
+                    return Ok(Some(device));
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
             // A successful login with an unknown device path is an unknown
             // outcome, never an automatic failure.
