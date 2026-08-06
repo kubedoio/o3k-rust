@@ -319,13 +319,7 @@ sleep 5
 # with a run-owned backup and restored on cleanup so foreign state is
 # unchanged after the run.
 configure_tgtd_cinder_include() {
-  if [ -d "/etc/tgt/conf.d" ]; then
-    TGT_CONF_PATH="/etc/tgt/conf.d/cinder.conf"
-  elif [ -f "/etc/tgt/targets.conf" ]; then
-    TGT_CONF_PATH="/etc/tgt/targets.conf"
-  else
-    TGT_CONF_PATH="/etc/tgt/targets.conf"
-  fi
+  TGT_CONF_PATH="/etc/tgt/targets.conf"
   mkdir -p "$(dirname "${TGT_CONF_PATH}")"
   if [ -f "${TGT_CONF_PATH}" ] && grep -qs "^include ${CINDER_VOLUMES_DIR}/\*" "${TGT_CONF_PATH}"; then
     echo "    ${TGT_CONF_PATH} already includes ${CINDER_VOLUMES_DIR}/*"
