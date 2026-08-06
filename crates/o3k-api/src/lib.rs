@@ -2576,12 +2576,15 @@ struct VolumeAttachmentDetails {
 }
 
 fn map_volume_attachment(record: o3k_store::VolumeAttachmentRecord) -> VolumeAttachmentDetails {
-    let attachment_id = record.id.to_string();
+    let attachment_id = record
+        .cinder_attachment_id
+        .clone()
+        .unwrap_or_else(|| record.id.to_string());
     VolumeAttachmentDetails {
         id: attachment_id.clone(),
         attachment_id: attachment_id.clone(),
         attachment_id_camel: attachment_id.clone(),
-        bdm_uuid: attachment_id,
+        bdm_uuid: record.id.to_string(),
         server_id: record.server_id.to_string(),
         volume_id: record.volume_id.to_string(),
         device: record.device,
