@@ -266,6 +266,7 @@ pub fn build_attach_disk_xml(
   <driver name="qemu" type="raw" cache="none"/>
   <source dev="{host_path}"/>
   <target dev="{device}" bus="virtio"/>
+  <address type="pci" domain="0x0000" bus="0x01"/>
   <metadata>
     <o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="{volume_id}" attachment_id="{attachment_id}"/>
   </metadata>
