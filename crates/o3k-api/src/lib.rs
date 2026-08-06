@@ -2560,6 +2560,12 @@ struct VolumeAttachmentsResponse {
 #[derive(Debug, Serialize)]
 struct VolumeAttachmentDetails {
     id: String,
+    #[serde(rename = "attachment_id")]
+    attachment_id: String,
+    #[serde(rename = "attachmentId")]
+    attachment_id_camel: String,
+    #[serde(rename = "bdm_uuid")]
+    bdm_uuid: String,
     #[serde(rename = "serverId")]
     server_id: String,
     #[serde(rename = "volumeId")]
@@ -2570,8 +2576,12 @@ struct VolumeAttachmentDetails {
 }
 
 fn map_volume_attachment(record: o3k_store::VolumeAttachmentRecord) -> VolumeAttachmentDetails {
+    let attachment_id = record.id.to_string();
     VolumeAttachmentDetails {
-        id: record.id.to_string(),
+        id: attachment_id.clone(),
+        attachment_id: attachment_id.clone(),
+        attachment_id_camel: attachment_id.clone(),
+        bdm_uuid: attachment_id,
         server_id: record.server_id.to_string(),
         volume_id: record.volume_id.to_string(),
         device: record.device,
