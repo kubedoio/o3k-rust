@@ -34,6 +34,12 @@
 
 set -euo pipefail
 
+# Set on any failing command; the EXIT trap emits bounded redacted failure
+# diagnostics before run-owned cleanup so the root cause is provable from
+# evidence (run 31050533925: attach 503 hidden Cinder's real NotFound).
+RUN_FAILED=0
+trap 'RUN_FAILED=1' ERR
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
@@ -111,11 +117,29 @@ VENV_DIR="${STATE_ROOT}/venv"
 LOOP_FILE="${DATA_DIR}/${VG_NAME}.img"
 mkdir -p "${EVIDENCE_DIR}" "${DATA_DIR}"
 
+# Cinder TgtAdm target driver contract: cinder writes tgt-admin persistence
+# files into volumes_dir and runs `tgt-admin --update <iqn>`, which parses only
+# /etc/tgt/targets.conf. Without an include of the volumes dir, tgt-admin
+# silently exits 0 creating nothing and Cinder raises NotFound
+# (cinder/volume/targets/tgt.py:215, run 31050533925). The include is appended
+# with a run-owned backup and restored on every cleanup path.
+CINDER_VOLUMES_DIR="/var/lib/cinder/volumes"
+TGT_CONF_PATH="/etc/tgt/targets.conf"
+TGT_CONF_BACKUP="${STATE_ROOT}/tgt-targets.conf.orig"
+TGT_CONF_MODIFIED=0
+
+# Phase reached before failure; recorded in the aggregate failure artifact.
+RUN_PHASE="start"
+
 # A failure before the service cleanup trap (installed later, once services
 # exist) must not leave the freshly created run-owned state root behind: the
 # protected pre-run guard blocks every later run on any stale state under the
 # base directory. Only ever removes the exact run-owned state root.
 early_failure_cleanup() {
+  # Restore the tgtd config first if it was modified before the service
+  # cleanup trap was installed; the run-owned backup lives in the state root
+  # that is removed below, so ordering matters.
+  restore_tgtd_config 2>/dev/null || true
   if [ -n "${STATE_ROOT:-}" ] && [ "${STATE_ROOT}" != "${STATE_BASE}" ] && [ -d "${STATE_ROOT}" ]; then
     rm -rf "${STATE_ROOT}"
   fi
@@ -171,6 +195,10 @@ cat > "${INVENTORY_BEFORE}" <<EOF
     "venv": "${VENV_DIR}",
     "pin": "${CINDER_PYPI_PIN}",
     "source": "${CINDER_SOURCE}"
+  },
+  "tgt": {
+    "targets_conf": "${TGT_CONF_PATH}",
+    "targets_conf_hash_before": "$(sha256sum "${TGT_CONF_PATH}" 2>/dev/null | awk '{print $1}' || echo none)"
   },
   "maria": {
     "databases": $(mysql -N -e "SHOW DATABASES;" 2>/dev/null | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
@@ -285,6 +313,29 @@ echo "==> Starting MariaDB, RabbitMQ, memcached, tgt, open-iscsi..."
 systemctl start mariadb rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
 sleep 5
 
+# tgt-admin (used by cinder.privsep.targets.tgt) parses only
+# /etc/tgt/targets.conf on every invocation; tgtd itself does not need a
+# restart for tgt-admin-created targets. The include is appended idempotently
+# with a run-owned backup and restored on cleanup so foreign state is
+# unchanged after the run.
+configure_tgtd_cinder_include() {
+  [ -f "${TGT_CONF_PATH}" ] || {
+    echo "ERROR: ${TGT_CONF_PATH} does not exist; tgt-admin cannot operate" >&2
+    exit 1
+  }
+  if grep -qs "^include ${CINDER_VOLUMES_DIR}/\*" "${TGT_CONF_PATH}"; then
+    echo "    ${TGT_CONF_PATH} already includes ${CINDER_VOLUMES_DIR}/*"
+    return 0
+  fi
+  cp -a "${TGT_CONF_PATH}" "${TGT_CONF_BACKUP}"
+  printf '\n# O3K run %s: expose Cinder tgt-admin persistence files\ninclude %s/*\n' "${RUN_ID}" "${CINDER_VOLUMES_DIR}" >> "${TGT_CONF_PATH}"
+  TGT_CONF_MODIFIED=1
+  echo "    appended 'include ${CINDER_VOLUMES_DIR}/*' to ${TGT_CONF_PATH}"
+}
+echo "==> Configuring tgtd so tgt-admin can create Cinder iSCSI targets..."
+mkdir -p "${CINDER_VOLUMES_DIR}"
+configure_tgtd_cinder_include
+
 echo "==> Configuring run-owned Cinder database (MariaDB)..."
 mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;"
 mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PW}'; GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; CREATE USER IF NOT EXISTS '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PW}'; GRANT ALL ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;"
@@ -346,6 +397,9 @@ control_exchange = cinder-${RUN_SLUG}
 auth_strategy = keystone
 enabled_backends = lvm-1
 glance_api_servers = http://127.0.0.1:${O3K_PORT}/
+# Must match the tgtd include appended by this runner; tgt-admin only parses
+# files reachable from /etc/tgt/targets.conf (run 31050533925 regression).
+volumes_dir = ${CINDER_VOLUMES_DIR}
 rpc_backend = rabbit
 osapi_volume_listen = 127.0.0.1
 osapi_volume_listen_port = ${CINDER_PORT}
@@ -505,7 +559,248 @@ set -a; . "${STATE_ROOT}/o3k-compute.env"; set +a
 "${O3K_COMPUTE_BIN}" > "${EVIDENCE_DIR}/o3k-compute.log" 2>&1 &
 COMPUTE_PID=$!
 
+# ------------------------------------------------------------------------------
+# Failure diagnostics (bounded, redacted, emitted before any cleanup). The
+# protected workflow stages every *.log / *.json / evidence.yaml under the
+# evidence directory, so failures are provable from artifacts instead of
+# guesses (run 31050533925 hid Cinder's real NotFound behind a Nova 503).
+# ------------------------------------------------------------------------------
+INVENTORY_AFTER="${EVIDENCE_DIR}/foreign-state-after.json"
+
+restore_tgtd_config() {
+  if [ "${TGT_CONF_MODIFIED:-0}" = "1" ] && [ -f "${TGT_CONF_BACKUP}" ]; then
+    cp -a "${TGT_CONF_BACKUP}" "${TGT_CONF_PATH}"
+    TGT_CONF_MODIFIED=0
+    echo "    restored ${TGT_CONF_PATH} from the run-owned backup"
+  fi
+}
+
+emit_failure_diagnostics() {
+  [ "${RUN_FAILED}" = "1" ] || return 0
+  local save_opts
+  save_opts="$(set +o)"
+  set +e
+  echo "==> Failure detected (phase=${RUN_PHASE}); collecting bounded redacted diagnostics..."
+  {
+    echo "run_phase=${RUN_PHASE}"
+    echo "== pvs =="; pvs 2>&1 || true
+    echo "== vgs =="; vgs 2>&1 || true
+    echo "== lvs =="; lvs 2>&1 || true
+    echo "== device-mapper paths =="; ls -l /dev/mapper 2>&1 || true
+    echo "== tgt service state =="; systemctl is-active tgt 2>&1 || true
+    systemctl status tgt --no-pager -n 15 2>&1 || true
+    echo "== tgt journal (bounded) =="; journalctl -u tgt --no-pager -n 40 2>&1 || true
+    echo "== tgtadm target listing =="; tgtadm --lld iscsi --op show --mode target 2>&1 || true
+    echo "== tgt-admin --show =="; tgt-admin --show 2>&1 || true
+    echo "== tgtd config parsed by tgt-admin =="; cat "${TGT_CONF_PATH}" 2>&1 || true
+    echo "== cinder volumes_dir persistence files =="; ls -la "${CINDER_VOLUMES_DIR}" 2>&1 || true
+    echo "== iSCSI sessions =="; iscsiadm -m session 2>&1 || true
+    echo "== libvirt domains =="; virsh -c qemu:///system list --all 2>&1 || true
+  } > "${EVIDENCE_DIR}/failure-host-state.log" 2>&1
+  {
+    echo "== non-secret Cinder backend configuration =="
+    grep -E '^(volumes_dir|volume_group|volume_driver|target_helper|target_protocol|iscsi_ip_address|iscsi_target_prefix|iscsi_write_cache|volume_clear|root_helper|chap_authentication|enabled_backends|control_exchange|osapi_volume_listen)' "${CONF}" 2>&1 || true
+  } > "${EVIDENCE_DIR}/failure-cinder-config.log" 2>&1
+  {
+    echo "== run-owned Cinder volume, attachment, and provider-location state =="
+    python3 - "${DB_NAME}" "${CINDER_VOLUMES_DIR}" <<'PY'
+import json, os, subprocess, sys
+
+db, volumes_dir = sys.argv[1:]
+
+
+def rows(sql):
+    try:
+        out = subprocess.run(["mysql", "-N", "-B", "-e", sql],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode == 0:
+            return [line for line in out.stdout.splitlines() if line]
+    except Exception:
+        pass
+    return []
+
+
+volumes = []
+for parts in (row.split("\t") for row in rows(
+        "SELECT id, display_name, status, attach_status, host, "
+        "provider_location, size, created_at FROM `%s`.volumes;" % db)):
+    if len(parts) == 8:
+        volumes.append({"id": parts[0], "display_name": parts[1],
+                        "status": parts[2], "attach_status": parts[3],
+                        "host": parts[4], "provider_location": parts[5],
+                        "size": parts[6], "created_at": parts[7]})
+
+table = ""
+for candidate in ("attachments", "volume_attachment"):
+    if candidate in rows("SHOW TABLES FROM `%s`;" % db):
+        table = candidate
+        break
+attachments = []
+if table:
+    for parts in (row.split("\t") for row in rows(
+            "SELECT id, volume_id, instance_uuid, attached_host, status, "
+            "attach_status, attach_mode, attach_time, detach_time, deleted "
+            "FROM `%s`.%s;" % (db, table))):
+        if len(parts) == 10:
+            attachments.append({"id": parts[0], "volume_id": parts[1],
+                                "instance_uuid": parts[2],
+                                "attached_host": parts[3], "status": parts[4],
+                                "attach_status": parts[5],
+                                "attach_mode": parts[6],
+                                "attach_time": parts[7],
+                                "detach_time": parts[8], "deleted": parts[9]})
+
+doc = {"artifact_type": "failure-cinder-state.json", "redacted": True,
+       "volumes": volumes, "attachments_table": table,
+       "attachments": attachments,
+       "persistence_files": sorted(
+           os.listdir(volumes_dir)) if os.path.isdir(volumes_dir) else [],
+    }
+json.dump(doc, sys.stdout, indent=2)
+sys.stdout.write("\n")
+PY
+  } > "${EVIDENCE_DIR}/failure-cinder-state.json" 2>&1
+  {
+    echo "== redacted cinder-volume traceback (bounded) =="
+    grep -a -B2 -A60 'Create export for volume failed' "${EVIDENCE_DIR}/cinder-volume.log" 2>/dev/null \
+      | sed -E 's/[0-9a-f]{48,}/<redacted>/g' | head -c 20000 || true
+  } > "${EVIDENCE_DIR}/failure-attach-traceback.log" 2>&1
+  {
+    echo "== o3kd log tail =="
+    tail -n 60 "${EVIDENCE_DIR}/o3kd.log" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' || true
+    echo "== o3k-compute log tail =="
+    tail -n 60 "${EVIDENCE_DIR}/o3k-compute.log" 2>/dev/null | sed -E 's/[0-9a-f]{48,}/<redacted>/g' || true
+    echo "== compute agent health =="
+    curl -s -m 2 "http://127.0.0.1:${COMPUTE_HEALTH_PORT:-18091}/readyz" 2>&1 || true
+  } > "${EVIDENCE_DIR}/failure-o3k-state.log" 2>&1
+  eval "${save_opts}"
+}
+
+emit_partial_evidence() {
+  # Honest partial manifest and aggregate failure artifact on every failure
+  # path, emitted before cleanup so the protected post-run guard can consume
+  # them. Tiers before the failing phase are passed; the failing phase and
+  # everything after are not-reached.
+  [ "${RUN_FAILED}" = "1" ] || return 0
+  local save_opts
+  save_opts="$(set +o)"
+  set +e
+  python3 - "${RUN_PHASE}" "${RELEASE_SERIES}" "${RELEASE_CODENAME}" \
+    "${CINDER_DISPLAY}" "${CINDER_PYPI_PIN}" "${CINDER_SOURCE}" "${RUN_ID}" \
+    "${EVIDENCE_DIR}" <<'PY'
+import json, os, sys
+
+phase, series, codename, display, pin, source, run_id, evidence_dir = sys.argv[1:]
+tiers = [
+    "cinder_service_user_auth", "o3k_token_validation_by_cinder",
+    "catalog_discovery_of_volumev3", "real_volume_create",
+    "real_volume_available", "real_server_created", "real_libvirt_domain",
+    "guest_console_boot_marker", "compute_attach_via_libvirt",
+    "guest_device_observation", "detach_and_delete_cleanup",
+]
+passed_before = {
+    "start": 0, "volume-available": 5, "server-active": 6,
+    "volume-attach": 8, "attachment-verified": 9, "volume-detached": 11,
+    "cleanup": 12,
+}
+idx = passed_before.get(phase, 0)
+statuses = {t: ("passed" if i < idx else "not-reached")
+            for i, t in enumerate(tiers)}
+manifest = {
+    "profile": f"real-external-cinder-{codename}-service-under-test",
+    "release_series": series, "codename": codename,
+    "cinder_version": display, "cinder_pin": pin, "cinder_source": source,
+    "cinder_processes": ["cinder-api", "cinder-scheduler", "cinder-volume"],
+    "cinder_dependencies": ["mariadb", "rabbitmq", "memcached"],
+    "backend": "run-owned local-lvm (loop device)",
+    "o3k_processes": ["o3kd", "o3k-compute-bin"],
+    "run_id": run_id,
+    "run_phase": phase,
+    "failure_reason": "runner step failed; see failure-* artifacts and service logs",
+    "evidence_tiers": statuses,
+    "secret_scan": "pending",
+    "foreign_state_unchanged": "pending-post-run-guard",
+    "run_owned_resources_remaining": "pending-post-run-guard",
+}
+with open(evidence_dir + "/evidence.yaml", "w",
+          encoding="utf-8") as stream:
+    stream.write("profile: %s\n" % manifest["profile"])
+    stream.write('release_series: "%s"\n' % manifest["release_series"])
+    stream.write("codename: %s\n" % manifest["codename"])
+    stream.write('cinder_version: "%s"\n' % manifest["cinder_version"])
+    stream.write('cinder_pin: "%s"\n' % manifest["cinder_pin"])
+    stream.write('cinder_source: "%s"\n' % manifest["cinder_source"])
+    stream.write("cinder_processes: [cinder-api, cinder-scheduler, cinder-volume]\n")
+    stream.write("cinder_dependencies: [mariadb, rabbitmq, memcached]\n")
+    stream.write("backend: run-owned local-lvm (loop device)\n")
+    stream.write("o3k_processes: [o3kd, o3k-compute-bin]\n")
+    stream.write('run_id: "%s"\n' % run_id)
+    stream.write('run_phase: "%s"\n' % phase)
+    stream.write('failure_reason: "%s"\n' % manifest["failure_reason"])
+    stream.write("evidence_tiers:\n")
+    for tier, status in statuses.items():
+        stream.write("  %s: %s\n" % (tier, status))
+    stream.write("  secret_scan: pending\n")
+    stream.write("  foreign_state_unchanged: pending-post-run-guard\n")
+    stream.write("  run_owned_resources_remaining: pending-post-run-guard\n")
+result = {
+    "artifact_type": "real-cinder-runner-result.json",
+    "status": "failed",
+    "reason": "runner step failed at phase %s" % phase,
+    "run_phase": phase,
+    "redacted": True,
+    "run_id": run_id,
+    "finished_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime()),
+    }
+with open(evidence_dir + "/real-cinder-runner-result.json", "w",
+          encoding="utf-8") as stream:
+    json.dump(result, stream, indent=2)
+    stream.write("\n")
+PY
+  eval "${save_opts}"
+}
+
+write_foreign_state_after() {
+  # Honest post-cleanup verification shared by the failure and success paths.
+  local save_opts
+  save_opts="$(set +o)"
+  set +e
+  local leftovers
+  leftovers="$(verify_clean 2>/dev/null || true)"
+  local clean_state="passed"
+  [ -z "${leftovers}" ] || clean_state="failed"
+  local tgt_restored="true"
+  if [ -f "${TGT_CONF_BACKUP}" ]; then
+    cmp -s "${TGT_CONF_BACKUP}" "${TGT_CONF_PATH}" || tgt_restored="false"
+  fi
+  local foreign_unchanged="true"
+  [ "${tgt_restored}" = "true" ] || foreign_unchanged="false"
+  python3 - "${RUN_ID}" "${foreign_unchanged}" "${clean_state}" "${tgt_restored}" \
+    "${leftovers}" "${INVENTORY_AFTER}" <<'PY'
+import json, sys, time
+
+run_id, foreign_unchanged, clean_state, tgt_restored, leftovers, inventory_after = sys.argv[1:]
+remaining = leftovers.split() if leftovers else []
+after = {
+    "run_id": run_id,
+    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    "foreign_unchanged": foreign_unchanged == "true",
+    "run_owned_resources_remaining": remaining,
+    "cleanup_status": clean_state,
+    "tgt": {"targets_conf_restored": tgt_restored == "true"},
+    }
+with open(inventory_after, "w", encoding="utf-8") as stream:
+    json.dump(after, stream, indent=2)
+PY
+  eval "${save_opts}"
+}
+
 cleanup_early() {
+  # Diagnostics and the partial manifest run before anything is torn down so
+  # the live service, LVM, tgtd, and database state is provable from evidence.
+  emit_failure_diagnostics
+  emit_partial_evidence
+  restore_tgtd_config
   kill -TERM "${COMPUTE_PID:-}" 2>/dev/null || true
   wait "${COMPUTE_PID:-}" 2>/dev/null || true
   kill -TERM "${O3KD_PID:-}" 2>/dev/null || true
@@ -521,6 +816,7 @@ cleanup_early() {
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
+  write_foreign_state_after
 }
 trap cleanup_early EXIT
 
@@ -605,6 +901,7 @@ for i in $(seq 1 60); do
   sleep 2
 done
 [ "${STATUS}" = "available" ] || { echo "ERROR: volume did not become available (status=${STATUS})"; exit 1; }
+RUN_PHASE="volume-available"
 echo "    volume ${VOLUME_ID} is available"
 echo "${VOLUME_ID}" > "${EVIDENCE_DIR}/volume-id.txt"
 
@@ -677,6 +974,7 @@ SERVER_ID="${SERVER_ID//[[:space:]]/}"
 echo "==> Verifying the selected compute host and real libvirt domain..."
 SERVER_STATUS="$(openstack server show "${SERVER_ID}" -f value -c status)"
 [ "${SERVER_STATUS}" = "ACTIVE" ] || { echo "ERROR: server did not reach ACTIVE (status=${SERVER_STATUS})"; exit 1; }
+RUN_PHASE="server-active"
 echo "    server ${SERVER_ID} is ACTIVE"
 SERVER_JSON="$(openstack server show "${SERVER_ID}" -f json)"
 echo "${SERVER_JSON}" > "${EVIDENCE_DIR}/server-show.json"
@@ -706,7 +1004,17 @@ done
 echo "    guest boot marker observed in console"
 
 echo "==> Workflow: attach the real volume through the public Nova API..."
+RUN_PHASE="volume-attach"
+# Regression guard (run 31050533925): Cinder TgtAdm runs `tgt-admin --update
+# <iqn>`, which parses only /etc/tgt/targets.conf. Without the include below,
+# tgt-admin silently creates nothing and Cinder fails export creation with
+# NotFound, surfacing as a Nova attach 503.
+grep -qs "^include ${CINDER_VOLUMES_DIR}/\*" "${TGT_CONF_PATH}" || {
+  echo "ERROR: ${TGT_CONF_PATH} lacks 'include ${CINDER_VOLUMES_DIR}/*'; tgt-admin cannot create the iSCSI target" >&2
+  exit 1
+}
 openstack server add volume "${SERVER_ID}" "${VOLUME_ID}"
+RUN_PHASE="attachment-verified"
 echo "    volume ${VOLUME_ID} attached to server ${SERVER_ID}"
 
 echo "==> Waiting for the durable attachment to reach attached..."
@@ -757,8 +1065,10 @@ for i in $(seq 1 30); do
   sleep 2
 done
 [ "${DETACH_OK}" = "yes" ] || { echo "ERROR: volume did not return to available (status=${VOL_STATUS})"; exit 1; }
+RUN_PHASE="volume-detached"
 echo "    volume ${VOLUME_ID} is available again"
 
+RUN_PHASE="cleanup"
 echo "==> Workflow: delete all run-owned resources and verify cleanup..."
 timeout 300 openstack server delete --wait "${SERVER_ID}" >/dev/null 2>&1 || true
 openstack keypair delete "${KEYPAIR_NAME}" >/dev/null 2>&1 || true
@@ -925,6 +1235,7 @@ cleanup_run_owned() {
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
+  restore_tgtd_config
 }
 
 verify_clean() {
@@ -952,6 +1263,7 @@ verify_clean() {
   fi
   if [ -n "${leftovers[*]:-}" ]; then
     printf 'run-owned resource remains after cleanup: %s\n' "${leftovers[*]}" >&2
+    printf '%s\n' "${leftovers[*]}"
     return 1
   fi
   return 0
@@ -961,7 +1273,6 @@ echo "==> Cleaning up run-owned host resources..."
 trap - EXIT
 cleanup_run_owned
 
-INVENTORY_AFTER="${EVIDENCE_DIR}/foreign-state-after.json"
 if [ "${KEEP}" != "--keep" ]; then
   rm -rf "${STATE_ROOT}"
 else
@@ -972,26 +1283,12 @@ else
 fi
 
 echo "==> Recording post-cleanup foreign-state verification..."
-if verify_clean; then
-  CLEAN_STATE="passed"
-else
-  CLEAN_STATE="failed"
-fi
-python3 - <<PY
-import json
-
-after = {
-    "run_id": "${RUN_ID}",
-    "recorded_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "foreign_unchanged": True,
-    "run_owned_resources_remaining": [],
-    "cleanup_status": "${CLEAN_STATE}"
-}
-with open("${INVENTORY_AFTER}", "w") as f:
-    json.dump(after, f, indent=2)
+write_foreign_state_after
+python3 - "${INVENTORY_AFTER}" <<'PY'
+import json, sys
+after = json.load(open(sys.argv[1], encoding="utf-8"))
+assert after["cleanup_status"] == "passed", after
+assert after["foreign_unchanged"] is True, after
+assert after["tgt"]["targets_conf_restored"] is True, after
 PY
-if [ "${CLEAN_STATE}" != "passed" ]; then
-  echo "ERROR: run-owned resources remain after cleanup" >&2
-  exit 1
-fi
 echo "==> Cleanup complete: zero run-owned resources remain."

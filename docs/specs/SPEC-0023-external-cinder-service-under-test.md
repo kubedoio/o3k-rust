@@ -42,6 +42,15 @@ The external Cinder deployment still owns and operates its supported:
 - storage backend and backend-specific dependencies;
 - upgrades, configuration, service health, and operational lifecycle.
 
+For the run-owned LVM/iSCSI backend of the protected testbed profile, the
+runner provisions the Cinder `tgtadm` helper contract: Cinder writes
+tgt-admin persistence files into `volumes_dir` and invokes
+`tgt-admin --update <iqn>`, which parses only the tgtd config file. The
+testbed therefore appends `include <volumes_dir>/*` to that config with a
+run-owned backup and restores it on cleanup (run 31050533925: a missing
+include made tgt-admin silently exit 0 without creating the target, and
+Cinder failed export creation with `NotFound`).
+
 The profile can later be used within a small edge-cloud integration scenario,
 but that does not automatically make external Cinder part of the native O3K
 storage profile or prove broad cross-cloud compatibility.

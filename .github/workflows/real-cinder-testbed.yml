@@ -93,9 +93,6 @@ jobs:
           set -euo pipefail
           [[ "${RECOVERY_RUN_ID}" =~ ^[0-9A-Za-z-]+$ ]] || { echo "invalid run id"; exit 1; }
           state="/var/lib/o3k-cinder-testbed/${RECOVERY_RUN_ID}"
-          slug="$(printf '%s' "${RECOVERY_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
-          vg="o3k-vg-${slug}"
-          db="o3k_cinder_${slug}"
           sudo -n pkill -f "${state}" 2>/dev/null || true
           sleep 2
           sudo -n pkill -9 -f "${state}" 2>/dev/null || true
