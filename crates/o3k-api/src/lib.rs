@@ -331,8 +331,12 @@ async fn microversion_middleware(
             return resp;
         }
 
+        let is_attachment_route = path.contains("/os-volume_attachments");
+        let is_allowed_289 = is_attachment_route && compute_version == Some("2.89");
+
         if let Some(ver) = compute_version
             && ver != "2.1"
+            && !is_allowed_289
         {
             let body = serde_json::json!({
                 "computeFault": {
@@ -359,14 +363,25 @@ async fn microversion_middleware(
         }
 
         let mut response = next.run(req).await;
-        response.headers_mut().insert(
-            "OpenStack-API-Version",
-            HeaderValue::from_static("compute 2.1"),
-        );
-        response.headers_mut().insert(
-            "X-OpenStack-Nova-API-Version",
-            HeaderValue::from_static("2.1"),
-        );
+        if is_allowed_289 {
+            response.headers_mut().insert(
+                "OpenStack-API-Version",
+                HeaderValue::from_static("compute 2.89"),
+            );
+            response.headers_mut().insert(
+                "X-OpenStack-Nova-API-Version",
+                HeaderValue::from_static("2.89"),
+            );
+        } else {
+            response.headers_mut().insert(
+                "OpenStack-API-Version",
+                HeaderValue::from_static("compute 2.1"),
+            );
+            response.headers_mut().insert(
+                "X-OpenStack-Nova-API-Version",
+                HeaderValue::from_static("2.1"),
+            );
+        }
         response.headers_mut().insert(
             "Vary",
             HeaderValue::from_static("OpenStack-API-Version, X-OpenStack-Nova-API-Version"),
@@ -2645,9 +2660,6 @@ async fn show_volume_attachment(
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
-    let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
-        return compute_error(ComputeError::NotFound).into_response();
-    };
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2657,19 +2669,40 @@ async fn show_volume_attachment(
         .into_response();
     };
 
-    match compute
-        .get_volume_attachment(&project_id, server_uuid, attachment_uuid)
-        .await
+    if let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id)
+        && let Ok(record) = compute
+            .get_volume_attachment(&project_id, server_uuid, attachment_uuid)
+            .await
     {
-        Ok(record) => (
+        return (
             StatusCode::OK,
             Json(VolumeAttachmentResponse {
                 volume_attachment: map_volume_attachment(record),
             }),
         )
-            .into_response(),
-        Err(error) => compute_error(error).into_response(),
+            .into_response();
     }
+
+    if let Ok(records) = compute
+        .list_volume_attachments(&project_id, server_uuid)
+        .await
+    {
+        for record in records {
+            if record.volume_id.to_string() == attachment_id
+                || record.cinder_attachment_id.as_deref() == Some(&attachment_id)
+            {
+                return (
+                    StatusCode::OK,
+                    Json(VolumeAttachmentResponse {
+                        volume_attachment: map_volume_attachment(record),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    compute_error(ComputeError::NotFound).into_response()
 }
 
 async fn delete_volume_attachment(
@@ -2679,9 +2712,6 @@ async fn delete_volume_attachment(
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
-    let Ok(attachment_uuid) = Uuid::parse_str(&attachment_id) else {
-        return compute_error(ComputeError::NotFound).into_response();
-    };
     let Some(compute) = state.compute else {
         return keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2691,11 +2721,46 @@ async fn delete_volume_attachment(
         .into_response();
     };
 
+    let target_uuid = if let Ok(uuid) = Uuid::parse_str(&attachment_id) {
+        if compute
+            .get_volume_attachment(&project_id, server_uuid, uuid)
+            .await
+            .is_ok()
+        {
+            Some(uuid)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let target_uuid = match target_uuid {
+        Some(uuid) => uuid,
+        None => {
+            if let Ok(records) = compute
+                .list_volume_attachments(&project_id, server_uuid)
+                .await
+            {
+                let found = records.into_iter().find(|r| {
+                    r.volume_id.to_string() == attachment_id
+                        || r.cinder_attachment_id.as_deref() == Some(&attachment_id)
+                });
+                match found {
+                    Some(r) => r.id,
+                    None => return compute_error(ComputeError::NotFound).into_response(),
+                }
+            } else {
+                return compute_error(ComputeError::NotFound).into_response();
+            }
+        }
+    };
+
     match compute
-        .detach_volume(&project_id, server_uuid, attachment_uuid)
+        .detach_volume(&project_id, server_uuid, target_uuid)
         .await
     {
-        Ok(_) => StatusCode::ACCEPTED.into_response(),
+        Ok(()) => StatusCode::OK.into_response(),
         Err(error) => compute_error(error).into_response(),
     }
 }
