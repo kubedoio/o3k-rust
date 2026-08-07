@@ -148,12 +148,19 @@ selected-host/binding intent with desired/observed binding state are
 durable-store authoritative. SQLite UNIQUE constraints on `(subnet_id,
 fixed_ip)` and `mac_address` make duplicate allocation impossible under the
 supported single-`o3kd` concurrency, with allocation retry on unique
-violation. The previous `metadata.json` file is imported once, idempotently
-and crash-resume safely, then renamed so it is never read again. Binding
-intent is recorded when a create dispatch selects a host, and host
-observations project into durable binding state. Host-local TAP/bridge/DHCP
-execution and the ownership fences around foreign links remain agent-owned
-and unchanged; the first-alpha flat-network public behavior is unchanged.
+violation. The store layer is additionally safe for concurrent writers on
+one SQLite file: independent service instances conflict deterministically
+on duplicate names, CIDRs, and deletes, and never allocate a duplicate IP or
+MAC (executable multi-writer tests), while deployment remains a single
+`o3kd` process. The previous `metadata.json` file is imported once,
+idempotently and crash-resume safely, then renamed so it is never read
+again. Binding intent is recorded when a create dispatch selects a host, and
+terminal create outcomes project `bound`/`error` onto the recorded intent
+(live agent updates and reconcile paths, best-effort and idempotent), while
+terminal delete success unbinds the ports so they are reusable. Host-local
+TAP/bridge/DHCP execution and the ownership fences around foreign links
+remain agent-owned and unchanged; the first-alpha flat-network public
+behavior is unchanged.
 
 ### 3. Durable control-plane metadata authority
 
