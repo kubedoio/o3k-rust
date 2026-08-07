@@ -574,7 +574,13 @@ async fn neutron_network_subnet_port_lifecycle_is_deterministic()
     let identity = test_service("http://127.0.0.1:8080").await?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
-        .with_network(NetworkService::open(&root)?);
+        .with_network(
+            NetworkService::open(
+                &root,
+                std::sync::Arc::new(o3k_store::testkit::open_memory().await?),
+            )
+            .await?,
+        );
     let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let response = o3k_api::router_with_state(state.clone())
         .oneshot(
@@ -735,23 +741,32 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         "/tmp/o3k-api-compute-network-{}",
         uuid::Uuid::now_v7()
     ));
-    let network_service = NetworkService::open(&network_root)?;
+    let network_service = NetworkService::open(
+        &network_root,
+        std::sync::Arc::new(o3k_store::testkit::open_memory().await?),
+    )
+    .await?;
     let network = network_service
-        .create_network("eba29e2d-53de-461d-ae91-ede7402713cb", "flat".to_owned())?;
-    let _subnet = network_service.create_subnet(
-        "eba29e2d-53de-461d-ae91-ede7402713cb",
-        network.id,
-        "subnet".to_owned(),
-        "192.0.2.0/29".to_owned(),
-        None,
-        None,
-        None,
-    )?;
-    let port = network_service.create_port(
-        "eba29e2d-53de-461d-ae91-ede7402713cb",
-        network.id,
-        "server-port".to_owned(),
-    )?;
+        .create_network("eba29e2d-53de-461d-ae91-ede7402713cb", "flat".to_owned())
+        .await?;
+    let _subnet = network_service
+        .create_subnet(
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            network.id,
+            "subnet".to_owned(),
+            "192.0.2.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let port = network_service
+        .create_port(
+            "eba29e2d-53de-461d-ae91-ede7402713cb",
+            network.id,
+            "server-port".to_owned(),
+        )
+        .await?;
     let port_id = port.id.to_string();
     let expected_fixed_ip = port.fixed_ip.to_string();
     let console = o3k_console::ConsoleService::open(format!(
