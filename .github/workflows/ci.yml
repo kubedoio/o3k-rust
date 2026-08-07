@@ -52,6 +52,10 @@ jobs:
         run: bash tests/real-cinder-evidence-artifacts.sh
       - name: Test real-Cinder tgt configuration regression
         run: bash tests/real-cinder-tgt-config.sh
+      - name: Test real-Cinder attachment diagnostics SQL (attach_status)
+        run: bash tests/real-cinder-attach-status-diagnostics.sh
+      - name: Test CHAP iSCSI compute gate (Gate D; skips without tgt/iscsiadm/libvirt)
+        run: bash tests/cinder-chap-compute-gate.sh
       - name: Test Tempest summary generator
         run: bash tests/tempest-summary-generator.sh
       - name: Test CI workflow contracts

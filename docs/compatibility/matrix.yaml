@@ -247,8 +247,10 @@ entries:
       - At 2.89 the response emits the upstream 2.89 field set and omits the legacy id field; the 2.1 response shape is unchanged.
       - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
     executable_tests:
-      - crates/o3k-api/tests/health.rs::nova_volume_attachment_lifecycle_list_create_show_delete
-      - crates/o3k-api/tests/health.rs::nova_volume_attachment_list_microversion_289_returns_upstream_fields_without_legacy_id
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::list_at_289_emits_exact_fields_without_legacy_id
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::show_at_289_resolves_volume_id_like_cinder_does
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::non_get_289_attachment_requests_are_rejected_with_406
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::discovery_document_stays_at_21
     status: implemented
   - service: compute
     operation: server_volume_attachments_show
@@ -264,6 +266,6 @@ entries:
       - At 2.89 the final path segment resolves as the volume id, the O3K attachment id, or the Cinder attachment id (cinder_attachment_id) scoped to the server; anything else is 404 and project isolation is unchanged.
       - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
     executable_tests:
-      - crates/o3k-api/tests/health.rs::nova_volume_attachment_lifecycle_list_create_show_delete
-      - crates/o3k-api/tests/health.rs::nova_volume_attachment_show_microversion_289_resolves_volume_and_attachment_ids
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::show_at_289_resolves_volume_id_like_cinder_does
+      - crates/o3k-api/tests/gate_c_nova_callback.rs::project_isolation_is_preserved_at_289
     status: implemented

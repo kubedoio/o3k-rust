@@ -20,7 +20,10 @@
 //! persisted; connection information is stored as a digest and its secret
 //! fields never cross the compute boundary.
 
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use o3k_cinder::{AttachTarget, CinderClient, CinderError, ComputeConnector};
 use o3k_provider::{BlockDeviceAttachment, ComputeProvider, ProviderError};
@@ -28,7 +31,6 @@ use o3k_store::{DurableStore, SqliteStore, VolumeAttachmentRecord};
 use uuid::Uuid;
 
 use crate::{ComputeError, ProviderBackend};
-
 pub const STATUS_VALIDATED: &str = "validated";
 pub const STATUS_CINDER_ATTACHMENT_CREATED: &str = "cinder_attachment_created";
 pub const STATUS_CONNECTOR_OBTAINED: &str = "connector_obtained";
@@ -47,11 +49,41 @@ pub const STATUS_UNKNOWN: &str = "unknown_outcome";
 
 pub const TERMINAL_STATUSES: &[&str] = &[STATUS_ATTACHED, STATUS_DETACHED, STATUS_ERROR];
 
+/// Whether a persisted phase belongs to the detach flow (reverse of attach).
+fn is_detach_phase(status: &str) -> bool {
+    matches!(
+        status,
+        STATUS_DETACH_REQUESTED
+            | STATUS_COMPUTE_DETACH_REQUESTED
+            | STATUS_COMPUTE_DETACHED
+            | STATUS_CINDER_ATTACHMENT_TERMINATED
+    )
+}
+
+/// Removes the durable id from the in-flight set when dropped, covering every
+/// early-return path of attach/continue_attach/detach.
+struct FlightGuard<'a> {
+    set: &'a Mutex<HashSet<Uuid>>,
+    id: Uuid,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        self.set
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
+    }
+}
+
 #[derive(Clone)]
 pub struct AttachmentOrchestrator {
     store: Arc<SqliteStore>,
     provider: Arc<ProviderBackend>,
     cinder: Option<Arc<CinderClient>>,
+    /// Durable attachment ids currently being processed by attach/detach.
+    /// Reconciliation skips these so it never races a live operation.
+    in_flight: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 impl AttachmentOrchestrator {
@@ -64,7 +96,26 @@ impl AttachmentOrchestrator {
             store,
             provider,
             cinder,
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
         }
+    }
+
+    fn enter_flight(&self, id: Uuid) -> FlightGuard<'_> {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id);
+        FlightGuard {
+            set: &self.in_flight,
+            id,
+        }
+    }
+
+    fn is_in_flight(&self, id: Uuid) -> bool {
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&id)
     }
 
     #[must_use]
@@ -73,7 +124,10 @@ impl AttachmentOrchestrator {
     }
 
     /// Executes the durable Cinder attach lifecycle. Duplicate requests for
-    /// the same volume return the existing durable attachment.
+    /// the same volume return the existing durable attachment. The flow is
+    /// phase-driven: every external side effect is preceded by persisting its
+    /// phase, so a restart or an unknown outcome resumes from the persisted
+    /// phase instead of guessing.
     pub async fn attach(
         &self,
         project_id: &str,
@@ -88,9 +142,11 @@ impl AttachmentOrchestrator {
             .get_volume_attachment_by_volume(volume_id)
             .await?
         {
+            // Idempotent duplicate attach: never create a second attachment or
+            // a second Cinder record. A still-in-flight record is returned as
+            //-is and the reconciler drives it to completion.
             return Ok(existing);
         }
-        let cinder = self.cinder.clone().ok_or(ComputeError::Unavailable)?;
 
         let id = Uuid::now_v7();
         let operation_id = Uuid::now_v7();
@@ -133,129 +189,186 @@ impl AttachmentOrchestrator {
             error: None,
         };
         self.store.insert_volume_attachment(&record).await?;
+        self.trace_phase(&record, STATUS_VALIDATED, None).await?;
+        let _flight = self.enter_flight(id);
+        self.continue_attach(project_id, &record).await
+    }
 
-        let volume_id_str = volume_id.to_string();
+    /// Advances an attachment record through the attach state machine from its
+    /// persisted phase. Safe to call after a restart or an unknown outcome:
+    /// each step is re-derived from the durable record and external side
+    /// effects are idempotent (Cinder create/complete/delete are idempotent by
+    /// id; compute attach/detach are idempotent in the provider).
+    async fn continue_attach(
+        &self,
+        project_id: &str,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let _flight = self.enter_flight(record.id);
+        let cinder = self.cinder.clone().ok_or(ComputeError::Unavailable)?;
+        let volume_id_str = record.volume_id.to_string();
+        let server_id = record.server_id;
 
         // Phase: cinder_attachment_created
-        self.set_phase(id, STATUS_CINDER_ATTACHMENT_CREATED, None)
-            .await?;
-        let server_id_str = server_id.to_string();
-        let cinder_attachment = match cinder
-            .create_attachment(project_id, &volume_id_str, Some(&server_id_str))
-            .await
-        {
-            Ok(attachment) => attachment,
-            Err(error) => {
-                self.compensate_after_create(project_id, id, None, &format!("{error}"))
+        let cinder_attachment_id = match record.cinder_attachment_id.clone() {
+            Some(id) => id,
+            None => {
+                self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_CREATED, None)
                     .await?;
-                return Err(map_cinder_error(error));
+                let server_id_str = server_id.to_string();
+                match cinder
+                    .create_attachment(project_id, &volume_id_str, Some(&server_id_str))
+                    .await
+                {
+                    Ok(attachment) => {
+                        let id = attachment.id.clone();
+                        self.trace_attachment(
+                            record,
+                            "cinder_attachment_created",
+                            &attachment,
+                            None,
+                        );
+                        self.store
+                            .update_volume_attachment_outcome(
+                                record.id,
+                                STATUS_CINDER_ATTACHMENT_CREATED,
+                                Some(&id),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await?;
+                        id
+                    }
+                    Err(error) => {
+                        self.trace_error(record, "cinder_attachment_create", &error);
+                        if error.is_unknown_outcome() {
+                            // Unknown outcome: never compensate without observing.
+                            self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                                .await?;
+                            return Err(map_cinder_error(error));
+                        }
+                        self.observe_before_compensate(
+                            project_id,
+                            record.id,
+                            &volume_id_str,
+                            None,
+                            &format!("{error}"),
+                        )
+                        .await?;
+                        return Err(map_cinder_error(error));
+                    }
+                }
             }
         };
-        self.store
-            .update_volume_attachment_outcome(
-                id,
-                STATUS_CINDER_ATTACHMENT_CREATED,
-                Some(&cinder_attachment.id),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
 
         // Phase: connector_obtained
-        self.set_phase(id, STATUS_CONNECTOR_OBTAINED, None).await?;
-        let connector = match self.provider.collect_connector(server_id).await {
-            Ok(connector) => connector,
-            Err(error) => {
-                self.compensate_after_create(
-                    project_id,
-                    id,
-                    Some(&cinder_attachment.id),
-                    &format!("{error}"),
-                )
+        if record.connector_host.is_none() {
+            self.set_phase(record.id, STATUS_CONNECTOR_OBTAINED, None)
                 .await?;
-                return Err(map_provider_error(error));
+            match self.provider.collect_connector(server_id).await {
+                Ok(connector) => {
+                    self.store
+                        .update_volume_attachment_outcome(
+                            record.id,
+                            STATUS_CONNECTOR_OBTAINED,
+                            None,
+                            Some(&connector.host),
+                            Some(&connector.ip),
+                            connector.initiator.as_deref(),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await?;
+                }
+                Err(error) => {
+                    self.trace_error(record, "collect_connector", &error);
+                    self.compensate_after_create(
+                        project_id,
+                        record.id,
+                        Some(&cinder_attachment_id),
+                        &format!("{error}"),
+                    )
+                    .await?;
+                    return Err(map_provider_error(error));
+                }
             }
-        };
-        self.store
-            .update_volume_attachment_outcome(
-                id,
-                STATUS_CONNECTOR_OBTAINED,
-                None,
-                Some(&connector.host),
-                Some(&connector.ip),
-                connector.initiator.as_deref(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
+        }
 
-        // Phase: connection_prepared
-        self.set_phase(id, STATUS_CONNECTION_PREPARED, None).await?;
-        let cinder_connector = ComputeConnector {
-            host: connector.host.clone(),
-            ip: connector.ip.clone(),
-            platform: connector.platform.clone(),
-            os_type: connector.os_type.clone(),
-            multipath: connector.multipath,
-            initiator: connector.initiator.clone(),
-        };
-        let updated = match cinder
-            .update_attachment_connector(project_id, &cinder_attachment.id, &cinder_connector)
-            .await
-        {
-            Ok(updated) => updated,
-            Err(error) => {
-                self.compensate_after_create(
-                    project_id,
-                    id,
-                    Some(&cinder_attachment.id),
-                    &format!("{error}"),
-                )
+        // Phase: connection_prepared (PUT connector to Cinder)
+        let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+        let record = fresh.as_ref().unwrap_or(record);
+        let (connection_info, target) = if record.connection_info_digest.is_some() {
+            // Resumed after a restart or unknown outcome: re-fetch the secret
+            // connection information from Cinder (CHAP credentials are never
+            // persisted) and re-derive the target.
+            self.prepared_target(project_id, &cinder_attachment_id, record)
+                .await?
+        } else {
+            self.set_phase(record.id, STATUS_CONNECTION_PREPARED, None)
                 .await?;
-                return Err(map_cinder_error(error));
-            }
+            let cinder_connector = {
+                let host = record.connector_host.clone().unwrap_or_default();
+                let ip = record.connector_ip.clone().unwrap_or_default();
+                let initiator = record.connector_initiator.clone();
+                ComputeConnector {
+                    host,
+                    ip,
+                    platform: "x86_64".to_owned(),
+                    os_type: "linux".to_owned(),
+                    multipath: false,
+                    initiator,
+                }
+            };
+            let updated = match cinder
+                .update_attachment_connector(project_id, &cinder_attachment_id, &cinder_connector)
+                .await
+            {
+                Ok(updated) => updated,
+                Err(error) => {
+                    self.trace_error(record, "cinder_attachment_update", &error);
+                    if error.is_unknown_outcome() {
+                        // The PUT may have succeeded server-side. Never delete a
+                        // possibly-successful attachment solely because the local
+                        // outcome was uncertain; persist unknown and reconcile by
+                        // observation.
+                        self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                            .await?;
+                        return Err(map_cinder_error(error));
+                    }
+                    self.observe_before_compensate(
+                        project_id,
+                        record.id,
+                        &volume_id_str,
+                        Some(&cinder_attachment_id),
+                        &format!("{error}"),
+                    )
+                    .await?;
+                    return Err(map_cinder_error(error));
+                }
+            };
+            self.trace_attachment(record, "cinder_attachment_update", &updated, None);
+            self.connection_target(record, &updated).await?
         };
-        let connection_info = match updated.connection_info {
-            Some(connection_info) => connection_info,
-            None => {
-                self.compensate_after_create(
-                    project_id,
-                    id,
-                    Some(&cinder_attachment.id),
-                    "connection information is missing",
-                )
-                .await?;
-                return Err(ComputeError::InvalidRequest);
-            }
-        };
-        let target = match connection_info.attach_target() {
-            Some(target) => target,
-            None => {
-                self.compensate_after_create(
-                    project_id,
-                    id,
-                    Some(&cinder_attachment.id),
-                    "connection information is malformed",
-                )
-                .await?;
-                return Err(ComputeError::InvalidRequest);
-            }
-        };
-        validate_target(&target)?;
+
+        let record = self
+            .store
+            .get_volume_attachment_by_id(record.id)
+            .await?
+            .ok_or(ComputeError::NotFound)?;
         self.store
             .update_volume_attachment_outcome(
-                id,
+                record.id,
                 STATUS_CONNECTION_PREPARED,
                 None,
                 None,
@@ -270,105 +383,268 @@ impl AttachmentOrchestrator {
             )
             .await?;
 
-        // Phase: compute_attach_requested
-        self.set_phase(id, STATUS_COMPUTE_ATTACH_REQUESTED, None)
-            .await?;
-        let device_attachment = BlockDeviceAttachment {
-            volume_id: volume_id_str.clone(),
-            attachment_id: cinder_attachment.id.clone(),
-            driver_volume_type: target.driver_volume_type.clone(),
-            target_iqn: target.target_iqn.clone(),
-            target_portal: target.target_portal.clone(),
-            target_lun: target.target_lun.map(|value| value as u32),
-            local_path: target.local_path.clone(),
-            device_path: None,
-            multipath: false,
-            initiator: connector.initiator.clone(),
-            auth_method: target.auth_method.clone(),
-            auth_username: target
-                .auth_username
-                .as_ref()
-                .map(|value| value.expose().to_owned()),
-            auth_password: target
-                .auth_password
-                .as_ref()
-                .map(|value| value.expose().to_owned()),
-        };
-        let observation = match self
+        // Phase: compute_attach_requested -> compute_attached
+        let record = self
+            .store
+            .get_volume_attachment_by_id(record.id)
+            .await?
+            .ok_or(ComputeError::NotFound)?;
+        let observed = self
             .provider
-            .attach_block_device(server_id, &device_attachment)
-            .await
-        {
-            Ok(observation) => observation,
-            Err(error) => {
+            .observe_block_device(server_id, &volume_id_str)
+            .await;
+        let device_attached = matches!(observed, Ok(Some(o)) if o.attached);
+        if !device_attached {
+            self.set_phase(record.id, STATUS_COMPUTE_ATTACH_REQUESTED, None)
+                .await?;
+            let initiator = record.connector_initiator.clone();
+            let device_attachment = BlockDeviceAttachment {
+                volume_id: volume_id_str.clone(),
+                attachment_id: cinder_attachment_id.clone(),
+                driver_volume_type: target.driver_volume_type.clone(),
+                target_iqn: target.target_iqn.clone(),
+                target_portal: target.target_portal.clone(),
+                target_lun: target.target_lun.map(|value| value as u32),
+                local_path: target.local_path.clone(),
+                device_path: None,
+                multipath: false,
+                initiator,
+                auth_method: target.auth_method.clone(),
+                auth_username: target
+                    .auth_username
+                    .as_ref()
+                    .map(|value| value.expose().to_owned()),
+                auth_password: target
+                    .auth_password
+                    .as_ref()
+                    .map(|value| value.expose().to_owned()),
+            };
+            let observation = match self
+                .provider
+                .attach_block_device(server_id, &device_attachment)
+                .await
+            {
+                Ok(observation) => observation,
+                Err(error) => {
+                    self.trace_error(&record, "compute_attach", &error);
+                    if error.is_unknown_outcome() {
+                        self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                            .await?;
+                        return Err(map_provider_error(error));
+                    }
+                    self.compensate_after_attach(
+                        project_id,
+                        record.id,
+                        Some(&cinder_attachment_id),
+                        server_id,
+                        &device_attachment,
+                        &format!("{error}"),
+                    )
+                    .await?;
+                    return Err(map_provider_error(error));
+                }
+            };
+            if !observation.attached {
                 self.compensate_after_attach(
                     project_id,
-                    id,
-                    Some(&cinder_attachment.id),
+                    record.id,
+                    Some(&cinder_attachment_id),
                     server_id,
                     &device_attachment,
-                    &format!("{error}"),
+                    "compute device was not attached",
                 )
                 .await?;
-                return Err(map_provider_error(error));
+                return Err(ComputeError::Conflict);
             }
-        };
-        if !observation.attached {
-            self.compensate_after_attach(
-                project_id,
-                id,
-                Some(&cinder_attachment.id),
-                server_id,
-                &device_attachment,
-                "compute device was not attached",
-            )
-            .await?;
-            return Err(ComputeError::Conflict);
-        }
-        self.set_phase(id, STATUS_COMPUTE_ATTACHED, None).await?;
-        if let Some(path) = &observation.device_path {
-            self.store
-                .update_volume_attachment_outcome(
-                    id,
-                    STATUS_COMPUTE_ATTACHED,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(path),
-                )
+            self.set_phase(record.id, STATUS_COMPUTE_ATTACHED, None)
+                .await?;
+            if let Some(path) = &observation.device_path {
+                self.store
+                    .update_volume_attachment_outcome(
+                        record.id,
+                        STATUS_COMPUTE_ATTACHED,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(path),
+                    )
+                    .await?;
+            }
+        } else {
+            self.set_phase(record.id, STATUS_COMPUTE_ATTACHED, None)
                 .await?;
         }
 
-        // Phase: cinder_attachment_completed
-        self.set_phase(id, STATUS_CINDER_ATTACHMENT_COMPLETED, None)
-            .await?;
-        if let Err(error) = cinder
-            .complete_attachment(project_id, &cinder_attachment.id)
-            .await
-        {
-            self.compensate_after_attach(
-                project_id,
-                id,
-                Some(&cinder_attachment.id),
-                server_id,
-                &device_attachment,
-                &format!("{error}"),
-            )
-            .await?;
-            return Err(map_cinder_error(error));
+        // Phase: cinder_attachment_completed -> attached
+        let record = self
+            .store
+            .get_volume_attachment_by_id(record.id)
+            .await?
+            .ok_or(ComputeError::NotFound)?;
+        if record.status != STATUS_ATTACHED {
+            self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_COMPLETED, None)
+                .await?;
+            match cinder
+                .complete_attachment(project_id, &cinder_attachment_id)
+                .await
+            {
+                Ok(()) => {
+                    self.set_phase(record.id, STATUS_ATTACHED, None).await?;
+                }
+                Err(error) => {
+                    self.trace_error(&record, "cinder_attachment_complete", &error);
+                    if error.is_unknown_outcome() {
+                        // The complete may have succeeded server-side. Persist
+                        // unknown; reconciliation observes the attachment and
+                        // drives it to attached.
+                        self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                            .await?;
+                        return Err(map_cinder_error(error));
+                    }
+                    let device = self.block_device_from_record(&record).await;
+                    self.compensate_after_attach(
+                        project_id,
+                        record.id,
+                        Some(&cinder_attachment_id),
+                        server_id,
+                        &device,
+                        &format!("{error}"),
+                    )
+                    .await?;
+                    return Err(map_cinder_error(error));
+                }
+            }
         }
-        self.set_phase(id, STATUS_ATTACHED, None).await?;
 
         self.store
-            .get_volume_attachment_by_id(id)
+            .get_volume_attachment_by_id(record.id)
             .await?
             .ok_or(ComputeError::NotFound)
+    }
+
+    /// Extracts the connection target from an attachment-update response,
+    /// distinguishing missing, null and malformed `connection_info`. On any
+    /// malformed result the attachment is observed (show) before a decision is
+    /// made: a possibly-successful attachment is never deleted solely because
+    /// the local parse failed.
+    async fn connection_target(
+        &self,
+        record: &VolumeAttachmentRecord,
+        updated: &o3k_cinder::CinderAttachment,
+    ) -> Result<(o3k_cinder::ConnectionInfo, AttachTarget), ComputeError> {
+        let presence = updated.connection_info_presence();
+        let Some(connection_info) = updated.connection_info.clone() else {
+            self.trace_malformed(record, "connection_information_missing_or_null");
+            self.observe_before_compensate(
+                &self.project_id(record.server_id).await?,
+                record.id,
+                &record.volume_id.to_string(),
+                Some(&updated.id),
+                "connection information is missing or null",
+            )
+            .await?;
+            return Err(ComputeError::InvalidRequest);
+        };
+        let Some(target) = connection_info.attach_target() else {
+            self.trace_malformed(record, "connection_information_is_malformed");
+            self.observe_before_compensate(
+                &self.project_id(record.server_id).await?,
+                record.id,
+                &record.volume_id.to_string(),
+                Some(&updated.id),
+                "connection information is malformed",
+            )
+            .await?;
+            return Err(ComputeError::InvalidRequest);
+        };
+        validate_target(&target)?;
+        tracing::debug!(
+            presence = format!("{presence:?}").to_lowercase(),
+            "connection_information_classified"
+        );
+        Ok((connection_info, target))
+    }
+
+    /// Re-fetches connection information from Cinder for a record that already
+    /// reached `connection_prepared` (restart/unknown-outcome resume).
+    async fn prepared_target(
+        &self,
+        project_id: &str,
+        cinder_attachment_id: &str,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<(o3k_cinder::ConnectionInfo, AttachTarget), ComputeError> {
+        let cinder = self.cinder.clone().ok_or(ComputeError::Unavailable)?;
+        let attachment = cinder
+            .show_attachment(project_id, cinder_attachment_id)
+            .await
+            .map_err(|error| {
+                self.trace_error(record, "cinder_attachment_observe", &error);
+                // A failed or uncertain observation must not be compensated
+                // without further observation; both map to Unavailable so the
+                // record stays non-terminal for the reconciler.
+                let _ = error;
+                ComputeError::Unavailable
+            })?;
+        let Some(connection_info) = attachment.connection_info else {
+            self.trace_malformed(record, "connection_information_missing_on_observe");
+            self.observe_before_compensate(
+                project_id,
+                record.id,
+                &record.volume_id.to_string(),
+                Some(cinder_attachment_id),
+                "connection information is missing on observe",
+            )
+            .await?;
+            return Err(ComputeError::InvalidRequest);
+        };
+        let Some(target) = connection_info.attach_target() else {
+            self.trace_malformed(record, "connection_information_malformed_on_observe");
+            self.observe_before_compensate(
+                project_id,
+                record.id,
+                &record.volume_id.to_string(),
+                Some(cinder_attachment_id),
+                "connection information is malformed on observe",
+            )
+            .await?;
+            return Err(ComputeError::InvalidRequest);
+        };
+        validate_target(&target)?;
+        Ok((connection_info, target))
+    }
+
+    async fn project_id(&self, server_id: Uuid) -> Result<String, ComputeError> {
+        self.project_for_server(server_id).await
+    }
+
+    async fn block_device_from_record(
+        &self,
+        record: &VolumeAttachmentRecord,
+    ) -> BlockDeviceAttachment {
+        BlockDeviceAttachment {
+            volume_id: record.volume_id.to_string(),
+            attachment_id: record
+                .cinder_attachment_id
+                .clone()
+                .unwrap_or_else(|| record.id.to_string()),
+            driver_volume_type: record.driver_volume_type.clone().unwrap_or_default(),
+            target_iqn: record.target_iqn.clone(),
+            target_portal: record.target_portal.clone(),
+            target_lun: record.target_lun,
+            local_path: None,
+            device_path: None,
+            multipath: false,
+            initiator: record.connector_initiator.clone(),
+            auth_method: None,
+            auth_username: None,
+            auth_password: None,
+        }
     }
 
     /// Executes the durable detach lifecycle in reverse order. Repeated
@@ -387,71 +663,128 @@ impl AttachmentOrchestrator {
         if record.status == STATUS_DETACHED || record.status == STATUS_ERROR {
             return Ok(());
         }
+        self.continue_detach(project_id, &record).await
+    }
+
+    /// Advances a detach from its persisted phase. Restart-safe and
+    /// idempotent: a crash between phases is resumed from the persisted phase,
+    /// and the terminal `detached` is only persisted after the Cinder
+    /// attachment has been terminated, so a terminal record never hides a live
+    /// Cinder attachment.
+    async fn continue_detach(
+        &self,
+        project_id: &str,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<(), ComputeError> {
+        let _flight = self.enter_flight(record.id);
         let cinder = self.cinder.clone().ok_or(ComputeError::Unavailable)?;
-        self.set_phase(record.id, STATUS_DETACH_REQUESTED, None)
-            .await?;
+        // Enter the detach flow from any non-detach phase (attached or a
+        // mid-attach phase) by persisting the detach_requested phase first.
+        if !is_detach_phase(record.status.as_str()) {
+            self.set_phase(record.id, STATUS_DETACH_REQUESTED, None)
+                .await?;
+        }
 
-        let device_attachment = BlockDeviceAttachment {
-            volume_id: record.volume_id.to_string(),
-            attachment_id: record
-                .cinder_attachment_id
-                .clone()
-                .unwrap_or_else(|| record.id.to_string()),
-            driver_volume_type: record.driver_volume_type.clone().unwrap_or_default(),
-            target_iqn: record.target_iqn.clone(),
-            target_portal: record.target_portal.clone(),
-            target_lun: record.target_lun,
-            local_path: None,
-            device_path: None,
-            multipath: false,
-            initiator: record.connector_initiator.clone(),
-            // Detach only needs the target identity; CHAP credentials are
-            // never persisted and are not required to log out.
-            auth_method: None,
-            auth_username: None,
-            auth_password: None,
-        };
-
-        // Phase: compute_detach_requested
-        self.set_phase(record.id, STATUS_COMPUTE_DETACH_REQUESTED, None)
-            .await?;
-        match self
-            .provider
-            .detach_block_device(server_id, &device_attachment)
-            .await
+        // Phase: compute_detach_requested -> compute_detached
+        let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+        let record = fresh.as_ref().unwrap_or(record);
+        if record.status == STATUS_DETACH_REQUESTED
+            || record.status == STATUS_COMPUTE_DETACH_REQUESTED
         {
-            Ok(_) => {}
-            Err(error) => {
-                self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
-                    .await?;
-                return Err(map_provider_error(error));
+            self.set_phase(record.id, STATUS_COMPUTE_DETACH_REQUESTED, None)
+                .await?;
+            let device_attachment = self.block_device_from_record(record).await;
+            match self
+                .provider
+                .detach_block_device(record.server_id, &device_attachment)
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => {
+                    self.trace_error(record, "compute_detach", &error);
+                    // A known compute-detach failure must not hide the Cinder
+                    // attachment behind a terminal record: the reverse-order
+                    // terminate cannot run while the device is attached, so
+                    // keep the record non-terminal for the reconciler to
+                    // observe and retry.
+                    if error.is_unknown_outcome() {
+                        self.set_phase(
+                            record.id,
+                            STATUS_UNKNOWN,
+                            Some(&format!("detach; {error}")),
+                        )
+                        .await?;
+                    } else {
+                        self.set_phase(
+                            record.id,
+                            STATUS_COMPUTE_DETACH_REQUESTED,
+                            Some(&format!("{error}")),
+                        )
+                        .await?;
+                    }
+                    return Err(map_provider_error(error));
+                }
+            }
+            self.set_phase(record.id, STATUS_COMPUTE_DETACHED, None)
+                .await?;
+        }
+
+        // Phase: cinder_attachment_terminated
+        let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+        let record = fresh.as_ref().unwrap_or(record);
+        if (record.status == STATUS_COMPUTE_DETACHED
+            || record.status == STATUS_CINDER_ATTACHMENT_TERMINATED)
+            && let Some(cinder_attachment_id) = &record.cinder_attachment_id
+        {
+            self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_TERMINATED, None)
+                .await?;
+            match cinder
+                .terminate_attachment(project_id, cinder_attachment_id)
+                .await
+            {
+                Ok(()) => {}
+                Err(error) => {
+                    self.trace_error(record, "cinder_attachment_terminate", &error);
+                    match &error {
+                        o3k_cinder::CinderError::NotFound(_)
+                        | o3k_cinder::CinderError::Conflict(_) => {}
+                        other => {
+                            // Unknown-outcome termination must not flip the
+                            // record to detached without observation; keep it
+                            // non-terminal so reconciliation observes first.
+                            if other.is_unknown_outcome() {
+                                self.set_phase(
+                                    record.id,
+                                    STATUS_UNKNOWN,
+                                    Some(&format!("detach; {other}")),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                            tracing::warn!(%error, "cinder attachment termination warning");
+                        }
+                    }
+                }
             }
         }
         self.set_phase(record.id, STATUS_DETACHED, None).await?;
-
-        // Phase: cinder_attachment_terminated
-        if let Some(cinder_attachment_id) = &record.cinder_attachment_id
-            && let Err(error) = cinder
-                .terminate_attachment(project_id, cinder_attachment_id)
-                .await
-        {
-            match error {
-                o3k_cinder::CinderError::NotFound(_) | o3k_cinder::CinderError::Conflict(_) => {}
-                _ => tracing::warn!(%error, "cinder attachment termination warning"),
-            }
-        }
         Ok(())
     }
 
     /// Reconciles non-terminal attachments after restart or an unknown
     /// outcome: observes the Cinder and compute boundaries and either advances
-    /// the phase or compensates. Foreign resources are never deleted.
+    /// the phase or compensates. Foreign resources are never deleted. Records
+    /// with an operation in flight are skipped so reconciliation never races a
+    /// live attach/detach.
     pub async fn reconcile(&self) -> Result<(), ComputeError> {
         let records = self
             .store
             .list_volume_attachments_by_status(TERMINAL_STATUSES)
             .await?;
         for record in records {
+            if self.is_in_flight(record.id) {
+                continue;
+            }
             self.reconcile_record(&record).await?;
         }
         Ok(())
@@ -470,6 +803,18 @@ impl AttachmentOrchestrator {
     }
 
     async fn reconcile_unknown(&self, record: &VolumeAttachmentRecord) -> Result<(), ComputeError> {
+        // A record set to unknown mid-detach must resume the detach flow, not
+        // the attach flow. The detach unknown paths record an error prefixed
+        // with "detach".
+        if record
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("detach"))
+        {
+            let project = self.project_for_server(record.server_id).await?;
+            let _ = self.continue_detach(&project, record).await;
+            return Ok(());
+        }
         let Some(cinder) = self.cinder.clone() else {
             self.set_phase(
                 record.id,
@@ -489,9 +834,29 @@ impl AttachmentOrchestrator {
                         .iter()
                         .any(|attachment| attachment.volume_id == record.volume_id.to_string()) =>
                 {
-                    self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_CREATED, None)
+                    let observed = attachments
+                        .into_iter()
+                        .find(|attachment| attachment.volume_id == record.volume_id.to_string())
+                        .ok_or(ComputeError::NotFound)?;
+                    self.store
+                        .update_volume_attachment_outcome(
+                            record.id,
+                            STATUS_CINDER_ATTACHMENT_CREATED,
+                            Some(&observed.id),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
                         .await?;
-                    return Ok(());
+                    let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+                    self.continue_attach(&project, fresh.as_ref().unwrap_or(record))
+                        .await?;
                 }
                 Ok(_) => {
                     self.set_phase(
@@ -502,8 +867,17 @@ impl AttachmentOrchestrator {
                     .await?;
                 }
                 Err(error) => {
-                    self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
-                        .await?;
+                    self.trace_error(record, "cinder_attachment_list", &error);
+                    // The observation itself failed: the outcome is still
+                    // unknown, so the record must stay non-terminal rather than
+                    // being hidden behind a terminal error.
+                    if error.is_unknown_outcome() {
+                        self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                            .await?;
+                    } else {
+                        self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
+                            .await?;
+                    }
                 }
             }
             return Ok(());
@@ -512,23 +886,63 @@ impl AttachmentOrchestrator {
             .show_attachment(&project, &cinder_attachment_id)
             .await
         {
-            Ok(attachment) if attachment.status == "attached" => {
-                self.set_phase(record.id, STATUS_ATTACHED, None).await?;
-            }
-            Ok(attachment) => {
-                self.set_phase(
-                    record.id,
-                    STATUS_ERROR,
-                    Some(&format!(
-                        "cinder attachment is in state {}",
-                        attachment.status
-                    )),
-                )
-                .await?;
-            }
-            Err(error) => {
-                self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
+            Ok(attachment) => match attachment.status.as_str() {
+                "attached" => {
+                    self.set_phase(record.id, STATUS_ATTACHED, None).await?;
+                }
+                "attaching" | "reserved" => {
+                    // The PUT (or a later phase) completed server-side; resume
+                    // the attach flow from the observed Cinder state.
+                    let phase = if attachment
+                        .connection_info
+                        .as_ref()
+                        .map(|info| info.has_usable_target())
+                        .unwrap_or(false)
+                    {
+                        STATUS_CONNECTION_PREPARED
+                    } else {
+                        STATUS_CINDER_ATTACHMENT_CREATED
+                    };
+                    self.set_phase(record.id, phase, None).await?;
+                    let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+                    self.continue_attach(&project, fresh.as_ref().unwrap_or(record))
+                        .await?;
+                }
+                other => {
+                    self.set_phase(
+                        record.id,
+                        STATUS_ERROR,
+                        Some(&format!("cinder attachment is in state {}", other)),
+                    )
                     .await?;
+                }
+            },
+            Err(error) => {
+                self.trace_error(record, "cinder_attachment_observe", &error);
+                if matches!(error, CinderError::NotFound(_)) {
+                    // The attachment no longer exists; mark the durable record
+                    // error so it is not retried blindly, and clean up any
+                    // compute device without touching foreign state.
+                    let device = self.block_device_from_record(record).await;
+                    let _ = self
+                        .provider
+                        .detach_block_device(record.server_id, &device)
+                        .await;
+                    self.set_phase(
+                        record.id,
+                        STATUS_ERROR,
+                        Some("cinder attachment no longer exists"),
+                    )
+                    .await?;
+                } else if error.is_unknown_outcome() {
+                    // The observation failed: the outcome is still unknown.
+                    // Keep the record non-terminal so reconcile observes again.
+                    self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
+                        .await?;
+                } else {
+                    self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
+                        .await?;
+                }
             }
         }
         Ok(())
@@ -538,41 +952,134 @@ impl AttachmentOrchestrator {
         &self,
         record: &VolumeAttachmentRecord,
     ) -> Result<(), ComputeError> {
-        // Observe the compute device. If it is attached, drive completion;
-        // otherwise advance deterministically from the persisted phase.
+        let project = self.project_for_server(record.server_id).await?;
+        let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+        let record = fresh.as_ref().unwrap_or(record);
+        if is_detach_phase(record.status.as_str()) {
+            // A crash or unknown outcome mid-detach: resume the reverse flow
+            // (compute detach then Cinder terminate) instead of re-attaching.
+            let _ = self.continue_detach(&project, record).await;
+            return Ok(());
+        }
+        // Observe the compute device first. If it is attached, drive
+        // completion; otherwise resume the attach flow from the persisted
+        // phase (idempotent).
         let observed = self
             .provider
             .observe_block_device(record.server_id, &record.volume_id.to_string())
             .await;
-        match (record.status.as_str(), observed) {
-            (_, Ok(Some(observation))) if observation.attached => {
+        match observed {
+            Ok(Some(observation)) if observation.attached => {
                 self.set_phase(record.id, STATUS_COMPUTE_ATTACHED, None)
                     .await?;
-                if let Some(cinder_attachment_id) = &record.cinder_attachment_id
-                    && let Some(cinder) = &self.cinder
-                {
-                    let project = self.project_for_server(record.server_id).await?;
-                    self.set_phase(record.id, STATUS_CINDER_ATTACHMENT_COMPLETED, None)
-                        .await?;
-                    match cinder
-                        .complete_attachment(&project, cinder_attachment_id)
-                        .await
-                    {
-                        Ok(()) => {
-                            self.set_phase(record.id, STATUS_ATTACHED, None).await?;
-                        }
-                        Err(error) => {
-                            self.set_phase(record.id, STATUS_ERROR, Some(&format!("{error}")))
-                                .await?;
-                        }
-                    }
-                } else {
-                    self.set_phase(record.id, STATUS_ATTACHED, None).await?;
-                }
+                let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+                self.continue_attach(&project, fresh.as_ref().unwrap_or(record))
+                    .await?;
             }
-            _ => {}
+            _ => {
+                let fresh = self.store.get_volume_attachment_by_id(record.id).await?;
+                let _ = self
+                    .continue_attach(&project, fresh.as_ref().unwrap_or(record))
+                    .await;
+            }
         }
         Ok(())
+    }
+
+    /// Observes the Cinder attachment before any compensation DELETE. If the
+    /// attachment exists and holds connection information, the earlier outcome
+    /// was actually successful and the record is left non-terminal for
+    /// reconciliation rather than deleted. Compensation (a service-token
+    /// DELETE) runs only after observation confirms the attachment is safe to
+    /// remove or the attachment is absent.
+    async fn observe_before_compensate(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        volume_id: &str,
+        cinder_attachment_id: Option<&str>,
+        reason: &str,
+    ) -> Result<(), ComputeError> {
+        let Some(cinder_attachment_id) = cinder_attachment_id else {
+            // No attachment id known: the create outcome was uncertain. Observe
+            // THIS volume's attachments; if none match, compensation is a no-op.
+            let Some(cinder) = self.cinder.clone() else {
+                return Ok(());
+            };
+            match cinder.list_attachments(project_id).await {
+                Ok(attachments)
+                    if attachments.iter().any(|attachment| {
+                        attachment.volume_id == volume_id
+                            && attachment
+                                .connection_info
+                                .as_ref()
+                                .map(|info| info.has_usable_target())
+                                .unwrap_or(false)
+                    }) =>
+                {
+                    self.set_phase(id, STATUS_UNKNOWN, Some(reason)).await?;
+                    return Ok(());
+                }
+                Ok(_) => {
+                    // No live attachment observed for this volume; nothing to
+                    // compensate.
+                    self.set_phase(id, STATUS_ERROR, Some(reason)).await?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    if error.is_unknown_outcome() {
+                        self.set_phase(id, STATUS_UNKNOWN, Some(&format!("{reason}; {error}")))
+                            .await?;
+                    } else {
+                        self.set_phase(id, STATUS_ERROR, Some(&format!("{reason}; {error}")))
+                            .await?;
+                    }
+                    return Ok(());
+                }
+            }
+        };
+        let Some(cinder) = self.cinder.clone() else {
+            return Ok(());
+        };
+        match cinder
+            .show_attachment(project_id, cinder_attachment_id)
+            .await
+        {
+            Ok(attachment)
+                if attachment
+                    .connection_info
+                    .as_ref()
+                    .map(|info| info.has_usable_target())
+                    .unwrap_or(false) =>
+            {
+                // The attachment was updated successfully despite the local
+                // outcome; never delete it. Leave it unknown for reconcile to
+                // drive forward.
+                self.trace_malformed_record(
+                    id,
+                    "attachment_holds_connection_info_not_compensated",
+                    reason,
+                );
+                self.set_phase(id, STATUS_UNKNOWN, Some(reason)).await?;
+                Ok(())
+            }
+            Ok(_) => {
+                // Confirmed absent/null connection_info: compensating is safe.
+                self.compensate_after_create(project_id, id, Some(cinder_attachment_id), reason)
+                    .await
+            }
+            Err(error) => {
+                if error.is_unknown_outcome() {
+                    self.set_phase(id, STATUS_UNKNOWN, Some(&format!("{reason}; {error}")))
+                        .await?;
+                } else {
+                    // A confirmed NotFound means there is nothing to delete.
+                    self.set_phase(id, STATUS_ERROR, Some(&format!("{reason}; {error}")))
+                        .await?;
+                }
+                Ok(())
+            }
+        }
     }
 
     async fn compensate_after_create(
@@ -592,6 +1099,7 @@ impl AttachmentOrchestrator {
             {
                 Ok(()) => {}
                 Err(error) => {
+                    self.trace_error_record(id, "compensation_terminate", &error);
                     self.set_phase(id, STATUS_UNKNOWN, Some(&format!("{reason}; {error}")))
                         .await?;
                     return Ok(());
@@ -623,6 +1131,7 @@ impl AttachmentOrchestrator {
             {
                 Ok(()) => {}
                 Err(error) => {
+                    self.trace_error_record(id, "compensation_terminate", &error);
                     self.set_phase(id, STATUS_UNKNOWN, Some(&format!("{reason}; {error}")))
                         .await?;
                     return Ok(());
@@ -643,6 +1152,96 @@ impl AttachmentOrchestrator {
             .update_volume_attachment_phase(id, status, error)
             .await?;
         Ok(())
+    }
+
+    /// Bounded redacted phase tracing. Records only attachment/volume/instance
+    /// ids, the durable phase, connection_info presence and top-level key names,
+    /// and attach_target presence. Never tokens, CHAP secrets, or raw
+    /// connection_info.
+    async fn trace_phase(
+        &self,
+        record: &VolumeAttachmentRecord,
+        phase: &str,
+        _error: Option<&str>,
+    ) -> Result<(), ComputeError> {
+        tracing::info!(
+            phase,
+            attachment_id = record.cinder_attachment_id.as_deref().unwrap_or(""),
+            volume_id = %record.volume_id,
+            instance_id = %record.server_id,
+            "attachment phase"
+        );
+        Ok(())
+    }
+
+    fn trace_attachment(
+        &self,
+        record: &VolumeAttachmentRecord,
+        step: &str,
+        attachment: &o3k_cinder::CinderAttachment,
+        _error: Option<&str>,
+    ) {
+        let presence = match attachment.connection_info_presence() {
+            o3k_cinder::ConnectionInfoPresence::Present => "present",
+            o3k_cinder::ConnectionInfoPresence::Missing => "missing",
+            o3k_cinder::ConnectionInfoPresence::Null => "null",
+            o3k_cinder::ConnectionInfoPresence::Malformed => "malformed",
+        };
+        let top_level_keys = attachment
+            .connection_info
+            .as_ref()
+            .map(|info| info.top_level_keys())
+            .unwrap_or_default()
+            .join(",");
+        let target_present = attachment
+            .connection_info
+            .as_ref()
+            .map(|info| info.attach_target().is_some())
+            .unwrap_or(false);
+        tracing::info!(
+            step,
+            attachment_id = %attachment.id,
+            volume_id = %record.volume_id,
+            instance_id = %record.server_id,
+            attach_status = %attachment.status,
+            connection_info_presence = presence,
+            connection_info_top_level_keys = top_level_keys,
+            attach_target_present = target_present,
+            "cinder attachment trace"
+        );
+    }
+
+    fn trace_malformed(&self, record: &VolumeAttachmentRecord, reason: &str) {
+        tracing::warn!(
+            volume_id = %record.volume_id,
+            instance_id = %record.server_id,
+            attachment_id = record.cinder_attachment_id.as_deref().unwrap_or(""),
+            reason,
+            "cinder attachment parse trace"
+        );
+    }
+
+    fn trace_malformed_record(&self, id: Uuid, step: &str, reason: &str) {
+        tracing::warn!(attachment_id = %id, step, reason, "cinder attachment observe trace");
+    }
+
+    fn trace_error(
+        &self,
+        record: &VolumeAttachmentRecord,
+        step: &str,
+        error: &dyn std::fmt::Display,
+    ) {
+        tracing::warn!(
+            step,
+            volume_id = %record.volume_id,
+            instance_id = %record.server_id,
+            error = %error,
+            "attachment error trace"
+        );
+    }
+
+    fn trace_error_record(&self, id: Uuid, step: &str, error: &dyn std::fmt::Display) {
+        tracing::warn!(attachment_id = %id, step, error = %error, "attachment compensation trace");
     }
 }
 
@@ -941,7 +1540,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cinder_unavailable_before_create_compensates_cleanly()
+    async fn cinder_unavailable_before_create_is_observed_not_compensated()
     -> Result<(), Box<dyn std::error::Error>> {
         let h = harness().await?;
         let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
@@ -956,11 +1555,23 @@ mod tests {
         assert!(result.is_err());
         assert!(h.cinder_fake.attachment_ids().is_empty());
         assert_eq!(h.fake_provider.attached_volume_count(server_id), 0);
+        // A 503 on create is an uncertain outcome: the record must be left
+        // non-terminal (unknown), not compensated blindly.
+        let pending = h
+            .store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, STATUS_UNKNOWN);
+        // Reconciliation observes the volume's attachments and settles the
+        // record once it confirms none exist.
+        h.orchestrator.reconcile().await?;
         let pending = h
             .store
             .list_volume_attachments_by_status(TERMINAL_STATUSES)
             .await?;
         assert!(pending.is_empty());
+        assert_eq!(h.cinder_fake.attachment_ids().len(), 0);
         Ok(())
     }
 
@@ -1008,8 +1619,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compute_attach_success_with_cinder_completion_failure_compensates()
+    async fn compute_attach_success_with_cinder_completion_failure_is_not_prematurely_compensated()
     -> Result<(), Box<dyn std::error::Error>> {
+        // A 500 on os-complete is an uncertain outcome: the compute device was
+        // already attached and the Cinder complete may have succeeded
+        // server-side. The orchestrator must NOT compensate; it leaves the
+        // record unknown and reconciliation observes, then resumes and
+        // completes (the fake consumes the fault once).
         let h = harness().await?;
         let project = "eba29e2d-53de-461d-ae91-ede7402713cb";
         let server_id = Uuid::now_v7();
@@ -1021,12 +1637,21 @@ mod tests {
             .attach(project, server_id, volume, None, None, false)
             .await;
         assert!(result.is_err());
-        assert_eq!(h.fake_provider.attached_volume_count(server_id), 0);
+        // No premature compensation: the compute device stays attached and no
+        // DELETE is issued.
+        assert_eq!(h.fake_provider.attached_volume_count(server_id), 1);
+        assert!(h.cinder_fake.attachment_ids().len() == 1);
+        // Reconciliation observes the attachment, sees the compute device is
+        // attached, retries completion and reaches attached.
+        h.orchestrator.reconcile().await?;
         let pending = h
             .store
             .list_volume_attachments_by_status(TERMINAL_STATUSES)
             .await?;
         assert!(pending.is_empty());
+        let records = h.store.list_volume_attachments(server_id).await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, STATUS_ATTACHED);
         Ok(())
     }
 
@@ -1153,6 +1778,388 @@ mod restart_tests {
             pending.is_empty(),
             "compensation must leave no non-terminal records"
         );
+        Ok(())
+    }
+}
+
+/// Gate E — orchestrator replay gate.
+///
+/// Replays the response classes defined in
+/// `contracts/cinder/attachment-interaction-v28.yaml` through the durable
+/// attachment orchestrator and proves: observe-before-retry, no premature
+/// compensation, no duplicate attachment, and restart safety.
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use crate::FakeComputeProvider;
+    use o3k_cinder::testkit::{faults, start_testbed};
+    use std::time::Duration;
+
+    const PROJECT: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
+
+    async fn harness_with_timeout(
+        timeout: Duration,
+    ) -> Result<
+        (
+            Arc<SqliteStore>,
+            Arc<FakeComputeProvider>,
+            AttachmentOrchestrator,
+            o3k_cinder::testkit::FakeCinderState,
+            Arc<o3k_cinder::CinderClient>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let fake_provider = Arc::new(FakeComputeProvider::new());
+        let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
+        let (client, fake, _addr) = start_testbed().await.map_err(|error| error.to_string())?;
+        let client = Arc::new(client.with_timeout(timeout));
+        let orchestrator =
+            AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
+        Ok((store, fake_provider, orchestrator, fake, client))
+    }
+
+    async fn seed_server(
+        store: &SqliteStore,
+        server_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: PROJECT.to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "ACTIVE".to_owned(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn create_volume(
+        client: &o3k_cinder::CinderClient,
+    ) -> Result<Uuid, Box<dyn std::error::Error>> {
+        let volume = client.create_volume(PROJECT, 1, "vol").await?;
+        Ok(Uuid::parse_str(&volume.id)?)
+    }
+
+    #[tokio::test]
+    async fn put_missing_connection_info_observes_then_compensates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        fake.set_fault(faults::missing_connection_info_on_update, true);
+        let result = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await;
+        assert!(result.is_err());
+        // Observe-before-compensate: after observing the confirmed-missing
+        // connection_info the orchestrator compensates with a service-token
+        // DELETE, so no attachment remains and no compute device was attached.
+        assert!(
+            fake.attachment_ids().is_empty(),
+            "confirmed missing connection_info must be compensated"
+        );
+        assert_eq!(fake.last_delete_service_token_validated(), Some(true));
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_null_connection_info_observes_then_compensates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        fake.set_fault(faults::null_connection_info_on_update, true);
+        let result = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await;
+        assert!(result.is_err());
+        assert!(
+            fake.attachment_ids().is_empty(),
+            "confirmed null connection_info must be compensated"
+        );
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_malformed_connection_info_observes_then_compensates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        fake.set_fault(faults::malformed_connection_info_on_update, true);
+        let result = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await;
+        assert!(result.is_err());
+        assert!(
+            fake.attachment_ids().is_empty(),
+            "confirmed malformed connection_info must be compensated"
+        );
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert!(pending.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_timeout_is_unknown_then_reconcile_resumes_and_attaches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A timed-out PUT is an unknown outcome: the orchestrator must NOT
+        // delete a possibly-successful attachment. It persists unknown and
+        // reconciliation observes, then resumes the connector update (the
+        // fake consumes the timeout fault once) and reaches attached.
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_millis(500)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        fake.set_fault(faults::timeout_update_connector, true);
+        let result = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await;
+        assert!(result.is_err());
+        // No premature compensation: the Cinder attachment still exists.
+        assert_eq!(fake.attachment_ids().len(), 1);
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, STATUS_UNKNOWN);
+
+        // Reconciliation observes and resumes the attach flow to completion.
+        orchestrator.reconcile().await?;
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert!(pending.is_empty(), "reconcile must settle the record");
+        let records = store.list_volume_attachments(server_id).await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, STATUS_ATTACHED);
+        assert_eq!(fake_provider.attached_volume_count(server_id), 1);
+        assert_eq!(fake.attachment_ids().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_at_connection_prepared_resumes_without_duplicate_attachment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Simulate a restart after the connector update completed (phase
+        // connection_prepared, digest persisted, CHAP credentials not
+        // persisted): reconciliation re-fetches connection information from
+        // Cinder, re-derives the target, attaches the compute device, completes
+        // the attachment, and reaches attached without creating a second
+        // Cinder attachment.
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+
+        // Prepare the Cinder-side attachment through the shared client (create
+        // + connector update) so the fake holds real connection_info.
+        let volume_str = volume_id.to_string();
+        let cinder_attachment = client
+            .create_attachment(PROJECT, &volume_str, Some(&server_id.to_string()))
+            .await?;
+        let connector = o3k_cinder::ComputeConnector {
+            host: "compute-restart".to_owned(),
+            ip: "10.0.0.5".to_owned(),
+            platform: "x86_64".to_owned(),
+            os_type: "linux".to_owned(),
+            multipath: false,
+            initiator: Some("iqn.1993-08.org.debian:01:o3k".to_owned()),
+        };
+        let updated = client
+            .update_attachment_connector(PROJECT, &cinder_attachment.id, &connector)
+            .await?;
+        let connection_info = updated.connection_info.ok_or("missing connection_info")?;
+        let target = connection_info.attach_target().ok_or("missing target")?;
+
+        // Durable record at connection_prepared: digest and target fields
+        // persisted, CHAP credentials never persisted.
+        let record_id = Uuid::now_v7();
+        store
+            .insert_volume_attachment(&VolumeAttachmentRecord {
+                id: record_id,
+                server_id,
+                volume_id,
+                device: "/dev/vdb".to_owned(),
+                tag: None,
+                delete_on_termination: false,
+                created_at: now_rfc3339(),
+                status: STATUS_CONNECTION_PREPARED.to_owned(),
+                operation_id: Some(Uuid::now_v7()),
+                idempotency_key: Some("attach:restart".to_owned()),
+                cinder_attachment_id: Some(cinder_attachment.id.clone()),
+                connector_host: Some("compute-restart".to_owned()),
+                connector_ip: Some("10.0.0.5".to_owned()),
+                connector_initiator: Some("iqn.1993-08.org.debian:01:o3k".to_owned()),
+                driver_volume_type: Some(target.driver_volume_type.clone()),
+                target_iqn: target.target_iqn.clone(),
+                target_portal: target.target_portal.clone(),
+                target_lun: target.target_lun.map(|v| v as u32),
+                connection_info_digest: Some(connection_info.digest()),
+                error: None,
+            })
+            .await?;
+
+        orchestrator.reconcile().await?;
+        let record = store
+            .get_volume_attachment_by_id(record_id)
+            .await?
+            .ok_or("record missing")?;
+        assert_eq!(record.status, STATUS_ATTACHED);
+        assert_eq!(fake_provider.attached_volume_count(server_id), 1);
+        // Exactly one Cinder attachment: no duplicate was created.
+        assert_eq!(fake.attachment_ids().len(), 1);
+        assert!(fake.attachment_ids().contains(&cinder_attachment.id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_attach_never_creates_a_second_cinder_attachment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (store, _fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+
+        let first = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await?;
+        let second = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await?;
+        assert_eq!(first.id, second.id);
+        assert_eq!(fake.attachment_ids().len(), 1, "no duplicate attachment");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_timeout_is_unknown_and_reconcile_observes_before_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A timed-out create leaves the attachment id unknown. The orchestrator
+        // must not DELETE blindly; reconciliation lists the volume's
+        // attachments and only settles once observation confirms state.
+        let (store, _fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_millis(500)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        fake.set_fault(faults::timeout_create_attachment, true);
+        let result = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await;
+        assert!(result.is_err());
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, STATUS_UNKNOWN);
+        orchestrator.reconcile().await?;
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert!(
+            pending.is_empty(),
+            "reconcile must settle after observation"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn crash_mid_detach_resumes_detach_not_reattach() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // A crash after the compute_detach_requested phase persisted must be
+        // resumed by reconciliation as a DETACH (compute detach then Cinder
+        // terminate), never as a re-attach.
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        let record = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await?;
+        assert_eq!(fake_provider.attached_volume_count(server_id), 1);
+
+        // Simulate a crash mid-detach.
+        store
+            .update_volume_attachment_phase(record.id, STATUS_COMPUTE_DETACH_REQUESTED, None)
+            .await?;
+
+        orchestrator.reconcile().await?;
+        let final_record = store
+            .get_volume_attachment_by_id(record.id)
+            .await?
+            .ok_or("record missing")?;
+        assert_eq!(final_record.status, STATUS_DETACHED);
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        assert!(
+            fake.attachment_ids().is_empty(),
+            "the Cinder attachment must be terminated, not re-attached"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn detach_terminate_unknown_outcome_resumes_after_observation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // An unknown-outcome Cinder terminate during detach must keep the
+        // record non-terminal; reconciliation observes and retries to detached.
+        let (store, fake_provider, orchestrator, fake, client) =
+            harness_with_timeout(Duration::from_secs(5)).await?;
+        let server_id = Uuid::now_v7();
+        seed_server(&store, server_id).await?;
+        let volume_id = create_volume(&client).await?;
+        let record = orchestrator
+            .attach(PROJECT, server_id, volume_id, None, None, false)
+            .await?;
+
+        fake.set_fault(faults::fail_terminate_attachment, true);
+        // The terminate outcome is unknown: detach leaves the record
+        // non-terminal (unknown) instead of reporting a confirmed failure or
+        // flipping it to detached without observation.
+        orchestrator.detach(PROJECT, server_id, record.id).await?;
+        let pending = store
+            .list_volume_attachments_by_status(TERMINAL_STATUSES)
+            .await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].status, STATUS_UNKNOWN);
+
+        orchestrator.reconcile().await?;
+        let final_record = store
+            .get_volume_attachment_by_id(record.id)
+            .await?
+            .ok_or("record missing")?;
+        assert_eq!(final_record.status, STATUS_DETACHED);
+        assert_eq!(fake_provider.attached_volume_count(server_id), 0);
+        assert!(fake.attachment_ids().is_empty());
         Ok(())
     }
 }

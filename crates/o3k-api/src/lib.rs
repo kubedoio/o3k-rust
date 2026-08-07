@@ -261,6 +261,39 @@ fn parse_microversion(ver: &str) -> Result<(u32, u32), ()> {
     Err(())
 }
 
+/// Whether the caller negotiated Nova microversion 2.89 for this request.
+/// Mirrors the parsing in `microversion_middleware`: the caller may use
+/// `OpenStack-API-Version: compute 2.89` or `X-OpenStack-Nova-API-Version:
+/// 2.89`. The operation-scoped 2.89 profile is GET-only on the volume
+/// attachment routes; this helper is used to select the 2.89 response shape.
+fn requested_compute_289(headers: &HeaderMap) -> bool {
+    let os_api_ver = headers
+        .get("OpenStack-API-Version")
+        .and_then(|h| h.to_str().ok());
+    let nova_api_ver = headers
+        .get("X-OpenStack-Nova-API-Version")
+        .and_then(|h| h.to_str().ok());
+    let mut compute_version: Option<&str> = None;
+    if let Some(val) = os_api_ver {
+        for part in val.split(',') {
+            let tokens: Vec<&str> = part.split_whitespace().collect();
+            if tokens.len() == 2 && tokens[0].eq_ignore_ascii_case("compute") {
+                compute_version = Some(tokens[1]);
+                break;
+            }
+        }
+    }
+    if compute_version.is_none()
+        && let Some(val) = nova_api_ver
+    {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            compute_version = Some(trimmed);
+        }
+    }
+    compute_version == Some("2.89")
+}
+
 async fn microversion_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -332,7 +365,12 @@ async fn microversion_middleware(
         }
 
         let is_attachment_route = path.contains("/os-volume_attachments");
-        let is_allowed_289 = is_attachment_route && compute_version == Some("2.89");
+        // The operation-scoped 2.89 profile is GET-only on the volume
+        // attachment list/show operations that Cinder's attachment-delete
+        // guard (bug #2004555) requires. Every other 2.89 request is rejected.
+        let is_allowed_289 = is_attachment_route
+            && req.method() == axum::http::Method::GET
+            && compute_version == Some("2.89");
 
         if let Some(ver) = compute_version
             && ver != "2.1"
@@ -2559,11 +2597,16 @@ struct VolumeAttachmentsResponse {
 
 #[derive(Debug, Serialize)]
 struct VolumeAttachmentDetails {
-    id: String,
+    /// Legacy `id` field, emitted only at microversion 2.1 (and below).
+    /// Upstream Nova removed it at 2.89 in favor of `attachment_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
     #[serde(rename = "attachment_id")]
     attachment_id: String,
-    #[serde(rename = "attachmentId")]
-    attachment_id_camel: String,
+    /// `attachmentId` (camel) is a legacy O3K alias emitted at 2.1 only; it is
+    /// not part of the upstream 2.89 field set.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "attachmentId")]
+    attachment_id_camel: Option<String>,
     #[serde(rename = "bdm_uuid")]
     bdm_uuid: String,
     #[serde(rename = "serverId")]
@@ -2575,15 +2618,22 @@ struct VolumeAttachmentDetails {
     delete_on_termination: bool,
 }
 
-fn map_volume_attachment(record: o3k_store::VolumeAttachmentRecord) -> VolumeAttachmentDetails {
+fn map_volume_attachment(
+    record: o3k_store::VolumeAttachmentRecord,
+    at_289: bool,
+) -> VolumeAttachmentDetails {
     let attachment_id = record
         .cinder_attachment_id
         .clone()
         .unwrap_or_else(|| record.id.to_string());
     VolumeAttachmentDetails {
-        id: attachment_id.clone(),
+        id: if at_289 {
+            None
+        } else {
+            Some(attachment_id.clone())
+        },
         attachment_id: attachment_id.clone(),
-        attachment_id_camel: attachment_id.clone(),
+        attachment_id_camel: if at_289 { None } else { Some(attachment_id) },
         bdm_uuid: record.id.to_string(),
         server_id: record.server_id.to_string(),
         volume_id: record.volume_id.to_string(),
@@ -2627,7 +2677,7 @@ async fn attach_volume(
         Ok(record) => (
             StatusCode::OK,
             Json(VolumeAttachmentResponse {
-                volume_attachment: map_volume_attachment(record),
+                volume_attachment: map_volume_attachment(record, false),
             }),
         )
             .into_response(),
@@ -2638,6 +2688,7 @@ async fn attach_volume(
 async fn list_volume_attachments(
     State(state): State<AppState>,
     Path((project_id, server_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
@@ -2655,17 +2706,20 @@ async fn list_volume_attachments(
         .list_volume_attachments(&project_id, server_uuid)
         .await
     {
-        Ok(records) => (
-            StatusCode::OK,
-            Json(VolumeAttachmentsResponse {
-                volume_attachments: records
-                    .into_iter()
-                    .filter(|r| r.status == "attached")
-                    .map(map_volume_attachment)
-                    .collect(),
-            }),
-        )
-            .into_response(),
+        Ok(records) => {
+            let at_289 = requested_compute_289(&headers);
+            (
+                StatusCode::OK,
+                Json(VolumeAttachmentsResponse {
+                    volume_attachments: records
+                        .into_iter()
+                        .filter(|r| r.status == "attached")
+                        .map(|record| map_volume_attachment(record, at_289))
+                        .collect(),
+                }),
+            )
+                .into_response()
+        }
         Err(error) => compute_error(error).into_response(),
     }
 }
@@ -2673,6 +2727,7 @@ async fn list_volume_attachments(
 async fn show_volume_attachment(
     State(state): State<AppState>,
     Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
@@ -2685,6 +2740,7 @@ async fn show_volume_attachment(
         )
         .into_response();
     };
+    let at_289 = requested_compute_289(&headers);
 
     if let Ok(records) = compute
         .list_volume_attachments(&project_id, server_uuid)
@@ -2699,7 +2755,7 @@ async fn show_volume_attachment(
                 return (
                     StatusCode::OK,
                     Json(VolumeAttachmentResponse {
-                        volume_attachment: map_volume_attachment(record),
+                        volume_attachment: map_volume_attachment(record, at_289),
                     }),
                 )
                     .into_response();

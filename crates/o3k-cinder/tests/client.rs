@@ -168,7 +168,7 @@ async fn attachment_lifecycle_validates_token_through_keystone()
             Some("9dd22dc6-ea63-5bea-b994-f5a3796a3c59"),
         )
         .await?;
-    assert_eq!(attachment.status, "creating");
+    assert_eq!(attachment.status, "reserved");
     assert_eq!(
         fake.last_openstack_api_version().as_deref(),
         Some("volume 3.44")
@@ -187,7 +187,7 @@ async fn attachment_lifecycle_validates_token_through_keystone()
         .ok_or("attach target missing")?;
     assert_eq!(
         target.target_iqn.as_deref(),
-        Some("iqn.2026-01.example.com:volume-00000001")
+        Some("iqn.2010-10.org.openstack:volume-00000001")
     );
     assert_eq!(target.target_portal.as_deref(), Some("10.0.0.10:3260"));
     assert_eq!(target.target_lun, Some(1));
