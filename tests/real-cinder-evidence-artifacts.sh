@@ -74,12 +74,22 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["status"] == "pending-post-run-guard", doc["status"]
 PY
 # The runner result must not assert an aggregate pass; the post-run guard owns
-# the aggregate decision.
+# the aggregate decision, and the lifecycle / Tempest verdicts stay separate.
 python3 - "${EVIDENCE_DIR}/real-cinder-runner-result.json" <<'PY'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["artifact_type"] == "real-cinder-runner-result.json", doc.get("artifact_type")
 assert doc["status"] == "runner-completed", doc["status"]
+assert "lifecycle_status" in doc, doc.keys()
+assert "tempest_preflight" in doc, doc.keys()
+assert "tempest_execution" in doc, doc.keys()
+PY
+# Honest guest observation: without evidence the marker is not-proven, never
+# fabricated passed.
+python3 - "${EVIDENCE_DIR}/guest-device-observation.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+assert doc["status"] == "not-proven", doc["status"]
 PY
 if grep -rqE "cinder-service-password|cinder-db-password|O3K_PW=|DB_PW=|MQ_PW=" "${EVIDENCE_DIR}"; then
     echo "secret value leaked into evidence artifacts" >&2

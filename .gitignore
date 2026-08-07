@@ -15,3 +15,12 @@ artifacts/
 # Real-host gate evidence artifacts (regenerated per run)
 /cinder-chap-compute-result.json
 /gate-d-domain-debug.xml
+
+# Tempest evidence regenerated per run (committed status/audit/allowlist stay)
+/tests/tempest-evidence/tempest-workspace/
+/tests/tempest-evidence/tempest.log
+/tests/tempest-evidence/tempest-results.xml
+/tests/tempest-evidence/tempest-cinder-summary.json
+/tests/tempest-evidence/tempest-preflight-result.json
+/tests/tempest-evidence/pipeline-*.xml
+/tests/tempest-evidence/pipeline-*.json

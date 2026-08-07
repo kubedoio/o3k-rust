@@ -133,6 +133,13 @@ TGT_CONF_MODIFIED=0
 # Phase reached before failure; recorded in the aggregate failure artifact.
 RUN_PHASE="start"
 
+# Gate B lifecycle verdict: bound to "passed" only after the real-Cinder
+# attach/detach lifecycle and cleanup verification complete. The Tempest gate
+# (Gate C) has its own verdict and must never overwrite or invalidate it.
+LIFECYCLE_PASSED="failed"
+TEMPEST_PREFLIGHT_STATUS="not-executed"
+TEMPEST_EXECUTION_STATUS="not-executed"
+
 # A failure before the service cleanup trap (installed later, once services
 # exist) must not leave the freshly created run-owned state root behind: the
 # protected pre-run guard blocks every later run on any stale state under the
@@ -703,25 +710,33 @@ emit_partial_evidence() {
   set +e
   python3 - "${RUN_PHASE}" "${RELEASE_SERIES}" "${RELEASE_CODENAME}" \
     "${CINDER_DISPLAY}" "${CINDER_PYPI_PIN}" "${CINDER_SOURCE}" "${RUN_ID}" \
-    "${EVIDENCE_DIR}" <<'PY'
+    "${EVIDENCE_DIR}" "${LIFECYCLE_PASSED}" "${TEMPEST_PREFLIGHT_STATUS}" \
+    "${TEMPEST_EXECUTION_STATUS}" <<'PY'
 import json, os, sys
 
-phase, series, codename, display, pin, source, run_id, evidence_dir = sys.argv[1:]
+phase, series, codename, display, pin, source, run_id, evidence_dir = sys.argv[1:9]
+lifecycle_status, tempest_preflight, tempest_execution = sys.argv[9:12]
 tiers = [
     "cinder_service_user_auth", "o3k_token_validation_by_cinder",
     "catalog_discovery_of_volumev3", "real_volume_create",
     "real_volume_available", "real_server_created", "real_libvirt_domain",
     "guest_console_boot_marker", "compute_attach_via_libvirt",
     "guest_device_observation", "detach_and_delete_cleanup",
+    "tempest_preflight", "tempest_execution",
 ]
 passed_before = {
     "start": 0, "volume-available": 5, "server-active": 6,
     "volume-attach": 8, "attachment-verified": 9, "volume-detached": 11,
-    "cleanup": 12,
+    "cleanup": 13,
 }
 idx = passed_before.get(phase, 0)
 statuses = {t: ("passed" if i < idx else "not-reached")
             for i, t in enumerate(tiers)}
+# Tempest tiers reflect their own verdicts once the tempest phase has started;
+# the lifecycle verdict is never overwritten by a Tempest outcome.
+if phase in ("tempest", "cleanup"):
+    statuses["tempest_preflight"] = tempest_preflight or "not-reached"
+    statuses["tempest_execution"] = tempest_execution or "not-reached"
 manifest = {
     "profile": f"real-external-cinder-{codename}-service-under-test",
     "release_series": series, "codename": codename,
@@ -732,6 +747,7 @@ manifest = {
     "o3k_processes": ["o3kd", "o3k-compute-bin"],
     "run_id": run_id,
     "run_phase": phase,
+    "lifecycle_status": lifecycle_status,
     "failure_reason": "runner step failed; see failure-* artifacts and service logs",
     "evidence_tiers": statuses,
     "secret_scan": "pending",
@@ -752,6 +768,7 @@ with open(evidence_dir + "/evidence.yaml", "w",
     stream.write("o3k_processes: [o3kd, o3k-compute-bin]\n")
     stream.write('run_id: "%s"\n' % run_id)
     stream.write('run_phase: "%s"\n' % phase)
+    stream.write('lifecycle_status: "%s"\n' % manifest["lifecycle_status"])
     stream.write('failure_reason: "%s"\n' % manifest["failure_reason"])
     stream.write("evidence_tiers:\n")
     for tier, status in statuses.items():
@@ -764,6 +781,9 @@ result = {
     "status": "failed",
     "reason": "runner step failed at phase %s" % phase,
     "run_phase": phase,
+    "lifecycle_status": lifecycle_status,
+    "tempest_preflight": tempest_preflight,
+    "tempest_execution": tempest_execution,
     "redacted": True,
     "run_id": run_id,
     "finished_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime()),
@@ -912,13 +932,21 @@ SERVICE_TOKEN=$(get_token "cinder" "${CINDER_SERVICE_PW}" "service")
 echo "==> Workflow: GET /v3/auth/tokens (public token validation for Cinder middleware)..."
 ADMIN_TOKEN=$(get_token "admin" "${O3K_PW}" "admin")
 curl -s -f -H "X-Subject-Token: ${ADMIN_TOKEN}" "${AUTH}" > "${EVIDENCE_DIR}/validated-token.json"
-grep -q "volumev3" "${EVIDENCE_DIR}/validated-token.json"
+# Structured catalog check: the token must carry the volumev3 service and the
+# run-owned Cinder endpoint URL. Parsed JSON, never text-grep.
+python3 - "${EVIDENCE_DIR}/validated-token.json" "${CINDER_PORT}" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+catalog = doc.get("token", {}).get("catalog", [])
+types = [s.get("type") for s in catalog]
+assert "volumev3" in types, types
+endpoints = [e.get("url") or "" for s in catalog for e in s.get("endpoints", [])]
+assert any(sys.argv[2] in url for url in endpoints), endpoints
+print("    volumev3 present in the validated token catalog")
+PY
 
 echo "==> Workflow: HEAD /v3/auth/tokens (token existence check)..."
 curl -s -o /dev/null -w "%{http_code}" -I -H "X-Subject-Token: ${ADMIN_TOKEN}" "${AUTH}" | grep -q "200"
-
-echo "==> Workflow: catalog discovery of the external volumev3 endpoint..."
-grep -q "127.0.0.1:${CINDER_PORT}" "${EVIDENCE_DIR}/validated-token.json"
 
 echo "==> Starting real Cinder services from the pinned venv..."
 "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" > "${EVIDENCE_DIR}/cinder-api.log" 2>&1 &
@@ -1077,8 +1105,14 @@ echo "==> Waiting for the durable attachment to reach attached..."
 ATTACHED_OK=no
 for i in $(seq 1 30); do
   ATTACH_LIST="$(openstack volume attachment list --volume "${VOLUME_ID}" -f json 2>/dev/null || true)"
-  # The OSC JSON field name is title-cased ("Status"), so match case-insensitively.
-  if echo "${ATTACH_LIST}" | grep -qi '"status": "attached"'; then
+  # Structured JSON parsing: the OSC field name is title-cased ("Status"), so
+  # match any field whose lowercase key equals "status" with value "attached".
+  if python3 -c 'import json,sys
+try:
+    rows = json.load(sys.stdin)
+    exit(0 if any((k.lower() == "status" and v == "attached") for r in rows for k, v in r.items()) else 1)
+except Exception:
+    exit(1)' <<< "${ATTACH_LIST}" 2>/dev/null; then
     ATTACHED_OK=yes
     break
   fi
@@ -1095,10 +1129,29 @@ iscsiadm -m session 2>/dev/null | grep -q "volume-${VOLUME_ID}" \
   || { echo "ERROR: no run-owned iSCSI session"; exit 1; }
 DOMAIN_NAME="$(virsh -c qemu:///system list --all --name | grep 'o3k-' | head -n 1)"
 virsh -c qemu:///system dumpxml "${DOMAIN_NAME}" 2>/dev/null > "${EVIDENCE_DIR}/domain.xml" || true
-# libvirt serializes attributes with single quotes.
-grep -qE "device=['\"]disk['\"]" "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no block disk in domain XML"; exit 1; }
-grep -q '<serial>o3k-' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no o3k disk ownership serial in domain XML"; exit 1; }
-echo "    libvirt domain XML contains the o3k-owned attached disk"
+# Structured XML parsing: verify a <disk device='disk'> element carrying an
+# o3k-owned serial. Never inspect quote-specific serializations.
+python3 - "${EVIDENCE_DIR}/domain.xml" <<'PY'
+import sys, xml.etree.ElementTree as ET
+path = sys.argv[1]
+try:
+    root = ET.parse(path).getroot()
+except Exception as exc:
+    print(f"ERROR: domain XML unparseable: {exc}", file=sys.stderr)
+    sys.exit(1)
+disks = root.findall(".//devices/disk")
+has_block_disk = any(d.get("device") == "disk" for d in disks)
+has_o3k_serial = any(
+    (s.text or "").startswith("o3k-") for d in disks for s in d.findall("serial")
+)
+if not has_block_disk:
+    print("ERROR: no block disk element in domain XML", file=sys.stderr)
+    sys.exit(1)
+if not has_o3k_serial:
+    print("ERROR: no o3k disk ownership serial in domain XML", file=sys.stderr)
+    sys.exit(1)
+print("    libvirt domain XML contains the o3k-owned attached disk (serial bound)")
+PY
 
 echo "==> Workflow: prove the running guest observes the attached block device..."
 # The in-guest marker is DIAGNOSTIC evidence, not a gate: the closure's compute
@@ -1139,52 +1192,81 @@ for i in $(seq 1 30); do
 done
 [ "${DETACH_OK}" = "yes" ] || { echo "ERROR: volume did not return to available (status=${VOL_STATUS})"; exit 1; }
 RUN_PHASE="volume-detached"
+LIFECYCLE_PASSED="passed"
 echo "    volume ${VOLUME_ID} is available again"
+echo "==> Gate B (real-Cinder lifecycle) recorded: ${LIFECYCLE_PASSED}"
 
 # ------------------------------------------------------------------------------
-# Pinned Tempest subset against the LIVE profile (before teardown). The subset
-# runs only the operations in the accepted compatibility manifest; every other
-# test is an explicit skip. The runner venv installs the pinned Tempest and
-# cinder-tempest-plugin so the evidence reflects an actual execution, not a
-# NOT_READY placeholder.
+# Gate C — pinned Tempest subset against the LIVE profile (before teardown).
+# This is a separate verdict from the real-Cinder lifecycle (Gate B): a Tempest
+# harness error must never invalidate an otherwise successful attach/detach
+# lifecycle. The subset runs only operations in the accepted compatibility
+# manifest; the pinned Tempest and cinder-tempest-plugin live in a DEDICATED
+# virtualenv (never the Cinder venv) so the evidence reflects an actual
+# execution, not a NOT_READY placeholder.
 # ------------------------------------------------------------------------------
 RUN_PHASE="tempest"
-echo "==> Workflow: run the pinned Tempest subset against the live profile..."
+echo "==> Workflow: Gate C — run the pinned Tempest subset against the live profile..."
 # The subset reads O3K_CINDER_ENDPOINT as the Cinder port and O3K_LISTEN_ADDR
 # for the O3K port.
 export O3K_CINDER_ENDPOINT="${CINDER_PORT}"
 export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
-# A dedicated Tempest venv avoids pin conflicts with the Cinder venv (tempest
-# 46 requires a newer oslo_utils than cinder 28's pins).
-TEMPEST_VENV="${STATE_ROOT}/tempest-venv"
-if [ ! -x "${TEMPEST_VENV}/bin/python" ]; then
-  python3 -m venv "${TEMPEST_VENV}"
-fi
-"${TEMPEST_VENV}/bin/pip" install -q --upgrade pip wheel setuptools >/dev/null 2>&1 || true
-"${TEMPEST_VENV}/bin/pip" install -q "tempest==${TEMPEST_PIN}" \
-  "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
-  "oslo_utils>=7.3.0,<10.0.0" \
-  "testrepository" "python-subunit" "stestr" \
-  > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
-"${TEMPEST_VENV}/bin/pip" freeze 2>/dev/null \
-  | grep -iE "oslo_utils|tempest|stestr|testrepository|subunit" \
-  > "${EVIDENCE_DIR}/tempest-venv-freeze.txt" || true
-if ! "${TEMPEST_VENV}/bin/python" -c "import oslo_utils.secretutils as s; s.md5" 2>/dev/null; then
-  echo "WARN: oslo_utils in tempest venv lacks secretutils.md5; upgrading"
-  "${TEMPEST_VENV}/bin/pip" install -q --upgrade "oslo_utils>=7.3.0,<10.0.0" \
-    >> "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || true
-fi
-export O3K_TEMPEST_VENV="${TEMPEST_VENV}"
-export O3K_TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 export O3K_PW="${O3K_PW}"
-TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
+# Dedicated Tempest venv: Cinder and Tempest must never share a virtualenv
+# (tempest 46 requires a newer oslo_utils than Cinder 28's pins). Every
+# Tempest binary is invoked through the explicit venv path; ambient PATH must
+# never reach the Cinder venv for Tempest. Fail explicitly when the dedicated
+# environment is invalid instead of silently falling back to the Cinder venv.
+export O3K_TEMPEST_VENV="${STATE_ROOT}/tempest-venv"
+export O3K_TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
+export O3K_CINDER_TEMPEST_PLUGIN_PIN="${CINDER_TEMPEST_PLUGIN_PIN}"
+export O3K_TEMPEST_PIN="${TEMPEST_PIN}"
+TEMPEST_WORKSPACE="${O3K_TEMPEST_WORKSPACE}"
 mkdir -p "${TEMPEST_WORKSPACE}"
-"${VENV_DIR}/bin/pip" install -q "tempest==${TEMPEST_PIN}" "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
-  "testrepository" "python-subunit" "stestr" \
-  > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
-CLOUDS_DIR="${STATE_ROOT}/tempest-clouds"
-mkdir -p "${CLOUDS_DIR}/.config/openstack"
-cat > "${CLOUDS_DIR}/.config/openstack/clouds.yaml" <<EOF
+# Gate C owns its verdict; failures here are recorded and never flip the
+# lifecycle result (LIFECYCLE_PASSED is already bound after detach).
+TEMPEST_PREFLIGHT_STATUS="not-executed"
+TEMPEST_EXECUTION_STATUS="not-executed"
+if [ ! -x "${O3K_TEMPEST_VENV}/bin/python" ]; then
+  python3 -m venv "${O3K_TEMPEST_VENV}" 2>/dev/null || true
+fi
+if ! "${O3K_TEMPEST_VENV}/bin/python" -c "import sys" 2>/dev/null; then
+  echo "ERROR: dedicated Tempest venv is invalid (${O3K_TEMPEST_VENV}); Tempest evidence = harness-error" >&2
+  TEMPEST_PREFLIGHT_STATUS="harness-error"
+else
+  # Only the dedicated Tempest venv ever receives Tempest and its tooling.
+  "${O3K_TEMPEST_VENV}/bin/pip" install -q --upgrade pip wheel setuptools >/dev/null 2>&1 || true
+  "${O3K_TEMPEST_VENV}/bin/pip" install -q "tempest==${TEMPEST_PIN}" \
+    "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
+    "oslo_utils>=7.3.0,<10.0.0" \
+    "testrepository" "python-subunit" "stestr" "junitxml" \
+    > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || true
+  "${O3K_TEMPEST_VENV}/bin/pip" freeze 2>/dev/null \
+    | grep -iE "oslo_utils|tempest|stestr|testrepository|subunit" \
+    > "${EVIDENCE_DIR}/tempest-venv-freeze.txt" || true
+  if ! "${O3K_TEMPEST_VENV}/bin/python" -c "import oslo_utils.secretutils as s; s.md5" 2>/dev/null; then
+    echo "WARN: oslo_utils in tempest venv lacks secretutils.md5; upgrading"
+    "${O3K_TEMPEST_VENV}/bin/pip" install -q --upgrade "oslo_utils>=7.3.0,<10.0.0" \
+      >> "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || true
+  fi
+  # Deterministic preflight against the exact venv the protected run will use:
+  # environment, versions, configuration, test-ID discovery, and the
+  # subunit -> JUnit -> summary evidence pipeline. No real Cinder is needed.
+  # A preflight failure records harness-error and never fails the lifecycle.
+  export O3K_PREFLIGHT_SKIP_INSTALL=1
+  export O3K_PREFLIGHT_WORKDIR="${TEMPEST_WORKSPACE}"
+  export O3K_PREFLIGHT_RESULT="${EVIDENCE_DIR}/tempest-preflight-result.json"
+  if bash "${REPO_ROOT}/tests/tempest-preflight.sh" > "${EVIDENCE_DIR}/tempest-preflight.log" 2>&1; then
+    TEMPEST_PREFLIGHT_STATUS="passed"
+  else
+    TEMPEST_PREFLIGHT_STATUS="harness-error"
+    echo "WARN: Tempest preflight recorded harness-error; Tempest execution skipped"
+    cat "${EVIDENCE_DIR}/tempest-preflight.log" 2>/dev/null | tail -n 30 || true
+  fi
+  if [ "${TEMPEST_PREFLIGHT_STATUS}" = "passed" ]; then
+    CLOUDS_DIR="${STATE_ROOT}/tempest-clouds"
+    mkdir -p "${CLOUDS_DIR}/.config/openstack"
+    cat > "${CLOUDS_DIR}/.config/openstack/clouds.yaml" <<EOF
 clouds:
   o3k-protected:
     auth:
@@ -1198,29 +1280,61 @@ clouds:
     interface: "public"
     identity_api_version: 3
 EOF
-export OS_CLIENT_CONFIG_FILE="${CLOUDS_DIR}/.config/openstack/clouds.yaml"
-export HOME="${CLOUDS_DIR}"
-(
-  cd "${TEMPEST_WORKSPACE}" || exit 1
-  "${VENV_DIR}/bin/tempest" init >/dev/null 2>&1 || true
-)
-cat >> "${TEMPEST_WORKSPACE}/etc/tempest.conf" <<EOF
+    export OS_CLIENT_CONFIG_FILE="${CLOUDS_DIR}/.config/openstack/clouds.yaml"
+    export HOME="${CLOUDS_DIR}"
+    cat >> "${TEMPEST_WORKSPACE}/etc/tempest.conf" <<EOF
 
 [identity]
 uri = http://127.0.0.1:${O3K_PORT}/v3/
 auth_version = v3
 
+[auth]
+use_dynamic_credentials = false
+admin_username = admin
+admin_password = ${O3K_PW}
+admin_project_name = admin
+admin_domain_name = Default
+admin_user_domain_name = Default
+
 [validation]
 run_validation = False
 EOF
-PATH="${VENV_DIR}/bin:${PATH}" bash "${REPO_ROOT}/tests/tempest-cinder-subset.sh" --keep \
-  || echo "WARN: tempest subset recorded non-passing status"
+    # Execute with the dedicated Tempest venv first on PATH; the subset script
+    # itself also pins explicit binaries from O3K_TEMPEST_VENV so ambient PATH
+    # can never select the Cinder venv.
+    if PATH="${O3K_TEMPEST_VENV}/bin:${PATH}" bash "${REPO_ROOT}/tests/tempest-cinder-subset.sh" --keep; then
+      TEMPEST_EXECUTION_STATUS="passed"
+    else
+      TEMPEST_EXECUTION_STATUS="harness-error"
+      echo "WARN: tempest subset recorded non-passing status"
+    fi
+  fi
+fi
 if [ -f "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" ]; then
   cp "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" "${EVIDENCE_DIR}/tempest-cinder-summary.json" || true
   cp "${REPO_ROOT}/tests/tempest-evidence/tempest-status.yaml" "${EVIDENCE_DIR}/tempest-status.yaml" 2>/dev/null || true
 fi
 cp "${REPO_ROOT}/tests/tempest-evidence/tempest.log" "${EVIDENCE_DIR}/tempest-run.log" 2>/dev/null || true
 cp "${REPO_ROOT}/tests/tempest-evidence/tempest-results.xml" "${EVIDENCE_DIR}/tempest-results.xml" 2>/dev/null || true
+# Honest Gate C verdicts for the evidence manifest. The subset summary carries
+# the actual test pass/fail when execution happened; a summary with zero
+# executed tests is never reported as useful evidence.
+if [ -f "${EVIDENCE_DIR}/tempest-cinder-summary.json" ]; then
+  SUMMARY_STATUS="$(python3 - "${EVIDENCE_DIR}/tempest-cinder-summary.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+if doc.get("status") in ("passed", "failed"):
+    print(doc["status"])
+elif doc.get("status") == "harness-error":
+    print("harness-error")
+else:
+    print("harness-error")
+PY
+)" || TEMPEST_EXECUTION_STATUS="harness-error"
+  case "${SUMMARY_STATUS}" in
+    passed|failed|harness-error) TEMPEST_EXECUTION_STATUS="${SUMMARY_STATUS}" ;;
+  esac
+fi
 
 RUN_PHASE="cleanup"
 echo "==> Workflow: delete all run-owned resources and verify cleanup..."
@@ -1245,6 +1359,8 @@ grep -q "${CINDER_SERVICE_PW}" "${EVIDENCE_DIR}/o3kd.log" && { echo "ERROR: secr
 grep -q "${CINDER_SERVICE_PW}" "${EVIDENCE_DIR}/validated-token.json" && { echo "ERROR: secret leaked into evidence"; exit 1; } || true
 grep -q "${O3K_PW}" "${EVIDENCE_DIR}/o3kd.log" && { echo "ERROR: bootstrap secret leaked into o3kd.log"; exit 1; } || true
 
+GUEST_OBSERVATION_STATE="not-proven"
+if [ "${GUEST_OK}" = "yes" ]; then GUEST_OBSERVATION_STATE="passed"; fi
 echo "==> Writing evidence manifest..."
 cat > "${EVIDENCE_DIR}/evidence.yaml" <<EOF
 profile: real-external-cinder-${RELEASE_CODENAME}-service-under-test
@@ -1260,6 +1376,9 @@ backend: run-owned local-lvm (loop device)
 o3k_processes: [o3kd, o3k-compute-bin]
 compute_host_operations: [collect-connector, attach-disk, observe-disk, detach-disk]
 run_id: "${RUN_ID}"
+lifecycle_status: ${LIFECYCLE_PASSED}
+tempest_preflight: ${TEMPEST_PREFLIGHT_STATUS}
+tempest_execution: ${TEMPEST_EXECUTION_STATUS}
 evidence_tiers:
   cinder_service_user_auth: passed
   o3k_token_validation_by_cinder: passed
@@ -1270,8 +1389,10 @@ evidence_tiers:
   real_libvirt_domain: passed
   guest_console_boot_marker: passed
   compute_attach_via_libvirt: passed
-  guest_device_observation: ${GUEST_OK}
+  guest_device_observation: ${GUEST_OBSERVATION_STATE}
   detach_and_delete_cleanup: passed
+  tempest_preflight: ${TEMPEST_PREFLIGHT_STATUS}
+  tempest_execution: ${TEMPEST_EXECUTION_STATUS}
   secret_scan: passed
   foreign_state_unchanged: pending-post-run-guard
   run_owned_resources_remaining: pending-post-run-guard
@@ -1289,10 +1410,13 @@ emit_evidence_artifacts() {
   local base="${EVIDENCE_DIR}"
 
   python3 - "$base" "$src_commit" "$finished_at" "${RELEASE_SERIES}" "${RELEASE_CODENAME}" \
-    "${CINDER_PYPI_PIN}" "${CINDER_TEMPEST_PLUGIN_PIN}" "${RUN_ID}" <<'PY'
+    "${CINDER_PYPI_PIN}" "${CINDER_TEMPEST_PLUGIN_PIN}" "${RUN_ID}" \
+    "${LIFECYCLE_PASSED:-failed}" "${TEMPEST_PREFLIGHT_STATUS:-not-executed}" \
+    "${TEMPEST_EXECUTION_STATUS:-not-executed}" "${GUEST_OBSERVATION_STATE:-not-proven}" <<'PY'
 import json, os, sys
 
-base, src_commit, finished_at, series, codename, cinder_pin, plugin_pin, run_id = sys.argv[1:]
+base, src_commit, finished_at, series, codename, cinder_pin, plugin_pin, run_id = sys.argv[1:9]
+lifecycle_status, tempest_preflight, tempest_execution, guest_observation = sys.argv[9:13]
 
 def write(name, doc):
     doc.setdefault("artifact_type", name)
@@ -1324,18 +1448,21 @@ write("real-volume-lifecycle.json", {
 })
 write("nova-cinder-attachment-result.json", {
     "evidence_tier": "real-service",
-    "status": "passed",
+    "status": lifecycle_status,
     "checks": ["attach_through_nova", "durable_phases", "detach_through_nova"],
     "server_id": os.environ.get("SERVER_ID", ""),
 })
 write("compute-block-device-result.json", {
     "evidence_tier": "real-compute",
-    "status": "passed",
+    "status": lifecycle_status,
     "checks": ["collect_connector", "attach_disk", "observe_disk", "detach_disk"],
 })
+# Honest guest-level observation: the serial-console marker is diagnostic-only
+# and is never promoted to passed when the console did not surface it. The
+# libvirt hotplug proof lives in compute-block-device-result.json / domain.xml.
 write("guest-device-observation.json", {
     "evidence_tier": "real-compute",
-    "status": "passed",
+    "status": guest_observation if guest_observation in ("passed", "not-proven") else "not-proven",
     "method": "config-drive user_data probe + serial console readback",
     "marker": "O3K_GUEST_DEVICE_MARKER",
     "note": "bounded, non-secret; no private keys or connection secrets uploaded",
@@ -1360,13 +1487,19 @@ write("foreign-state-result.json", {
 # Tempest evidence reflects the actual subset run when one happened (the
 # tempest block copies tests/tempest-evidence/tempest-cinder-summary.json into
 # the evidence dir before this artifact generator runs); fall back to an honest
-# not-executed record otherwise.
+# not-executed record otherwise. A zero-test summary is never useful evidence.
 tempest_summary = os.path.join(base, "tempest-cinder-summary.json")
 if os.path.exists(tempest_summary):
     try:
         with open(tempest_summary, encoding="utf-8") as stream:
             real_summary = json.load(stream)
         real_summary.setdefault("cinder_tempest_plugin", plugin_pin)
+        real_summary.setdefault("tempest_preflight", tempest_preflight)
+        if real_summary.get("status") not in ("passed", "failed", "harness-error"):
+            real_summary["status"] = "harness-error"
+        if real_summary.get("passed", 0) + real_summary.get("failed", 0) == 0:
+            real_summary["status"] = "harness-error"
+            real_summary.setdefault("reason", "no Tempest test was executed")
         write("tempest-cinder-summary.json", real_summary)
     except (OSError, json.JSONDecodeError):
         pass
@@ -1376,11 +1509,18 @@ if not os.path.exists(os.path.join(base, "tempest-cinder-summary.json")):
         "status": "not-executed",
         "reason": "real Cinder profile must be running for the pinned Tempest subset",
         "tempest_revision": "", "cinder_tempest_plugin": plugin_pin,
+        "tempest_preflight": tempest_preflight,
         "test_ids": [], "passed": 0, "failed": 0, "skipped": 0,
     })
+# The runner-level result keeps the two verdicts independent: the real-Cinder
+# lifecycle (Gate B) and the Tempest compatibility gate (Gate C) never
+# overwrite each other. The post-run guard owns foreign-state/cleanup verdicts.
 write("real-cinder-runner-result.json", {
     "status": "runner-completed",
     "reason": "runner completed; aggregate pass/fail is decided by the post-run guard",
+    "lifecycle_status": lifecycle_status,
+    "tempest_preflight": tempest_preflight,
+    "tempest_execution": tempest_execution,
 })
 PY
   echo "    machine-readable evidence artifacts written under ${EVIDENCE_DIR}"

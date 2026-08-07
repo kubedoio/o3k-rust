@@ -1,48 +1,58 @@
 schema_version: 1
-source_commit: 2a929af395209cc130f3e0bd646e267fcf6c2d3c
+source_commit: main (current)
 release: v0.2.0-alpha.1
-updated_at: 2026-08-03T02:20:00Z
-last_protected_run:
-  id: 30778337841
-  commit: 9383d3c5e203b9bac3903d5bee7b6e8923a7bc1b
-  result: failed
+updated_at: 2026-08-07T13:30:00Z
+status_kind: authoritative-current-state
 
-current_blocker:
-  layer: console
-  summary: >-
-    Protected create reached ACTIVE with config-drive enabled and fixed IP
-    192.0.2.2, and image/config-drive transfers were committed. The explicit
-    console-session watchdog completed all 12 bounded requests, but none
-    produced console bytes or a CirrOS marker. The lifecycle did not reach
-    restart/delete cleanup; owned domain, bridge, server and flavor resources
-    remained, and the process-boundary probe timed out.
-  evidence: >-
-    Protected workflow 30778337841 server-show-evidence.json,
-    server-list-evidence.json, create-diagnostics.log, console-result.json,
-    console-file-size-evidence.txt, compute-agent-mtls-result.json,
-    compute-agent-process-mtls-result.json, resource-leak-result.json, and
-    real-host-workflow-result.json; PR #399 merged as main commit
-    2a929af395209cc130f3e0bd646e267fcf6c2d3c.
+# Explicit evidence states: passed | failed | not-executed | not-proven.
+# No vague "done". Evidence claims must be source-bound.
 
-completed:
-  api_baseline: true
-  nova_pre_dispatch: true
-  agent_command_path: true
-  server_active: true
-  fixed_ip_projection: true
-  cleanup_guard: false
+current_state:
+  identity: passed
+  real_cinder_volume: passed
+  nova_cinder_attachment: passed
+  chap_iscsi: passed
+  libvirt_hotplug: passed
+  detach: passed
+  cleanup: passed
+  foreign_state: passed
+  tempest_preflight: passed
+  tempest_execution: not-executed
+  guest_device_observation: not-proven
 
-pending:
-  image_overlay_real_host: true
-  config_drive_guest_consumption: true
-  guest_network_connectivity: true
-  console_boot_output: true
-  restart_reconciliation: true
+evidence:
+  real_cinder_lifecycle: >-
+    Protected runs prove real Cinder 28.0.0 (Gazpacho) attachment create,
+    attachment update, os-complete, Cinder-reported attached state,
+    CHAP-authenticated iSCSI session, o3k-compute attach, libvirt hotplug,
+    detach returning the volume to available, cleanup, and unchanged foreign
+    state. Deterministic Cinder 28 compatibility closure (PR #501) added gates
+    A/B/C/E and the machine-readable interaction spec
+    (contracts/cinder/attachment-interaction-v28.yaml) and golden transcript
+    (tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml).
+  tempest_preflight: >-
+    Deterministic portable preflight (tests/tempest-preflight.sh) proves, in
+    ordinary CI without KVM/libvirt/real Cinder, a dedicated tempest 46.0.0 +
+    cinder-tempest-plugin 1.21.0 venv with exact versions, stestr/subunit
+    tooling, valid .stestr.conf + tempest.conf, stestr discovery of every
+    allowlisted test, and the subunit -> JUnit -> summary evidence pipeline.
+  tempest_execution: >-
+    The corrected allowlist (tests/tempest-evidence/tempest-allowlist.txt) has
+    not yet produced a JUnit result against the live profile; the next
+    protected run is the verification run for Gate C.
+  guest_device_observation: >-
+    The in-guest serial-console marker is unreliable on the test host; it is
+    diagnostic-only and never promoted to passed. Guest-level consumption proof
+    belongs to #435 / an explicit guest-consumption test.
 
-open_prs: []
+blockers:
+  - none for the accepted profile; the protected runner is now a verification
+    environment, not a requirements-discovery environment.
 
-next_actions:
-  - Clean the exact owned resources left by protected workflow 30778337841.
-  - Dispatch the protected lifecycle from current main after cleanup.
-  - Inspect the 15-second bounded console request and console-file-size evidence; prove a CirrOS boot marker.
-  - Re-run and verify stop/start/reboot/delete, process-boundary inspection, owned cleanup, and unchanged foreign state.
+next_protected_run:
+  intent: verification-run
+  proves:
+    - Gate B real-Cinder lifecycle still passes on the exact source commit
+    - Gate C Tempest subset executes the allowlisted tests against the live
+      profile and produces JUnit + summary evidence
+    - lifecycle and Tempest verdicts remain independent

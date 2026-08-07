@@ -413,3 +413,68 @@ that environment. A RabbitMQ-ready AMQP probe was added to the runner (PR
 #464) and per-service logs are captured; resolving the remaining interaction
 requires inspecting the real scheduler/volume processes during a live run,
 which is deferred with external Cinder.
+
+---
+
+## SUPERSEDING CURRENT STATUS — 2026-08-07
+
+The sections above (2026-08-04) describe an earlier stage. They are retained
+as history only. The authoritative current state is in
+`docs/status/current-state.yaml` and this section supersedes the dependency
+order and the "real Cinder not yet proven" claims where they conflict.
+
+### What is now proven with source-bound evidence
+
+The protected real-Cinder runner (`scripts/real-cinder-testbed-runner.sh`)
+executes the full Gate B lifecycle against a pinned Cinder 28.0.0 (Gazpacho)
+venv with MariaDB/RabbitMQ/LVM/iSCSI. Recent evidence demonstrates:
+
+```text
+real Cinder attachment create     passed
+real Cinder attachment update     passed
+os-complete                       passed
+Cinder reports attached           passed
+CHAP-authenticated iSCSI session  passed
+o3k-compute performs the attach   passed
+libvirt hotplug                   passed
+detach -> volume available        passed
+cleanup / foreign state           passed
+guest_device_observation          not-proven (in-guest console marker is
+                                   diagnostic-only; ownership in #435)
+```
+
+PR #501 ("deterministic Cinder 28 attachment compatibility closure") replaced
+empirical protected-run debugging with five deterministic gates (identity,
+Cinder protocol, Nova 2.89 callback, real CHAP iSCSI compute, orchestrator
+replay), a machine-readable interaction spec
+(`contracts/cinder/attachment-interaction-v28.yaml`), and a redacted golden
+transcript (`tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml`).
+The protected runner is no longer a requirements-discovery environment.
+
+### Tempest infrastructure (Gate A portable / Gate C execution)
+
+The dedicated-Tempest-venv model is now enforced deterministically:
+
+- Cinder and Tempest live in separate virtualenvs; the runner never executes
+  Tempest from the Cinder venv.
+- `tests/tempest-preflight.sh` proves environment/version/config/test-ID
+  discovery and the subunit -> JUnit -> summary evidence pipeline in ordinary
+  CI (no KVM, libvirt, real Cinder, MariaDB, RabbitMQ, LVM, tgt).
+- The allowlist (`tests/tempest-evidence/tempest-allowlist.txt`) contains only
+  tests that exist at the pinned tempest 46.0.0 / cinder-tempest-plugin 1.21.0
+  and stay inside the accepted compatibility profile; every ID is audited in
+  `tests/tempest-evidence/tempest-test-audit.yaml`. Zero-test runs are never
+  reported as useful evidence.
+- Lifecycle evidence (Gate B) and Tempest evidence (Gate C) are independent;
+  a Tempest harness error cannot invalidate a successful real Cinder
+  attach/detach lifecycle.
+
+### Issue status after the above
+
+- #420, #421, #429 acceptance criteria that map to the real-Cinder lifecycle
+  now have source-bound evidence; they remain open only where durable
+  identity/catalog breadth, full typed-client/compensation breadth, or other
+  criteria are still unproven. The next protected run is a verification run.
+- #424 is the home of Tempest compatibility; preflight is proven, execution of
+  the corrected allowlist is pending the next verification run.
+- #432 should be updated with this reconciled status.

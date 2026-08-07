@@ -204,11 +204,18 @@ EOF
     --selected "${SELECTED_IDS}" \
     --o3k-commit "${GITHUB_SHA:-<recorded in workflow>}" \
     --cinder-version "${O3K_CINDER_VERSION:-<recorded by runner>}" \
-    || echo "WARN: Tempest summary recorded harness-error/failed status"
+    || true
+  TEMPEST_STATUS="$(python3 - "${PROFILE_DIR}/tempest-cinder-summary.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+print(doc.get("status", "harness-error"))
+PY
+)" || TEMPEST_STATUS="harness-error"
   echo "    Tempest subset executed; JUnit + summary written under ${PROFILE_DIR}"
 else
   echo "==> Real Cinder profile is not running; recording honest NOT_READY status..."
   echo "    tempest_pin=${TEMPEST_PIN} cinder_tempest_plugin=${CINDER_TEMPEST_PLUGIN_PIN}"
+  TEMPEST_STATUS="not-executed"
   if [ "${REAL_CINDER_UP}" = false ] && [ "${TEMPEST_INSTALLED}" = false ]; then
     cat > "${PROFILE_DIR}/tempest-cinder-summary.json" <<JSON
 {"artifact_type": "tempest-cinder-summary.json", "evidence_tier": "tempest",
@@ -244,7 +251,7 @@ tempest:
   installed: ${TEMPEST_INSTALLED}
   dedicated_tempest_venv: ${O3K_TEMPEST_VENV:-none}
   real_cinder_profile_running: ${REAL_CINDER_UP}
-  evidence_status: ${TEMPEST_STATUS:-recorded}
+  evidence_status: ${TEMPEST_STATUS:-not-executed}
 
 supported_operations:
   identity:

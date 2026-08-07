@@ -58,6 +58,10 @@ jobs:
         run: bash tests/cinder-chap-compute-gate.sh
       - name: Test Tempest summary generator
         run: bash tests/tempest-summary-generator.sh
+      - name: Test Tempest preflight validation logic (self-test)
+        run: bash tests/tempest-preflight-test.sh
+      - name: Test Tempest/Cinder venv isolation and Gate B/C verdict independence
+        run: bash tests/tempest-runner-isolation.sh
       - name: Test CI workflow contracts
         run: bash tests/ci-workflow.sh
       - name: Test OpenAPI contract governance
@@ -109,6 +113,25 @@ jobs:
           path: target/nextest/pr/junit.xml
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
+        # Safest useful preparation for the follow-up pre-built-artifact pipeline:
+        # record the exact commit and sha256 of the two protected-run binaries so
+        # the follow-up can compare a protected-run build against ordinary CI. This
+        # does NOT change the trust model: the protected runner still verifies its
+        # own build against the exact source until the accepted follow-up decides
+        # otherwise. See issue #502 for the full design.
+        run: |
+          mkdir -p target/ci-artifacts
+          cargo build --bin o3kd --locked
+          cargo build --bin o3k-compute-bin --features libvirt --locked
+          python3 scripts/emit-build-manifest.py target/ci-artifacts/build-manifest.json "${GITHUB_SHA}"
+      - name: Upload exact-source build manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: exact-source-build-manifest
+          if-no-files-found: warn
+          path: target/ci-artifacts/build-manifest.json
       - name: Validate compute-agent protobuf draft
         run: |
           protoc --proto_path=proto \
@@ -165,3 +188,22 @@ jobs:
           echo "RustSec advisory database: ${advisory_commit}"
           cargo install cargo-audit --version 0.22.1 --locked
           cargo audit --db "${advisory_db}" --no-fetch --stale --ignore RUSTSEC-2023-0071
+  tempest-preflight:
+    name: Tempest portable preflight (Gate A)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install python venv tooling
+        run: sudo apt-get update && sudo apt-get install -y python3-venv python3-pip
+      - name: Run deterministic Tempest preflight
+        env:
+          O3K_PREFLIGHT_RESULT: target/tempest-preflight/result.json
+        run: bash tests/tempest-preflight.sh
+      - name: Upload Tempest preflight result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tempest-preflight-result
+          if-no-files-found: warn
+          path: |
+            target/tempest-preflight/result.json
