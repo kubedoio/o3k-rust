@@ -33,9 +33,8 @@ forbidden_source_markers = [
 ]
 
 [application]
-# These dependencies are adapter/framework concerns. Application crates may not
-# acquire new dependencies on them. Existing debt is listed explicitly below
-# and is expected to shrink.
+# These dependencies are adapter/framework concerns and are not valid
+# application dependencies at all.
 hard_forbidden_dependencies = [
   "o3k-api",
   "axum",
@@ -45,6 +44,16 @@ hard_forbidden_dependencies = [
   "rustls",
   "o3k-libvirt",
   "o3k-cellhv",
+]
+
+# These dependencies currently appear in a small number of application crates.
+# They are migration debt and may occur only where listed under
+# adapter_dependency_debt. The allowed set must shrink rather than spread.
+ratcheted_adapter_dependencies = [
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-provider-contract",
+  "prost",
 ]
 
 concrete_store_symbol = "SqliteStore"
