@@ -114,6 +114,19 @@ For attachment workflows, O3K provides the frozen Nova volume-attachment API
 subset required by the selected clients and Cinder integration. Exact methods,
 paths, fields, policies, and microversions are declared before implementation.
 
+The general advertised Nova maximum stays `2.1`. A single operation-scoped
+exception exists for the external Cinder 28 attachment-delete guard (bug
+#2004555): Cinder's `attachment_deletion_allowed` calls
+`novaclient volumes.get_server_volume(server_id, volume_id)` at microversion
+`2.89`, so O3K accepts `GET` on the two volume-attachment routes
+(`os-volume_attachments` list and the `{volume_id}` show variant) at 2.89.
+Those GETs emit the upstream 2.89 field set (`attachment_id`, `bdm_uuid`,
+`serverId`, `volumeId`, `device`, `tag`, `delete_on_termination`, no legacy
+`id`). Every other 2.89 request is rejected with 406 and the version discovery
+document stays `version`/`min_version` = 2.1. The exact shapes are recorded in
+`contracts/cinder/attachment-interaction-v28.yaml` and tested by the Nova
+callback gate (`crates/o3k-api/tests/gate_c_nova_callback.rs`).
+
 O3K also provides a typed outbound Cinder v3 client for the selected attachment
 sequence. A typical workflow is:
 

@@ -39,8 +39,13 @@ Project-scoped paths must use the authenticated project. Cross-project paths
 are concealed with `404`; missing project context is `400`. Clients omit the
 Nova microversion header and target Nova microversion `2.1`. Placement
 allocation writes use exactly microversion `1.28`. A requested Nova
-microversion above the baseline is rejected with `406`. Only explicitly listed
-extensions are supported; unknown extensions return `404`.
+microversion above the baseline is rejected with `406`, with one narrow
+exception: the external Cinder 28 attachment-delete guard (bug #2004555)
+requires `GET` on the server volume-attachment list/show operations at
+microversion `2.89`. The 2.89 profile is GET-only on those two routes, emits
+the upstream 2.89 field set, and leaves the advertised Nova maximum and the
+version discovery document at `2.1`. Only explicitly listed extensions are
+supported; unknown extensions return `404`.
 
 Errors are JSON and have an `error` object containing integer `code`, string
 `title`, and string `message`. Error responses must not expose credentials,

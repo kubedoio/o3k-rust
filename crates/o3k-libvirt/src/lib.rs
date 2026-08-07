@@ -20,7 +20,6 @@ use virt::{connect::Connect, domain::Domain, stream::Stream};
 
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
 pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
-pub const O3K_DISK_NAMESPACE: &str = "urn:o3k:compute:block-device";
 
 // These values are the stable public libvirt virDomainState values. Keep the
 // projection explicit: treating every non-active domain as stopped would turn
@@ -242,19 +241,28 @@ pub fn discover_domain_xml(name: &str, xml: &str) -> DiscoveryResult {
 }
 
 /// Builds the deterministic libvirt `<disk>` XML for a hotplugged block
-/// device. The `o3k:disk` metadata binds the host device to a durable O3K
-/// volume/attachment identity so detach and observe can find it.
+/// device. The `o3k-<uuid>` `<serial>` binds the host device to a durable O3K
+/// volume identity so detach and observe can find it (libvirt preserves disk
+/// serials across attach; it strips custom device `<metadata>`).
+///
+/// The disk is placed on the domain's pci-bridge (bus `0x01`). PCI bridges
+/// reserve slot 0 for the bridge itself, so the caller must supply a slot in
+/// `1..=31` (see `free_pci_bridge_slot`); a fixed slot would collide on
+/// multi-attach.
 pub fn build_attach_disk_xml(
     volume_id: &str,
     attachment_id: &str,
     host_path: &str,
     device: &str,
+    slot: u8,
 ) -> Result<String, LibvirtError> {
     if volume_id.trim().is_empty()
         || attachment_id.trim().is_empty()
         || host_path.trim().is_empty()
         || device.trim().is_empty()
         || device.starts_with('/')
+        || slot == 0
+        || slot > 31
     {
         return Err(LibvirtError::new(
             ErrorCategory::InvalidRequest,
@@ -266,29 +274,70 @@ pub fn build_attach_disk_xml(
   <driver name="qemu" type="raw" cache="none"/>
   <source dev="{host_path}"/>
   <target dev="{device}" bus="virtio"/>
-  <address type="pci" domain="0x0000" bus="0x01"/>
-  <metadata>
-    <o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="{volume_id}" attachment_id="{attachment_id}"/>
-  </metadata>
-</disk>"#
+  <serial>{serial}</serial>
+  <address type="pci" domain="0x0000" bus="0x01" slot="0x{slot:02x}" function="0x0"/>
+</disk>"#,
+        serial = o3k_disk_serial(volume_id)
     ))
 }
 
+/// Builds the durable disk serial that binds a hotplugged block device to an
+/// O3K volume. The serial is preserved by libvirt across attach/dumpxml (the
+/// custom `<metadata>` element is not), so observe and detach match on it.
+/// Libvirt rejects serials containing unsafe characters (colons, spaces, etc.);
+/// UUIDs and the `o3k-` prefix are safe.
+pub fn o3k_disk_serial(volume_id: &str) -> String {
+    format!("o3k-{volume_id}")
+}
+
+/// Parses the PCI slots already in use on a given bus from a domain XML
+/// document, returning them as a sorted set. Used to place a hotplugged disk
+/// on a free pci-bridge slot.
+fn used_pci_slots_on_bus(xml: &str, bus_hex: &str) -> Vec<u8> {
+    let mut slots = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel) = xml[search_from..].find("<address type=\"pci\"") {
+        let start = search_from + rel;
+        let Some(end) = xml[start..].find("/>") else {
+            break;
+        };
+        let tag = &xml[start..start + end];
+        if tag.contains(&format!("bus=\"{bus_hex}\""))
+            && let Some(slot) = attr(tag, "slot")
+            && let Ok(slot) = u8::from_str_radix(slot.trim_start_matches("0x"), 16)
+        {
+            slots.push(slot);
+        }
+        search_from = start + end;
+    }
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
+/// Selects the lowest free slot in `1..=31` on the pci-bridge (bus `0x01`).
+fn free_pci_bridge_slot(xml: &str) -> Option<u8> {
+    let used = used_pci_slots_on_bus(xml, "0x01");
+    (1..=31).find(|slot| !used.contains(slot))
+}
+
 /// Extracts the O3K-owned disk volume identities from a domain XML document.
+/// The durable identity is carried in the disk `<serial>` element (libvirt
+/// preserves serials across attach; custom device metadata is not).
 pub fn owned_disk_volume_ids(xml: &str) -> Vec<String> {
     let mut volumes = Vec::new();
     let mut search_from = 0;
-    while let Some(marker_start) = xml[search_from..].find("<o3k:disk") {
+    while let Some(marker_start) = xml[search_from..].find("<serial>o3k-") {
         let start = search_from + marker_start;
-        let Some(end) = xml[start..].find('>') else {
+        let Some(end) = xml[start..].find("</serial>") else {
             break;
         };
-        let end = start + end;
-        let tag = &xml[start..end];
-        if let Some(volume_id) = attr(tag, "volume_id") {
-            volumes.push(volume_id);
+        let serial = &xml[start + "<serial>o3k-".len()..start + end];
+        // Serial format is `o3k-<uuid>`; accept the 36-character UUID.
+        if serial.len() == 36 {
+            volumes.push(serial.to_owned());
         }
-        search_from = end + 1;
+        search_from = start + end;
     }
     volumes
 }
@@ -700,7 +749,8 @@ impl LibvirtAdapter {
     }
 
     /// Hotplugs a block device into the domain and records durable volume
-    /// identity in the disk metadata.
+    /// identity in the disk metadata. The device is placed on a free
+    /// pci-bridge slot so repeated attaches never collide.
     pub async fn attach_disk(
         &self,
         name: String,
@@ -709,9 +759,11 @@ impl LibvirtAdapter {
         host_path: String,
         device: String,
     ) -> Result<(), LibvirtError> {
-        let xml = build_attach_disk_xml(&volume_id, &attachment_id, &host_path, &device)?;
         let uri = self.config.uri.clone();
-        run_blocking(move || backend_attach_disk(&uri, &name, &xml)).await
+        run_blocking(move || {
+            backend_attach_disk(&uri, &name, &volume_id, &attachment_id, &host_path, &device)
+        })
+        .await
     }
 
     /// Detaches the O3K-owned disk for the given volume from the domain.
@@ -951,13 +1003,33 @@ const VIR_DOMAIN_DEVICE_MODIFY_LIVE: u32 = 1;
 const VIR_DOMAIN_DEVICE_MODIFY_CONFIG: u32 = 2;
 
 #[cfg(feature = "libvirt")]
-fn backend_attach_disk(uri: &str, name: &str, disk_xml: &str) -> Result<(), LibvirtError> {
+fn backend_attach_disk(
+    uri: &str,
+    name: &str,
+    volume_id: &str,
+    attachment_id: &str,
+    host_path: &str,
+    device: &str,
+) -> Result<(), LibvirtError> {
     let connection = open(uri)?;
     let domain = Domain::lookup_by_name(&connection, name)
         .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain XML inspection failed",
+        )
+    })?;
+    let slot = free_pci_bridge_slot(&xml).ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "no free pci-bridge slot for block-device attach",
+        )
+    })?;
+    let disk_xml = build_attach_disk_xml(volume_id, attachment_id, host_path, device, slot)?;
     domain
         .attach_device_flags(
-            disk_xml,
+            &disk_xml,
             VIR_DOMAIN_DEVICE_MODIFY_LIVE | VIR_DOMAIN_DEVICE_MODIFY_CONFIG,
         )
         .map_err(|_| {
@@ -1020,7 +1092,14 @@ fn backend_observe_disk(uri: &str, name: &str, volume_id: &str) -> Result<bool, 
 }
 
 #[cfg(not(feature = "libvirt"))]
-fn backend_attach_disk(_uri: &str, _name: &str, _disk_xml: &str) -> Result<(), LibvirtError> {
+fn backend_attach_disk(
+    _uri: &str,
+    _name: &str,
+    _volume_id: &str,
+    _attachment_id: &str,
+    _host_path: &str,
+    _device: &str,
+) -> Result<(), LibvirtError> {
     Err(LibvirtError::new(
         ErrorCategory::Unavailable,
         "libvirt hotplug is unavailable in this build",
@@ -1046,6 +1125,7 @@ fn backend_observe_disk(_uri: &str, _name: &str, _volume_id: &str) -> Result<boo
 /// Locates the full `<disk>` XML element owning the given volume identity.
 #[cfg(feature = "libvirt")]
 fn owned_disk_xml_for_volume(xml: &str, volume_id: &str) -> Option<String> {
+    let serial = format!("o3k-{volume_id}");
     let mut search_from = 0;
     while let Some(marker_start) = xml[search_from..].find("<disk") {
         let start = search_from + marker_start;
@@ -1054,7 +1134,7 @@ fn owned_disk_xml_for_volume(xml: &str, volume_id: &str) -> Option<String> {
         };
         let end = start + close + "</disk>".len();
         let element = &xml[start..end];
-        if element.contains("o3k:disk") && element.contains(&format!("volume_id=\"{volume_id}\"")) {
+        if element.contains(&serial) {
             return Some(element.to_owned());
         }
         search_from = end;
@@ -2065,27 +2145,43 @@ mod block_device_tests {
 
     #[test]
     fn attach_disk_xml_binds_durable_volume_identity() -> Result<(), LibvirtError> {
-        let xml = build_attach_disk_xml("volume-1", "attachment-1", "/dev/sdb", "vdb")?;
+        let xml = build_attach_disk_xml("volume-1", "attachment-1", "/dev/sdb", "vdb", 2)?;
         assert!(xml.contains("<disk type=\"block\" device=\"disk\">"));
         assert!(xml.contains("<source dev=\"/dev/sdb\"/>"));
         assert!(xml.contains("<target dev=\"vdb\" bus=\"virtio\"/>"));
-        assert!(xml.contains("volume_id=\"volume-1\""));
-        assert!(xml.contains("attachment_id=\"attachment-1\""));
-        assert!(xml.contains(O3K_DISK_NAMESPACE));
+        assert!(xml.contains("bus=\"0x01\" slot=\"0x02\""));
+        assert!(xml.contains("<serial>o3k-volume-1</serial>"));
+        assert!(xml.contains(&format!("o3k-{}{}", "", "volume-1")));
         Ok(())
     }
 
     #[test]
     fn attach_disk_xml_rejects_invalid_targets() {
-        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "").is_err());
-        assert!(build_attach_disk_xml("v", "a", "", "vdb").is_err());
-        assert!(build_attach_disk_xml("v", "", "/dev/sdb", "vdb").is_err());
-        assert!(build_attach_disk_xml("", "a", "/dev/sdb", "vdb").is_err());
-        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "/dev/vdb").is_err());
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "", 2).is_err());
+        assert!(build_attach_disk_xml("v", "a", "", "vdb", 2).is_err());
+        assert!(build_attach_disk_xml("v", "", "/dev/sdb", "vdb", 2).is_err());
+        assert!(build_attach_disk_xml("", "a", "/dev/sdb", "vdb", 2).is_err());
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "/dev/vdb", 2).is_err());
+        // Slot 0 is reserved on a pci-bridge; slots above 31 are invalid.
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "vdb", 0).is_err());
+        assert!(build_attach_disk_xml("v", "a", "/dev/sdb", "vdb", 32).is_err());
+    }
+
+    #[test]
+    fn free_pci_bridge_slot_skips_used_slots_and_slot_zero() {
+        let xml = r#"<domain><devices>
+  <address type="pci" domain="0x0000" bus="0x01" slot="0x01" function="0x0"/>
+  <address type="pci" domain="0x0000" bus="0x01" slot="0x02" function="0x0"/>
+  <address type="pci" domain="0x0000" bus="0x00" slot="0x01" function="0x0"/>
+</devices></domain>"#;
+        assert_eq!(free_pci_bridge_slot(xml), Some(3));
+        assert_eq!(used_pci_slots_on_bus(xml, "0x01"), vec![1, 2]);
+        assert_eq!(used_pci_slots_on_bus(xml, "0x00"), vec![1]);
     }
 
     #[test]
     fn owned_disk_volume_ids_extracts_only_o3k_disks() {
+        let volume_id = "00000000-0000-0000-0000-000000000001";
         let xml = format!(
             r#"<domain>
   <devices>
@@ -2093,36 +2189,38 @@ mod block_device_tests {
     <disk type="block" device="disk">
       <source dev="/dev/sdb"/>
       <target dev="vdb" bus="virtio"/>
-      <metadata><o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="volume-1" attachment_id="attachment-1"/></metadata>
+      <serial>o3k-{volume_id}</serial>
     </disk>
   </devices>
 </domain>"#
         );
         let volumes = owned_disk_volume_ids(&xml);
-        assert_eq!(volumes, vec!["volume-1".to_owned()]);
+        assert_eq!(volumes, vec![volume_id.to_owned()]);
 
-        let foreign = owned_disk_volume_ids("<domain><disk type='file'/></domain>");
+        let foreign =
+            owned_disk_volume_ids("<domain><disk type='file'/><serial>foreign</serial></domain>");
         assert!(foreign.is_empty());
     }
 
     #[cfg(feature = "libvirt")]
     #[test]
     fn owned_disk_xml_for_volume_finds_whole_element() -> Result<(), LibvirtError> {
+        let volume_id = "00000000-0000-0000-0000-000000000002";
         let xml = format!(
             r#"<domain><devices>
   <disk type="block" device="disk">
     <driver name="qemu" type="raw"/>
     <source dev="/dev/sdb"/>
     <target dev="vdb" bus="virtio"/>
-    <metadata><o3k:disk xmlns:o3k="{O3K_DISK_NAMESPACE}" volume_id="volume-2" attachment_id="attachment-2"/></metadata>
+    <serial>o3k-{volume_id}</serial>
   </disk>
 </devices></domain>"#
         );
-        let element = owned_disk_xml_for_volume(&xml, "volume-2")
+        let element = owned_disk_xml_for_volume(&xml, volume_id)
             .ok_or_else(|| LibvirtError::new(ErrorCategory::NotFound, "disk element missing"))?;
         assert!(element.contains("<source dev=\"/dev/sdb\"/>"));
         assert!(element.ends_with("</disk>"));
-        assert!(owned_disk_xml_for_volume(&xml, "volume-missing").is_none());
+        assert!(owned_disk_xml_for_volume(&xml, "00000000-0000-0000-0000-00000000ffff").is_none());
         Ok(())
     }
 }

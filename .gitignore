@@ -11,3 +11,7 @@ artifacts/
 
 # Local opencode tooling (not part of the repository)
 /.opencode/
+
+# Real-host gate evidence artifacts (regenerated per run)
+/cinder-chap-compute-result.json
+/gate-d-domain-debug.xml

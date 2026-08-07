@@ -1,0 +1,120 @@
+# Golden transcript: protected real-Cinder run (redacted)
+#
+# Captured from protected run `local-1786012319` (branch after #493/#495/#496/#498),
+# issue #500. Stores ONLY redacted request methods, paths, status codes, body
+# shapes, and field names. Tokens, CHAP secrets, raw connection_info, and other
+# secret-bearing values are NEVER recorded here.
+#
+# The transcript is the observed cross-service trace that the deterministic
+# gates must reproduce. Rows annotated `closed_by_gate_*` are now proven by a
+# deterministic gate rather than inferred from a single run.
+
+source_run: local-1786012319
+source_branch: "after #493/#495/#496/#498"
+cinder_pin: "28.0.0"
+evidence_dir: /var/lib/o3k-cinder-testbed/local-1786012319/evidence-1786012319/
+redacted: true
+
+transcript:
+  - sequence: 1
+    caller: o3k-compute (attachment orchestrator)
+    method: POST
+    path: /v3/{project_id}/attachments
+    status: 200
+    body_shape: detail_view
+    body_fields: [id, status, instance, volume_id, attached_at, detached_at, attach_mode, connection_info]
+    connection_info_presence: empty_object
+    note: >-
+      Attachment reserved for the volume with instance_uuid set. Response is the
+      Cinder 28 detail view with status=reserved, attach_mode="null" and
+      connection_info an empty object `{}` (Cinder initializes it to {}).
+    closed_by_gate: gate_b_cinder_protocol
+
+  - sequence: 2
+    caller: o3k-compute (collect_connector)
+    method: POST
+    path: /v2.1/{project_id}/servers/{server_id}/action   # internal agent dispatch, not HTTP
+    status: 200
+    body_shape: connector_observation
+    body_fields: [host, ip, initiator, platform, os_type, multipath]
+    note: Agent CollectConnector returned host/ip/initiator for the compute node.
+    closed_by_gate: gate_d_compute
+
+  - sequence: 3
+    caller: o3k-compute (attachment orchestrator)
+    method: PUT
+    path: /v3/{project_id}/attachments/{attachment_id}
+    status: 200
+    response_bytes: 1095
+    body_shape: detail_view
+    body_fields: [id, status, instance, volume_id, attached_at, detached_at, attach_mode, connection_info]
+    connection_info_presence: present
+    connection_info_top_level_keys: [driver_volume_type, target_discovered, target_portal, target_iqn, target_lun, volume_id, auth_method, auth_username, auth_password, encrypted, qos_specs, attachment_id, enforce_multipath]
+    note: >-
+      PUT with the connector returned 200 (detail view). The orchestrator then
+      compensated with a DELETE within ~5ms, i.e. the post-PUT parse/validation
+      branch rejected an apparently successful response. Zero orchestrator
+      tracing existed so the exact branch (missing/null/malformed connection_info
+      vs client-level outcome) was unproven. The closure adds bounded redacted
+      phase tracing and observe-before-compensate so this is pinned and cannot
+      recur as an unobserved DELETE.
+    closed_by_gate: gate_e_orchestrator_replay
+
+  - sequence: 4
+    caller: o3k-compute (compensate_after_create)
+    method: DELETE
+    path: /v3/{project_id}/attachments/{attachment_id}
+    status: 406
+    auth_headers_sent: [x-auth-token]
+    auth_headers_required: [x-auth-token, x-service-token]
+    body_shape: computeFault
+    body_fields: [code, message]
+    message_shape: "Version 2.89 is not supported by the API. Minimum supported version is 2.1 and maximum supported version is 2.1."
+    note: >-
+      Cinder attachment_deletion_allowed called Nova get_server_volume at
+      microversion 2.89; O3K rejected every 2.89 request with 406. The DELETE
+      also lacked X-Service-Token, which would additionally have produced 409
+      once the Nova check succeeded. Both defects are closed by
+      gate_c_nova_callback and gate_a_identity.
+    closed_by_gates: [gate_a_identity, gate_c_nova_callback]
+
+  - sequence: 5
+    caller: cinder-api (attachment_deletion_allowed)
+    method: GET
+    path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{volume_id}
+    microversion: "2.89"
+    status: 406          # rejected; the closure serves 200 with the 2.89 field set
+    expected_status: 200
+    body_shape: volumeAttachment
+    body_fields_at_289: [attachment_id, bdm_uuid, serverId, volumeId, device, tag, delete_on_termination]
+    legacy_id_at_289: omitted
+    note: The Nova callback Cinder requires during the delete guard.
+    closed_by_gate: gate_c_nova_callback
+
+  - sequence: 6
+    caller: runner
+    method: SQL
+    target: cinder.volume_attachment table
+    status: failure
+    body_fields_selected: [id, volume_id, instance_uuid, attached_host, status, attach_status, attach_mode, attach_time, detach_time, deleted]
+    note: >-
+      Diagnostics selected the nonexistent column `status` from
+      cinder.volume_attachment (real column: attach_status), producing an empty
+      attachments list in failure-cinder-state.json. Fixed to query attach_status.
+    closed_by_gate: runner_diagnostics_fix
+
+  - sequence: 7
+    caller: runner
+    method: SQL
+    target: cinder.volumes table
+    status: success
+    body_fields_selected: [id, display_name, status, attach_status, host, provider_location, size, created_at]
+    observed: 'status=attaching, attach_status=attaching after failed detach'
+    note: Volume never returned to available because the DELETE (sequence 4) failed.
+    closed_by_gate: full_protected_run
+
+verification_note: >-
+  After the closure, the protected run may only discover host/environment
+  defects. Any API shape, token, microversion, attachment phase, or compensation
+  requirement discovered for the first time in the full runner means the closure
+  is incomplete.

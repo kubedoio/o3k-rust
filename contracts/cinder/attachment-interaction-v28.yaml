@@ -1,0 +1,286 @@
+# Cinder 28.0.0 attachment interaction specification (machine-readable)
+#
+# Normative field-level contract for the external Cinder service-under-test
+# profile (`real-external-cinder-Gazpacho-service-under-test`). This is the
+# deterministic reference for the five gates (identity, Cinder protocol, Nova
+# callback, compute, orchestrator replay) and the protected real-Cinder run.
+#
+# Provenance (behavior evidence only; no code copied):
+#   - openstack/cinder tag 28.0.0 (Apache-2.0), PyPI pin `cinder==28.0.0`:
+#     * cinder/api/v3/views/attachments.py   (ViewBuilder summary/detail/list)
+#     * cinder/api/v3/attachments.py         (create/update/show/index/delete/complete)
+#     * cinder/volume/api.py                 (attachment_create/update/delete,
+#                                             attachment_deletion_allowed,
+#                                             is_service_request)
+#     * cinder/volume/manager.py             (attachment_update/_connection_create)
+#     * cinder/volume/targets/iscsi.py       (_get_iscsi_properties CHAP shape)
+#     * cinder/volume/targets/tgt.py         (tgtadm persistence, lun 1)
+#     * cinder/compute/nova.py               (get_server_volume at Nova 2.89)
+#   - Nova compute API reference, volume attachments (2.89 field set).
+#   - Protected run local-1786012319 evidence directory.
+#
+# Every field listed here is reproduced deterministically by the gate servers
+# and asserted by the gate tests; nothing is inferred from the protected run.
+
+schema_version: 1
+cinder_release: "28.0.0"
+cinder_deliverable: "2026.1 Gazpacho"
+product_profile: openstack-service-testbed
+service_ownership:
+  cinder: external-hosted
+  nova_surface: o3k-implemented
+  identity: o3k-implemented
+
+identity:
+  service_user:
+    username: cinder
+    domain: Default
+    roles:
+      - service
+      - admin
+    scope: project-scoped (project id of the volume owner, or the service project)
+  caller_tokens:
+    header: X-Auth-Token
+    source: project-scoped user token issued by the O3K identity surface
+  service_tokens:
+    header: X-Service-Token
+    source: project-scoped token for the `cinder` service user
+    purpose: >-
+      Cinder 28 `attachment_deletion_allowed` (bug #2004555) returns early and
+      allows the DELETE when `is_service_request` sees a service-token role
+      intersecting `[keystone_authtoken] service_token_roles` (default
+      `service`). Without `X-Service-Token`, a DELETE of a live attachment is
+      rejected with 409 ConflictNovaUsingAttachment. Upstream Nova performs the
+      delete with both tokens; O3K must too.
+  token_auth_methods_required:
+    - password
+    - token           # Cinder's Nova client re-authenticates via token auth
+  public_validation:
+    - GET /v3/auth/tokens   # keystonemiddleware `validate_token`
+    - HEAD /v3/auth/tokens  # keystonemiddleware token existence check
+  fail_closed: true
+
+protocol:
+  content_type: application/json
+  accept: application/json
+  cinder_api_version_header: OpenStack-API-Version
+  cinder_api_version_value: "volume 3.44"
+  timeout_classification: unknown_outcome
+  timeout_seconds_default: 30
+
+operations:
+  - name: attachment_create
+    method: POST
+    path: /v3/{project_id}/attachments
+    auth: X-Auth-Token
+    request_body:
+      attachment:
+        volume_uuid: <volume-uuid>        # required; the only accepted create field (volume_id is NOT an alias)
+        instance_uuid: <null|server-uuid> # required for reserve-with-instance flow
+        connector: <null|connector-object>
+        mode: <null|rw|ro>                # attach mode arg is 3.54+; O3K sends none
+    success_status: 200
+    response_shape: detail
+    note: >-
+      The create response is the Cinder 28 detail view. `status` carries the
+      reserved attach_status, `attach_mode` is the string "null" (the mode
+      argument is 3.54+ and O3K sends none), and `connection_info` is an empty
+      object `{}` (attachment_create initializes it to `{}`).
+    response: |
+      {"attachment": {
+        "id": "<attachment-uuid>",
+        "status": "reserved",
+        "instance": "<instance_uuid|null>",
+        "volume_id": "<volume-uuid>",
+        "attached_at": "",
+        "detached_at": "",
+        "attach_mode": "null",
+        "connection_info": {}
+      }}
+    errors:
+      - 401 unauthorized
+      - 404 volume not found
+      - 500 unable to create attachment
+  - name: attachment_update
+    method: PUT
+    path: /v3/{project_id}/attachments/{attachment_id}
+    auth: X-Auth-Token
+    request_body:
+      attachment:
+        connector:
+          initiator: <iqn>
+          ip: <host ip>
+          platform: <x86_64>
+          os_type: <linux>
+          host: <hostname>
+          multipath: false
+          mountpoint: <optional /dev/vdb>
+          mode: <optional rw|ro>
+    success_status: 200
+    response_shape: detail
+    note: >-
+      This is the response the O3K orchestrator must accept. Cinder serializes
+      the STALE API object: the controller's pre-update attachment_ref, so
+      `status` is still the reserved attach_status and `attach_mode` is still
+      the string "null" (the mode arg is 3.54+). The `connection_info` IS
+      populated with the flattened driver data. A subsequent GET show returns
+      the fresh view (`status=attaching`, `attach_mode=rw`).
+    response: |
+      {"attachment": {
+        "id": "<attachment-uuid>",
+        "status": "reserved",
+        "instance": "<instance_uuid>",
+        "volume_id": "<volume-uuid>",
+        "attached_at": "",
+        "detached_at": "",
+        "attach_mode": "null",
+        "connection_info": { ... connection_info ... }
+      }}
+    errors:
+      - 401 unauthorized
+      - 404 attachment not found
+      - 409 resource_conflict (volume in error state)
+      - 409 duplicate connectors on volume
+      - 500 unable to update attachment
+  - name: attachment_show
+    method: GET
+    path: /v3/{project_id}/attachments/{attachment_id}
+    auth: X-Auth-Token
+    success_status: 200
+    response_shape: detail
+    note: Used to observe an attachment after an unknown outcome before any retry.
+    errors:
+      - 401 unauthorized
+      - 404 attachment not found
+  - name: attachment_list
+    method: GET
+    path: /v3/{project_id}/attachments
+    auth: X-Auth-Token
+    success_status: 200
+    response_shape: summary_list
+    response: |
+      {"attachments": [
+        {"id": "<attachment-uuid>", "status": "<attach_status>",
+         "instance": "<instance_uuid|null>", "volume_id": "<volume-uuid>"}
+      ]}
+    note: >-
+      Used to observe whether an attachment exists for a volume when the
+      attachment id is unknown after a create-time unknown outcome.
+  - name: attachment_complete
+    method: POST
+    path: /v3/{project_id}/attachments/{attachment_id}/action
+    auth: X-Auth-Token
+    request_body: {"os-complete": null}
+    success_status: 204
+    response_body: <empty>
+    note: >-
+      Microversion 3.44 (`NEW_ATTACH_COMPLETION`). Marks the attachment and
+      volume `attached`/`in-use`. Response is 204 with no body.
+    errors:
+      - 401 unauthorized
+      - 404 attachment not found
+  - name: attachment_delete
+    method: DELETE
+    path: /v3/{project_id}/attachments/{attachment_id}
+    auth:
+      - X-Auth-Token
+      - X-Service-Token   # required; otherwise 409 for live attachments
+    success_status: 200
+    response_shape: summary_list
+    response: |
+      {"attachments": [ ...remaining shared attachments (usually empty)... ]}
+    note: >-
+      Invoked for detach and compensation. Cinder 28 guards with
+      attachment_deletion_allowed: service-role X-Service-Token bypasses the
+      Nova check; otherwise Cinder calls Nova get_server_volume at 2.89 and a
+      matching attachment_id produces ConflictNovaUsingAttachment (409).
+    errors:
+      - 401 unauthorized
+      - 404 attachment not found (treated as success by the client)
+      - 409 conflict_nova_using_attachment (missing service token)
+
+connection_info:
+  driver: LVM + tgt (tgtadm helper), CHAP-authenticated iSCSI
+  shape: flattened     # `data` is merged to top level by manager._connection_create
+  fields:
+    driver_volume_type: iscsi
+    target_discovered: false
+    target_portal: "<host-ip>:3260"
+    target_iqn: "iqn.2010-10.org.openstack:volume-<volume-uuid>"
+    target_lun: 1
+    volume_id: <volume-uuid>
+    auth_method: CHAP
+    auth_username: <generated>
+    auth_password: <generated>     # SECRET - never persisted or logged
+    encrypted: false
+    access_mode: rw
+    qos_specs: null
+    attachment_id: <attachment-uuid>
+    enforce_multipath: false
+  secret_handling:
+    persist: connection_info_digest (SHA-256) only
+    transport: CHAP credentials over the authenticated agent control channel
+    log_redaction: mask_dict_password equivalent; never CHAP or tokens
+
+nova_callback:
+  trigger: attachment_deletion_allowed when request is NOT a service request
+  operation: server_volume_attachments_show
+  method: GET
+  path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{volume_id}
+  microversion: "2.89"
+  auth: X-Auth-Token (caller token), re-authenticated via token auth
+  client: novaclient volumes.get_server_volume(server_id, volume_id)
+  required_response_fields_at_289:
+    - attachment_id     # MUST match the Cinder attachment id or Cinder warns and deletes locally
+    - bdm_uuid
+    - serverId
+    - volumeId
+    - device
+    - tag
+    - delete_on_termination
+  legacy_id_at_289: omitted
+  not_found_behavior: Cinder deletes the attachment locally (may leave compute device)
+  match_behavior: matching attachment_id falls through to ConflictNovaUsingAttachment
+  global_nova_max_microversion: "2.1"   # unchanged discovery; only this GET is 2.89
+
+compute_execution:
+  flow: >
+    collect_connector -> iscsi node create (show then new) -> CHAP node update
+    -> login (exit 15 = already logged in is success) -> device observation
+    -> libvirt hotplug (virtio-blk on pci-bridge) -> complete -> observe
+    -> detach -> libvirt unplug -> iscsi logout -> session cleanup
+  secrets: CHAP applied at login only; never persisted or logged
+
+compensation:
+  order: compute detach first, then Cinder attachment DELETE (reverse order)
+  delete_auth: X-Auth-Token + X-Service-Token
+  idempotent: true
+  restart_safe: true
+  observe_before_retry: true
+  unknown_outcome_rule: >-
+    A timeout or transport failure is an unknown outcome. The orchestrator
+    must observe the attachment (show) and the compute device before retrying
+    or compensating. It must never DELETE a possibly-successful Cinder
+    attachment solely because local parsing of the PUT response failed.
+
+timeout_and_unknown_outcome:
+  - transport_timeout: classify as unknown_outcome; observe before retry/compensate
+  - response_body_timeout: unknown_outcome; observe before retry/compensate
+  - malformed_json: protocol error; observe before retry/compensate
+  - missing_connection_info: deterministically malformed; observe then decide
+  - null_connection_info: deterministically malformed; observe then decide
+  - non_object_connection_info: deterministically malformed; observe then decide
+  - duplicate_attach: idempotent; return existing durable attachment, no duplicate
+  - post_side_effect_failure: reverse-order compensation only after observation
+
+evidence_gates:
+  - gate_a_identity
+  - gate_b_cinder_protocol
+  - gate_c_nova_callback
+  - gate_d_compute
+  - gate_e_orchestrator_replay
+protected_run_policy: >-
+  The protected real-Cinder run is the final integration verifier, not a
+  requirements-discovery loop. Any API shape, token, microversion, attachment
+  phase, or compensation requirement discovered for the first time in the full
+  runner means this closure is incomplete.

@@ -226,6 +226,19 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Whether the error leaves the provider-side outcome unknown (timeout,
+    /// transport, or stale observation). The caller must observe the provider
+    /// before retrying or compensating.
+    #[must_use]
+    pub fn is_unknown_outcome(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::UnknownOutcome { .. }
+                | ProviderError::Retryable
+                | ProviderError::StaleState
+        )
+    }
+
     #[must_use]
     pub fn category(&self) -> ErrorCategory {
         match self {

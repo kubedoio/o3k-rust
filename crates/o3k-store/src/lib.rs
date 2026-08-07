@@ -904,8 +904,12 @@ impl SqliteStore {
         connection_info_digest: Option<&str>,
         device: Option<&str>,
     ) -> Result<VolumeAttachmentRecord, StoreError> {
+        // Phase transition persistence: None leaves the durable field untouched
+        // (COALESCE), so a transition that only updates status/device/one field
+        // never wipes the connector or connection-information data persisted by
+        // an earlier phase.
         sqlx::query(
-            "UPDATE volume_attachments SET status = ?, cinder_attachment_id = COALESCE(?, cinder_attachment_id), connector_host = ?, connector_ip = ?, connector_initiator = ?, driver_volume_type = ?, target_iqn = ?, target_portal = ?, target_lun = ?, connection_info_digest = ?, device = COALESCE(?, device) WHERE id = ?",
+            "UPDATE volume_attachments SET status = ?, cinder_attachment_id = COALESCE(?, cinder_attachment_id), connector_host = COALESCE(?, connector_host), connector_ip = COALESCE(?, connector_ip), connector_initiator = COALESCE(?, connector_initiator), driver_volume_type = COALESCE(?, driver_volume_type), target_iqn = COALESCE(?, target_iqn), target_portal = COALESCE(?, target_portal), target_lun = COALESCE(?, target_lun), connection_info_digest = COALESCE(?, connection_info_digest), device = COALESCE(?, device) WHERE id = ?",
         )
         .bind(status)
         .bind(cinder_attachment_id)

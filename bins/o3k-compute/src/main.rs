@@ -1214,7 +1214,37 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     device.device_path.clone()
                 };
                 let guest_device = attach_device_letter(&command.resource_id, &device.volume_id);
-                self.adapter
+                // Idempotent hotplug: a concurrent attach or a reconciler
+                // resume may already have hotplugged the disk. If the durable
+                // o3k-<uuid> disk serial is present, skip the attach and
+                // report success rather than failing with "device already
+                // exists".
+                if self
+                    .adapter
+                    .observe_disk(name.clone(), device.volume_id.clone())
+                    .await
+                    .unwrap_or(false)
+                {
+                    let host_path = host_path.clone();
+                    let mut result =
+                        success("block device attached", proto::ResourceState::Running)?;
+                    result.block_device = Some(proto::BlockDeviceObservation {
+                        volume_id: device.volume_id.clone(),
+                        attachment_id: device.attachment_id.clone(),
+                        driver_volume_type: device.driver_volume_type.clone(),
+                        device_path: format!("/dev/{guest_device}"),
+                        host_path,
+                        attached: true,
+                        found: true,
+                        initiator: device.initiator.clone(),
+                        host_name: String::new(),
+                        ip_address: String::new(),
+                        iscsi_logged_in: device.driver_volume_type == "iscsi",
+                    });
+                    return Ok(result);
+                }
+                if let Err(error) = self
+                    .adapter
                     .attach_disk(
                         name.clone(),
                         device.volume_id.clone(),
@@ -1223,7 +1253,23 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         guest_device.clone(),
                     )
                     .await
-                    .map_err(agent_error)?;
+                {
+                    // The hotplug raced with a concurrent attach: verify by the
+                    // durable ownership metadata before failing.
+                    if self
+                        .adapter
+                        .observe_disk(name.clone(), device.volume_id.clone())
+                        .await
+                        .unwrap_or(false)
+                    {
+                        tracing::info!(
+                            volume_id = %device.volume_id,
+                            "disk already hotplugged by a concurrent attach; treating as success"
+                        );
+                    } else {
+                        return Err(agent_error(error));
+                    }
+                }
                 let mut result = success("block device attached", proto::ResourceState::Running)?;
                 result.block_device = Some(proto::BlockDeviceObservation {
                     volume_id: device.volume_id.clone(),

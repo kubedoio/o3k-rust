@@ -75,6 +75,21 @@ pub enum CinderError {
     Auth(String),
 }
 
+impl CinderError {
+    /// Whether the error means the Cinder-side outcome is unknown (timeout,
+    /// transport failure, or unclassified status). The caller must observe the
+    /// attachment before retrying or compensating; it must never treat an
+    /// unknown outcome as a confirmed failure.
+    pub fn is_unknown_outcome(&self) -> bool {
+        matches!(
+            self,
+            CinderError::UnknownOutcome(_)
+                | CinderError::ServiceUnavailable
+                | CinderError::Protocol(_)
+        )
+    }
+}
+
 /// Configuration for the outbound Cinder client. Credentials authenticate the
 /// configured service identity; the scoped project is the project that owns
 /// the volumes and attachments.
@@ -98,6 +113,19 @@ pub struct ComputeConnector {
     pub initiator: Option<String>,
 }
 
+/// Classification of the `connection_info` field of a Cinder attachment
+/// response. The orchestrator must distinguish these cases: missing and null
+/// are deterministic Cinder-side outcomes, while a non-object value or an
+/// object without an extractable target is malformed. In every non-present case
+/// the caller observes the attachment before deciding to retry or compensate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionInfoPresence {
+    Missing,
+    Null,
+    Malformed,
+    Present,
+}
+
 /// A Cinder attachment as returned by the API. `connection_info` is present
 /// only after the connector update flow has completed.
 #[derive(Debug, Clone)]
@@ -106,11 +134,15 @@ pub struct CinderAttachment {
     pub status: String,
     pub volume_id: String,
     pub connection_info: Option<ConnectionInfo>,
+    presence: ConnectionInfoPresence,
 }
 
 impl CinderAttachment {
     pub fn parse(value: &serde_json::Value) -> Result<Self, CinderError> {
-        let attachment = &value["attachment"];
+        // Single-object responses are wrapped (`{"attachment": {...}}`) while
+        // list items are flat (`{"id": ..., "status": ...}`); both forms occur
+        // in the Cinder 28 API.
+        let attachment = value.get("attachment").unwrap_or(value);
         let id = attachment["id"]
             .as_str()
             .ok_or_else(|| CinderError::Protocol("attachment id is missing".to_owned()))?
@@ -120,16 +152,29 @@ impl CinderAttachment {
             .unwrap_or("unknown")
             .to_owned();
         let volume_id = attachment["volume_id"].as_str().unwrap_or("").to_owned();
-        let connection_info = attachment
-            .get("connection_info")
-            .filter(|value| !value.is_null())
-            .map(ConnectionInfo::new);
+        let (connection_info, presence) = match attachment.get("connection_info") {
+            None => (None, ConnectionInfoPresence::Missing),
+            Some(serde_json::Value::Null) => (None, ConnectionInfoPresence::Null),
+            Some(serde_json::Value::Object(_)) => (
+                Some(ConnectionInfo::new(&attachment["connection_info"])),
+                ConnectionInfoPresence::Present,
+            ),
+            Some(_) => (None, ConnectionInfoPresence::Malformed),
+        };
         Ok(Self {
             id,
             status,
             volume_id,
             connection_info,
+            presence,
         })
+    }
+
+    /// How the `connection_info` field appeared in the response. Used for
+    /// bounded redacted diagnostics and to decide between observation and
+    /// compensation after an uncertain update outcome.
+    pub fn connection_info_presence(&self) -> ConnectionInfoPresence {
+        self.presence
     }
 }
 
@@ -158,8 +203,12 @@ impl ConnectionInfo {
     }
 
     /// Extracts the typed non-secret target data required to attach through
-    /// the compute boundary.
+    /// the compute boundary. Returns `None` when the value is not a JSON object
+    /// from which a target could be extracted.
     pub fn attach_target(&self) -> Option<AttachTarget> {
+        if !self.raw.is_object() {
+            return None;
+        }
         let data = self.raw.get("data").unwrap_or(&self.raw);
         let auth_username = data
             .get("auth_username")
@@ -232,6 +281,34 @@ impl ConnectionInfo {
         let canonical = serde_json::to_vec(&self.raw).unwrap_or_default();
         let digest = Sha256::digest(&canonical);
         URL_SAFE_NO_PAD.encode(digest)
+    }
+
+    /// Top-level field names only, for bounded redacted diagnostics. Never the
+    /// values: secrets such as `auth_password` are named but their contents are
+    /// not exposed.
+    pub fn top_level_keys(&self) -> Vec<String> {
+        self.raw
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether the connection information carries a usable target for the
+    /// compute boundary. Used to distinguish a real, driver-populated
+    /// connection (e.g. an iSCSI target with IQN and portal, or a local path)
+    /// from an empty `{}` or otherwise unusable value. An unusable value never
+    /// justifies deleting a possibly-successful Cinder attachment without
+    /// observation, but a usable one means the connector update completed
+    /// server-side and must not be compensated.
+    pub fn has_usable_target(&self) -> bool {
+        match self.attach_target() {
+            Some(target) => match target.driver_volume_type.as_str() {
+                "iscsi" => target.target_iqn.is_some() && target.target_portal.is_some(),
+                "local" => target.local_path.is_some(),
+                _ => false,
+            },
+            None => false,
+        }
     }
 
     /// Consumes the raw value; the caller owns the secret-safe extraction.
@@ -373,7 +450,7 @@ impl CinderClient {
             self.config.keystone_endpoint.trim_end_matches('/')
         );
         let (status, headers, value) = self
-            .send_with_token(Method::POST, &url, None, Some(body))
+            .send_with_token(Method::POST, &url, None, Some(body), false)
             .await?;
         if !status.is_success() {
             let fallback_body = serde_json::json!({
@@ -392,7 +469,7 @@ impl CinderClient {
                 }
             });
             let (fb_status, fb_headers, fb_value) = self
-                .send_with_token(Method::POST, &url, None, Some(fallback_body))
+                .send_with_token(Method::POST, &url, None, Some(fallback_body), false)
                 .await?;
             if !fb_status.is_success() {
                 return Err(CinderError::Auth(format!(
@@ -443,7 +520,7 @@ impl CinderClient {
         }
         let body = serde_json::json!({"attachment": attachment});
         let (status, _, value) = self
-            .send(Method::POST, &url, Some(project_id), Some(body))
+            .send(Method::POST, &url, Some(project_id), Some(body), false)
             .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
@@ -464,7 +541,9 @@ impl CinderClient {
             project_id,
             attachment_id
         );
-        let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
+        let (status, _, value) = self
+            .send(Method::GET, &url, Some(project_id), None, false)
+            .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
         }
@@ -482,7 +561,9 @@ impl CinderClient {
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id
         );
-        let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
+        let (status, _, value) = self
+            .send(Method::GET, &url, Some(project_id), None, false)
+            .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
         }
@@ -512,7 +593,7 @@ impl CinderClient {
         );
         let body = serde_json::json!({"attachment": {"connector": connector}});
         let (status, _, value) = self
-            .send(Method::PUT, &url, Some(project_id), Some(body))
+            .send(Method::PUT, &url, Some(project_id), Some(body), false)
             .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
@@ -535,7 +616,7 @@ impl CinderClient {
         );
         let body = serde_json::json!({"os-complete": null});
         let (status, _, value) = self
-            .send(Method::POST, &url, Some(project_id), Some(body))
+            .send(Method::POST, &url, Some(project_id), Some(body), false)
             .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
@@ -545,6 +626,15 @@ impl CinderClient {
 
     /// Terminates (deletes) the attachment. Used during detach and
     /// compensation.
+    ///
+    /// Cinder 28 guards deletes of live attachments with
+    /// `attachment_deletion_allowed` (bug #2004555): without a service-role
+    /// `X-Service-Token` a live attachment DELETE is rejected with 409
+    /// (`ConflictNovaUsingAttachment`) after a Nova 2.89 lookup, or with 406
+    /// when the Nova callback microversion is unsupported. The outbound client
+    /// therefore sends the Cinder service-user token (roles `service`, `admin`)
+    /// in both `X-Auth-Token` and `X-Service-Token`, matching the upstream
+    /// Nova->Cinder service-token mechanism.
     pub async fn terminate_attachment(
         &self,
         project_id: &str,
@@ -557,7 +647,7 @@ impl CinderClient {
             attachment_id
         );
         let (status, _, value) = self
-            .send(Method::DELETE, &url, Some(project_id), None)
+            .send(Method::DELETE, &url, Some(project_id), None, true)
             .await?;
         if status == StatusCode::NOT_FOUND {
             return Ok(());
@@ -582,7 +672,7 @@ impl CinderClient {
         );
         let body = serde_json::json!({"volume": {"size": size_gib, "name": name}});
         let (status, _, value) = self
-            .send(Method::POST, &url, Some(project_id), Some(body))
+            .send(Method::POST, &url, Some(project_id), Some(body), false)
             .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
@@ -601,7 +691,9 @@ impl CinderClient {
             project_id,
             volume_id
         );
-        let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
+        let (status, _, value) = self
+            .send(Method::GET, &url, Some(project_id), None, false)
+            .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
         }
@@ -614,7 +706,9 @@ impl CinderClient {
             self.config.cinder_endpoint.trim_end_matches('/'),
             project_id
         );
-        let (status, _, value) = self.send(Method::GET, &url, Some(project_id), None).await?;
+        let (status, _, value) = self
+            .send(Method::GET, &url, Some(project_id), None, false)
+            .await?;
         if !status.is_success() {
             return Err(status_error(status, &value));
         }
@@ -640,7 +734,7 @@ impl CinderClient {
             volume_id
         );
         let (status, _, value) = self
-            .send(Method::DELETE, &url, Some(project_id), None)
+            .send(Method::DELETE, &url, Some(project_id), None, false)
             .await?;
         if status == StatusCode::NOT_FOUND {
             return Ok(());
@@ -689,12 +783,14 @@ impl CinderClient {
         url: &str,
         project_id: Option<&str>,
         body: Option<serde_json::Value>,
+        service_token: bool,
     ) -> Result<(StatusCode, http::HeaderMap, serde_json::Value), CinderError> {
         let token = match project_id {
             Some(project_id) => Some(self.token(project_id).await?),
             None => None,
         };
-        self.send_with_token(method, url, token, body).await
+        self.send_with_token(method, url, token, body, service_token)
+            .await
     }
 
     async fn send_with_token(
@@ -703,6 +799,7 @@ impl CinderClient {
         url: &str,
         token: Option<Secret>,
         body: Option<serde_json::Value>,
+        service_token: bool,
     ) -> Result<(StatusCode, http::HeaderMap, serde_json::Value), CinderError> {
         let uri: Uri = url
             .parse()
@@ -734,6 +831,16 @@ impl CinderClient {
                     header::HeaderName::from_static("openstack-api-version"),
                     CINDER_API_MICROVERSION,
                 );
+            if service_token {
+                // Required by Cinder 28 `attachment_deletion_allowed`
+                // (`is_service_request` compares the service-token roles
+                // against `[keystone_authtoken] service_token_roles`,
+                // default `service`).
+                builder = builder.header(
+                    header::HeaderName::from_static("x-service-token"),
+                    token.expose(),
+                );
+            }
         }
         let request_body = body.map_or_else(
             || Full::new(Bytes::new()),
@@ -782,11 +889,16 @@ fn status_error(status: StatusCode, value: &serde_json::Value) -> CinderError {
                 .and_then(|m| m.as_str())
         })
         .unwrap_or("");
-    tracing::warn!(%status, %msg, "cinder error response");
-    let detail = if msg.is_empty() {
+    // The message is external input from the external-hosted Cinder service and
+    // can carry connection information or other secret-bearing text in error
+    // paths. Bound its length and mask secret-looking values before it is
+    // logged or persisted into the durable error column.
+    let redacted = redact_error_message(msg);
+    tracing::warn!(%status, msg = %redacted, "cinder error response");
+    let detail = if redacted.is_empty() {
         format!("{status}")
     } else {
-        format!("{status}: {msg}")
+        format!("{status}: {redacted}")
     };
     match status {
         StatusCode::BAD_REQUEST => CinderError::InvalidRequest(detail),
@@ -796,8 +908,47 @@ fn status_error(status: StatusCode, value: &serde_json::Value) -> CinderError {
         StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT => {
             CinderError::ServiceUnavailable
         }
-        other => CinderError::UnknownOutcome(format!("unexpected status {other}: {msg}")),
+        other => CinderError::UnknownOutcome(format!("unexpected status {other}: {redacted}")),
     }
+}
+
+/// Bounds and redacts a Cinder error message before it is logged or persisted:
+/// truncates to a fixed length and masks the values of known secret-bearing
+/// keys plus long hex/base64 tokens.
+fn redact_error_message(message: &str) -> String {
+    const MAX_LEN: usize = 512;
+    let mut redacted = String::with_capacity(message.len().min(MAX_LEN));
+    for part in message.split_whitespace() {
+        if !redacted.is_empty() {
+            redacted.push(' ');
+        }
+        let key = part.split([':', '=', '"', '\'', ' ']).next().unwrap_or("");
+        let secret_key = matches!(
+            key.to_ascii_lowercase().as_str(),
+            "password"
+                | "auth_password"
+                | "chap_password"
+                | "secret"
+                | "token"
+                | "auth_username"
+                | "chap_username"
+                | "connection_info"
+                | "provider_auth"
+                | "user"
+                | "key"
+        );
+        let token_like = part.chars().filter(|c| c.is_ascii_hexdigit()).count() >= 24;
+        if secret_key || token_like {
+            redacted.push_str("<redacted>");
+        } else {
+            redacted.push_str(part);
+        }
+    }
+    if redacted.len() > MAX_LEN {
+        redacted.truncate(MAX_LEN);
+        redacted.push('…');
+    }
+    redacted
 }
 
 /// A volume as returned by the Cinder API.

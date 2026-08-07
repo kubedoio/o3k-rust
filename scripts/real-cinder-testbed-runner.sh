@@ -643,18 +643,26 @@ for candidate in ("attachments", "volume_attachment"):
         break
 attachments = []
 if table:
+    # Query the real Cinder schema: the attachment-state column is
+    # `attach_status` (there is no `status` column on `volume_attachment`).
+    # connection_info and connector are secret-bearing JSON columns; only
+    # bounded presence flags are selected, never their contents.
     for parts in (row.split("\t") for row in rows(
-            "SELECT id, volume_id, instance_uuid, attached_host, status, "
-            "attach_status, attach_mode, attach_time, detach_time, deleted "
+            "SELECT id, volume_id, instance_uuid, attached_host, "
+            "attach_status, attach_mode, attach_time, detach_time, deleted, "
+            "(connection_info IS NOT NULL), (connector IS NOT NULL) "
             "FROM `%s`.%s;" % (db, table))):
-        if len(parts) == 10:
+        if len(parts) == 11:
             attachments.append({"id": parts[0], "volume_id": parts[1],
                                 "instance_uuid": parts[2],
-                                "attached_host": parts[3], "status": parts[4],
-                                "attach_status": parts[5],
-                                "attach_mode": parts[6],
-                                "attach_time": parts[7],
-                                "detach_time": parts[8], "deleted": parts[9]})
+                                "attached_host": parts[3],
+                                "attach_status": parts[4],
+                                "attach_mode": parts[5],
+                                "attach_time": parts[6],
+                                "detach_time": parts[7],
+                                "deleted": parts[8],
+                                "connection_info_present": parts[9] == "1",
+                                "connector_present": parts[10] == "1"})
 
 doc = {"artifact_type": "failure-cinder-state.json", "redacted": True,
        "volumes": volumes, "attachments_table": table,
@@ -1078,7 +1086,7 @@ iscsiadm -m session 2>/dev/null | grep -q "o3k" && echo "    run-owned iSCSI ses
 DOMAIN_NAME="$(virsh -c qemu:///system list --all --name | grep 'o3k-' | head -n 1)"
 virsh -c qemu:///system dumpxml "${DOMAIN_NAME}" 2>/dev/null > "${EVIDENCE_DIR}/domain.xml" || true
 grep -q 'device="disk"' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no block disk in domain XML"; exit 1; }
-grep -q 'o3k:disk' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no o3k disk ownership metadata in domain XML"; exit 1; }
+grep -q '<serial>o3k-' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no o3k disk ownership serial in domain XML"; exit 1; }
 echo "    libvirt domain XML contains the o3k-owned attached disk"
 
 echo "==> Workflow: prove the running guest observes the attached block device..."

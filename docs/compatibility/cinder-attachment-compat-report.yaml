@@ -1,0 +1,171 @@
+# Cinder 28 attachment compatibility report
+
+Machine-readable report mapping every expected cross-service call in the Cinder
+28.0.0 attachment lifecycle (issue #500) to the deterministic gate test that
+proves it. The normative interaction contract is
+`contracts/cinder/attachment-interaction-v28.yaml`; the redacted protected-run
+transcript is `tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml`.
+
+schema_version: 1
+issue: "https://github.com/kubedoio/o3k-rust/issues/500"
+product_profile: openstack-service-testbed
+cinder_pin: "28.0.0"
+generated_after_gates: all-five
+
+gates:
+  gate_a_identity:
+    description: Identity gate (tokens, service role, X-Service-Token, public validation)
+    files:
+      - crates/o3k-cinder/tests/gate_a_identity.rs
+    status: passing
+  gate_b_cinder_protocol:
+    description: Cinder protocol gate (exact 28 response shapes, full sequence)
+    files:
+      - crates/o3k-cinder/tests/gate_b_protocol.rs
+    status: passing
+  gate_c_nova_callback:
+    description: Nova 2.89 callback gate (GET-only, exact fields, discovery stays 2.1)
+    files:
+      - crates/o3k-api/tests/gate_c_nova_callback.rs
+    status: passing
+  gate_d_compute:
+    description: Real local CHAP iSCSI compute gate (tgt + open-iscsi + libvirt)
+    files:
+      - tests/cinder-chap-compute-gate.sh
+    status: passing
+    evidence: cinder-chap-compute-result.json status=passed run_id=gate-d-1786063181 proven=[collect_connector, chap_login, libvirt_hotplug, observe_disk, detach, session_cleanup]
+  gate_e_orchestrator_replay:
+    description: Orchestrator replay gate (observe-before-compensate, restart, no duplicate)
+    files:
+      - crates/o3k-compute/src/attachment.rs (mod replay_tests)
+    status: passing
+
+cross_service_calls:
+  - call: O3K orchestrator -> Keystone: project-scoped service-user token issuance
+    method: POST
+    path: /v3/auth/tokens
+    test: gate_a_identity::password_authentication_issues_and_public_validation_succeeds
+  - call: Keystone public token validation (keystonemiddleware validate_token)
+    method: GET
+    path: /v3/auth/tokens
+    test: gate_a_identity::password_authentication_issues_and_public_validation_succeeds
+  - call: Token re-authentication (methods: ["token"], Cinder's Nova client)
+    method: POST
+    path: /v3/auth/tokens
+    test: gate_a_identity::token_reauthentication_exchanges_a_valid_token
+  - call: Cinder service user carries the service role; regular user does not
+    method: n/a
+    path: n/a
+    test: gate_a_identity::cinder_service_token_carries_the_service_role
+  - call: Cinder DELETE carries X-Service-Token validated through public Identity
+    method: DELETE
+    path: /v3/{project}/attachments/{id}
+    test: gate_a_identity::delete_sends_and_validates_x_service_token_through_public_identity
+  - call: DELETE without a service token is rejected with 409 (bug #2004555 guard)
+    method: DELETE
+    path: /v3/{project}/attachments/{id}
+    test: gate_a_identity::delete_without_service_token_is_rejected_with_conflict
+  - call: Attachment create (reserve) returns the Cinder 28 detail view
+    method: POST
+    path: /v3/{project}/attachments
+    test: gate_b_protocol::full_lifecycle_reproduces_exact_cinder_28_shapes
+  - call: Attachment update (connector) returns detail view with flattened CHAP connection_info
+    method: PUT
+    path: /v3/{project}/attachments/{id}
+    test: gate_b_protocol::successful_update_response_is_parsed_from_the_actual_cinder_detail_view
+  - call: Missing/null/malformed connection_info classified distinctly
+    method: PUT
+    path: /v3/{project}/attachments/{id}
+    tests:
+      - gate_b_protocol::missing_connection_info_is_classified_distinctly
+      - gate_b_protocol::null_connection_info_is_classified_distinctly
+      - gate_b_protocol::malformed_connection_info_is_classified_distinctly
+  - call: Attachment complete returns 204 No Content
+    method: POST
+    path: /v3/{project}/attachments/{id}/action
+    test: gate_b_protocol::full_lifecycle_reproduces_exact_cinder_28_shapes
+  - call: Attachment show returns the detail view; list returns the summary view
+    method: GET
+    path: /v3/{project}/attachments
+    test: gate_b_protocol::full_lifecycle_reproduces_exact_cinder_28_shapes
+  - call: Timeout on connector update is an unknown outcome
+    method: PUT
+    path: /v3/{project}/attachments/{id}
+    test: gate_b_protocol::timeout_on_update_is_an_unknown_outcome
+  - call: Cinder -> O3K Nova: get_server_volume at microversion 2.89 (delete guard)
+    method: GET
+    path: /v2.1/{project}/servers/{server}/os-volume_attachments/{volume}
+    tests:
+      - gate_c_nova_callback::show_at_289_resolves_volume_id_like_cinder_does
+      - gate_c_nova_callback::list_at_289_emits_exact_fields_without_legacy_id
+  - call: Non-GET 2.89 attachment requests and unrelated 2.89 routes rejected with 406
+    method: any
+    path: /v2.1/** (non-GET at 2.89, unrelated routes)
+    tests:
+      - gate_c_nova_callback::non_get_289_attachment_requests_are_rejected_with_406
+      - gate_c_nova_callback::unrelated_289_requests_are_rejected_with_406
+  - call: Nova version discovery document stays version/min_version = 2.1
+    method: GET
+    path: /v2.1
+    test: gate_c_nova_callback::discovery_document_stays_at_21
+  - call: O3K compute: CollectConnector returns host/ip/initiator
+    method: agent-command
+    path: collect_connector
+    test: gate_d_compute (proven list includes collect_connector)
+  - call: O3K compute: CHAP iSCSI login against a real local target
+    method: agent-command
+    path: attach_disk (iscsi_login)
+    test: gate_d_compute (proven list includes chap_login; CHAP iSCSI session established)
+  - call: O3K compute: libvirt disk hotplug with durable o3k-<uuid> serial
+    method: agent-command
+    path: attach_disk (libvirt)
+    test: gate_d_compute (domain XML serial-bound disk)
+  - call: O3K compute: observation of the attached device (serial-bound observe_disk; optional in-guest observation)
+    method: agent-command
+    path: observe_disk
+    test: gate_d_compute (proven list includes observe_disk; guest_observation recorded separately)
+  - call: O3K compute: detach unplugs the disk and logs out the CHAP session
+    method: agent-command
+    path: detach_disk (libvirt + iscsi_logout)
+    tests:
+      - gate_d_compute (proven list includes detach, session_cleanup)
+      - gate_e_orchestrator_replay::put_timeout_is_unknown_then_reconcile_resumes_and_attaches
+  - call: Orchestrator observes before compensating on uncertain outcomes
+    method: GET
+    path: /v3/{project}/attachments/{id} (show during observe_before_compensate)
+    tests:
+      - gate_e_orchestrator_replay::put_missing_connection_info_observes_then_compensates
+      - gate_e_orchestrator_replay::put_null_connection_info_observes_then_compensates
+      - gate_e_orchestrator_replay::put_malformed_connection_info_observes_then_compensates
+  - call: No premature compensation on a timed-out PUT (attachment survives)
+    method: PUT
+    path: /v3/{project}/attachments/{id}
+    test: gate_e_orchestrator_replay::put_timeout_is_unknown_then_reconcile_resumes_and_attaches
+  - call: No premature compensation after a post-side-effect completion failure
+    method: POST
+    path: /v3/{project}/attachments/{id}/action
+    test: crates/o3k-compute/src/attachment.rs (mod tests)::compute_attach_success_with_cinder_completion_failure_is_not_prematurely_compensated
+  - call: Restart at connection_prepared resumes without a duplicate Cinder attachment
+    method: GET
+    path: /v3/{project}/attachments/{id}
+    test: gate_e_orchestrator_replay::restart_at_connection_prepared_resumes_without_duplicate_attachment
+  - call: Duplicate attach is idempotent (no second Cinder attachment)
+    method: POST
+    path: /v3/{project}/attachments
+    test: gate_e_orchestrator_replay::duplicate_attach_never_creates_a_second_cinder_attachment
+  - call: Create-time unknown outcome is observed before any retry
+    method: GET
+    path: /v3/{project}/attachments (list during reconcile)
+    test: gate_e_orchestrator_replay::create_timeout_is_unknown_and_reconcile_observes_before_retry
+  - call: Cinder deletion/compensation sends X-Service-Token (service-token delete)
+    method: DELETE
+    path: /v3/{project}/attachments/{id}
+    tests:
+      - gate_a_identity::delete_sends_and_validates_x_service_token_through_public_identity
+      - gate_b_protocol::full_lifecycle_reproduces_exact_cinder_28_shapes
+
+protected_run_policy: >-
+  The protected real-Cinder run is the final integration verifier, not a
+  requirements-discovery loop. Any API shape, token, microversion, attachment
+  phase, or compensation requirement discovered for the first time in the full
+  runner means this closure is incomplete.
