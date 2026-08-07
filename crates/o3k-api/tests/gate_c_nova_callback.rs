@@ -22,13 +22,13 @@ use axum::{
 use o3k_api::AppState;
 use o3k_compute::ComputeService;
 use o3k_provider::FakeComputeProvider;
-use o3k_store::{DurableStore, SqliteStore, VolumeAttachmentRecord};
+use o3k_store::{DurableStore, VolumeAttachmentRecord, testkit::TestStore};
 use serde_json::Value;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn build_app(store: Arc<SqliteStore>) -> axum::Router {
+fn build_app(store: Arc<TestStore>) -> axum::Router {
     let provider = Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider);
     let state = AppState::new().with_compute(compute);
@@ -37,7 +37,7 @@ fn build_app(store: Arc<SqliteStore>) -> axum::Router {
 }
 
 async fn seed_server_and_attachment(
-    store: &SqliteStore,
+    store: &TestStore,
     server_id: Uuid,
     volume_id: Uuid,
     cinder_attachment_id: &str,
@@ -209,7 +209,7 @@ async fn get_with_microversion(
 #[tokio::test]
 async fn list_at_289_emits_exact_fields_without_legacy_id() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
@@ -241,7 +241,7 @@ fn json_wrap(value: Value) -> Value {
 #[tokio::test]
 async fn show_at_289_resolves_volume_id_like_cinder_does() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
@@ -280,7 +280,7 @@ async fn show_at_289_resolves_volume_id_like_cinder_does() -> Result<(), Box<dyn
 
 #[tokio::test]
 async fn list_and_show_at_21_keep_the_legacy_id() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
@@ -312,7 +312,7 @@ async fn list_and_show_at_21_keep_the_legacy_id() -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn non_get_289_attachment_requests_are_rejected_with_406()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
@@ -345,7 +345,7 @@ async fn non_get_289_attachment_requests_are_rejected_with_406()
 
 #[tokio::test]
 async fn unrelated_289_requests_are_rejected_with_406() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let app = build_app(store);
     let server_id = Uuid::now_v7();
 
@@ -361,7 +361,7 @@ async fn unrelated_289_requests_are_rejected_with_406() -> Result<(), Box<dyn st
 
 #[tokio::test]
 async fn discovery_document_stays_at_21() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let app = build_app(store);
     let req = Request::builder()
         .method(Method::GET)
@@ -378,7 +378,7 @@ async fn discovery_document_stays_at_21() -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn project_isolation_is_preserved_at_289() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
