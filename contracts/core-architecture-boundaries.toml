@@ -59,6 +59,7 @@ ratcheted_adapter_dependencies = [
 concrete_store_symbol = "SqliteStore"
 concrete_store_debt_files = [
   "crates/o3k-compute/src/lib.rs",
+  "crates/o3k-compute/src/attachment.rs",
   "crates/o3k-identity/src/lib.rs",
 ]
 
