@@ -104,6 +104,12 @@ Acceptance:
 
 ## Prompt 2 — extract repository ports and remove direct SqliteStore use
 
+> Completed by issue #510 / PR #511: narrow `IdentityRepository`,
+> `KeypairRepository`, `VolumeAttachmentRepository`, and `ComputeRepository`
+> ports now serve o3k-compute and o3k-identity; `concrete_store_debt_files` in
+> `contracts/core-architecture-boundaries.toml` is empty. The prompt below is
+> retained for historical reference.
+
 ```text
 Objective: remove direct SqliteStore coupling from o3k-compute and o3k-identity
 while keeping SQLite as the only supported database adapter.

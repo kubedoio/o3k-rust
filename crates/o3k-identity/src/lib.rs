@@ -14,7 +14,7 @@ use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
 
-use o3k_store::{SqliteStore, StoreError};
+use o3k_store::{IdentityRepository, StoreError};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -468,7 +468,7 @@ pub struct BootstrapConfig {
 /// Idempotent: existing records are updated from configuration, assignments and
 /// roles are inserted when missing. Passwords and secrets are never logged.
 pub async fn seed_identity_defaults(
-    store: &SqliteStore,
+    store: &dyn IdentityRepository,
     config: &BootstrapConfig,
 ) -> Result<(), StoreError> {
     let now = now_rfc3339();
@@ -689,11 +689,11 @@ impl TokenService {
     /// authoritative for authentication, roles, and the catalog until the
     /// control plane restarts.
     pub async fn load(
-        store: Arc<SqliteStore>,
+        store: Arc<dyn IdentityRepository>,
         signing_key: Secret,
         token_ttl: Duration,
     ) -> Result<Self, AuthError> {
-        let snapshot = load_snapshot(&store).await?;
+        let snapshot = load_snapshot(store.as_ref()).await?;
         Self::from_snapshot(snapshot, signing_key, token_ttl)
     }
 
@@ -1195,7 +1195,7 @@ fn civil_date(days_since_epoch: u64) -> Result<(i64, u64, u64), AuthError> {
     ))
 }
 
-async fn load_snapshot(store: &SqliteStore) -> Result<IdentitySnapshot, AuthError> {
+async fn load_snapshot(store: &dyn IdentityRepository) -> Result<IdentitySnapshot, AuthError> {
     let map_error = |_: StoreError| AuthError::IdentityUnavailable;
     let domains = store
         .list_keystone_domains()
@@ -1321,12 +1321,12 @@ pub mod testkit {
     /// 8776 port.
     pub async fn test_service(catalog_endpoint: &str) -> Result<TokenService, AuthError> {
         let store = Arc::new(
-            SqliteStore::connect("sqlite::memory:")
+            o3k_store::testkit::open_memory()
                 .await
                 .map_err(|_| AuthError::IdentityUnavailable)?,
         );
         seed_identity_defaults(
-            &store,
+            store.as_ref(),
             &BootstrapConfig {
                 catalog_endpoint: catalog_endpoint.to_owned(),
                 bootstrap_password: Secret::new("password".to_owned()),
@@ -1890,12 +1890,12 @@ mod tests {
     #[tokio::test]
     async fn endpoint_records_survive_reload_from_store() -> Result<(), AuthError> {
         let store = Arc::new(
-            SqliteStore::connect("sqlite::memory:")
+            o3k_store::testkit::open_memory()
                 .await
                 .map_err(|_| AuthError::IdentityUnavailable)?,
         );
         seed_identity_defaults(
-            &store,
+            store.as_ref(),
             &BootstrapConfig {
                 catalog_endpoint: "http://127.0.0.1:18080".to_owned(),
                 bootstrap_password: Secret::new("password".to_owned()),

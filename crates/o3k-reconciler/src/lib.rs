@@ -91,7 +91,7 @@ enum EvidenceDisposition {
     Stale,
 }
 
-pub struct OperationJournal<S, P: ?Sized> {
+pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
     max_attempts: u8,
@@ -99,7 +99,7 @@ pub struct OperationJournal<S, P: ?Sized> {
     agent_evidence: Arc<Mutex<HashMap<Uuid, AgentEvidenceFence>>>,
 }
 
-impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
+impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
     fn clone(&self) -> Self {
         Self {
             store: self.store.clone(),
@@ -111,7 +111,7 @@ impl<S, P: ?Sized> Clone for OperationJournal<S, P> {
     }
 }
 
-impl<S, P: ?Sized> OperationJournal<S, P>
+impl<S: ?Sized, P: ?Sized> OperationJournal<S, P>
 where
     S: DurableStore + 'static,
     P: ComputeProvider + 'static,
@@ -1365,7 +1365,7 @@ fn valid_agent_reference(value: &str) -> bool {
 mod tests {
     use super::*;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
-    use o3k_store::SqliteStore;
+    use o3k_store::testkit::TestStore;
     use std::path::PathBuf;
 
     fn request() -> CreateInstanceRequest {
@@ -1394,8 +1394,8 @@ mod tests {
         max_attempts: u8,
     ) -> Result<
         (
-            OperationJournal<SqliteStore, FakeComputeProvider>,
-            Arc<SqliteStore>,
+            OperationJournal<TestStore, FakeComputeProvider>,
+            Arc<TestStore>,
             Arc<FakeComputeProvider>,
         ),
         ReconcileError,
@@ -1405,7 +1405,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
         Ok((
             OperationJournal::new(store.clone(), provider.clone(), max_attempts),
@@ -1512,7 +1512,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(ForeignOperationProvider::new());
         let journal = OperationJournal::new(store.clone(), provider, 2);
         let request = request();
@@ -1536,7 +1536,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(ForeignOperationProvider::new());
         provider.inner.set_failure(FailureInjection::Timeout)?;
         let journal = OperationJournal::new(store.clone(), provider, 2);
