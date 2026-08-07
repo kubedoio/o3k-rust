@@ -1,30 +1,31 @@
 #!/usr/bin/env python3
-"""Fail closed on new O3K core/application architecture boundary debt.
+"""Fail closed on O3K core/application architecture boundary drift.
 
 This is a ratchet, not a claim that the current architecture is already clean.
 Known temporary exceptions live in contracts/core-architecture-boundaries.toml.
-Removing exceptions is allowed; adding or broadening them requires explicit
-architecture review.
+The exception set must match current debt exactly, so deleting debt requires
+removing the matching exception in the same change and cannot leave a dormant
+allowlist entry that permits later reintroduction.
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import tomllib
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_PATH = ROOT / "contracts" / "core-architecture-boundaries.toml"
 
 
 def fail(errors: list[str], message: str) -> None:
     errors.append(message)
 
 
-def load_manifest(crate: str) -> tuple[Path, dict]:
-    manifest = ROOT / "crates" / crate / "Cargo.toml"
+def load_manifest(root: Path, crate: str) -> tuple[Path, dict]:
+    manifest = root / "crates" / crate / "Cargo.toml"
     if not manifest.is_file():
-        raise FileNotFoundError(f"missing application/domain manifest: {manifest.relative_to(ROOT)}")
+        raise FileNotFoundError(
+            f"missing application/domain manifest: {manifest.relative_to(root)}"
+        )
     with manifest.open("rb") as handle:
         return manifest, tomllib.load(handle)
 
@@ -33,23 +34,23 @@ def dependency_names(manifest: dict) -> set[str]:
     return set(manifest.get("dependencies", {}).keys())
 
 
-def rust_files(crate: str) -> list[Path]:
-    src = ROOT / "crates" / crate / "src"
+def rust_files(root: Path, crate: str) -> list[Path]:
+    src = root / "crates" / crate / "src"
     if not src.is_dir():
         return []
     return sorted(src.rglob("*.rs"))
 
 
-def main() -> int:
-    if not CONTRACT_PATH.is_file():
-        print(f"ERROR: missing architecture contract: {CONTRACT_PATH.relative_to(ROOT)}", file=sys.stderr)
-        return 1
-
-    with CONTRACT_PATH.open("rb") as handle:
-        contract = tomllib.load(handle)
-
+def check(root: Path) -> list[str]:
+    contract_path = root / "contracts" / "core-architecture-boundaries.toml"
     errors: list[str] = []
     debt_notes: list[str] = []
+
+    if not contract_path.is_file():
+        return [f"missing architecture contract: {contract_path.relative_to(root)}"]
+
+    with contract_path.open("rb") as handle:
+        contract = tomllib.load(handle)
 
     if contract.get("schema_version") != 1:
         fail(errors, "architecture contract schema_version must be 1")
@@ -67,7 +68,7 @@ def main() -> int:
         fail(errors, "domain.crate is required")
     else:
         try:
-            _, domain_manifest = load_manifest(domain_crate)
+            _, domain_manifest = load_manifest(root, domain_crate)
         except FileNotFoundError as exc:
             fail(errors, str(exc))
         else:
@@ -76,16 +77,17 @@ def main() -> int:
             if unexpected:
                 fail(
                     errors,
-                    f"{domain_crate} gained outward/unapproved dependencies: {', '.join(unexpected)}",
+                    f"{domain_crate} gained outward/unapproved dependencies: "
+                    + ", ".join(unexpected),
                 )
 
-            for path in rust_files(domain_crate):
+            for path in rust_files(root, domain_crate):
                 text = path.read_text(encoding="utf-8")
                 for marker in forbidden_domain_markers:
                     if marker in text:
                         fail(
                             errors,
-                            f"{path.relative_to(ROOT)} contains forbidden domain marker {marker!r}",
+                            f"{path.relative_to(root)} contains forbidden domain marker {marker!r}",
                         )
 
     application = contract.get("application", {})
@@ -116,7 +118,7 @@ def main() -> int:
 
     for crate in applications:
         try:
-            _, manifest = load_manifest(crate)
+            _, manifest = load_manifest(root, crate)
         except FileNotFoundError as exc:
             fail(errors, str(exc))
             continue
@@ -130,24 +132,31 @@ def main() -> int:
                 + ", ".join(forbidden_present),
             )
 
-        allowed_debt = set(adapter_debt.get(crate, []))
-        ratcheted_present = deps & ratcheted_dependencies
-        new_debt = sorted(ratcheted_present - allowed_debt)
+        declared_debt = set(adapter_debt.get(crate, []))
+        observed_debt = deps & ratcheted_dependencies
+        new_debt = sorted(observed_debt - declared_debt)
+        stale_debt = sorted(declared_debt - observed_debt)
         if new_debt:
             fail(
                 errors,
                 f"{crate} gained new ratcheted adapter dependencies: {', '.join(new_debt)}",
             )
-
-        remaining_debt = sorted(ratcheted_present & allowed_debt)
-        if remaining_debt:
-            debt_notes.append(f"{crate}: adapter dependency debt = {', '.join(remaining_debt)}")
+        if stale_debt:
+            fail(
+                errors,
+                f"{crate} has stale architecture exceptions that must be removed: "
+                + ", ".join(stale_debt),
+            )
+        if observed_debt:
+            debt_notes.append(
+                f"{crate}: adapter dependency debt = {', '.join(sorted(observed_debt))}"
+            )
 
         if concrete_store_symbol:
-            for path in rust_files(crate):
+            for path in rust_files(root, crate):
                 text = path.read_text(encoding="utf-8")
                 if concrete_store_symbol in text:
-                    rel = path.relative_to(ROOT).as_posix()
+                    rel = path.relative_to(root).as_posix()
                     observed_store_debt_files.add(rel)
                     if rel not in concrete_store_debt_files:
                         fail(
@@ -155,11 +164,8 @@ def main() -> int:
                             f"new concrete-store coupling: {rel} contains {concrete_store_symbol}",
                         )
 
-    for rel in sorted(observed_store_debt_files & concrete_store_debt_files):
-        debt_notes.append(f"{rel}: concrete store debt = {concrete_store_symbol}")
-
     missing_debt_paths = sorted(
-        path for path in concrete_store_debt_files if not (ROOT / path).is_file()
+        path for path in concrete_store_debt_files if not (root / path).is_file()
     )
     if missing_debt_paths:
         fail(
@@ -167,22 +173,50 @@ def main() -> int:
             "architecture debt contract names missing files: " + ", ".join(missing_debt_paths),
         )
 
+    stale_store_exceptions = sorted(concrete_store_debt_files - observed_store_debt_files)
+    if stale_store_exceptions:
+        fail(
+            errors,
+            "stale concrete-store exceptions must be removed: "
+            + ", ".join(stale_store_exceptions),
+        )
+
+    for rel in sorted(observed_store_debt_files):
+        debt_notes.append(f"{rel}: concrete store debt = {concrete_store_symbol}")
+
+    if not errors:
+        print("Architecture boundary check passed.")
+        if debt_notes:
+            print("Known migration debt (ratcheted; exact and temporary):")
+            for note in sorted(set(debt_notes)):
+                print(f"  - {note}")
+
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
+        help="repository root (defaults to the checkout containing this script)",
+    )
+    args = parser.parse_args()
+    root = args.root.resolve()
+
+    errors = check(root)
     if errors:
         print("Architecture boundary check FAILED:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         print(
-            "\nDo not widen the debt list as a convenience. Refactor toward the inward dependency "
-            "model or obtain explicit architecture review for a justified contract change.",
+            "\nDo not widen or leave dormant debt exceptions as a convenience. "
+            "Refactor toward the inward dependency model, remove stale exceptions, "
+            "or obtain explicit architecture review for a justified contract change.",
             file=sys.stderr,
         )
         return 1
-
-    print("Architecture boundary check passed.")
-    if debt_notes:
-        print("Known migration debt (ratcheted; may shrink, must not spread):")
-        for note in sorted(set(debt_notes)):
-            print(f"  - {note}")
     return 0
 
 
