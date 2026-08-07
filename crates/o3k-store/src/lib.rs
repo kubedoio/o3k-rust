@@ -3508,6 +3508,12 @@ mod tests {
         run_keypair_repository_conformance(&compute_store).await?;
         run_volume_attachment_repository_conformance(&compute_store).await?;
         run_conformance(&compute_store).await?;
+        // Invariant: exactly two `compute_instance` rows survive the combined
+        // run. The keypair suite leaves one (its server-create scenario) and
+        // the volume-attachment suite leaves one; the identity suite and the
+        // generic `run_conformance` create none (keystone rows and a `server`
+        // resource only). Keep this assertion on the shared store so a suite
+        // added to the combined run cannot silently change the count.
         assert_eq!(
             compute_store
                 .list_resources_by_kind("compute_instance")
