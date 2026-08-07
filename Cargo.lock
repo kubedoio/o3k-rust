@@ -1145,10 +1145,12 @@ dependencies = [
 name = "o3k-image"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "o3k-store",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
+ "tokio",
  "uuid",
 ]
 

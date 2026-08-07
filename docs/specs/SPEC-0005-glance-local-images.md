@@ -23,7 +23,10 @@ active. Authenticated `GET /v2/images/{id}/file` revalidates ownership, size,
 and SHA-256 before returning bytes. The adapter uses a bounded upload limit and
 does not expose staging or filesystem errors publicly.
 
-SQLite image metadata integration and protected OpenStack CLI evidence remain
-follow-ups for the durable resource/API workflow issues. Portable API evidence
-is recorded in the compatibility inventory; protected-runner evidence is not
-fabricated.
+SQLite image metadata integration is complete (issue #514): metadata lives
+behind the narrow `ImageRepository` port on the SQLite adapter, restart
+reconstructs public image metadata from the durable store, and active metadata
+with a missing or corrupt artifact fails closed. Protected OpenStack CLI
+evidence remains a follow-up for the durable resource/API workflow issues.
+Portable API evidence is recorded in the compatibility inventory;
+protected-runner evidence is not fabricated.

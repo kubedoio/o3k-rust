@@ -128,6 +128,17 @@ existing exceptions behind the narrow `IdentityRepository`,
 `KeypairRepository`, `VolumeAttachmentRepository`, and `ComputeRepository`
 ports; the architecture-boundary ratchet continues to prevent new occurrences.
 
+Issue #514 (step 3 of the required implementation sequence below) moved
+Glance-compatible image metadata behind the narrow `ImageRepository` port on
+the SQLite adapter: public image identity, project ownership, format,
+visibility, size, checksum, and lifecycle state are durable-store
+authoritative, restart reconstructs them from the store rather than from
+directory or sidecar-file naming, and a missing or corrupt artifact for active
+metadata fails closed. Uploaded bytes, the content-addressed cache, qcow2
+verification, compute-host base images and overlays, and temporary publication
+files remain the artifact authority in the bounded filesystem store; image
+contents are not stored in SQLite.
+
 ### 3. Durable control-plane metadata authority
 
 The durable store becomes authoritative for O3K-owned public metadata and

@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -20,7 +21,7 @@ pub enum ImageStatus {
     Active,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRecord {
     pub id: Uuid,
     pub name: String,
@@ -69,6 +70,8 @@ pub enum ImageError {
     Storage(#[source] io::Error),
     #[error("image metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
+    #[error("image store error")]
+    Store(#[source] StoreError),
     #[error("image format is not supported")]
     UnsupportedFormat,
     #[error("image checksum does not match")]
@@ -666,36 +669,35 @@ fn is_checksum(value: &str) -> bool {
 
 #[derive(Clone)]
 pub struct ImageService {
-    inner: Arc<Mutex<Inner>>,
+    inner: Arc<Inner>,
+    lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
 }
 
 struct Inner {
     root: PathBuf,
-    images: Vec<ImageRecord>,
+    repository: Arc<dyn ImageRepository>,
 }
 
 impl ImageService {
-    pub fn open(root: impl Into<PathBuf>, max_upload_bytes: usize) -> Result<Self, ImageError> {
+    pub async fn open(
+        root: impl Into<PathBuf>,
+        max_upload_bytes: usize,
+        repository: Arc<dyn ImageRepository>,
+    ) -> Result<Self, ImageError> {
         let root = root.into();
         ensure_managed_directory(&root)?;
         let content = root.join("content");
         ensure_managed_directory(&content)?;
         remove_temporary_files(&content, TemporaryKind::Upload)?;
-        let metadata_path = root.join("metadata.json");
-        let images = if metadata_path.exists() {
-            let data = fs::read(&metadata_path).map_err(ImageError::Storage)?;
-            serde_json::from_slice(&data).map_err(ImageError::CorruptMetadata)?
-        } else {
-            Vec::new()
-        };
         Ok(Self {
-            inner: Arc::new(Mutex::new(Inner { root, images })),
+            inner: Arc::new(Inner { root, repository }),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
         })
     }
 
-    pub fn create(
+    pub async fn create(
         &self,
         project_id: &str,
         name: String,
@@ -712,71 +714,72 @@ impl ImageService {
         {
             return Err(ImageError::InvalidMetadata);
         }
-        let mut inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-        let image = ImageRecord {
+        let record = ImageMetadataRecord {
             id: Uuid::now_v7(),
             name,
             project_id: project_id.to_owned(),
-            status: ImageStatus::Queued,
+            status: "queued".to_owned(),
             visibility,
             container_format,
             disk_format,
             size: None,
             checksum: None,
         };
-        inner.images.push(image.clone());
-        persist(&inner)?;
-        Ok(image)
+        self.inner
+            .repository
+            .insert_image(&record)
+            .await
+            .map_err(Self::map_store_error)?;
+        image_from_store(record)
     }
 
-    pub fn list(&self, project_id: &str) -> Result<Vec<ImageRecord>, ImageError> {
-        let inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-        Ok(inner
-            .images
-            .iter()
-            .filter(|image| image.project_id == project_id)
-            .cloned()
-            .collect())
+    pub async fn list(&self, project_id: &str) -> Result<Vec<ImageRecord>, ImageError> {
+        self.inner
+            .repository
+            .list_images(project_id)
+            .await
+            .map_err(Self::map_store_error)?
+            .into_iter()
+            .map(image_from_store)
+            .collect()
     }
 
-    pub fn get(&self, project_id: &str, id: Uuid) -> Result<ImageRecord, ImageError> {
-        let inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-        inner
-            .images
-            .iter()
-            .find(|image| image.id == id && image.project_id == project_id)
-            .cloned()
-            .ok_or(ImageError::NotFound)
+    pub async fn get(&self, project_id: &str, id: Uuid) -> Result<ImageRecord, ImageError> {
+        let record = self
+            .inner
+            .repository
+            .get_image(project_id, &id)
+            .await
+            .map_err(Self::map_store_error)?
+            .ok_or(ImageError::NotFound)?;
+        image_from_store(record)
     }
 
-    pub fn resolve_artifact(
+    pub async fn resolve_artifact(
         &self,
         project_id: &str,
         id: Uuid,
     ) -> Result<ImageArtifact, ImageError> {
-        let (format, checksum, size, path) = {
-            let inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-            let image = inner
-                .images
-                .iter()
-                .find(|image| image.id == id && image.project_id == project_id)
-                .ok_or(ImageError::NotFound)?;
-            if image.status != ImageStatus::Active {
-                return Err(ImageError::NotFound);
-            }
-            let checksum = image.checksum.clone().ok_or(ImageError::NotFound)?;
-            let size = image.size.ok_or(ImageError::NotFound)?;
-            if !matches!(image.disk_format.as_str(), "raw" | "qcow2") {
-                return Err(ImageError::UnsupportedFormat);
-            }
-            (
-                image.disk_format.clone(),
-                checksum,
-                size,
-                content_path(&inner.root, id),
-            )
-        };
-
+        let record = self
+            .inner
+            .repository
+            .get_image(project_id, &id)
+            .await
+            .map_err(Self::map_store_error)?
+            .ok_or(ImageError::NotFound)?;
+        if record.status != "active" {
+            return Err(ImageError::NotFound);
+        }
+        let checksum = record.checksum.ok_or(ImageError::NotFound)?;
+        let size = record
+            .size
+            .map(|value| u64::try_from(value).map_err(|_| ImageError::NotFound))
+            .transpose()?
+            .ok_or(ImageError::NotFound)?;
+        if !matches!(record.disk_format.as_str(), "raw" | "qcow2") {
+            return Err(ImageError::UnsupportedFormat);
+        }
+        let path = content_path(&self.inner.root, id);
         if path.is_symlink() || !path.is_file() {
             return Err(ImageError::NotFound);
         }
@@ -797,13 +800,13 @@ impl ImageService {
         Ok(ImageArtifact {
             id,
             checksum,
-            format,
+            format: record.disk_format,
             size,
             content,
         })
     }
 
-    pub fn upload(
+    pub async fn upload(
         &self,
         project_id: &str,
         id: Uuid,
@@ -812,16 +815,26 @@ impl ImageService {
         if content.len() > self.max_upload_bytes {
             return Err(ImageError::TooLarge);
         }
-        let mut inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-        let position = inner
-            .images
-            .iter()
-            .position(|image| image.id == id && image.project_id == project_id)
+        // Upload and delete are serialized by this lock, preserving the
+        // check-then-act atomicity of the previous in-memory implementation:
+        // a concurrent upload of the same image must not write bytes after
+        // another upload already activated the record, because the losing
+        // writer would then have to remove the winner's published content
+        // file. The store's conditional activate remains the authoritative
+        // guard; this lock only reproduces the single-process serialization.
+        let _guard = self.lock.lock().await;
+        let record = self
+            .inner
+            .repository
+            .get_image(project_id, &id)
+            .await
+            .map_err(Self::map_store_error)?
             .ok_or(ImageError::NotFound)?;
-        if inner.images[position].status == ImageStatus::Active {
+        let record = image_from_store(record)?;
+        if record.status == ImageStatus::Active {
             return Err(ImageError::Conflict);
         }
-        let content_path = content_path(&inner.root, id);
+        let content_path = content_path(&self.inner.root, id);
         let temporary_path = content_path.with_extension(format!("upload-{}", Uuid::now_v7()));
         if let Err(error) = fs::write(&temporary_path, content) {
             let _ = fs::remove_file(&temporary_path);
@@ -832,30 +845,44 @@ impl ImageService {
             return Err(ImageError::Storage(error));
         }
         let checksum = format!("{:x}", Sha256::digest(content));
-        inner.images[position].status = ImageStatus::Active;
-        inner.images[position].size = Some(content.len() as u64);
-        inner.images[position].checksum = Some(checksum);
-        if let Err(error) = persist(&inner) {
-            let _ = fs::remove_file(&content_path);
-            return Err(error);
+        match self
+            .inner
+            .repository
+            .activate_image(project_id, &id, content.len() as u64, &checksum)
+            .await
+        {
+            Ok(record) => image_from_store(record),
+            Err(error) => {
+                // Roll back the published content file when the activation
+                // fails; the record stays queued and remains re-uploadable.
+                let _ = fs::remove_file(&content_path);
+                Err(Self::map_store_error(error))
+            }
         }
-        Ok(inner.images[position].clone())
     }
 
-    pub fn delete(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {
-        let mut inner = self.inner.lock().map_err(|_| ImageError::Conflict)?;
-        let position = inner
-            .images
-            .iter()
-            .position(|image| image.id == id && image.project_id == project_id)
-            .ok_or(ImageError::NotFound)?;
-        let content = content_path(&inner.root, id);
-        inner.images.remove(position);
-        persist(&inner)?;
+    pub async fn delete(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {
+        // Same serialization as upload so a delete cannot interleave with an
+        // upload of the same image.
+        let _guard = self.lock.lock().await;
+        self.inner
+            .repository
+            .delete_image(project_id, &id)
+            .await
+            .map_err(Self::map_store_error)?;
+        let content = content_path(&self.inner.root, id);
         if content.exists() {
             fs::remove_file(content).map_err(ImageError::Storage)?;
         }
         Ok(())
+    }
+
+    fn map_store_error(error: StoreError) -> ImageError {
+        match error {
+            StoreError::ImageNotFound => ImageError::NotFound,
+            StoreError::ImageAlreadyActive => ImageError::Conflict,
+            other => ImageError::Store(other),
+        }
     }
 }
 
@@ -863,21 +890,38 @@ fn content_path(root: &Path, id: Uuid) -> PathBuf {
     root.join("content").join(id.to_string())
 }
 
-fn persist(inner: &Inner) -> Result<(), ImageError> {
-    let metadata_path = inner.root.join("metadata.json");
-    let temporary_path = inner
-        .root
-        .join(format!("metadata.json.tmp-{}", Uuid::now_v7()));
-    let encoded = serde_json::to_vec_pretty(&inner.images).map_err(ImageError::CorruptMetadata)?;
-    if let Err(error) = fs::write(&temporary_path, encoded) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(ImageError::Storage(error));
-    }
-    if let Err(error) = fs::rename(&temporary_path, &metadata_path) {
-        let _ = fs::remove_file(&temporary_path);
-        return Err(ImageError::Storage(error));
-    }
-    Ok(())
+fn image_from_store(record: ImageMetadataRecord) -> Result<ImageRecord, ImageError> {
+    let status = match record.status.as_str() {
+        "queued" => ImageStatus::Queued,
+        "active" => ImageStatus::Active,
+        // An unknown status is corrupt durable state; fail closed instead of
+        // inventing a status projection.
+        _ => {
+            return Err(ImageError::Store(StoreError::Corrupt(format!(
+                "image {} has unknown status `{}`",
+                record.id, record.status
+            ))));
+        }
+    };
+    Ok(ImageRecord {
+        id: record.id,
+        name: record.name,
+        project_id: record.project_id,
+        status,
+        visibility: record.visibility,
+        container_format: record.container_format,
+        disk_format: record.disk_format,
+        size: record
+            .size
+            .map(|size| {
+                u64::try_from(size).map_err(|_| {
+                    StoreError::Corrupt(format!("image {} has invalid size", record.id))
+                })
+            })
+            .transpose()
+            .map_err(ImageError::Store)?,
+        checksum: record.checksum,
+    })
 }
 
 #[cfg(test)]
@@ -891,102 +935,129 @@ mod tests {
         PathBuf::from(format!("/tmp/o3k-image-{label}-{}", std::process::id()))
     }
 
-    #[test]
-    fn upload_is_atomic_and_restartable() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn upload_is_atomic_and_restartable() -> Result<(), Box<dyn std::error::Error>> {
         let path = root("restart");
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
-        let image = service.create(
-            "project-a",
-            "test".to_owned(),
-            "private".to_owned(),
-            "bare".to_owned(),
-            "qcow2".to_owned(),
-        )?;
-        let uploaded = service.upload("project-a", image.id, b"image-bytes")?;
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "qcow2".to_owned(),
+            )
+            .await?;
+        let uploaded = service
+            .upload("project-a", image.id, b"image-bytes")
+            .await?;
         assert_eq!(uploaded.status, ImageStatus::Active);
         assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
             entry.file_name().to_string_lossy().contains(".tmp-")
                 || entry.file_name().to_string_lossy().contains("upload-")
         }));
-        let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
-        assert_eq!(reopened.get("project-a", image.id)?, uploaded);
-        let artifact = reopened.resolve_artifact("project-a", image.id)?;
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        assert_eq!(reopened.get("project-a", image.id).await?, uploaded);
+        let artifact = reopened.resolve_artifact("project-a", image.id).await?;
         assert_eq!(artifact.id, image.id);
         assert_eq!(artifact.format, "qcow2");
         assert_eq!(artifact.size, 11);
         assert_eq!(artifact.content, b"image-bytes");
         fs::remove_dir_all(path)?;
+        fs::remove_file(sqlite_path)?;
         Ok(())
     }
 
-    #[test]
-    fn artifact_resolution_rechecks_content_and_scope() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn artifact_resolution_rechecks_content_and_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path = root("artifact");
-        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES)?;
-        let image = service.create(
-            "project-a",
-            "test".to_owned(),
-            "private".to_owned(),
-            "bare".to_owned(),
-            "raw".to_owned(),
-        )?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id),
+            service.resolve_artifact("project-a", image.id).await,
             Err(ImageError::NotFound)
         ));
-        service.upload("project-a", image.id, b"image-bytes")?;
+        service
+            .upload("project-a", image.id, b"image-bytes")
+            .await?;
         assert!(matches!(
-            service.resolve_artifact("project-b", image.id),
+            service.resolve_artifact("project-b", image.id).await,
             Err(ImageError::NotFound)
         ));
         fs::write(path.join("content").join(image.id.to_string()), b"tampered")?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id),
+            service.resolve_artifact("project-a", image.id).await,
             Err(ImageError::ChecksumMismatch)
         ));
         fs::remove_dir_all(path)?;
         Ok(())
     }
 
-    #[test]
-    fn artifact_resolution_bounds_tampered_content() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn artifact_resolution_bounds_tampered_content() -> Result<(), Box<dyn std::error::Error>>
+    {
         let path = root("artifact-limit");
-        let service = ImageService::open(&path, 3)?;
-        let image = service.create(
-            "project-a",
-            "test".to_owned(),
-            "private".to_owned(),
-            "bare".to_owned(),
-            "raw".to_owned(),
-        )?;
-        service.upload("project-a", image.id, b"abc")?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, 3, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        service.upload("project-a", image.id, b"abc").await?;
         fs::write(
             path.join("content").join(image.id.to_string()),
             b"too-large",
         )?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id),
+            service.resolve_artifact("project-a", image.id).await,
             Err(ImageError::TooLarge)
         ));
         fs::remove_dir_all(path)?;
         Ok(())
     }
 
-    #[test]
-    fn verified_service_artifact_publishes_to_cache_idempotently()
+    #[tokio::test]
+    async fn verified_service_artifact_publishes_to_cache_idempotently()
     -> Result<(), Box<dyn std::error::Error>> {
         let service_path = root("artifact-cache-service");
         let cache_path = root("artifact-cache-cache");
-        let service = ImageService::open(&service_path, DEFAULT_MAX_UPLOAD_BYTES)?;
-        let image = service.create(
-            "project-a",
-            "test".to_owned(),
-            "private".to_owned(),
-            "bare".to_owned(),
-            "raw".to_owned(),
-        )?;
-        service.upload("project-a", image.id, b"image-bytes")?;
-        let artifact = service.resolve_artifact("project-a", image.id)?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&service_path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        service
+            .upload("project-a", image.id, b"image-bytes")
+            .await?;
+        let artifact = service.resolve_artifact("project-a", image.id).await?;
         let cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
 
         let first = cache.cache_artifact(&artifact)?;
@@ -1071,33 +1142,37 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn upload_limit_and_project_isolation_are_enforced() -> Result<(), Box<dyn std::error::Error>> {
+    #[tokio::test]
+    async fn upload_limit_and_project_isolation_are_enforced()
+    -> Result<(), Box<dyn std::error::Error>> {
         let path = root("limits");
-        let service = ImageService::open(&path, 3)?;
-        let image = service.create(
-            "project-a",
-            "../outside".to_owned(),
-            "private".to_owned(),
-            "bare".to_owned(),
-            "raw".to_owned(),
-        )?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, 3, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "../outside".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
         assert!(matches!(
-            service.upload("project-a", image.id, b"four"),
+            service.upload("project-a", image.id, b"four").await,
             Err(ImageError::TooLarge)
         ));
         assert!(matches!(
-            service.get("project-b", image.id),
+            service.get("project-b", image.id).await,
             Err(ImageError::NotFound)
         ));
-        service.delete("project-a", image.id)?;
+        service.delete("project-a", image.id).await?;
         assert!(!path.join("outside").exists());
         fs::remove_dir_all(path)?;
         Ok(())
     }
 
-    #[test]
-    fn image_service_restart_cleans_only_upload_temporaries()
+    #[tokio::test]
+    async fn image_service_restart_cleans_only_upload_temporaries()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("upload-restart");
         let _ = fs::remove_dir_all(&path);
@@ -1109,9 +1184,149 @@ mod tests {
         let unrelated = path.join("content").join("foreign.upload-user");
         fs::write(&stale, b"partial")?;
         fs::write(&unrelated, b"keep")?;
-        let _service = ImageService::open(&path, 1024)?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let _service = ImageService::open(&path, 1024, store).await?;
         assert!(!stale.exists());
         assert_eq!(fs::read(&unrelated)?, b"keep");
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn metadata_survives_restart_from_durable_store() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = root("durable-restart");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let content = b"durable-image-bytes";
+        let (image_id, uploaded) = {
+            let store =
+                Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+            let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+            let image = service
+                .create(
+                    "project-a",
+                    "test".to_owned(),
+                    "private".to_owned(),
+                    "bare".to_owned(),
+                    "raw".to_owned(),
+                )
+                .await?;
+            let uploaded = service.upload("project-a", image.id, content).await?;
+            (image.id, uploaded)
+        };
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        assert_eq!(service.list("project-a").await?, vec![uploaded.clone()]);
+        assert_eq!(service.get("project-a", image_id).await?, uploaded);
+        let artifact = service.resolve_artifact("project-a", image_id).await?;
+        assert_eq!(artifact.content, content);
+        assert!(!path.join("metadata.json").exists());
+        fs::remove_dir_all(path)?;
+        fs::remove_file(sqlite_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_bytes_remain_outside_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("bytes-outside-db");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let payload = (0..1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        service.upload("project-a", image.id, &payload).await?;
+        drop(service);
+        drop(store);
+        // The content file is the only place the payload may live; the SQLite
+        // file must not contain the bytes as a contiguous sequence. A 4 KiB
+        // chunk of the patterned payload stands in for the full 1 MiB so the
+        // scan stays fast while remaining distinctive.
+        let database = fs::read(&sqlite_path)?;
+        let chunk = &payload[..4096];
+        assert!(
+            !database.windows(chunk.len()).any(|window| window == chunk),
+            "image payload bytes leaked into the durable store"
+        );
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
+        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        assert_eq!(artifact.size, payload.len() as u64);
+        assert_eq!(artifact.content, payload);
+        fs::remove_dir_all(path)?;
+        fs::remove_file(sqlite_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_metadata_with_missing_artifact_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("missing-artifact");
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        let uploaded = service
+            .upload("project-a", image.id, b"image-bytes")
+            .await?;
+        fs::remove_file(path.join("content").join(image.id.to_string()))?;
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id).await,
+            Err(ImageError::NotFound)
+        ));
+        let record = service.get("project-a", image.id).await?;
+        assert_eq!(record.status, ImageStatus::Active);
+        assert_eq!(record.size, uploaded.size);
+        assert_eq!(record.checksum, uploaded.checksum);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn active_metadata_with_corrupt_artifact_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("corrupt-artifact");
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        service
+            .upload("project-a", image.id, b"image-bytes")
+            .await?;
+        fs::write(
+            path.join("content").join(image.id.to_string()),
+            b"tampered!",
+        )?;
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id).await,
+            Err(ImageError::ChecksumMismatch)
+        ));
         fs::remove_dir_all(path)?;
         Ok(())
     }
