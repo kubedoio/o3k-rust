@@ -3503,13 +3503,8 @@ mod tests {
 
     #[tokio::test]
     async fn sqlite_store_passes_extracted_repository_port_conformance() -> Result<(), StoreError> {
-        let identity_store = SqliteStore::connect("sqlite::memory:").await?;
-        run_identity_repository_conformance(&identity_store).await?;
-        let keypair_store = SqliteStore::connect("sqlite::memory:").await?;
-        run_keypair_repository_conformance(&keypair_store).await?;
-        let attachment_store = SqliteStore::connect("sqlite::memory:").await?;
-        run_volume_attachment_repository_conformance(&attachment_store).await?;
         let compute_store = SqliteStore::connect("sqlite::memory:").await?;
+        run_identity_repository_conformance(&compute_store).await?;
         run_keypair_repository_conformance(&compute_store).await?;
         run_volume_attachment_repository_conformance(&compute_store).await?;
         run_conformance(&compute_store).await?;

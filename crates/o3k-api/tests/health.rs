@@ -5,7 +5,6 @@ use o3k_identity::testkit::test_service;
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
 use o3k_network::NetworkService;
 use o3k_provider::{FailureInjection, FakeComputeProvider};
-use o3k_store::SqliteStore;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -29,7 +28,7 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
         "/tmp/o3k-api-agent-console-{}.sqlite",
         uuid::Uuid::now_v7()
     ));
-    let store = std::sync::Arc::new(SqliteStore::connect_file(&store_path).await?);
+    let store = std::sync::Arc::new(o3k_store::testkit::open_file(&store_path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
     let registry = o3k_compute_agent::NodeRegistry::default();
     registry
@@ -728,7 +727,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     ));
     let _ = std::fs::remove_file(&path);
     let identity = test_service("http://127.0.0.1:8080").await?;
-    let store = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
+    let store = std::sync::Arc::new(o3k_store::testkit::open_file(&path).await?);
     let provider = std::sync::Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider.clone());
     let network_root = std::path::PathBuf::from(format!(
@@ -1286,7 +1285,7 @@ async fn nova_volume_attachment_lifecycle_list_create_show_delete()
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let provider = Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider);
 
