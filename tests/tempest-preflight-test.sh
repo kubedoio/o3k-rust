@@ -14,7 +14,6 @@ SELFTEST_ENV=(O3K_PREFLIGHT_SELFTEST=1 O3K_PREFLIGHT_VENV_PY="$(command -v pytho
 
 # Discovered test IDs use the stestr "[id-<uuid>[,tags]]" suffix form.
 ALLOWLIST=(
-  "tempest.api.identity.v3.test_tokens.TokensV3Test.test_create_token"
   "tempest.api.volume.test_volumes_get.VolumesGetTest.test_volume_create_get_update_delete"
   "tempest.api.volume.test_volumes_list.VolumesListTestJSON.test_volume_list_with_details"
 )
@@ -23,13 +22,11 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/o3k-tempest-preflight-test.XXXXXX")"
 trap 'rm -rf -- "${WORK}"' EXIT
 
 printf '%s\n' \
-  "${ALLOWLIST[0]}[id-6f8e4436-fc96-4282-8122-e41df57197a9]" \
-  "${ALLOWLIST[1]}[id-27fb0e9f-fb64-41dd-8bdb-1ffa762f0d51,smoke]" \
-  "${ALLOWLIST[2]}[id-adcbb5a7-5ad8-4b61-bd10-5380e111a877]" \
+  "${ALLOWLIST[0]}[id-27fb0e9f-fb64-41dd-8bdb-1ffa762f0d51,smoke]" \
+  "${ALLOWLIST[1]}[id-adcbb5a7-5ad8-4b61-bd10-5380e111a877]" \
   > "${WORK}/discovered-good.txt"
 printf '%s\n' \
-  "${ALLOWLIST[0]}[id-6f8e4436-fc96-4282-8122-e41df57197a9]" \
-  "${ALLOWLIST[1]}[id-27fb0e9f-fb64-41dd-8bdb-1ffa762f0d51,smoke]" \
+  "${ALLOWLIST[0]}[id-27fb0e9f-fb64-41dd-8bdb-1ffa762f0d51,smoke]" \
   > "${WORK}/discovered-missing.txt"
 : > "${WORK}/discovered-empty.txt"
 

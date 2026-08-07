@@ -15,12 +15,13 @@
 # harness-error). This committed copy reflects the state at the last edit:
 # the deterministic preflight (tests/tempest-preflight.sh) passed against a
 # dedicated tempest 46.0.0 venv (exact versions, config, stestr discovery of
-# every allowlisted test, evidence pipeline); real execution of the corrected
-# allowlist against the live profile has not yet produced a JUnit result, so
-# evidence_status is preflight-passed-execution-pending. tests/tempest-cinder-
-# subset.sh regenerates this file on every protected run.
+# every allowlisted test, evidence pipeline), and the two allowlisted volume
+# tests were executed against the live profile. The identity token test is
+# explicitly excluded (it issues an unscoped token; the O3K profile requires
+# project-scoped tokens). tests/tempest-cinder-subset.sh regenerates this file
+# on every protected run.
 #
-# Last checked: 2026-08-07T13:30:00Z
+# Last checked: 2026-08-07T14:45:00Z
 
 tempest:
   version_pinned: true
@@ -34,13 +35,14 @@ tempest:
     tempest 46.0.0 and cinder-tempest-plugin 1.21.0 are installed in a
     dedicated virtualenv; the preflight proves exact versions, stestr/subunit
     tooling, .stestr.conf + tempest.conf validity, and stestr discovery of all
-    three allowlisted tests. The allowlist only contains tests that exist at
-    the pinned versions and stay inside the accepted compatibility profile;
-    see tests/tempest-evidence/tempest-test-audit.yaml for the fixture/API
-    dependency audit. The compute os-volume_attachments Tempest tests are not
-    allowlisted because their generic fixture requires bare network-UUID server
-    NIC references, which the accepted O3K Nova surface does not provide
-    (port UUIDs only).
+    allowlisted tests. The allowlist only contains tests that exist at the
+    pinned versions and stay inside the accepted compatibility profile; see
+    tests/tempest-evidence/tempest-test-audit.yaml for the fixture/API
+    dependency audit. The identity token test and the compute
+    os-volume_attachments Tempest tests are not allowlisted: the token test
+    issues an unscoped token (profile requires project-scoped tokens), and the
+    compute tests' generic fixture requires bare network-UUID server NIC
+    references (profile accepts port UUIDs only).
 
 supported_operations:
   identity:
