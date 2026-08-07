@@ -1,0 +1,26 @@
+# Canonical Tempest allowlist for the accepted openstack-service-testbed profile.
+#
+# Source of truth for tests/tempest-preflight.sh (existence + stestr discovery),
+# tests/tempest-cinder-subset.sh (execution), and the fixture audit in
+# tests/tempest-evidence/tempest-test-audit.yaml.
+#
+# Rules:
+#   - Every ID must exist in the pinned installation (tempest 46.0.0 /
+#     cinder-tempest-plugin 1.21.0 for Gazpacho). The preflight fails the
+#     moment an ID was renamed, removed, moved, or cannot be collected.
+#   - No test outside the declared compatibility profile may be allowlisted.
+#   - Zero-test discovery is never accepted as evidence.
+#
+# Identity (o3k-implemented): token issuance through the public Identity v3
+# API. Token revocation is unsupported in the profile, so the revocation tests
+# (test_validate_token, test_token_auth_creation_existence_deletion) are NOT
+# allowlisted (see tempest-test-audit.yaml).
+tempest.api.identity.v3.test_tokens.TokensV3Test.test_create_token
+
+# Volume lifecycle (external-hosted real Cinder): create/show/update/delete
+# through the volumev3 endpoint in the O3K-issued catalog.
+tempest.api.volume.test_volumes_get.VolumesGetTest.test_volume_create_get_update_delete
+
+# Volume listing (external-hosted real Cinder): list-with-details through the
+# volumev3 endpoint in the O3K-issued catalog.
+tempest.api.volume.test_volumes_list.VolumesListTestJSON.test_volume_list_with_details

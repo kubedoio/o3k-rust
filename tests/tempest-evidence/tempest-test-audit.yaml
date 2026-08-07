@@ -1,0 +1,161 @@
+# Tempest allowlist fixture/API dependency audit — openstack-service-testbed profile.
+#
+# Machine-readable dependency record for every candidate Tempest test against
+# the pinned installation (tempest 46.0.0, cinder-tempest-plugin 1.21.0 for
+# Gazpacho). This audit is the Step-4 guard: an allowlisted test must not
+# silently require OpenStack APIs outside the accepted O3K compatibility
+# profile, and O3K must not grow APIs merely to satisfy a generic Tempest
+# fixture.
+#
+# Provenance (behavior evidence only; no code copied):
+#   - openstack/tempest tag 46.0.0 (Apache-2.0):
+#       tempest/api/identity/v3/test_tokens.py
+#       tempest/api/compute/volumes/test_attach_volume.py
+#       tempest/api/volume/test_volumes_get.py
+#       tempest/api/volume/test_volumes_list.py
+#       tempest/api/volume/base.py, tempest/api/compute/base.py
+#       tempest/common/compute.py, tempest/lib/common/fixed_network.py
+#       tempest/lib/auth.py, tempest/lib/common/rest_client.py
+#       tempest/lib/services/compute/servers_client.py
+#       tempest/cmd/init.py (STESTR_CONF), tempest/test_discover/test_discover.py
+#   - openstack/cinder-tempest-plugin tag 1.21.0 (Apache-2.0): tree audit
+#     confirming the plugin carries no plain volume-CRUD or attachment API
+#     tests at this pin (they live in core Tempest).
+#   - O3K current main source (crates/o3k-api, crates/o3k-identity).
+#
+# Credential model: the subset runs with pre-provisioned credentials
+# (use_dynamic_credentials=false, admin user/project) so tempest fills
+# user/project/domain ids from the O3K-issued token response and never calls
+# the users/projects/roles APIs.
+
+schema_version: 1
+profile: openstack-service-testbed
+pins:
+  tempest: 46.0.0
+  cinder_tempest_plugin: 1.21.0
+
+tests:
+
+  - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_create_token
+    disposition: allowlisted
+    source: core tempest 46.0.0 (tempest/api/identity/v3/test_tokens.py)
+    primary_operation: identity token issuance (POST /v3/auth/tokens)
+    required_services: [identity]
+    setup_dependencies:
+      - none (BaseIdentityV3Test sets up clients only; no users/projects/roles APIs)
+    required_api_operations:
+      - POST /v3/auth/tokens (password auth, project-scoped)
+    required_microversions: none (identity v3 has no microversion negotiation)
+    required_extensions: none
+    credential_requirements: [os_primary pre-provisioned admin user/project]
+    expected_cleanup: none created
+    supported_by_o3k_profile: true
+    evidence: token response carries expires_at/issued_at/methods/user fields;
+      O3K seeds identity endpoints in the catalog.
+
+  - test_id: tempest.api.volume.test_volumes_get.VolumesGetTest.test_volume_create_get_update_delete
+    disposition: allowlisted
+    source: core tempest 46.0.0 (tempest/api/volume/test_volumes_get.py)
+    primary_operation: volume create/show/update/delete (external-hosted volumev3)
+    required_services: [volumev3, identity]
+    setup_dependencies:
+      - class fixture creates no server/network (create_default_network=false)
+      - per-test: two volumes via self.create_volume (real Cinder)
+    required_api_operations:
+      - POST /v3/{project_id}/volumes
+      - GET /v3/{project_id}/volumes/{volume_id}
+      - PATCH /v3/{project_id}/volumes/{volume_id}
+      - DELETE /v3/{project_id}/volumes/{volume_id}
+    required_microversions: volume 3.x (volumes_client_latest; request
+      microversion selected between CONF.volume min/max)
+    required_extensions: none (smoke; clone variant skips when disabled)
+    credential_requirements: [os_primary pre-provisioned admin]
+    expected_cleanup: volumes deleted via addCleanup
+    supported_by_o3k_profile: true (volumev3 is external-hosted; all calls
+      terminate at real Cinder through the O3K-issued catalog endpoint)
+    evidence: real Cinder owns volume CRUD; O3K supplies identity + catalog.
+
+  - test_id: tempest.api.volume.test_volumes_list.VolumesListTestJSON.test_volume_list_with_details
+    disposition: allowlisted
+    source: core tempest 46.0.0 (tempest/api/volume/test_volumes_list.py)
+    primary_operation: volume list-with-details (external-hosted volumev3)
+    required_services: [volumev3, identity]
+    setup_dependencies:
+      - class fixture creates three 1G volumes (real Cinder)
+    required_api_operations:
+      - GET /v3/{project_id}/volumes/detail
+      - GET /v3/{project_id}/volumes (via class setup listing)
+      - POST /v3/{project_id}/volumes (via class fixture)
+      - DELETE /v3/{project_id}/volumes/{volume_id} (cleanup)
+    required_microversions: volume 3.x (volumes_client_latest)
+    required_extensions: none
+    credential_requirements: [os_primary pre-provisioned admin]
+    expected_cleanup: class-created volumes removed in resource cleanup
+    supported_by_o3k_profile: true (external-hosted volumev3)
+    evidence: real Cinder owns volume listing; O3K supplies identity + catalog.
+
+# Candidates audited and NOT allowlisted, with the reason.
+
+  - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_validate_token
+    disposition: excluded
+    reason: requires DELETE /v3/auth/tokens (token revocation), which the
+      accepted identity profile explicitly lists as unsupported
+      (compatibility/openstack-targets.yaml identity unsupported_operations).
+    future_profile: identity token-revocation
+  - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_token_auth_creation_existence_deletion
+    disposition: excluded
+    reason: requires DELETE /v3/auth/tokens (token revocation); unsupported.
+    future_profile: identity token-revocation
+  - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_token_expired_validation
+    disposition: excluded
+    reason: does not exist at tempest 46.0.0 (renamed/removed); was previously
+      allowlisted and is a discovery failure on current main.
+  - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_token_create_delete
+    disposition: excluded
+    reason: does not exist at tempest 46.0.0 (superseded by test_create_token
+      and test_token_auth_creation_existence_deletion).
+  - test_id: tempest.api.compute.volumes.test_attach_volume.AttachVolumeTest.test_attach_volume
+    disposition: excluded
+    reason: class/method do not exist at tempest 46.0.0 (class is now
+      AttachVolumeTestJSON; the method is test_attach_detach_volume). Even the
+      valid compute attachment tests are excluded for the fixture reason below.
+  - test_id: tempest.api.compute.volumes.test_attach_volume.AttachVolumeTestJSON.test_list_get_volume_attachments
+    disposition: excluded
+    reason: >-
+      generic tempest fixture requires creating a server with a bare network
+      UUID in the NIC reference (tempest/lib/common/fixed_network.py
+      set_networks_kwarg passes {'uuid': network_id}). O3K's accepted Nova
+      surface validates every server-create NIC reference as a durable PORT
+      UUID and rejects bare network IDs (crates/o3k-api create_server). Making
+      this test green would require accepting generic bare-network NIC
+      references, which is exactly the accidental profile expansion Step 10
+      forbids. The attachment path itself is proven by Gate B (real-Cinder
+      lifecycle) and Gate D (cinder-chap-compute-gate).
+    future_profile: create-server network-uuid NIC references
+  - test_id: tempest.api.compute.volumes.test_attach_volume.AttachVolumeTestJSON.test_attach_detach_volume
+    disposition: excluded
+    reason: same network-uuid server-create fixture as above; additionally
+      exercises stop/start with an attached volume.
+    future_profile: create-server network-uuid NIC references
+  - test_id: tempest.api.volume.test_volumes.VolumesV3Test.test_volume_create_delete
+    disposition: excluded
+    reason: module/class do not exist at tempest 46.0.0 (volume tests were
+      split into test_volumes_get.py and test_volumes_list.py); previously
+      allowlisted and is a discovery failure on current main.
+  - test_id: tempest.api.volume.test_volumes.VolumesV3Test.test_volume_show
+    disposition: excluded
+    reason: does not exist at tempest 46.0.0; superseded by
+      VolumesGetTest.test_volume_create_get_update_delete (which covers show).
+  - test_id: tempest.api.volume.test_volumes.VolumesV3Test.test_volume_list_details
+    disposition: excluded
+    reason: does not exist at tempest 46.0.0; the real test is
+      VolumesListTestJSON.test_volume_list_with_details (renamed).
+  - test_id: tempest.api.volume.test_attachments.AttachmentsV3Test.test_attachment_create_delete
+    disposition: excluded
+    reason: no module/class test_attachments exists in tempest 46.0.0 or in
+      cinder-tempest-plugin 1.21.0 (tree audit). Cinder attachment API
+      coverage at this pin exists only through the compute os-volume_attachments
+      tests, which are themselves excluded for the network-uuid fixture reason.
+  - test_id: tempest.api.volume.test_attachments.AttachmentsV3Test.test_attachment_show
+    disposition: excluded
+    reason: does not exist at the pinned versions (same as above).
