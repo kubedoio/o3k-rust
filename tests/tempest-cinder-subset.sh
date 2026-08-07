@@ -107,9 +107,17 @@ EOF
   # Write a complete tempest.conf deterministically (tempest reads
   # ${TEMPEST_CONFIG_DIR}/${TEMPEST_CONFIG}, falling back to /etc/tempest when
   # the file is absent). The auth/identity sections target O3K and the real
-  # Cinder service.
+  # Cinder service. O3K's profile omits the users/projects API, so use a
+  # pre-provisioned accounts file rather than dynamic credentials.
   O3K_AUTH_URL="http://127.0.0.1:${O3K_PORT_NO_HOST}/v3"
   O3K_PW="${O3K_PW:-password}"
+  cat > "${TEMPEST_WORKSPACE}/accounts.yaml" <<EOF
+- username: admin
+  password: ${O3K_PW}
+  project_name: admin
+  project_domain_name: Default
+  user_domain_name: Default
+EOF
   cat > "${TEMPEST_WORKSPACE}/tempest.conf" <<EOF
 [DEFAULT]
 log_file = ${PROFILE_DIR}/tempest.log
@@ -121,6 +129,7 @@ auth_version = v3
 
 [auth]
 use_dynamic_credentials = false
+test_accounts_file = ${TEMPEST_WORKSPACE}/accounts.yaml
 admin_username = admin
 admin_password = ${O3K_PW}
 admin_project_name = admin
