@@ -974,6 +974,9 @@ export OS_USER_DOMAIN_NAME="Default"
 export OS_PROJECT_DOMAIN_NAME="Default"
 export OS_INTERFACE="public"
 export OS_IDENTITY_API_VERSION="3"
+# `openstack volume attachment list` requires Cinder volume API 3.27+; the
+# attachment lifecycle uses the same 3.44 microversion as the O3K client.
+export OS_VOLUME_API_VERSION="3.44"
 openstack token issue >/dev/null 2>&1 || { echo "ERROR: OpenStack CLI cannot authenticate"; exit 1; }
 
 echo "==> Workflow: create a real O3K server through public APIs..."

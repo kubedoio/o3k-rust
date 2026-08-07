@@ -31,4 +31,11 @@ fi
 grep -q 'display_name, status, attach_status, host,' "${RUNNER}" \
   || { echo "volume diagnostics must keep the real volumes.status column" >&2; exit 1; }
 
+# The protected runner's OSC must use Cinder volume API 3.27+ for the
+# `openstack volume attachment list` verification command (regression: the
+# command errored "3.27 or greater is required" and the run aborted at the
+# attached-state poll even though the attachment was attached).
+grep -q 'OS_VOLUME_API_VERSION="3.44"' "${RUNNER}" \
+  || { echo "runner must set OS_VOLUME_API_VERSION for volume attachment list" >&2; exit 1; }
+
 echo "real-cinder attachment diagnostics use attach_status + redacted presence flags"
