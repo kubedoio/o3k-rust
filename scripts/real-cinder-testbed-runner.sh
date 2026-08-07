@@ -1086,10 +1086,15 @@ done
 echo "    volume ${VOLUME_ID} is attached"
 
 echo "==> Workflow: verify the attached device on the compute host..."
-iscsiadm -m session 2>/dev/null | grep -q "o3k" && echo "    run-owned iSCSI session present" || { echo "ERROR: no run-owned iSCSI session"; exit 1; }
+# The run's real Cinder target IQN is iqn.2010-10.org.openstack:volume-<uuid>;
+# match the volume id in the active session (the "o3k" prefix does not appear).
+iscsiadm -m session 2>/dev/null | grep -q "volume-${VOLUME_ID}" \
+  && echo "    run-owned iSCSI session present" \
+  || { echo "ERROR: no run-owned iSCSI session"; exit 1; }
 DOMAIN_NAME="$(virsh -c qemu:///system list --all --name | grep 'o3k-' | head -n 1)"
 virsh -c qemu:///system dumpxml "${DOMAIN_NAME}" 2>/dev/null > "${EVIDENCE_DIR}/domain.xml" || true
-grep -q 'device="disk"' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no block disk in domain XML"; exit 1; }
+# libvirt serializes attributes with single quotes.
+grep -qE "device=['\"]disk['\"]" "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no block disk in domain XML"; exit 1; }
 grep -q '<serial>o3k-' "${EVIDENCE_DIR}/domain.xml" || { echo "ERROR: no o3k disk ownership serial in domain XML"; exit 1; }
 echo "    libvirt domain XML contains the o3k-owned attached disk"
 
