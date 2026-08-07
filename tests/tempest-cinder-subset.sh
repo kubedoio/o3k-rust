@@ -161,6 +161,15 @@ EOF
     cd "${TEMPEST_WORKSPACE}" || exit 1
     "${TEMPEST_VENV_BIN}/tempest" init "${TEMPEST_WORKSPACE}" >/dev/null 2>&1 || true
   )
+  # Pre-provisioned accounts file: O3K's profile omits the users/projects API,
+  # so dynamic credential creation is unavailable.
+  cat > "${TEMPEST_WORKSPACE}/accounts.yaml" <<EOF
+- username: admin
+  password: ${O3K_PW}
+  project_name: admin
+  project_domain_name: Default
+  user_domain_name: Default
+EOF
   cat >> "${TEMPEST_WORKSPACE}/etc/tempest.conf" <<EOF
 
 [identity]
@@ -170,6 +179,7 @@ auth_version = v3
 
 [auth]
 use_dynamic_credentials = false
+test_accounts_file = ${TEMPEST_WORKSPACE}/accounts.yaml
 admin_username = admin
 admin_password = ${O3K_PW}
 admin_project_name = admin
