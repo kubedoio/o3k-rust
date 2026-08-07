@@ -2772,9 +2772,19 @@ impl ComputeService {
             .await?;
         let mut servers = Vec::new();
         for resource in resources {
-            if let Ok(mut server) = server_from_resource(resource, &flavors)
-                && server.state != ServerState::Deleted
-            {
+            let resource_id = resource.id;
+            let mut server = match server_from_resource(resource, &flavors) {
+                Ok(server) => server,
+                Err(ServerProjectionError::CorruptState(corrupt)) => {
+                    // Corrupt rows are skipped, not misclassified: the
+                    // conversion failed closed. Surface the integrity failure
+                    // so an operator can repair the durable ledger.
+                    tracing::warn!(%resource_id, %corrupt, "server lifecycle state is corrupt; row skipped");
+                    continue;
+                }
+                Err(ServerProjectionError::Unresolvable) => continue,
+            };
+            if server.state != ServerState::Deleted {
                 server.key_name = self
                     .store
                     .get_server_keypair_name(server.id.as_uuid())
@@ -2802,8 +2812,15 @@ impl ComputeService {
             return Err(ComputeError::NotFound);
         }
         let flavors = self.flavors_for_project(project_id).await?;
-        let mut server =
-            server_from_resource(resource, &flavors).map_err(|_| ComputeError::InvalidRequest)?;
+        let mut server = match server_from_resource(resource, &flavors) {
+            Ok(server) => server,
+            Err(ServerProjectionError::CorruptState(corrupt)) => {
+                return Err(ComputeError::Store(corrupt));
+            }
+            Err(ServerProjectionError::Unresolvable) => {
+                return Err(ComputeError::InvalidRequest);
+            }
+        };
         if server.state == ServerState::Deleted {
             return Err(ComputeError::NotFound);
         }
@@ -3306,22 +3323,39 @@ impl ComputeService {
     }
 }
 
+/// Why a durable resource row could not be projected into a canonical
+/// `Server`. Distinguishing corrupt lifecycle state from an unresolvable
+/// intent matters: corruption is a server-side integrity failure (500),
+/// while an unparseable create intent or missing flavor is the pre-existing
+/// invalid-request category (400).
+enum ServerProjectionError {
+    /// The persisted server lifecycle state is not a decodable canonical
+    /// state. Carries the store corruption error for reporting.
+    CorruptState(StoreError),
+    /// The create intent cannot be parsed or its flavor cannot be resolved.
+    Unresolvable,
+}
+
 fn server_from_resource(
     resource: o3k_store::ResourceRecord,
     flavors: &[Flavor],
-) -> Result<Server, ()> {
-    let request: CreateInstanceRequest =
-        serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
+) -> Result<Server, ServerProjectionError> {
+    let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+        .map_err(|_| ServerProjectionError::Unresolvable)?;
     let flavor = if request.flavor_id.trim().is_empty() {
         flavors
             .iter()
             .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
     } else {
-        let flavor_id = request.flavor_id.parse::<Uuid>().map_err(|_| ())?;
+        let flavor_id = request
+            .flavor_id
+            .parse::<Uuid>()
+            .map_err(|_| ServerProjectionError::Unresolvable)?;
         flavors.iter().find(|flavor| flavor.id == flavor_id)
     }
-    .ok_or(())?;
-    let state = server_state_from_storage(&resource.observed_state).map_err(|_| ())?;
+    .ok_or(ServerProjectionError::Unresolvable)?;
+    let state = server_state_from_storage(&resource.observed_state)
+        .map_err(ServerProjectionError::CorruptState)?;
     Ok(Server {
         id: ServerId::from_uuid(resource.id),
         name: request.name,
@@ -3417,12 +3451,13 @@ mod tests {
             })
             .await?;
         // The corrupt value must never be misclassified as a valid lifecycle
-        // state: show fails closed, list skips the row, actions reject it.
+        // state: show fails closed as a server-side integrity failure, list
+        // skips the row, actions reject it.
         assert!(matches!(
             service
                 .show_server("project-a", ServerId::from_uuid(corrupt_id))
                 .await,
-            Err(ComputeError::InvalidRequest)
+            Err(ComputeError::Store(StoreError::Corrupt(_)))
         ));
         assert!(
             !service
@@ -3442,6 +3477,42 @@ mod tests {
             Err(ComputeError::Conflict)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn durable_server_states_project_to_the_provider_vocabulary() {
+        use o3k_provider::InstanceState as ProviderState;
+        let expected = [
+            ("REQUESTED", ProviderState::Creating),
+            ("BUILD", ProviderState::Creating),
+            ("ACTIVE", ProviderState::Running),
+            ("STOPPING", ProviderState::Creating),
+            ("SHUTOFF", ProviderState::Stopped),
+            ("STARTING", ProviderState::Creating),
+            ("REBOOTING", ProviderState::Creating),
+            ("DELETING", ProviderState::Deleting),
+            ("DELETED", ProviderState::Deleted),
+            ("ERROR", ProviderState::Error),
+        ];
+        assert_eq!(expected.len(), 10);
+        for (stored, provider) in expected {
+            assert_eq!(
+                instance_state_from_observed(stored),
+                Some(provider),
+                "{stored} must project to {provider:?}"
+            );
+        }
+        // Legacy lowercase spellings and corrupt values: legacy spellings
+        // decode, corrupt values fail closed.
+        assert_eq!(
+            instance_state_from_observed("active"),
+            Some(ProviderState::Running)
+        );
+        assert_eq!(
+            instance_state_from_observed("requested"),
+            Some(ProviderState::Creating)
+        );
+        assert_eq!(instance_state_from_observed("garbage-state"), None);
     }
 
     #[tokio::test]
