@@ -22,10 +22,12 @@ pub fn server_state_to_storage(state: ServerState) -> &'static str {
     }
 }
 
-/// Fail-closed decode of a persisted server lifecycle state. Legacy values
-/// written before the canonical model (lowercase spellings and provider-ish
-/// aliases) are accepted so existing databases keep working; anything else is
-/// corrupt and must not be misclassified as a valid lifecycle state.
+/// Fail-closed decode of a persisted server lifecycle state. Every spelling
+/// previous O3K versions wrote (the Nova-style values and the lowercase
+/// `requested`/`active` writes) is accepted so existing databases keep
+/// working, along with the provider-ish aliases earlier decode paths accepted;
+/// anything else is corrupt and must not be misclassified as a valid lifecycle
+/// state.
 pub fn server_state_from_storage(value: &str) -> Result<ServerState, StoreError> {
     match value.to_ascii_uppercase().as_str() {
         "REQUESTED" => Ok(ServerState::Requested),
@@ -83,7 +85,7 @@ mod tests {
             ("DELETING", ServerState::Deleting),
             ("DELETED", ServerState::Deleted),
             ("ERROR", ServerState::Error),
-            // Provider-ish aliases written by early agent adopters.
+            // Provider-ish aliases accepted by earlier decode paths.
             ("RUNNING", ServerState::Active),
             ("STOPPED", ServerState::Stopped),
             ("CREATING", ServerState::Building),

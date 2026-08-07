@@ -2372,20 +2372,22 @@ impl ComputeService {
             .list_resources(project_id, "compute_instance")
             .await?
         {
-            if !server.observed_state.eq_ignore_ascii_case("DELETED")
-                && serde_json::from_str::<serde_json::Value>(&server.desired_state)
-                    .ok()
-                    .is_some_and(|value| {
-                        value
-                            .get("flavor_id")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|value| value == flavor.id.to_string())
-                            || (value.get("flavor_id").is_none()
-                                && value.get("vcpus").and_then(serde_json::Value::as_u64)
-                                    == Some(u64::from(flavor.vcpus))
-                                && value.get("memory_mib").and_then(serde_json::Value::as_u64)
-                                    == Some(flavor.ram_mib))
-                    })
+            if !matches!(
+                server_state_from_storage(&server.observed_state),
+                Ok(ServerState::Deleted)
+            ) && serde_json::from_str::<serde_json::Value>(&server.desired_state)
+                .ok()
+                .is_some_and(|value| {
+                    value
+                        .get("flavor_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| value == flavor.id.to_string())
+                        || (value.get("flavor_id").is_none()
+                            && value.get("vcpus").and_then(serde_json::Value::as_u64)
+                                == Some(u64::from(flavor.vcpus))
+                            && value.get("memory_mib").and_then(serde_json::Value::as_u64)
+                                == Some(flavor.ram_mib))
+                })
             {
                 return Err(ComputeError::Conflict);
             }

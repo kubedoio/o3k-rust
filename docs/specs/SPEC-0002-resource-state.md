@@ -24,16 +24,17 @@ Pending -> Running -> Succeeded
 ## Initial server lifecycle
 
 ```text
-Requested -> Building -> Active -> Stopping -> Stopped
-                           |          |
-                           v          v
-                         Rebooting   Starting
-
-Any non-deleted state -> Deleting -> Deleted
-                     -> Error
+Requested -> Building -> Active
+Active -> Stopping -> Stopped -> Starting -> Active
+Active -> Rebooting -> Active
+Stopped -> Rebooting
+Any state except Deleted and Error -> Error
+Any state except Deleted and Deleting -> Deleting -> Deleted
 ```
 
-Transitions are validated in the domain. Public OpenStack status values are projections and may not be identical to internal states.
+`Deleted` is the only terminal state; `Error` retains only the delete
+transition. Transitions are validated in the domain. Public OpenStack status
+values are projections and may not be identical to internal states.
 
 ## Idempotency
 
