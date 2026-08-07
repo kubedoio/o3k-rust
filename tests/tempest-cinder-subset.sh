@@ -269,27 +269,27 @@ tempest:
 
 supported_operations:
   identity:
-    - {method: POST, path: /v3/auth/tokens, status: implemented, reason: required-for-cinder-auth}
-    - {method: GET, path: /v3/auth/tokens, status: implemented, reason: required-for-cinder-token-validation}
-    - {method: HEAD, path: /v3/auth/tokens, status: implemented, reason: required-for-cinder-token-validation}
-    - {method: GET, path: /, status: implemented, reason: version-discovery}
-    - {method: GET, path: /v3, status: implemented, reason: version-discovery}
+    - {method: POST, path: "/v3/auth/tokens", status: implemented, reason: required-for-cinder-auth}
+    - {method: GET, path: "/v3/auth/tokens", status: implemented, reason: required-for-cinder-token-validation}
+    - {method: HEAD, path: "/v3/auth/tokens", status: implemented, reason: required-for-cinder-token-validation}
+    - {method: GET, path: "/", status: implemented, reason: version-discovery}
+    - {method: GET, path: "/v3", status: implemented, reason: version-discovery}
   compute:
-    - {method: POST, path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments, status: implemented, reason: external-cinder-attach}
-    - {method: GET, path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments, status: implemented, reason: external-cinder-list-attachments}
-    - {method: GET, path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}, status: implemented, reason: external-cinder-show-attachment}
-    - {method: DELETE, path: /v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}, status: implemented, reason: external-cinder-detach}
+    - {method: POST, path: "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments", status: implemented, reason: external-cinder-attach}
+    - {method: GET, path: "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments", status: implemented, reason: external-cinder-list-attachments}
+    - {method: GET, path: "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}", status: implemented, reason: external-cinder-show-attachment}
+    - {method: DELETE, path: "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}", status: implemented, reason: external-cinder-detach}
   external_hosted_volumev3:
-    - {method: POST, path: /v3/{project_id}/volumes, status: implemented, reason: real-cinder-volume-create}
-    - {method: GET, path: /v3/{project_id}/volumes, status: implemented, reason: real-cinder-volume-list}
-    - {method: GET, path: /v3/{project_id}/volumes/{volume_id}, status: implemented, reason: real-cinder-volume-show}
-    - {method: DELETE, path: /v3/{project_id}/volumes/{volume_id}, status: implemented, reason: real-cinder-volume-delete}
-    - {method: POST, path: /v3/{project_id}/attachments, status: implemented, reason: real-cinder-attachment-create}
-    - {method: GET, path: /v3/{project_id}/attachments/{attachment_id}, status: implemented, reason: real-cinder-attachment-show}
-    - {method: POST, path: /v3/{project_id}/attachments/{attachment_id}/update, status: implemented, reason: real-cinder-attachment-update}
-    - {method: POST, path: /v3/{project_id}/attachments/{attachment_id}/action (os-complete), status: implemented, reason: real-cinder-attachment-complete}
-    - {method: POST, path: /v3/{project_id}/attachments/{attachment_id}/action (os-terminate), status: implemented, reason: real-cinder-attachment-terminate}
-    - {method: GET, path: /v3/{project_id}/attachments, status: implemented, reason: real-cinder-attachment-list}
+    - {method: POST, path: "/v3/{project_id}/volumes", status: implemented, reason: real-cinder-volume-create}
+    - {method: GET, path: "/v3/{project_id}/volumes", status: implemented, reason: real-cinder-volume-list}
+    - {method: GET, path: "/v3/{project_id}/volumes/{volume_id}", status: implemented, reason: real-cinder-volume-show}
+    - {method: DELETE, path: "/v3/{project_id}/volumes/{volume_id}", status: implemented, reason: real-cinder-volume-delete}
+    - {method: POST, path: "/v3/{project_id}/attachments", status: implemented, reason: real-cinder-attachment-create}
+    - {method: GET, path: "/v3/{project_id}/attachments/{attachment_id}", status: implemented, reason: real-cinder-attachment-show}
+    - {method: POST, path: "/v3/{project_id}/attachments/{attachment_id}/update", status: implemented, reason: real-cinder-attachment-update}
+    - {method: POST, path: "/v3/{project_id}/attachments/{attachment_id}/action (os-complete)", status: implemented, reason: real-cinder-attachment-complete}
+    - {method: POST, path: "/v3/{project_id}/attachments/{attachment_id}/action (os-terminate)", status: implemented, reason: real-cinder-attachment-terminate}
+    - {method: GET, path: "/v3/{project_id}/attachments", status: implemented, reason: real-cinder-attachment-list}
 
 known_unsupported:
   - {operation: identity./v3/domains, reason: hosted-service-profile-omits-domains-API}
