@@ -131,7 +131,9 @@ run_validation = False
 EOF
   (
     cd "${TEMPEST_WORKSPACE}" || exit 1
-    export TEMPEST_CONFIG_DIR="${TEMPEST_WORKSPACE}"
+    # Tempest reads ${TEMPEST_CONFIG_DIR}/tempest.conf (tempest init writes
+    # etc/tempest.conf in the workspace).
+    export TEMPEST_CONFIG_DIR="${TEMPEST_WORKSPACE}/etc"
     "${TEMPEST_VENV_PY}" -m stestr init >/dev/null 2>&1 || true
     # stestr run takes positional regex filters (full test IDs); config is read
     # from TEMPEST_CONFIG_DIR. --concurrency 1 avoids parallel DB conflicts.
