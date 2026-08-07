@@ -1150,7 +1150,10 @@ echo "    volume ${VOLUME_ID} is available again"
 # ------------------------------------------------------------------------------
 RUN_PHASE="tempest"
 echo "==> Workflow: run the pinned Tempest subset against the live profile..."
-export O3K_CINDER_ENDPOINT="http://127.0.0.1:${CINDER_PORT}"
+# The subset reads O3K_CINDER_ENDPOINT as the Cinder port and O3K_LISTEN_ADDR
+# for the O3K port.
+export O3K_CINDER_ENDPOINT="${CINDER_PORT}"
+export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
 export O3K_TEMPEST_VENV="${VENV_DIR}"
 TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 mkdir -p "${TEMPEST_WORKSPACE}"
