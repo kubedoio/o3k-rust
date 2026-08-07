@@ -1,0 +1,111 @@
+schema_version = 1
+status = "proposed"
+normative_adr = "docs/adr/ADR-0160-service-topology-and-execution-boundaries.md"
+normative_spec = "docs/specs/SPEC-0025-rust-rewrite-and-architecture-convergence.md"
+
+application_crates = [
+  "o3k-identity",
+  "o3k-image",
+  "o3k-network",
+  "o3k-compute",
+  "o3k-placement",
+  "o3k-scheduler",
+  "o3k-reconciler",
+]
+
+# Every other workspace crate under crates/ is an infrastructure or adapter
+# crate and is deliberately NOT an application crate. This list must be
+# exhaustive with application_crates: the checker fails when a workspace crate
+# is unclassified, so a new crate cannot silently escape the boundary checks.
+non_application_crates = [
+  "o3k-api",
+  "o3k-cellhv",
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-config",
+  "o3k-config-drive",
+  "o3k-console",
+  "o3k-dhcp",
+  "o3k-domain",
+  "o3k-libvirt",
+  "o3k-provider",
+  "o3k-provider-contract",
+  "o3k-store",
+]
+
+[domain]
+crate = "o3k-domain"
+allowed_dependencies = ["serde", "thiserror", "uuid"]
+forbidden_source_markers = [
+  "axum::",
+  "sqlx::",
+  "tonic::",
+  "prost::",
+  "hyper::",
+  "o3k_api",
+  "o3k_store",
+  "o3k_provider",
+  "o3k_provider_contract",
+  "o3k_compute_agent",
+  "o3k_libvirt",
+  "o3k_cellhv",
+  "o3k_cinder",
+]
+
+[application]
+# These dependencies are adapter/framework concerns and are not valid
+# application dependencies at all.
+hard_forbidden_dependencies = [
+  "o3k-api",
+  "axum",
+  "sqlx",
+  "hyper",
+  "tonic",
+  "rustls",
+  "o3k-libvirt",
+  "o3k-cellhv",
+]
+
+# These dependencies currently appear in a small number of application crates.
+# They are migration debt and may occur only where listed under
+# adapter_dependency_debt. The allowed set must shrink rather than spread.
+# `o3k-store` is intentionally not listed here: application code may depend on
+# narrow repository/store ports from that crate while concrete SqliteStore use
+# is separately ratcheted below. A later accepted design may split ports and
+# adapters into separate crates, but this contract does not force that choice.
+ratcheted_adapter_dependencies = [
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-provider-contract",
+  "prost",
+]
+
+concrete_store_symbol = "SqliteStore"
+concrete_store_debt_files = [
+  "crates/o3k-compute/src/lib.rs",
+  "crates/o3k-compute/src/attachment.rs",
+  "crates/o3k-identity/src/lib.rs",
+  "crates/o3k-reconciler/src/lib.rs",
+]
+
+[application.adapter_dependency_debt]
+# o3k-compute currently contains execution/external-service adapter logic that
+# should move behind bounded application ports. These are accepted as current
+# migration debt only; no additional dependency may be added silently.
+o3k-compute = [
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-provider-contract",
+  "prost",
+]
+
+# o3k-reconciler currently reads agent wire events directly. This should
+# converge toward application/domain observations behind an adapter boundary.
+o3k-reconciler = [
+  "o3k-provider-contract",
+]
+
+[ratchet]
+allow_debt_reduction = true
+allow_new_debt = false
+allow_broader_debt = false
