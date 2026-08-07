@@ -1075,7 +1075,8 @@ echo "==> Waiting for the durable attachment to reach attached..."
 ATTACHED_OK=no
 for i in $(seq 1 30); do
   ATTACH_LIST="$(openstack volume attachment list --volume "${VOLUME_ID}" -f json 2>/dev/null || true)"
-  if echo "${ATTACH_LIST}" | grep -q '"status": "attached"'; then
+  # The OSC JSON field name is title-cased ("Status"), so match case-insensitively.
+  if echo "${ATTACH_LIST}" | grep -qi '"status": "attached"'; then
     ATTACHED_OK=yes
     break
   fi
