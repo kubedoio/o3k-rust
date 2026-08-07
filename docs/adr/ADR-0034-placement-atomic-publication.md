@@ -25,3 +25,14 @@ Concurrent Placement writers no longer share a temporary pathname, and failed
 publication does not leave stale temporary files for a later process to
 mistake for current state. Cross-process locking and real Placement service
 integration remain out of scope for this slice.
+
+## Status note — superseded in part by issue #523 (SPEC-0025 step 5)
+
+The whole-file JSON publication mechanism this ADR describes was replaced by
+the durable `PlacementRepository` port on the SQLite adapter (migration
+0017): the ledger no longer publishes JSON snapshots, so the
+unique-temporary-path and atomic-rename mechanics no longer apply. Atomicity
+and crash safety are now provided by the adapter (BEGIN IMMEDIATE
+transactions, WAL, busy_timeout, optimistic generation guards), and the
+legacy journals are imported once and never read again. This decision is
+retained as the historical record of the file-backed era.

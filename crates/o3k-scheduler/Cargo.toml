@@ -12,3 +12,8 @@ workspace = true
 [dependencies]
 o3k-placement = { path = "../o3k-placement" }
 thiserror.workspace = true
+
+[dev-dependencies]
+o3k-store = { path = "../o3k-store" }
+tokio.workspace = true
+uuid.workspace = true

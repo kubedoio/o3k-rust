@@ -135,6 +135,53 @@ pub struct PortRecord {
     pub binding_state: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementInventoryRecord {
+    pub resource_class: String,
+    pub total: u64,
+    pub reserved: u64,
+    pub allocation_ratio: f64,
+    pub used: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementResourceRecord {
+    pub resource_class: String,
+    pub amount: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementAllocationRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub consumer_id: String,
+    pub resources: Vec<PlacementResourceRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementIntentRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub consumer_id: String,
+    pub resources: Vec<PlacementResourceRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementProviderRecord {
+    pub id: String,
+    pub node_id: String,
+    pub state: String,
+    pub generation: u64,
+    pub inventories: Vec<PlacementInventoryRecord>,
+    pub allocations: Vec<PlacementAllocationRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementReconcileRecord {
+    pub orphaned_allocations: Vec<PlacementAllocationRecord>,
+    pub abandoned_intents: Vec<PlacementIntentRecord>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VolumeAttachmentRecord {
     pub id: Uuid,
@@ -498,6 +545,14 @@ pub enum StoreError {
     NetworkNotFound,
     #[error("network resource is still in use")]
     NetworkInUse,
+    #[error("placement provider not found")]
+    PlacementProviderNotFound,
+    #[error("placement provider generation is stale")]
+    PlacementStaleGeneration,
+    #[error("placement allocation conflicts with existing allocation")]
+    PlacementAllocationConflict,
+    #[error("placement allocation intent conflicts with existing intent")]
+    PlacementIntentConflict,
 }
 
 #[async_trait]
@@ -842,6 +897,68 @@ pub trait NetworkRepository: Send + Sync {
     ) -> Result<PortRecord, StoreError>;
 }
 
+/// Durable Placement-compatible provider inventory, allocation, and intent
+/// records owned by the placement service: provider registration and state,
+/// generation-guarded inventory refresh, allocation commit/release with
+/// idempotent retries, allocation intents recorded before capacity is
+/// committed, consumer reconciliation, and row-granular provider import.
+///
+/// This is a narrow port around the placement use cases, not a generic
+/// persistence surface. Application code depends on this trait instead of on
+/// the concrete `SqliteStore` adapter.
+#[async_trait]
+pub trait PlacementRepository: Send + Sync {
+    async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<PlacementProviderRecord>, StoreError>;
+    async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError>;
+    async fn register_provider(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError>;
+    async fn sync_provider(
+        &self,
+        node_id: &str,
+        state: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError>;
+    async fn refresh_inventories(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError>;
+    async fn set_provider_state(&self, provider_id: &str, state: &str) -> Result<(), StoreError>;
+    async fn commit_allocation(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        allocation: &PlacementAllocationRecord,
+    ) -> Result<PlacementAllocationRecord, StoreError>;
+    async fn release_allocation(
+        &self,
+        provider_id: &str,
+        allocation_id: &str,
+    ) -> Result<(), StoreError>;
+    async fn upsert_intent(
+        &self,
+        intent: &PlacementIntentRecord,
+    ) -> Result<PlacementIntentRecord, StoreError>;
+    async fn get_intent(
+        &self,
+        allocation_id: &str,
+    ) -> Result<Option<PlacementIntentRecord>, StoreError>;
+    async fn list_intents(&self) -> Result<Vec<PlacementIntentRecord>, StoreError>;
+    async fn delete_intent(&self, allocation_id: &str) -> Result<(), StoreError>;
+    async fn reconcile_consumers(
+        &self,
+        durable_consumer_ids: &[String],
+    ) -> Result<PlacementReconcileRecord, StoreError>;
+    async fn import_provider(&self, provider: &PlacementProviderRecord) -> Result<(), StoreError>;
+}
+
 /// The persistence surface of the compute application service.
 ///
 /// Combines the reconciler's `DurableStore` semantics (resources, operations,
@@ -1136,12 +1253,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 22 {
+        if table_count != 28 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -2250,6 +2367,940 @@ impl SqliteStore {
             .await?
             .ok_or(StoreError::Corrupt("updated port is missing".to_owned()))
     }
+
+    pub async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<PlacementProviderRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, node_id, state, generation FROM placement_providers WHERE id = ?",
+        )
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut provider = placement_provider_from_row(&row)?;
+        provider.inventories = self.load_placement_inventories(provider_id).await?;
+        provider.allocations = self.load_placement_allocations(provider_id).await?;
+        Ok(Some(provider))
+    }
+
+    pub async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, node_id, state, generation FROM placement_providers ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut providers = Vec::new();
+        for row in rows {
+            let provider_id: String = row.get("id");
+            let mut provider = placement_provider_from_row(&row)?;
+            provider.inventories = self.load_placement_inventories(&provider_id).await?;
+            provider.allocations = self.load_placement_allocations(&provider_id).await?;
+            providers.push(provider);
+        }
+        Ok(providers)
+    }
+
+    async fn load_placement_inventories(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<PlacementInventoryRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT resource_class, total, reserved, allocation_ratio, used FROM placement_inventories WHERE provider_id = ? ORDER BY resource_class",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(placement_inventory_from_row).collect()
+    }
+
+    async fn load_placement_allocations(
+        &self,
+        provider_id: &str,
+    ) -> Result<Vec<PlacementAllocationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocations WHERE provider_id = ? ORDER BY id",
+        )
+        .bind(provider_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut allocations = Vec::new();
+        for row in rows {
+            let allocation_id: String = row.get("id");
+            let mut allocation = placement_allocation_from_row(&row)?;
+            allocation.resources = self.load_allocation_resources(&allocation_id).await?;
+            allocations.push(allocation);
+        }
+        Ok(allocations)
+    }
+
+    async fn load_allocation_resources(
+        &self,
+        allocation_id: &str,
+    ) -> Result<Vec<PlacementResourceRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT resource_class, amount FROM placement_allocation_resources WHERE allocation_id = ? ORDER BY resource_class",
+        )
+        .bind(allocation_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(placement_resource_from_row).collect()
+    }
+
+    async fn load_placement_intents(&self) -> Result<Vec<PlacementIntentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocation_intents ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let mut intents = Vec::new();
+        for row in rows {
+            let intent_id: String = row.get("id");
+            let mut intent = placement_intent_from_row(&row)?;
+            intent.resources = self.load_intent_resources(&intent_id).await?;
+            intents.push(intent);
+        }
+        Ok(intents)
+    }
+
+    async fn load_intent_resources(
+        &self,
+        intent_id: &str,
+    ) -> Result<Vec<PlacementResourceRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT resource_class, amount FROM placement_allocation_intent_resources WHERE intent_id = ? ORDER BY resource_class",
+        )
+        .bind(intent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(placement_resource_from_row).collect()
+    }
+
+    /// Recomputes the `used` amount per inventory class from the durable
+    /// allocations of the provider. Reported `used` values are never trusted:
+    /// usage is derived from the allocation rows so a capability refresh
+    /// cannot erase reservations or make them available twice.
+    async fn recompute_placement_used(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        provider_id: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<Vec<u64>, StoreError> {
+        let mut used = Vec::with_capacity(inventories.len());
+        for inventory in inventories {
+            let sum: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(r.amount), 0) FROM placement_allocations a JOIN placement_allocation_resources r ON r.allocation_id = a.id WHERE a.provider_id = ? AND r.resource_class = ?",
+            )
+            .bind(provider_id)
+            .bind(&inventory.resource_class)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            used.push(placement_u64(sum)?);
+        }
+        Ok(used)
+    }
+
+    /// Replaces the inventory rows of a provider, applying the recomputed
+    /// `used` values alongside the caller-supplied totals.
+    async fn replace_placement_inventories(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        provider_id: &str,
+        inventories: &[PlacementInventoryRecord],
+        used: &[u64],
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM placement_inventories WHERE provider_id = ?")
+            .bind(provider_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        for (inventory, used) in inventories.iter().zip(used) {
+            sqlx::query(
+                "INSERT INTO placement_inventories (provider_id, resource_class, total, reserved, allocation_ratio, used) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(provider_id)
+            .bind(&inventory.resource_class)
+            .bind(placement_i64(inventory.total)?)
+            .bind(placement_i64(inventory.reserved)?)
+            .bind(inventory.allocation_ratio)
+            .bind(placement_i64(*used)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        }
+        Ok(())
+    }
+
+    /// Loads one allocation with its resources inside a transaction.
+    async fn load_allocation_in_transaction(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        allocation_id: &str,
+    ) -> Result<Option<PlacementAllocationRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocations WHERE id = ?",
+        )
+        .bind(allocation_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut allocation = placement_allocation_from_row(&row)?;
+        let rows = sqlx::query(
+            "SELECT resource_class, amount FROM placement_allocation_resources WHERE allocation_id = ? ORDER BY resource_class",
+        )
+        .bind(allocation_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        allocation.resources = rows
+            .iter()
+            .map(placement_resource_from_row)
+            .collect::<Result<_, _>>()?;
+        Ok(Some(allocation))
+    }
+
+    /// Loads one allocation with its resources inside a transaction, scoped
+    /// to the owning provider: an allocation committed on another provider
+    /// is not visible to this lookup.
+    async fn load_allocation_in_transaction_for_provider(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        allocation_id: &str,
+        provider_id: &str,
+    ) -> Result<Option<PlacementAllocationRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocations WHERE id = ? AND provider_id = ?",
+        )
+        .bind(allocation_id)
+        .bind(provider_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut allocation = placement_allocation_from_row(&row)?;
+        let rows = sqlx::query(
+            "SELECT resource_class, amount FROM placement_allocation_resources WHERE allocation_id = ? ORDER BY resource_class",
+        )
+        .bind(allocation_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        allocation.resources = rows
+            .iter()
+            .map(placement_resource_from_row)
+            .collect::<Result<_, _>>()?;
+        Ok(Some(allocation))
+    }
+
+    /// Loads one intent with its resources inside a transaction.
+    async fn load_intent_in_transaction(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        intent_id: &str,
+    ) -> Result<Option<PlacementIntentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocation_intents WHERE id = ?",
+        )
+        .bind(intent_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut intent = placement_intent_from_row(&row)?;
+        let rows = sqlx::query(
+            "SELECT resource_class, amount FROM placement_allocation_intent_resources WHERE intent_id = ? ORDER BY resource_class",
+        )
+        .bind(intent_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        intent.resources = rows
+            .iter()
+            .map(placement_resource_from_row)
+            .collect::<Result<_, _>>()?;
+        Ok(Some(intent))
+    }
+
+    fn validate_placement_allocation(
+        allocation: &PlacementAllocationRecord,
+    ) -> Result<(), StoreError> {
+        if allocation.id.is_empty()
+            || allocation.provider_id.is_empty()
+            || allocation.consumer_id.is_empty()
+            || allocation.resources.is_empty()
+            || allocation
+                .resources
+                .iter()
+                .any(|resource| resource.amount == 0)
+        {
+            return Err(StoreError::Corrupt(
+                "invalid placement allocation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_placement_intent(intent: &PlacementIntentRecord) -> Result<(), StoreError> {
+        if intent.id.is_empty()
+            || intent.provider_id.is_empty()
+            || intent.consumer_id.is_empty()
+            || intent.resources.is_empty()
+            || intent.resources.iter().any(|resource| resource.amount == 0)
+        {
+            return Err(StoreError::Corrupt(
+                "invalid placement allocation intent".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Finalizes a BEGIN IMMEDIATE transaction: COMMIT on success, or a
+    /// best-effort ROLLBACK preserving the original error on failure. BEGIN
+    /// IMMEDIATE acquires the write lock up front so the configured
+    /// busy_timeout applies instead of failing immediately with
+    /// SQLITE_BUSY_SNAPSHOT on the deferred read-to-write upgrade.
+    async fn commit_or_rollback<T>(
+        connection: &mut sqlx::sqlite::SqliteConnection,
+        outcome: Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        match outcome {
+            Ok(value) => match sqlx::query("COMMIT").execute(&mut *connection).await {
+                Ok(_) => Ok(value),
+                Err(error) => {
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                    Err(StoreError::Database(error))
+                }
+            },
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn register_provider(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO placement_providers (id, node_id, state, generation) VALUES (?, ?, 'Enabled', 0)",
+            )
+            .bind(node_id)
+            .bind(node_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            let used = SqliteStore::recompute_placement_used(&mut connection, node_id, inventories)
+                .await?;
+            SqliteStore::replace_placement_inventories(
+                &mut connection,
+                node_id,
+                inventories,
+                &used,
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE placement_providers SET generation = generation + 1 WHERE id = ?",
+            )
+            .bind(node_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        self.get_provider(node_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)
+    }
+
+    pub async fn sync_provider(
+        &self,
+        node_id: &str,
+        state: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        if state.is_empty() {
+            return Err(StoreError::Corrupt(
+                "placement provider state is empty".to_owned(),
+            ));
+        }
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO placement_providers (id, node_id, state, generation) VALUES (?, ?, ?, 0)",
+            )
+            .bind(node_id)
+            .bind(node_id)
+            .bind(state)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            sqlx::query("UPDATE placement_providers SET state = ? WHERE id = ?")
+                .bind(state)
+                .bind(node_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            let used = SqliteStore::recompute_placement_used(&mut connection, node_id, inventories)
+                .await?;
+            SqliteStore::replace_placement_inventories(
+                &mut connection,
+                node_id,
+                inventories,
+                &used,
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE placement_providers SET generation = generation + 1 WHERE id = ?",
+            )
+            .bind(node_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        self.get_provider(node_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)
+    }
+
+    pub async fn refresh_inventories(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let row = sqlx::query("SELECT id FROM placement_providers WHERE id = ?")
+                .bind(provider_id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            if row.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+            let result = sqlx::query(
+                "UPDATE placement_providers SET generation = generation + 1 WHERE id = ? AND generation = ?",
+            )
+            .bind(provider_id)
+            .bind(placement_i64(expected_generation)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::PlacementStaleGeneration);
+            }
+            let used = SqliteStore::recompute_placement_used(
+                &mut connection,
+                provider_id,
+                inventories,
+            )
+            .await?;
+            SqliteStore::replace_placement_inventories(
+                &mut connection,
+                provider_id,
+                inventories,
+                &used,
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
+        self.get_provider(provider_id)
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)
+    }
+
+    pub async fn set_provider_state(
+        &self,
+        provider_id: &str,
+        state: &str,
+    ) -> Result<(), StoreError> {
+        if state.is_empty() {
+            return Err(StoreError::Corrupt(
+                "placement provider state is empty".to_owned(),
+            ));
+        }
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let row = sqlx::query("SELECT id FROM placement_providers WHERE id = ?")
+                .bind(provider_id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            if row.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+            sqlx::query(
+                "UPDATE placement_providers SET state = ?, generation = generation + 1 WHERE id = ?",
+            )
+            .bind(state)
+            .bind(provider_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
+    /// Commits one allocation to a provider. Allocation ids are globally
+    /// unique: a same-id allocation on another provider is a conflict, not
+    /// an idempotent retry. This prevents double allocation, which the
+    /// legacy in-memory ledger could not.
+    pub async fn commit_allocation(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        allocation: &PlacementAllocationRecord,
+    ) -> Result<PlacementAllocationRecord, StoreError> {
+        Self::validate_placement_allocation(allocation)?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<PlacementAllocationRecord, StoreError> = async {
+            let existing = SqliteStore::load_allocation_in_transaction(
+                &mut connection,
+                &allocation.id,
+            )
+            .await?;
+            if let Some(existing) = existing {
+                if existing == *allocation {
+                    return Ok(existing);
+                }
+                return Err(StoreError::PlacementAllocationConflict);
+            }
+            let provider_row = sqlx::query("SELECT id FROM placement_providers WHERE id = ?")
+                .bind(provider_id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            if provider_row.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+            let result = sqlx::query(
+                "UPDATE placement_providers SET generation = generation + 1 WHERE id = ? AND generation = ?",
+            )
+            .bind(provider_id)
+            .bind(placement_i64(expected_generation)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            if result.rows_affected() == 0 {
+                return Err(StoreError::PlacementStaleGeneration);
+            }
+            for resource in &allocation.resources {
+                sqlx::query(
+                    "UPDATE placement_inventories SET used = used + ? WHERE provider_id = ? AND resource_class = ?",
+                )
+                .bind(placement_i64(resource.amount)?)
+                .bind(provider_id)
+                .bind(&resource.resource_class)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            sqlx::query(
+                "INSERT INTO placement_allocations (id, provider_id, consumer_id) VALUES (?, ?, ?)",
+            )
+            .bind(&allocation.id)
+            .bind(&allocation.provider_id)
+            .bind(&allocation.consumer_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            for resource in &allocation.resources {
+                sqlx::query(
+                    "INSERT INTO placement_allocation_resources (allocation_id, resource_class, amount) VALUES (?, ?, ?)",
+                )
+                .bind(&allocation.id)
+                .bind(&resource.resource_class)
+                .bind(placement_i64(resource.amount)?)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            Ok(allocation.clone())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
+    pub async fn release_allocation(
+        &self,
+        provider_id: &str,
+        allocation_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            let provider_row = sqlx::query("SELECT id FROM placement_providers WHERE id = ?")
+                .bind(provider_id)
+                .fetch_optional(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            if provider_row.is_none() {
+                return Err(StoreError::PlacementProviderNotFound);
+            }
+            // The allocation is scoped to the owning provider: an
+            // allocation committed on another provider is not visible here,
+            // mirroring the per-provider in-memory ledger where a
+            // wrong-provider release is a no-op without a generation bump.
+            let Some(existing) = SqliteStore::load_allocation_in_transaction_for_provider(
+                &mut connection,
+                allocation_id,
+                provider_id,
+            )
+            .await?
+            else {
+                return Ok(());
+            };
+            sqlx::query("DELETE FROM placement_allocations WHERE id = ? AND provider_id = ?")
+                .bind(allocation_id)
+                .bind(provider_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            for resource in &existing.resources {
+                sqlx::query(
+                    "UPDATE placement_inventories SET used = MAX(used - ?, 0) WHERE provider_id = ? AND resource_class = ?",
+                )
+                .bind(placement_i64(resource.amount)?)
+                .bind(provider_id)
+                .bind(&resource.resource_class)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            sqlx::query("UPDATE placement_providers SET generation = generation + 1 WHERE id = ?")
+                .bind(provider_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
+    pub async fn upsert_intent(
+        &self,
+        intent: &PlacementIntentRecord,
+    ) -> Result<PlacementIntentRecord, StoreError> {
+        Self::validate_placement_intent(intent)?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<PlacementIntentRecord, StoreError> = async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO placement_allocation_intents (id, provider_id, consumer_id) VALUES (?, ?, ?)",
+            )
+            .bind(&intent.id)
+            .bind(&intent.provider_id)
+            .bind(&intent.consumer_id)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            for resource in &intent.resources {
+                sqlx::query(
+                    "INSERT OR IGNORE INTO placement_allocation_intent_resources (intent_id, resource_class, amount) VALUES (?, ?, ?)",
+                )
+                .bind(&intent.id)
+                .bind(&resource.resource_class)
+                .bind(placement_i64(resource.amount)?)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            let Some(stored) =
+                SqliteStore::load_intent_in_transaction(&mut connection, &intent.id).await?
+            else {
+                return Err(StoreError::PlacementIntentConflict);
+            };
+            if stored == *intent {
+                Ok(stored)
+            } else {
+                Err(StoreError::PlacementIntentConflict)
+            }
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
+    pub async fn get_intent(
+        &self,
+        allocation_id: &str,
+    ) -> Result<Option<PlacementIntentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, provider_id, consumer_id FROM placement_allocation_intents WHERE id = ?",
+        )
+        .bind(allocation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let mut intent = placement_intent_from_row(&row)?;
+        intent.resources = self.load_intent_resources(&intent.id).await?;
+        Ok(Some(intent))
+    }
+
+    pub async fn list_intents(&self) -> Result<Vec<PlacementIntentRecord>, StoreError> {
+        self.load_placement_intents().await
+    }
+
+    pub async fn delete_intent(&self, allocation_id: &str) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM placement_allocation_intents WHERE id = ?")
+            .bind(allocation_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    pub async fn reconcile_consumers(
+        &self,
+        durable_consumer_ids: &[String],
+    ) -> Result<PlacementReconcileRecord, StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<PlacementReconcileRecord, StoreError> = async {
+            let mut allocations = Vec::new();
+            let rows = sqlx::query(
+                "SELECT id, provider_id, consumer_id FROM placement_allocations ORDER BY id",
+            )
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            for row in rows {
+                let allocation_id: String = row.get("id");
+                let mut allocation = placement_allocation_from_row(&row)?;
+                let resource_rows = sqlx::query(
+                    "SELECT resource_class, amount FROM placement_allocation_resources WHERE allocation_id = ? ORDER BY resource_class",
+                )
+                .bind(&allocation_id)
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+                allocation.resources = resource_rows
+                    .iter()
+                    .map(placement_resource_from_row)
+                    .collect::<Result<_, _>>()?;
+                allocations.push(allocation);
+            }
+            let mut intents = Vec::new();
+            let rows = sqlx::query(
+                "SELECT id, provider_id, consumer_id FROM placement_allocation_intents ORDER BY id",
+            )
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            for row in rows {
+                let intent_id: String = row.get("id");
+                let mut intent = placement_intent_from_row(&row)?;
+                let resource_rows = sqlx::query(
+                    "SELECT resource_class, amount FROM placement_allocation_intent_resources WHERE intent_id = ? ORDER BY resource_class",
+                )
+                .bind(&intent_id)
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+                intent.resources = resource_rows
+                    .iter()
+                    .map(placement_resource_from_row)
+                    .collect::<Result<_, _>>()?;
+                intents.push(intent);
+            }
+            let orphaned: Vec<PlacementAllocationRecord> = allocations
+                .iter()
+                .filter(|allocation| {
+                    !durable_consumer_ids
+                        .iter()
+                        .any(|consumer_id| consumer_id == &allocation.consumer_id)
+                })
+                .cloned()
+                .collect();
+            let abandoned: Vec<PlacementIntentRecord> = intents
+                .iter()
+                .filter(|intent| {
+                    !durable_consumer_ids
+                        .iter()
+                        .any(|consumer_id| consumer_id == &intent.consumer_id)
+                })
+                .cloned()
+                .collect();
+            let mut affected_providers = Vec::new();
+            for allocation in &orphaned {
+                if !affected_providers.contains(&allocation.provider_id) {
+                    affected_providers.push(allocation.provider_id.clone());
+                }
+                sqlx::query("DELETE FROM placement_allocations WHERE id = ?")
+                    .bind(&allocation.id)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+            }
+            for provider_id in &affected_providers {
+                sqlx::query(
+                    "UPDATE placement_inventories SET used = COALESCE((SELECT SUM(r.amount) FROM placement_allocations a JOIN placement_allocation_resources r ON r.allocation_id = a.id WHERE a.provider_id = placement_inventories.provider_id AND r.resource_class = placement_inventories.resource_class), 0) WHERE provider_id = ?",
+                )
+                .bind(provider_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+                sqlx::query(
+                    "UPDATE placement_providers SET generation = generation + 1 WHERE id = ?",
+                )
+                .bind(provider_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            for intent in &abandoned {
+                sqlx::query("DELETE FROM placement_allocation_intents WHERE id = ?")
+                    .bind(&intent.id)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+            }
+            Ok(PlacementReconcileRecord {
+                orphaned_allocations: orphaned,
+                abandoned_intents: abandoned,
+            })
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
+    pub async fn import_provider(
+        &self,
+        provider: &PlacementProviderRecord,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        let outcome: Result<(), StoreError> = async {
+            sqlx::query(
+                "INSERT OR IGNORE INTO placement_providers (id, node_id, state, generation) VALUES (?, ?, ?, ?)",
+            )
+            .bind(&provider.id)
+            .bind(&provider.node_id)
+            .bind(&provider.state)
+            .bind(placement_i64(provider.generation)?)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            sqlx::query("DELETE FROM placement_inventories WHERE provider_id = ?")
+                .bind(&provider.id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            for inventory in &provider.inventories {
+                sqlx::query(
+                    "INSERT INTO placement_inventories (provider_id, resource_class, total, reserved, allocation_ratio, used) VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&provider.id)
+                .bind(&inventory.resource_class)
+                .bind(placement_i64(inventory.total)?)
+                .bind(placement_i64(inventory.reserved)?)
+                .bind(inventory.allocation_ratio)
+                .bind(placement_i64(inventory.used)?)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            }
+            for allocation in &provider.allocations {
+                let exists: Option<i64> =
+                    sqlx::query_scalar("SELECT 1 FROM placement_allocations WHERE id = ?")
+                        .bind(&allocation.id)
+                        .fetch_optional(&mut *connection)
+                        .await
+                        .map_err(StoreError::Database)?;
+                if exists.is_some() {
+                    continue;
+                }
+                sqlx::query(
+                    "INSERT INTO placement_allocations (id, provider_id, consumer_id) VALUES (?, ?, ?)",
+                )
+                .bind(&allocation.id)
+                .bind(&allocation.provider_id)
+                .bind(&allocation.consumer_id)
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+                for resource in &allocation.resources {
+                    sqlx::query(
+                        "INSERT INTO placement_allocation_resources (allocation_id, resource_class, amount) VALUES (?, ?, ?)",
+                    )
+                    .bind(&allocation.id)
+                    .bind(&resource.resource_class)
+                    .bind(placement_i64(resource.amount)?)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await
+    }
+
     /// Runs one attempt of the observation update inside a BEGIN IMMEDIATE
     /// transaction. Errors are rolled back best-effort; the original error
     /// stays authoritative.
@@ -2430,6 +3481,62 @@ fn port_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<PortRecord, StoreError
         status: row.get("status"),
         binding_host: row.get("binding_host"),
         binding_state: row.get("binding_state"),
+    })
+}
+
+fn placement_i64(value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value)
+        .map_err(|_| StoreError::Corrupt("placement value exceeds SQLite range".to_owned()))
+}
+
+fn placement_u64(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value)
+        .map_err(|_| StoreError::Corrupt("negative placement value in durable state".to_owned()))
+}
+
+fn placement_provider_from_row(row: &SqliteRow) -> Result<PlacementProviderRecord, StoreError> {
+    Ok(PlacementProviderRecord {
+        id: row.get("id"),
+        node_id: row.get("node_id"),
+        state: row.get("state"),
+        generation: placement_u64(row.get("generation"))?,
+        inventories: Vec::new(),
+        allocations: Vec::new(),
+    })
+}
+
+fn placement_inventory_from_row(row: &SqliteRow) -> Result<PlacementInventoryRecord, StoreError> {
+    Ok(PlacementInventoryRecord {
+        resource_class: row.get("resource_class"),
+        total: placement_u64(row.get("total"))?,
+        reserved: placement_u64(row.get("reserved"))?,
+        allocation_ratio: row.get("allocation_ratio"),
+        used: placement_u64(row.get("used"))?,
+    })
+}
+
+fn placement_allocation_from_row(row: &SqliteRow) -> Result<PlacementAllocationRecord, StoreError> {
+    Ok(PlacementAllocationRecord {
+        id: row.get("id"),
+        provider_id: row.get("provider_id"),
+        consumer_id: row.get("consumer_id"),
+        resources: Vec::new(),
+    })
+}
+
+fn placement_resource_from_row(row: &SqliteRow) -> Result<PlacementResourceRecord, StoreError> {
+    Ok(PlacementResourceRecord {
+        resource_class: row.get("resource_class"),
+        amount: placement_u64(row.get("amount"))?,
+    })
+}
+
+fn placement_intent_from_row(row: &SqliteRow) -> Result<PlacementIntentRecord, StoreError> {
+    Ok(PlacementIntentRecord {
+        id: row.get("id"),
+        provider_id: row.get("provider_id"),
+        consumer_id: row.get("consumer_id"),
+        resources: Vec::new(),
     })
 }
 
@@ -3581,6 +4688,102 @@ impl NetworkRepository for SqliteStore {
 }
 
 #[async_trait]
+impl PlacementRepository for SqliteStore {
+    async fn get_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<PlacementProviderRecord>, StoreError> {
+        self.get_provider(provider_id).await
+    }
+
+    async fn list_providers(&self) -> Result<Vec<PlacementProviderRecord>, StoreError> {
+        self.list_providers().await
+    }
+
+    async fn register_provider(
+        &self,
+        node_id: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        self.register_provider(node_id, inventories).await
+    }
+
+    async fn sync_provider(
+        &self,
+        node_id: &str,
+        state: &str,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        self.sync_provider(node_id, state, inventories).await
+    }
+
+    async fn refresh_inventories(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        inventories: &[PlacementInventoryRecord],
+    ) -> Result<PlacementProviderRecord, StoreError> {
+        self.refresh_inventories(provider_id, expected_generation, inventories)
+            .await
+    }
+
+    async fn set_provider_state(&self, provider_id: &str, state: &str) -> Result<(), StoreError> {
+        self.set_provider_state(provider_id, state).await
+    }
+
+    async fn commit_allocation(
+        &self,
+        provider_id: &str,
+        expected_generation: u64,
+        allocation: &PlacementAllocationRecord,
+    ) -> Result<PlacementAllocationRecord, StoreError> {
+        self.commit_allocation(provider_id, expected_generation, allocation)
+            .await
+    }
+
+    async fn release_allocation(
+        &self,
+        provider_id: &str,
+        allocation_id: &str,
+    ) -> Result<(), StoreError> {
+        self.release_allocation(provider_id, allocation_id).await
+    }
+
+    async fn upsert_intent(
+        &self,
+        intent: &PlacementIntentRecord,
+    ) -> Result<PlacementIntentRecord, StoreError> {
+        self.upsert_intent(intent).await
+    }
+
+    async fn get_intent(
+        &self,
+        allocation_id: &str,
+    ) -> Result<Option<PlacementIntentRecord>, StoreError> {
+        self.get_intent(allocation_id).await
+    }
+
+    async fn list_intents(&self) -> Result<Vec<PlacementIntentRecord>, StoreError> {
+        self.list_intents().await
+    }
+
+    async fn delete_intent(&self, allocation_id: &str) -> Result<(), StoreError> {
+        self.delete_intent(allocation_id).await
+    }
+
+    async fn reconcile_consumers(
+        &self,
+        durable_consumer_ids: &[String],
+    ) -> Result<PlacementReconcileRecord, StoreError> {
+        self.reconcile_consumers(durable_consumer_ids).await
+    }
+
+    async fn import_provider(&self, provider: &PlacementProviderRecord) -> Result<(), StoreError> {
+        self.import_provider(provider).await
+    }
+}
+
+#[async_trait]
 impl ComputeRepository for SqliteStore {
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
         self.list_resources_by_kind(kind).await
@@ -4689,6 +5892,560 @@ pub async fn run_network_repository_conformance<S: NetworkRepository>(
     Ok(())
 }
 
+/// Runs the behavior shared by every placement repository adapter: provider
+/// registration and sync with recomputed inventory usage, generation-guarded
+/// inventory refresh and state updates, allocation commit/release with
+/// idempotent retries and the over-allocation guard, allocation intent
+/// upserts, consumer reconciliation, and row-granular provider import.
+pub async fn run_placement_repository_conformance<S: PlacementRepository>(
+    repository: &S,
+) -> Result<(), StoreError> {
+    let inventories = vec![
+        PlacementInventoryRecord {
+            resource_class: "MEMORY_MB".to_owned(),
+            total: 4096,
+            reserved: 256,
+            allocation_ratio: 1.5,
+            used: 0,
+        },
+        PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 8,
+            reserved: 1,
+            allocation_ratio: 16.0,
+            used: 0,
+        },
+    ];
+
+    // register -> get_provider round-trip.
+    let registered = repository
+        .register_provider("compute-1", &inventories)
+        .await?;
+    assert_eq!(registered.id, "compute-1");
+    assert_eq!(registered.node_id, "compute-1");
+    assert_eq!(registered.state, "Enabled");
+    assert_eq!(registered.generation, 1);
+    assert_eq!(registered.inventories.len(), 2);
+    assert!(
+        registered
+            .inventories
+            .iter()
+            .all(|inventory| inventory.used == 0)
+    );
+    let fetched = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(fetched, registered);
+    assert_eq!(repository.get_provider("missing").await?, None);
+    assert_eq!(repository.list_providers().await?, vec![fetched.clone()]);
+
+    // register twice: state unchanged, generation bumped, used recomputed.
+    let re_registered = repository
+        .register_provider("compute-1", &inventories)
+        .await?;
+    assert_eq!(re_registered.state, "Enabled");
+    assert_eq!(re_registered.generation, 2);
+    assert!(
+        re_registered
+            .inventories
+            .iter()
+            .all(|inventory| inventory.used == 0)
+    );
+
+    // sync_provider always sets the state and bumps the generation.
+    let synced = repository
+        .sync_provider("compute-1", "Draining", &inventories)
+        .await?;
+    assert_eq!(synced.state, "Draining");
+    assert_eq!(synced.generation, 3);
+
+    // refresh_inventories: ok path, stale generation, unknown provider.
+    let refreshed = repository
+        .refresh_inventories("compute-1", 3, &inventories)
+        .await?;
+    assert_eq!(refreshed.generation, 4);
+    assert!(matches!(
+        repository
+            .refresh_inventories("compute-1", 3, &inventories)
+            .await,
+        Err(StoreError::PlacementStaleGeneration)
+    ));
+    assert!(matches!(
+        repository
+            .refresh_inventories("missing", 1, &inventories)
+            .await,
+        Err(StoreError::PlacementProviderNotFound)
+    ));
+
+    // set_provider_state: ok path and unknown provider.
+    repository
+        .set_provider_state("compute-1", "Enabled")
+        .await?;
+    assert_eq!(
+        repository
+            .get_provider("compute-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .state,
+        "Enabled"
+    );
+    assert!(matches!(
+        repository.set_provider_state("missing", "Enabled").await,
+        Err(StoreError::PlacementProviderNotFound)
+    ));
+
+    // commit_allocation: success increments used and bumps the generation.
+    let allocation = PlacementAllocationRecord {
+        id: "alloc-1".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-1".to_owned(),
+        resources: vec![
+            PlacementResourceRecord {
+                resource_class: "MEMORY_MB".to_owned(),
+                amount: 1024,
+            },
+            PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 2,
+            },
+        ],
+    };
+    let committed = repository
+        .commit_allocation("compute-1", 5, &allocation)
+        .await?;
+    assert_eq!(committed, allocation);
+    let after_commit = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(after_commit.generation, 6);
+    assert_eq!(after_commit.allocations, vec![allocation.clone()]);
+    let vcpu = after_commit
+        .inventories
+        .iter()
+        .find(|inventory| inventory.resource_class == "VCPU")
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(vcpu.used, 2);
+    let memory = after_commit
+        .inventories
+        .iter()
+        .find(|inventory| inventory.resource_class == "MEMORY_MB")
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(memory.used, 1024);
+
+    // Idempotent re-commit with the same record succeeds even with a stale
+    // expected generation and must not double-increment usage.
+    let idempotent = repository
+        .commit_allocation("compute-1", 3, &allocation)
+        .await?;
+    assert_eq!(idempotent, allocation);
+    let after_idempotent = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(after_idempotent.generation, 6);
+    assert_eq!(
+        after_idempotent
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .used,
+        2
+    );
+
+    // Same allocation id with different resources conflicts.
+    let conflicting = PlacementAllocationRecord {
+        id: "alloc-1".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-1".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 4,
+        }],
+    };
+    assert!(matches!(
+        repository
+            .commit_allocation("compute-1", 6, &conflicting)
+            .await,
+        Err(StoreError::PlacementAllocationConflict)
+    ));
+    let foreign = PlacementAllocationRecord {
+        id: "alloc-foreign".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-foreign".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    assert!(matches!(
+        repository.commit_allocation("missing", 1, &foreign).await,
+        Err(StoreError::PlacementProviderNotFound)
+    ));
+
+    // Two sequential commits with the same expected generation: the second is
+    // rejected by the over-allocation guard.
+    let second = PlacementAllocationRecord {
+        id: "alloc-2".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-2".to_owned(),
+        resources: vec![
+            PlacementResourceRecord {
+                resource_class: "MEMORY_MB".to_owned(),
+                amount: 512,
+            },
+            PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 1,
+            },
+        ],
+    };
+    repository
+        .commit_allocation("compute-1", 6, &second)
+        .await?;
+    let third = PlacementAllocationRecord {
+        id: "alloc-3".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-3".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    assert!(matches!(
+        repository.commit_allocation("compute-1", 6, &third).await,
+        Err(StoreError::PlacementStaleGeneration)
+    ));
+
+    // release_allocation: usage decremented and generation bumped once; a
+    // double release is a no-op; an unknown provider is an error.
+    repository
+        .release_allocation("compute-1", "alloc-2")
+        .await?;
+    let after_release = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(after_release.generation, 8);
+    assert_eq!(
+        after_release
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .used,
+        2
+    );
+    assert_eq!(
+        after_release
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "MEMORY_MB")
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .used,
+        1024
+    );
+    repository
+        .release_allocation("compute-1", "alloc-2")
+        .await?;
+    assert_eq!(
+        repository
+            .get_provider("compute-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .generation,
+        8
+    );
+    assert!(matches!(
+        repository.release_allocation("missing", "alloc-2").await,
+        Err(StoreError::PlacementProviderNotFound)
+    ));
+
+    // release_allocation is scoped to the owning provider: releasing through
+    // another registered provider is a no-op (Ok, allocation kept, no
+    // generation bump on either provider).
+    repository
+        .register_provider("compute-5", &inventories)
+        .await?;
+    let scoped = PlacementAllocationRecord {
+        id: "alloc-scoped".to_owned(),
+        provider_id: "compute-5".to_owned(),
+        consumer_id: "consumer-scoped".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    repository
+        .commit_allocation("compute-5", 1, &scoped)
+        .await?;
+    let compute_one_generation = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?
+        .generation;
+    repository
+        .release_allocation("compute-1", "alloc-scoped")
+        .await?;
+    let scoped_owner = repository
+        .get_provider("compute-5")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(scoped_owner.generation, 2);
+    assert_eq!(scoped_owner.allocations, vec![scoped.clone()]);
+    assert_eq!(
+        repository
+            .get_provider("compute-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .generation,
+        compute_one_generation
+    );
+    // Allocation ids are globally unique: a same-id allocation on another
+    // provider conflicts instead of silently double-allocating.
+    let same_id_elsewhere = PlacementAllocationRecord {
+        id: "alloc-scoped".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-elsewhere".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    assert!(matches!(
+        repository
+            .commit_allocation("compute-1", compute_one_generation, &same_id_elsewhere)
+            .await,
+        Err(StoreError::PlacementAllocationConflict)
+    ));
+    // The owning provider still releases its own allocation.
+    repository
+        .release_allocation("compute-5", "alloc-scoped")
+        .await?;
+    assert_eq!(
+        repository
+            .get_provider("compute-5")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .allocations,
+        Vec::<PlacementAllocationRecord>::new()
+    );
+
+    // Intent upsert: insert, read, identical re-upsert, conflicting
+    // re-upsert, delete, and missing delete.
+    let intent = PlacementIntentRecord {
+        id: "intent-1".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-1".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+    let stored_intent = repository.upsert_intent(&intent).await?;
+    assert_eq!(stored_intent, intent);
+    assert_eq!(
+        repository.get_intent("intent-1").await?,
+        Some(intent.clone())
+    );
+    assert_eq!(repository.get_intent("missing").await?, None);
+    assert_eq!(repository.list_intents().await?, vec![intent.clone()]);
+    let re_upserted = repository.upsert_intent(&intent).await?;
+    assert_eq!(re_upserted, intent);
+    let conflicting_intent = PlacementIntentRecord {
+        id: "intent-1".to_owned(),
+        provider_id: "compute-1".to_owned(),
+        consumer_id: "consumer-2".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+    assert!(matches!(
+        repository.upsert_intent(&conflicting_intent).await,
+        Err(StoreError::PlacementIntentConflict)
+    ));
+    repository.delete_intent("intent-1").await?;
+    assert_eq!(repository.get_intent("intent-1").await?, None);
+    repository.delete_intent("intent-1").await?;
+
+    // reconcile_consumers: two providers, one retained and one orphaned
+    // allocation and one retained and one abandoned intent.
+    repository
+        .register_provider("compute-2", &inventories)
+        .await?;
+    let retained = PlacementAllocationRecord {
+        id: "alloc-keep".to_owned(),
+        provider_id: "compute-2".to_owned(),
+        consumer_id: "consumer-keep".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    repository
+        .commit_allocation("compute-2", 1, &retained)
+        .await?;
+    let orphaned_allocation = PlacementAllocationRecord {
+        id: "alloc-orphan".to_owned(),
+        provider_id: "compute-2".to_owned(),
+        consumer_id: "consumer-gone".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+    repository
+        .commit_allocation("compute-2", 2, &orphaned_allocation)
+        .await?;
+    let retained_intent = PlacementIntentRecord {
+        id: "intent-keep".to_owned(),
+        provider_id: "compute-2".to_owned(),
+        consumer_id: "consumer-keep".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    repository.upsert_intent(&retained_intent).await?;
+    let abandoned_intent = PlacementIntentRecord {
+        id: "intent-orphan".to_owned(),
+        provider_id: "compute-2".to_owned(),
+        consumer_id: "consumer-gone".to_owned(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+    repository.upsert_intent(&abandoned_intent).await?;
+    let report = repository
+        .reconcile_consumers(&["consumer-1".to_owned(), "consumer-keep".to_owned()])
+        .await?;
+    assert_eq!(
+        report.orphaned_allocations,
+        vec![orphaned_allocation.clone()]
+    );
+    assert_eq!(report.abandoned_intents, vec![abandoned_intent.clone()]);
+    let compute_two = repository
+        .get_provider("compute-2")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(compute_two.generation, 4);
+    assert_eq!(compute_two.allocations, vec![retained.clone()]);
+    assert_eq!(
+        compute_two
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .used,
+        1
+    );
+    // The unaffected provider keeps its generation and allocations.
+    let compute_one = repository
+        .get_provider("compute-1")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(compute_one.generation, 8);
+    assert_eq!(compute_one.allocations, vec![allocation.clone()]);
+    assert_eq!(repository.get_intent("intent-orphan").await?, None);
+    assert_eq!(
+        repository.get_intent("intent-keep").await?,
+        Some(retained_intent)
+    );
+
+    // import_provider: row-granular, idempotent, exact generation preserved.
+    let imported = PlacementProviderRecord {
+        id: "compute-3".to_owned(),
+        node_id: "compute-3".to_owned(),
+        state: "Draining".to_owned(),
+        generation: 42,
+        inventories: vec![PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 4,
+            reserved: 0,
+            allocation_ratio: 1.0,
+            used: 1,
+        }],
+        allocations: vec![
+            PlacementAllocationRecord {
+                id: "imp-a".to_owned(),
+                provider_id: "compute-3".to_owned(),
+                consumer_id: "consumer-a".to_owned(),
+                resources: vec![PlacementResourceRecord {
+                    resource_class: "VCPU".to_owned(),
+                    amount: 1,
+                }],
+            },
+            PlacementAllocationRecord {
+                id: "imp-b".to_owned(),
+                provider_id: "compute-3".to_owned(),
+                consumer_id: "consumer-b".to_owned(),
+                resources: vec![PlacementResourceRecord {
+                    resource_class: "VCPU".to_owned(),
+                    amount: 2,
+                }],
+            },
+        ],
+    };
+    repository.import_provider(&imported).await?;
+    let restored_import = repository
+        .get_provider("compute-3")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(restored_import.generation, 42);
+    assert_eq!(restored_import.state, "Draining");
+    assert_eq!(restored_import.inventories.len(), 1);
+    assert_eq!(restored_import.allocations.len(), 2);
+    // Idempotent re-import duplicates nothing.
+    repository.import_provider(&imported).await?;
+    let re_imported = repository
+        .get_provider("compute-3")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(re_imported.generation, 42);
+    assert_eq!(re_imported.inventories.len(), 1);
+    assert_eq!(re_imported.allocations.len(), 2);
+    // An existing provider row does not block allocation import; the row
+    // keeps its stored generation.
+    repository
+        .register_provider("compute-4", &inventories)
+        .await?;
+    let partial = PlacementProviderRecord {
+        id: "compute-4".to_owned(),
+        node_id: "compute-4".to_owned(),
+        state: "Deleted".to_owned(),
+        generation: 9,
+        inventories: vec![PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 4,
+            reserved: 0,
+            allocation_ratio: 1.0,
+            used: 1,
+        }],
+        allocations: vec![PlacementAllocationRecord {
+            id: "imp-c".to_owned(),
+            provider_id: "compute-4".to_owned(),
+            consumer_id: "consumer-c".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 1,
+            }],
+        }],
+    };
+    repository.import_provider(&partial).await?;
+    let partial_store = repository
+        .get_provider("compute-4")
+        .await?
+        .ok_or(StoreError::PlacementProviderNotFound)?;
+    assert_eq!(partial_store.generation, 1);
+    assert_eq!(partial_store.state, "Enabled");
+    assert_eq!(partial_store.allocations.len(), 1);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4709,12 +6466,14 @@ mod tests {
         run_conformance(&compute_store).await?;
         run_image_repository_conformance(&compute_store).await?;
         run_network_repository_conformance(&compute_store).await?;
+        run_placement_repository_conformance(&compute_store).await?;
         // Invariant: exactly two `compute_instance` rows survive the combined
         // run. The keypair suite leaves one (its server-create scenario) and
         // the volume-attachment suite leaves one; the identity suite, the
-        // generic `run_conformance`, the image suite, and the network suite
-        // create none (keystone rows, a `server` resource, `image_metadata`
-        // rows, and `network_networks`/`network_subnets`/`network_ports` rows
+        // generic `run_conformance`, the image suite, the network suite, and
+        // the placement suite create none (keystone rows, a `server` resource,
+        // `image_metadata` rows, `network_networks`/`network_subnets`/
+        // `network_ports` rows, and `placement_providers`/`placement_*` rows
         // only). Keep this assertion on the shared store so a suite added to
         // the combined run cannot silently change the count.
         assert_eq!(
@@ -4834,6 +6593,274 @@ mod tests {
         reopened.delete_subnet("project-a", &subnet.id).await?;
         reopened.delete_network("project-a", &network.id).await?;
         fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn placement_metadata_survives_store_reopen() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-placement-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let inventories = vec![PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 8,
+            reserved: 1,
+            allocation_ratio: 16.0,
+            used: 0,
+        }];
+        let allocation = PlacementAllocationRecord {
+            id: "alloc-survivor".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-survivor".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 2,
+            }],
+        };
+        let intent = PlacementIntentRecord {
+            id: "intent-survivor".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-survivor".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 2,
+            }],
+        };
+        {
+            let store = testkit::open_file(&path).await?;
+            store.register_provider("node-1", &inventories).await?;
+            store.commit_allocation("node-1", 1, &allocation).await?;
+            store.upsert_intent(&intent).await?;
+        }
+        let reopened = testkit::open_file(&path).await?;
+        let provider = reopened
+            .get_provider("node-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(provider.generation, 2);
+        assert_eq!(provider.allocations, vec![allocation.clone()]);
+        let vcpu = provider
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(vcpu.total, 8);
+        assert_eq!(vcpu.reserved, 1);
+        assert_eq!(vcpu.used, 2);
+        assert_eq!(reopened.get_intent("intent-survivor").await?, Some(intent));
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_placement_commits_never_double_allocate() -> Result<(), Box<dyn Error>> {
+        // Regression guard for the over-allocation invariant: two allocators
+        // racing with the same generation cannot both win. Placement writes
+        // run under BEGIN IMMEDIATE (the deferred read-then-write upgrade
+        // fails with SQLITE_BUSY_SNAPSHOT even with a busy_timeout, see
+        // issue #487 in this file), so the write lock is taken up front and
+        // the losing commit deterministically observes the winner's commit:
+        // the idempotent Ok(existing) for a same-id race or
+        // PlacementStaleGeneration for a distinct-id race. A surfaced
+        // StoreError::Database is a hard test failure.
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-placement-concurrent-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store_a = testkit::open_file(&path).await?;
+        let store_b = testkit::open_file(&path).await?;
+        let inventories = vec![PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 64,
+            reserved: 0,
+            allocation_ratio: 1.0,
+            used: 0,
+        }];
+        store_a.register_provider("node-1", &inventories).await?;
+
+        let allocation = PlacementAllocationRecord {
+            id: "alloc-race".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-race".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 2,
+            }],
+        };
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for store in [store_a.clone(), store_b.clone()] {
+            let barrier = barrier.clone();
+            let allocation = allocation.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                store.commit_allocation("node-1", 1, &allocation).await
+            }));
+        }
+        barrier.wait().await;
+        let mut first_round: Vec<Result<PlacementAllocationRecord, StoreError>> = Vec::new();
+        for handle in handles {
+            first_round.push(handle.await?);
+        }
+        // Classify the outcomes first, then assert the classification set
+        // and the final database invariants. With BEGIN IMMEDIATE the loser
+        // is the idempotent Ok(existing); PlacementStaleGeneration is also
+        // acceptable, StoreError::Database never is.
+        let mut winners = 0;
+        for outcome in &first_round {
+            match outcome {
+                Ok(committed) => {
+                    assert_eq!(committed, &allocation);
+                    winners += 1;
+                }
+                Err(StoreError::PlacementStaleGeneration) => {}
+                Err(StoreError::Database(_)) => {
+                    return Err(Box::<dyn Error>::from(StoreError::Corrupt(
+                        "same-id race surfaced StoreError::Database".to_owned(),
+                    )));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            }
+        }
+        assert!(winners >= 1);
+        let provider = store_a
+            .get_provider("node-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(provider.generation, 2);
+        assert_eq!(provider.allocations.len(), 1);
+        let vcpu = provider
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(vcpu.used, 2);
+
+        // Distinct allocation ids with the same expected generation: exactly
+        // one commit wins; the loser deterministically reports
+        // PlacementStaleGeneration (never StoreError::Database) and retries
+        // with the current generation, after which both allocations exist
+        // with usage equal to the sum.
+        let first = PlacementAllocationRecord {
+            id: "alloc-a".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-a".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 1,
+            }],
+        };
+        let second = PlacementAllocationRecord {
+            id: "alloc-b".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-b".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 3,
+            }],
+        };
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let mut handles = Vec::new();
+        for (store, allocation) in [
+            (store_a.clone(), first.clone()),
+            (store_b.clone(), second.clone()),
+        ] {
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                (
+                    store.commit_allocation("node-1", 2, &allocation).await,
+                    allocation,
+                )
+            }));
+        }
+        barrier.wait().await;
+        let mut winners = 0;
+        let mut loser = None;
+        for handle in handles {
+            let (outcome, allocation) = handle.await?;
+            match outcome {
+                Ok(_) => winners += 1,
+                Err(StoreError::PlacementStaleGeneration) => loser = Some(allocation),
+                Err(StoreError::Database(_)) => {
+                    return Err(Box::<dyn Error>::from(StoreError::Corrupt(
+                        "distinct-id race surfaced StoreError::Database".to_owned(),
+                    )));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            }
+        }
+        assert_eq!(winners, 1);
+        let loser = loser.ok_or_else(|| {
+            Box::<dyn Error>::from(StoreError::Corrupt("expected one loser".to_owned()))
+        })?;
+        store_a.commit_allocation("node-1", 3, &loser).await?;
+        let provider = store_a
+            .get_provider("node-1")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(provider.generation, 4);
+        assert_eq!(provider.allocations.len(), 3);
+        let vcpu = provider
+            .inventories
+            .iter()
+            .find(|inventory| inventory.resource_class == "VCPU")
+            .ok_or(StoreError::PlacementProviderNotFound)?;
+        assert_eq!(vcpu.used, 6);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn placement_tables_fault_isolates_other_repositories() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-placement-fault-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let store = testkit::open_file(&path).await?;
+        let inventories = vec![PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 8,
+            reserved: 0,
+            allocation_ratio: 1.0,
+            used: 0,
+        }];
+        store.register_provider("node-1", &inventories).await?;
+        let allocation = PlacementAllocationRecord {
+            id: "alloc-fault".to_owned(),
+            provider_id: "node-1".to_owned(),
+            consumer_id: "consumer-fault".to_owned(),
+            resources: vec![PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 2,
+            }],
+        };
+        sqlx::query("DROP TABLE placement_allocations")
+            .execute(&store.pool)
+            .await?;
+        assert!(matches!(
+            store.commit_allocation("node-1", 1, &allocation).await,
+            Err(StoreError::Database(_))
+        ));
+        let network = NetworkRecord {
+            id: Uuid::now_v7(),
+            name: "unaffected".to_owned(),
+            project_id: "project-a".to_owned(),
+            status: "ACTIVE".to_owned(),
+        };
+        store.insert_network(&network).await?;
+        assert_eq!(
+            store.get_network("project-a", &network.id).await?,
+            Some(network)
+        );
+        let _ = fs::remove_file(&path);
         let _ = fs::remove_file(format!("{}-wal", path.display()));
         let _ = fs::remove_file(format!("{}-shm", path.display()));
         Ok(())

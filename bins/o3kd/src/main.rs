@@ -310,8 +310,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
     let registry = o3k_compute_agent::NodeRegistry::default();
-    let placement = o3k_placement::PlacementLedger::open(config.data_dir.join("placement"))
-        .map_err(|error| format!("open Placement ledger: {error}"))?;
+    let placement_repository: Arc<dyn o3k_store::PlacementRepository> = store.clone();
+    let placement = o3k_placement::PlacementLedger::open(
+        config.data_dir.join("placement"),
+        placement_repository,
+    )
+    .await
+    .map_err(|error| format!("open Placement ledger: {error}"))?;
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
