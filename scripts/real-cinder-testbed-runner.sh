@@ -1198,6 +1198,8 @@ if [ -f "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" ]; the
   cp "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" "${EVIDENCE_DIR}/tempest-cinder-summary.json" || true
   cp "${REPO_ROOT}/tests/tempest-evidence/tempest-status.yaml" "${EVIDENCE_DIR}/tempest-status.yaml" 2>/dev/null || true
 fi
+cp "${REPO_ROOT}/tests/tempest-evidence/tempest.log" "${EVIDENCE_DIR}/tempest-run.log" 2>/dev/null || true
+cp "${REPO_ROOT}/tests/tempest-evidence/tempest-results.xml" "${EVIDENCE_DIR}/tempest-results.xml" 2>/dev/null || true
 
 RUN_PHASE="cleanup"
 echo "==> Workflow: delete all run-owned resources and verify cleanup..."
