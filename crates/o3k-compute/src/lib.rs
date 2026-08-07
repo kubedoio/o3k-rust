@@ -6,6 +6,7 @@ use o3k_compute_agent::{
     Availability, CreateCommandSpec, LifecycleCommand, NetworkAttachmentSpec, NodeRegistry,
     NodeSnapshot, build_block_device_command, build_create_command, build_lifecycle_command,
 };
+pub use o3k_domain::{Server, ServerId, ServerState};
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
@@ -19,6 +20,7 @@ use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
     ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError, VolumeAttachmentRecord,
+    server_state_from_storage, server_state_to_storage,
 };
 
 use prost::Message;
@@ -42,23 +44,6 @@ pub struct Flavor {
     pub vcpus: u32,
     pub ram_mib: u64,
     pub disk_gib: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Server {
-    pub id: Uuid,
-    pub name: String,
-    pub project_id: String,
-    pub flavor_id: Uuid,
-    pub image_id: String,
-    pub status: String,
-    pub key_name: Option<String>,
-    pub config_drive: bool,
-    pub network_ids: Vec<String>,
-    /// Durable scheduler-selected compute host (placement provider identity),
-    /// projected as Nova's `OS-EXT-SRV-ATTR:host`. `None` only when the create
-    /// intent carries no placement decision.
-    pub host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,7 +348,10 @@ impl AgentComputeProvider {
         let mut instances = HashMap::new();
         let mut bindings = HashMap::new();
         for resource in resources {
-            if resource.observed_state.eq_ignore_ascii_case("DELETED") {
+            if matches!(
+                server_state_from_storage(&resource.observed_state),
+                Ok(ServerState::Deleted)
+            ) {
                 continue;
             }
             let Some(provider_id) = resource.provider_id.clone() else {
@@ -849,15 +837,24 @@ fn instance_state_from_proto(state: i32) -> Option<o3k_provider::InstanceState> 
     }
 }
 
+/// Decodes a durable observed value into the provider's own instance-state
+/// vocabulary for the agent provider's rehydrate projection. The durable
+/// value is decoded through the canonical fail-closed store decoder first, so
+/// the provider vocabulary is a projection of the canonical model rather than
+/// a second decoder of persisted strings.
 fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceState> {
-    match value.to_ascii_uppercase().as_str() {
-        "ACTIVE" | "RUNNING" => Some(o3k_provider::InstanceState::Running),
-        "SHUTOFF" | "STOPPED" => Some(o3k_provider::InstanceState::Stopped),
-        "BUILD" | "CREATING" | "REQUESTED" => Some(o3k_provider::InstanceState::Creating),
-        "DELETING" => Some(o3k_provider::InstanceState::Deleting),
-        "DELETED" => Some(o3k_provider::InstanceState::Deleted),
-        "ERROR" => Some(o3k_provider::InstanceState::Error),
-        _ => None,
+    let state = server_state_from_storage(value).ok()?;
+    match state {
+        ServerState::Requested
+        | ServerState::Building
+        | ServerState::Stopping
+        | ServerState::Starting
+        | ServerState::Rebooting => Some(o3k_provider::InstanceState::Creating),
+        ServerState::Active => Some(o3k_provider::InstanceState::Running),
+        ServerState::Stopped => Some(o3k_provider::InstanceState::Stopped),
+        ServerState::Deleting => Some(o3k_provider::InstanceState::Deleting),
+        ServerState::Deleted => Some(o3k_provider::InstanceState::Deleted),
+        ServerState::Error => Some(o3k_provider::InstanceState::Error),
     }
 }
 
@@ -2375,20 +2372,22 @@ impl ComputeService {
             .list_resources(project_id, "compute_instance")
             .await?
         {
-            if !server.observed_state.eq_ignore_ascii_case("DELETED")
-                && serde_json::from_str::<serde_json::Value>(&server.desired_state)
-                    .ok()
-                    .is_some_and(|value| {
-                        value
-                            .get("flavor_id")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|value| value == flavor.id.to_string())
-                            || (value.get("flavor_id").is_none()
-                                && value.get("vcpus").and_then(serde_json::Value::as_u64)
-                                    == Some(u64::from(flavor.vcpus))
-                                && value.get("memory_mib").and_then(serde_json::Value::as_u64)
-                                    == Some(flavor.ram_mib))
-                    })
+            if !matches!(
+                server_state_from_storage(&server.observed_state),
+                Ok(ServerState::Deleted)
+            ) && serde_json::from_str::<serde_json::Value>(&server.desired_state)
+                .ok()
+                .is_some_and(|value| {
+                    value
+                        .get("flavor_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| value == flavor.id.to_string())
+                        || (value.get("flavor_id").is_none()
+                            && value.get("vcpus").and_then(serde_json::Value::as_u64)
+                                == Some(u64::from(flavor.vcpus))
+                            && value.get("memory_mib").and_then(serde_json::Value::as_u64)
+                                == Some(flavor.ram_mib))
+                })
             {
                 return Err(ComputeError::Conflict);
             }
@@ -2511,7 +2510,10 @@ impl ComputeService {
                 let legacy_keypair_intent =
                     requests_match_with_keypair_migration(&existing_request, &request);
                 if existing_request == request || legacy_keypair_intent {
-                    if existing.observed_state == "DELETED" {
+                    if matches!(
+                        server_state_from_storage(&existing.observed_state),
+                        Ok(ServerState::Deleted)
+                    ) {
                         return Err(ComputeError::NotFound);
                     }
                     if legacy_keypair_intent {
@@ -2561,7 +2563,9 @@ impl ComputeService {
                             }
                         }
                     }
-                    return self.show_server(&project_id, server_id).await;
+                    return self
+                        .show_server(&project_id, ServerId::from_uuid(server_id))
+                        .await;
                 }
                 return Err(ComputeError::Conflict);
             }
@@ -2575,7 +2579,7 @@ impl ComputeService {
             .list_servers(&project_id)
             .await?
             .iter()
-            .any(|server| server.name == name && server.status != "DELETED")
+            .any(|server| server.name == name && server.state != ServerState::Deleted)
         {
             return Err(ComputeError::Conflict);
         }
@@ -2629,7 +2633,7 @@ impl ComputeService {
         };
         if servers
             .iter()
-            .any(|server| server.name == name && server.status != "DELETED")
+            .any(|server| server.name == name && server.state != ServerState::Deleted)
         {
             if let Some(decision) = placement.as_ref() {
                 self.release_placement_decision(decision)?;
@@ -2664,7 +2668,10 @@ impl ComputeService {
                 if existing_request != request && !legacy_keypair_intent {
                     return Err(ComputeError::Conflict);
                 }
-                if existing.observed_state == "DELETED" {
+                if matches!(
+                    server_state_from_storage(&existing.observed_state),
+                    Ok(ServerState::Deleted)
+                ) {
                     return Err(ComputeError::NotFound);
                 }
                 if legacy_keypair_intent {
@@ -2708,7 +2715,7 @@ impl ComputeService {
                         }
                     }
                 }
-                return self.show_server(&project_id, id).await;
+                return self.show_server(&project_id, ServerId::from_uuid(id)).await;
             }
             Err(error) => return Err(ComputeError::Reconcile(error)),
         }
@@ -2756,7 +2763,7 @@ impl ComputeService {
             }
             return Err(ComputeError::Conflict);
         }
-        self.show_server(&project_id, id).await
+        self.show_server(&project_id, ServerId::from_uuid(id)).await
     }
 
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
@@ -2767,42 +2774,69 @@ impl ComputeService {
             .await?;
         let mut servers = Vec::new();
         for resource in resources {
-            if let Ok(mut server) = server_from_resource(resource, &flavors)
-                && server.status != "DELETED"
-            {
-                server.key_name = self.store.get_server_keypair_name(server.id).await?;
+            let resource_id = resource.id;
+            let mut server = match server_from_resource(resource, &flavors) {
+                Ok(server) => server,
+                Err(ServerProjectionError::CorruptState(corrupt)) => {
+                    // Corrupt rows are skipped, not misclassified: the
+                    // conversion failed closed. Surface the integrity failure
+                    // so an operator can repair the durable ledger.
+                    tracing::warn!(%resource_id, %corrupt, "server lifecycle state is corrupt; row skipped");
+                    continue;
+                }
+                Err(ServerProjectionError::Unresolvable) => continue,
+            };
+            if server.state != ServerState::Deleted {
+                server.key_name = self
+                    .store
+                    .get_server_keypair_name(server.id.as_uuid())
+                    .await?;
                 servers.push(server);
             }
         }
         Ok(servers)
     }
 
-    pub async fn show_server(&self, project_id: &str, id: Uuid) -> Result<Server, ComputeError> {
-        let resource = self
-            .store
-            .get_resource(id)
-            .await
-            .map_err(|error| match error {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+    pub async fn show_server(
+        &self,
+        project_id: &str,
+        id: ServerId,
+    ) -> Result<Server, ComputeError> {
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
         let flavors = self.flavors_for_project(project_id).await?;
-        let mut server =
-            server_from_resource(resource, &flavors).map_err(|_| ComputeError::InvalidRequest)?;
-        if server.status == "DELETED" {
+        let mut server = match server_from_resource(resource, &flavors) {
+            Ok(server) => server,
+            Err(ServerProjectionError::CorruptState(corrupt)) => {
+                return Err(ComputeError::Store(corrupt));
+            }
+            Err(ServerProjectionError::Unresolvable) => {
+                return Err(ComputeError::InvalidRequest);
+            }
+        };
+        if server.state == ServerState::Deleted {
             return Err(ComputeError::NotFound);
         }
-        server.key_name = self.store.get_server_keypair_name(server.id).await?;
+        server.key_name = self
+            .store
+            .get_server_keypair_name(server.id.as_uuid())
+            .await?;
         Ok(server)
     }
 
     pub async fn attach_volume(
         &self,
         project_id: &str,
-        server_id: Uuid,
+        server_id: ServerId,
         volume_id: Uuid,
         device: Option<String>,
         tag: Option<String>,
@@ -2812,7 +2846,7 @@ impl ComputeService {
         self.attachments
             .attach(
                 project_id,
-                server_id,
+                server_id.as_uuid(),
                 volume_id,
                 device,
                 tag,
@@ -2824,10 +2858,13 @@ impl ComputeService {
     pub async fn list_volume_attachments(
         &self,
         project_id: &str,
-        server_id: Uuid,
+        server_id: ServerId,
     ) -> Result<Vec<VolumeAttachmentRecord>, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
-        let records = self.store.list_volume_attachments(server_id).await?;
+        let records = self
+            .store
+            .list_volume_attachments(server_id.as_uuid())
+            .await?;
         Ok(records
             .into_iter()
             .filter(|r| r.status != "detached")
@@ -2837,12 +2874,12 @@ impl ComputeService {
     pub async fn get_volume_attachment(
         &self,
         project_id: &str,
-        server_id: Uuid,
+        server_id: ServerId,
         attachment_id: Uuid,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
         self.store
-            .get_volume_attachment(server_id, attachment_id)
+            .get_volume_attachment(server_id.as_uuid(), attachment_id)
             .await?
             .ok_or(ComputeError::NotFound)
     }
@@ -2850,12 +2887,12 @@ impl ComputeService {
     pub async fn detach_volume(
         &self,
         project_id: &str,
-        server_id: Uuid,
+        server_id: ServerId,
         attachment_id: Uuid,
     ) -> Result<(), ComputeError> {
         let _ = self.show_server(project_id, server_id).await?;
         self.attachments
-            .detach(project_id, server_id, attachment_id)
+            .detach(project_id, server_id.as_uuid(), attachment_id)
             .await
     }
 
@@ -2866,17 +2903,17 @@ impl ComputeService {
     pub async fn inspect_server(
         &self,
         project_id: &str,
-        id: Uuid,
+        id: ServerId,
         idempotency_key: &str,
     ) -> Result<Operation, ComputeError> {
-        let resource = self
-            .store
-            .get_resource(id)
-            .await
-            .map_err(|error| match error {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
@@ -2895,11 +2932,15 @@ impl ComputeService {
         } else {
             return Err(ComputeError::Conflict);
         }
-        let _reference = match self.store.get_provider_reference(id, "compute").await {
+        let _reference = match self
+            .store
+            .get_provider_reference(id.as_uuid(), "compute")
+            .await
+        {
             Ok(reference) => reference,
             Err(StoreError::ProviderReferenceNotFound) => self
                 .store
-                .get_provider_reference(id, "compute-agent")
+                .get_provider_reference(id.as_uuid(), "compute-agent")
                 .await
                 .map_err(|error| match error {
                     StoreError::ProviderReferenceNotFound => ComputeError::NotFound,
@@ -2945,7 +2986,7 @@ impl ComputeService {
             self.store
                 .insert_operation(&o3k_store::OperationRecord {
                     id: operation_id,
-                    resource_id: id,
+                    resource_id: id.as_uuid(),
                     kind: "inspect".to_owned(),
                     state: o3k_store::OperationState::Pending,
                     provider_operation_id: None,
@@ -3087,9 +3128,9 @@ impl ComputeService {
     pub async fn placement_provider_id(
         &self,
         project_id: &str,
-        id: Uuid,
+        id: ServerId,
     ) -> Result<Option<String>, ComputeError> {
-        let resource = self.store.get_resource(id).await?;
+        let resource = self.store.get_resource(id.as_uuid()).await?;
         if resource.kind != "compute_instance" || resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
@@ -3098,23 +3139,31 @@ impl ComputeService {
         Ok(request.placement_provider_id)
     }
 
-    pub async fn delete_server(&self, project_id: &str, id: Uuid) -> Result<(), ComputeError> {
-        let resource = self
-            .store
-            .get_resource(id)
-            .await
-            .map_err(|error| match error {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+    pub async fn delete_server(&self, project_id: &str, id: ServerId) -> Result<(), ComputeError> {
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        if resource.observed_state == "DELETED" {
+        // The destructive path must fail closed on corrupt lifecycle state:
+        // deleting a row whose state cannot be decoded would dispatch a
+        // provider delete on an unknown instance and overwrite the evidence
+        // needed for repair. The decode error is propagated before any
+        // lifecycle operation begins; only a decodable `Deleted` row takes
+        // the already-deleted shortcut.
+        let observed =
+            server_state_from_storage(&resource.observed_state).map_err(ComputeError::Store)?;
+        if observed == ServerState::Deleted {
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
-            self.release_placement_allocation(id, &intent)?;
-            self.store.detach_server_keypair(id).await?;
+            self.release_placement_allocation(id.as_uuid(), &intent)?;
+            self.store.detach_server_keypair(id.as_uuid()).await?;
             return Ok(());
         }
         if resource.provider_id.is_none() {
@@ -3126,7 +3175,7 @@ impl ComputeService {
         );
         match self
             .journal
-            .begin_lifecycle(id, operation_id, LifecycleAction::Delete)
+            .begin_lifecycle(id.as_uuid(), operation_id, LifecycleAction::Delete)
             .await
         {
             Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
@@ -3141,8 +3190,8 @@ impl ComputeService {
         }
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
-        self.release_placement_allocation(id, &intent)?;
-        self.store.detach_server_keypair(id).await?;
+        self.release_placement_allocation(id.as_uuid(), &intent)?;
+        self.store.detach_server_keypair(id.as_uuid()).await?;
         Ok(())
     }
 
@@ -3182,27 +3231,35 @@ impl ComputeService {
     pub async fn action(
         &self,
         project_id: &str,
-        id: Uuid,
+        id: ServerId,
         action: InstanceAction,
     ) -> Result<Server, ComputeError> {
-        let resource = self
-            .store
-            .get_resource(id)
-            .await
-            .map_err(|error| match error {
-                StoreError::ResourceNotFound => ComputeError::NotFound,
-                other => ComputeError::Store(other),
-            })?;
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
         if resource.provider_id.is_none() {
             return Err(ComputeError::Conflict);
         }
-        let target = match (action, resource.observed_state.as_str()) {
-            (InstanceAction::Start, "stopped" | "SHUTOFF") => "ACTIVE",
-            (InstanceAction::Stop, "active" | "ACTIVE") => "SHUTOFF",
-            (InstanceAction::Reboot, "active" | "ACTIVE" | "stopped" | "SHUTOFF") => "ACTIVE",
+        // Action applicability is decided on the canonical lifecycle state,
+        // decoded fail-closed from the durable observed value. The target
+        // state feeds the deterministic journal identity through its storage
+        // encoding, so durable operation ids are unchanged.
+        let current = server_state_from_storage(&resource.observed_state)
+            .map_err(|_| ComputeError::Conflict)?;
+        let target = match (action, current) {
+            (InstanceAction::Start, ServerState::Stopped) => ServerState::Active,
+            (InstanceAction::Stop, ServerState::Active) => ServerState::Stopped,
+            (InstanceAction::Reboot, ServerState::Active | ServerState::Stopped) => {
+                ServerState::Active
+            }
             _ => return Err(ComputeError::Conflict),
         };
         let lifecycle_action = match action {
@@ -3213,14 +3270,15 @@ impl ComputeService {
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
-                "o3k:action:{project_id}:{id}:{target}:{}",
+                "o3k:action:{project_id}:{id}:{}:{}",
+                server_state_to_storage(target),
                 resource.generation
             )
             .as_bytes(),
         );
         match self
             .journal
-            .begin_lifecycle(id, operation_id, lifecycle_action)
+            .begin_lifecycle(id.as_uuid(), operation_id, lifecycle_action)
             .await
         {
             Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
@@ -3272,28 +3330,46 @@ impl ComputeService {
     }
 }
 
+/// Why a durable resource row could not be projected into a canonical
+/// `Server`. Distinguishing corrupt lifecycle state from an unresolvable
+/// intent matters: corruption is a server-side integrity failure (500),
+/// while an unparseable create intent or missing flavor is the pre-existing
+/// invalid-request category (400).
+enum ServerProjectionError {
+    /// The persisted server lifecycle state is not a decodable canonical
+    /// state. Carries the store corruption error for reporting.
+    CorruptState(StoreError),
+    /// The create intent cannot be parsed or its flavor cannot be resolved.
+    Unresolvable,
+}
+
 fn server_from_resource(
     resource: o3k_store::ResourceRecord,
     flavors: &[Flavor],
-) -> Result<Server, ()> {
-    let request: CreateInstanceRequest =
-        serde_json::from_str(&resource.desired_state).map_err(|_| ())?;
+) -> Result<Server, ServerProjectionError> {
+    let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+        .map_err(|_| ServerProjectionError::Unresolvable)?;
     let flavor = if request.flavor_id.trim().is_empty() {
         flavors
             .iter()
             .find(|flavor| flavor.vcpus == request.vcpus && flavor.ram_mib == request.memory_mib)
     } else {
-        let flavor_id = request.flavor_id.parse::<Uuid>().map_err(|_| ())?;
+        let flavor_id = request
+            .flavor_id
+            .parse::<Uuid>()
+            .map_err(|_| ServerProjectionError::Unresolvable)?;
         flavors.iter().find(|flavor| flavor.id == flavor_id)
     }
-    .ok_or(())?;
+    .ok_or(ServerProjectionError::Unresolvable)?;
+    let state = server_state_from_storage(&resource.observed_state)
+        .map_err(ServerProjectionError::CorruptState)?;
     Ok(Server {
-        id: resource.id,
+        id: ServerId::from_uuid(resource.id),
         name: request.name,
         project_id: resource.project_id,
         flavor_id: flavor.id,
         image_id: request.image_id.unwrap_or_default(),
-        status: resource.observed_state.to_ascii_uppercase(),
+        state,
         key_name: None,
         config_drive: request.config_drive.is_some(),
         network_ids: request.network_ids,
@@ -3342,6 +3418,121 @@ mod tests {
             Arc::new(SqliteStore::connect_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
+    }
+
+    #[tokio::test]
+    async fn corrupt_persisted_server_state_fails_closed() -> Result<(), ComputeError> {
+        let service = service("corrupt-state").await?;
+        let corrupt_id = Uuid::now_v7();
+        let flavor = service.flavors()[0].id;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: corrupt_id,
+            project_id: "project-a".to_owned(),
+            name: "corrupt".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: flavor.to_string(),
+            disk_gib: 10,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: Vec::new(),
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: "corrupt-state".to_owned(),
+        };
+        service
+            .store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: corrupt_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request)
+                    .map_err(|_| ComputeError::Conflict)?,
+                observed_state: "garbage-state".to_owned(),
+                provider_id: Some("node-a".to_owned()),
+            })
+            .await?;
+        // The corrupt value must never be misclassified as a valid lifecycle
+        // state: show fails closed as a server-side integrity failure, list
+        // skips the row, actions reject it.
+        assert!(matches!(
+            service
+                .show_server("project-a", ServerId::from_uuid(corrupt_id))
+                .await,
+            Err(ComputeError::Store(StoreError::Corrupt(_)))
+        ));
+        assert!(
+            !service
+                .list_servers("project-a")
+                .await?
+                .iter()
+                .any(|server| server.id.as_uuid() == corrupt_id)
+        );
+        assert!(matches!(
+            service
+                .action(
+                    "project-a",
+                    ServerId::from_uuid(corrupt_id),
+                    InstanceAction::Stop
+                )
+                .await,
+            Err(ComputeError::Conflict)
+        ));
+        // The destructive path must also fail closed: delete rejects the
+        // corrupt row instead of dispatching a provider delete on an unknown
+        // instance and overwriting the evidence needed for repair.
+        assert!(matches!(
+            service
+                .delete_server("project-a", ServerId::from_uuid(corrupt_id))
+                .await,
+            Err(ComputeError::Store(StoreError::Corrupt(_)))
+        ));
+        assert_eq!(
+            service.store.get_resource(corrupt_id).await?.observed_state,
+            "garbage-state"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn durable_server_states_project_to_the_provider_vocabulary() {
+        use o3k_provider::InstanceState as ProviderState;
+        let expected = [
+            ("REQUESTED", ProviderState::Creating),
+            ("BUILD", ProviderState::Creating),
+            ("ACTIVE", ProviderState::Running),
+            ("STOPPING", ProviderState::Creating),
+            ("SHUTOFF", ProviderState::Stopped),
+            ("STARTING", ProviderState::Creating),
+            ("REBOOTING", ProviderState::Creating),
+            ("DELETING", ProviderState::Deleting),
+            ("DELETED", ProviderState::Deleted),
+            ("ERROR", ProviderState::Error),
+        ];
+        assert_eq!(expected.len(), 10);
+        for (stored, provider) in expected {
+            assert_eq!(
+                instance_state_from_observed(stored),
+                Some(provider),
+                "{stored} must project to {provider:?}"
+            );
+        }
+        // Legacy lowercase spellings and corrupt values: legacy spellings
+        // decode, corrupt values fail closed.
+        assert_eq!(
+            instance_state_from_observed("active"),
+            Some(ProviderState::Running)
+        );
+        assert_eq!(
+            instance_state_from_observed("requested"),
+            Some(ProviderState::Creating)
+        );
+        assert_eq!(instance_state_from_observed("garbage-state"), None);
     }
 
     #[tokio::test]
@@ -3484,8 +3675,13 @@ mod tests {
                 .flavor_id,
             same_dimensions.id
         );
-        let persisted_intent: CreateInstanceRequest =
-            serde_json::from_str(&reopened.store.get_resource(server.id).await?.desired_state)?;
+        let persisted_intent: CreateInstanceRequest = serde_json::from_str(
+            &reopened
+                .store
+                .get_resource(server.id.as_uuid())
+                .await?
+                .desired_state,
+        )?;
         assert_eq!(persisted_intent.flavor_id, same_dimensions.id.to_string());
         assert_eq!(persisted_intent.disk_gib, same_dimensions.disk_gib);
         reopened.delete_flavor("project-a", flavor.id).await?;
@@ -3597,7 +3793,7 @@ mod tests {
         // command completes. The action must keep reconciling instead of
         // returning a conflict while the provider is still converging.
         provider.set_failure(o3k_provider::FailureInjection::PartialCompletion)?;
-        let resource = store.get_resource(server.id).await?;
+        let resource = store.get_resource(server.id.as_uuid()).await?;
         let action_operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
@@ -3615,7 +3811,7 @@ mod tests {
         let stopped = service
             .action("project-a", server.id, InstanceAction::Stop)
             .await?;
-        assert_eq!(stopped.status, "SHUTOFF");
+        assert_eq!(stopped.state, ServerState::Stopped);
         std::fs::remove_file(&path)?;
         Ok(())
     }
@@ -3658,20 +3854,20 @@ mod tests {
                 .await,
             Err(ComputeError::Conflict)
         ));
-        assert_eq!(server.status, "ACTIVE");
+        assert_eq!(server.state, ServerState::Active);
         assert_eq!(
             service
                 .action("project-a", server.id, InstanceAction::Stop)
                 .await?
-                .status,
-            "SHUTOFF"
+                .state,
+            ServerState::Stopped
         );
         assert_eq!(
             service
                 .action("project-a", server.id, InstanceAction::Start)
                 .await?
-                .status,
-            "ACTIVE"
+                .state,
+            ServerState::Active
         );
         assert!(matches!(
             service.show_server("project-b", server.id).await,
@@ -3828,7 +4024,7 @@ mod tests {
                 .get_resource(request.o3k_server_id)
                 .await?
                 .observed_state,
-            "requested"
+            "REQUESTED"
         );
         Ok(())
     }
@@ -3991,10 +4187,10 @@ mod tests {
         service.apply_agent_observation(&observation).await?;
         assert_eq!(
             service
-                .show_server("project-a", request.o3k_server_id)
+                .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
                 .await?
-                .status,
-            "SHUTOFF"
+                .state,
+            ServerState::Stopped
         );
         Ok(())
     }
@@ -4054,7 +4250,7 @@ mod tests {
                 "request-scheduled".to_owned(),
             )
             .await?;
-        let resource = service.store.get_resource(server.id).await?;
+        let resource = service.store.get_resource(server.id.as_uuid()).await?;
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         assert_eq!(intent.placement_provider_id.as_deref(), Some("node-a"));
@@ -4477,7 +4673,11 @@ mod tests {
             1
         );
         assert_eq!(
-            service.store.get_resource(server.id).await?.observed_state,
+            service
+                .store
+                .get_resource(server.id.as_uuid())
+                .await?
+                .observed_state,
             "DELETED"
         );
 
@@ -4597,7 +4797,7 @@ mod tests {
                 "registry-gated-request".to_owned(),
             )
             .await?;
-        let resource = service.store.get_resource(server.id).await?;
+        let resource = service.store.get_resource(server.id.as_uuid()).await?;
         let request: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         assert_eq!(request.placement_provider_id.as_deref(), Some("enabled"));
@@ -5188,12 +5388,14 @@ mod tests {
 
         let non_existent_id = Uuid::now_v7();
         assert!(matches!(
-            service.delete_server("project-a", non_existent_id).await,
+            service
+                .delete_server("project-a", ServerId::from_uuid(non_existent_id))
+                .await,
             Err(ComputeError::NotFound)
         ));
         assert!(matches!(
             service
-                .inspect_server("project-a", non_existent_id, "key-1")
+                .inspect_server("project-a", ServerId::from_uuid(non_existent_id), "key-1")
                 .await,
             Err(ComputeError::NotFound)
         ));
