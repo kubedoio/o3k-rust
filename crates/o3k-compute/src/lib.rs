@@ -100,6 +100,7 @@ pub struct ComputeService {
     agent_registry: Option<NodeRegistry>,
     cinder: Option<Arc<CinderClient>>,
     attachments: AttachmentOrchestrator,
+    binding_projector: Option<Arc<dyn PortBindingProjector>>,
 }
 
 #[derive(Clone)]
@@ -185,6 +186,31 @@ impl ResolvedCreateResolver for UnconfiguredResolvedCreateResolver {
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         Err(ProviderError::InvalidRequest)
     }
+}
+
+/// Projects terminal compute outcomes into the durable port binding state
+/// owned by the network control plane. Implementations are provided by the
+/// composition root (`o3kd` wires the network service); a `None` projector
+/// leaves binding state at the dispatch intent. Projection is best-effort:
+/// a failed projection is logged, never a compute failure.
+#[async_trait]
+pub trait PortBindingProjector: Send + Sync {
+    /// A terminal create outcome for the server owning `port_id`:
+    /// `succeeded` projects `bound`, otherwise `error`.
+    async fn project_create_outcome(
+        &self,
+        project_id: &str,
+        port_id: &str,
+        succeeded: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// The server owning `port_id` reached terminal deletion; the binding
+    /// must be cleared so the port is reusable.
+    async fn unbind_port(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
 #[derive(Debug, Clone)]
@@ -2023,7 +2049,19 @@ impl ComputeService {
             agent_registry: None,
             cinder: None,
             attachments,
+            binding_projector: None,
         }
+    }
+
+    /// Configures the projector that reflects terminal create/delete outcomes
+    /// into the durable port binding state of the network control plane.
+    #[must_use]
+    pub fn with_binding_projector(
+        mut self,
+        binding_projector: Arc<dyn PortBindingProjector>,
+    ) -> Self {
+        self.binding_projector = Some(binding_projector);
+        self
     }
 
     /// Configures the outbound Cinder client used for the durable attachment
@@ -2116,10 +2154,92 @@ impl ComputeService {
         update: &o3k_provider_contract::compute_proto::OperationUpdate,
     ) -> Result<o3k_store::OperationState, ComputeError> {
         let state = self.journal.apply_agent_update(update).await?;
+        if matches!(
+            state,
+            o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+        ) {
+            self.project_terminal_binding_outcome(update.operation_id.as_str(), state)
+                .await;
+        }
         if state == o3k_store::OperationState::Failed {
             self.compensate_failed_agent_create(update).await?;
         }
         Ok(state)
+    }
+
+    /// Reflects a terminal operation outcome into the durable port binding
+    /// state of the network control plane. The server's ports are read from
+    /// the durable desired-state snapshot, and the binding host comes from
+    /// the intent the network service recorded at dispatch. Projection is
+    /// best-effort and idempotent: it is a side observation, never a compute
+    /// failure, and a replayed terminal update projects the same state again.
+    async fn project_terminal_binding_outcome(
+        &self,
+        operation_id: &str,
+        state: o3k_store::OperationState,
+    ) {
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return;
+        };
+        let Ok(operation_id) = Uuid::parse_str(operation_id) else {
+            return;
+        };
+        let Ok(operation) = self.store.get_operation(operation_id).await else {
+            return;
+        };
+        let Ok(resource) = self.store.get_resource(operation.resource_id).await else {
+            return;
+        };
+        let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+        else {
+            return;
+        };
+        for port_id in &request.network_ids {
+            let outcome = match operation.kind.as_str() {
+                "create" => {
+                    projector
+                        .project_create_outcome(
+                            &request.project_id,
+                            port_id,
+                            state == o3k_store::OperationState::Succeeded,
+                        )
+                        .await
+                }
+                "lifecycle:delete" if state == o3k_store::OperationState::Succeeded => {
+                    projector.unbind_port(&request.project_id, port_id).await
+                }
+                _ => continue,
+            };
+            if let Err(error) = outcome {
+                tracing::warn!(
+                    operation_id = %operation_id,
+                    resource_id = %operation.resource_id,
+                    port_id = %port_id,
+                    error = %error,
+                    "port binding outcome projection rejected"
+                );
+            }
+        }
+    }
+
+    /// Clears the binding of every port named by the server's durable create
+    /// intent. Used when a delete reached terminal success, including the
+    /// already-deleted shortcut, where the delete completed in a previous
+    /// run. Best-effort and idempotent like `project_terminal_binding_outcome`.
+    async fn unbind_ports_from_intent(&self, request: &CreateInstanceRequest) {
+        let Some(projector) = self.binding_projector.as_ref() else {
+            return;
+        };
+        for port_id in &request.network_ids {
+            if let Err(error) = projector.unbind_port(&request.project_id, port_id).await {
+                tracing::warn!(
+                    resource_id = %request.o3k_server_id,
+                    port_id = %port_id,
+                    error = %error,
+                    "port unbind projection rejected"
+                );
+            }
+        }
     }
 
     /// Applies the same reverse-order compensation as the synchronous create
@@ -2555,7 +2675,19 @@ impl ComputeService {
                         {
                             Ok(o3k_store::OperationState::Failed) => {
                                 self.store.detach_server_keypair(server_id).await?;
+                                self.project_terminal_binding_outcome(
+                                    existing_request.operation_id.to_string().as_str(),
+                                    o3k_store::OperationState::Failed,
+                                )
+                                .await;
                                 return Err(ComputeError::Conflict);
+                            }
+                            Ok(o3k_store::OperationState::Succeeded) => {
+                                self.project_terminal_binding_outcome(
+                                    existing_request.operation_id.to_string().as_str(),
+                                    o3k_store::OperationState::Succeeded,
+                                )
+                                .await;
                             }
                             Ok(_) => {}
                             Err(error) => {
@@ -2707,7 +2839,19 @@ impl ComputeService {
                     match self.journal.reconcile_once(request.operation_id).await {
                         Ok(o3k_store::OperationState::Failed) => {
                             self.store.detach_server_keypair(id).await?;
+                            self.project_terminal_binding_outcome(
+                                request.operation_id.to_string().as_str(),
+                                o3k_store::OperationState::Failed,
+                            )
+                            .await;
                             return Err(ComputeError::Conflict);
+                        }
+                        Ok(o3k_store::OperationState::Succeeded) => {
+                            self.project_terminal_binding_outcome(
+                                request.operation_id.to_string().as_str(),
+                                o3k_store::OperationState::Succeeded,
+                            )
+                            .await;
                         }
                         Ok(_) => {}
                         Err(error) => {
@@ -2736,6 +2880,16 @@ impl ComputeService {
                 return Err(ComputeError::Reconcile(error));
             }
         };
+        if matches!(
+            reconcile_state,
+            o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+        ) {
+            self.project_terminal_binding_outcome(
+                request.operation_id.to_string().as_str(),
+                reconcile_state,
+            )
+            .await;
+        }
         if reconcile_state == o3k_store::OperationState::Failed {
             if let Ok(operation) = self.store.get_operation(request.operation_id).await {
                 tracing::warn!(
@@ -3165,6 +3319,9 @@ impl ComputeService {
                 .map_err(|_| ComputeError::Conflict)?;
             self.release_placement_allocation(id.as_uuid(), &intent)?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
+            // The delete reached terminal success in a previous run; clear
+            // any binding that was not yet unbound.
+            self.unbind_ports_from_intent(&intent).await;
             return Ok(());
         }
         if resource.provider_id.is_none() {
@@ -3193,6 +3350,13 @@ impl ComputeService {
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         self.release_placement_allocation(id.as_uuid(), &intent)?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
+        // Terminal delete success means the agent removed the host execution;
+        // the ports are reusable and must no longer claim a binding.
+        self.project_terminal_binding_outcome(
+            operation_id.to_string().as_str(),
+            o3k_store::OperationState::Succeeded,
+        )
+        .await;
         Ok(())
     }
 
@@ -3408,6 +3572,67 @@ mod tests {
     use super::*;
     use o3k_provider_contract::compute_proto as proto;
     use std::path::PathBuf;
+
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    enum ProjectorCall {
+        CreateOutcome {
+            project: String,
+            port: String,
+            succeeded: bool,
+        },
+        Unbind {
+            project: String,
+            port: String,
+        },
+    }
+
+    #[derive(Default)]
+    struct RecordingProjector {
+        calls: std::sync::Mutex<Vec<ProjectorCall>>,
+    }
+
+    #[async_trait]
+    impl PortBindingProjector for RecordingProjector {
+        async fn project_create_outcome(
+            &self,
+            project_id: &str,
+            port_id: &str,
+            succeeded: bool,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::CreateOutcome {
+                    project: project_id.to_owned(),
+                    port: port_id.to_owned(),
+                    succeeded,
+                });
+            Ok(())
+        }
+
+        async fn unbind_port(
+            &self,
+            project_id: &str,
+            port_id: &str,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.calls
+                .lock()
+                .map_err(|_| "recording projector lock poisoned".to_owned())?
+                .push(ProjectorCall::Unbind {
+                    project: project_id.to_owned(),
+                    port: port_id.to_owned(),
+                });
+            Ok(())
+        }
+    }
+
+    fn projector_calls(projector: &RecordingProjector) -> Vec<ProjectorCall> {
+        projector
+            .calls
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
 
     async fn service(label: &str) -> Result<ComputeService, ComputeError> {
         let path = PathBuf::from(format!(
@@ -4152,6 +4377,158 @@ mod tests {
         );
         std::fs::remove_file(database_path)?;
         std::fs::remove_dir_all(placement_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_agent_updates_project_create_binding_outcomes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-binding-projection-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_binding_projector(projector.clone());
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "binding-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-1".to_owned(), "port-2".to_owned()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "binding-projection".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        let failed = o3k_provider_contract::compute_proto::OperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: request.operation_id.to_string(),
+            resource_id: request.o3k_server_id.to_string(),
+            state: o3k_provider_contract::compute_proto::OperationState::Failed as i32,
+            error_category: o3k_provider_contract::compute_proto::ErrorCategory::Terminal as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            service.apply_agent_update(&failed).await?,
+            o3k_store::OperationState::Failed
+        );
+        assert_eq!(
+            projector_calls(&projector),
+            vec![
+                ProjectorCall::CreateOutcome {
+                    project: "project-a".to_owned(),
+                    port: "port-1".to_owned(),
+                    succeeded: false,
+                },
+                ProjectorCall::CreateOutcome {
+                    project: "project-a".to_owned(),
+                    port: "port-2".to_owned(),
+                    succeeded: false,
+                },
+            ]
+        );
+        // A replayed terminal update projects the same outcome again; the
+        // projection is an idempotent side observation.
+        service.apply_agent_update(&failed).await?;
+        assert_eq!(projector_calls(&projector).len(), 4);
+
+        // Terminal states are sticky in the journal: a later succeeded
+        // delivery of the same operation returns the terminal failed state
+        // and projects the same error outcome.
+        let succeeded = o3k_provider_contract::compute_proto::OperationUpdate {
+            operation_sequence: 2,
+            state: o3k_provider_contract::compute_proto::OperationState::Succeeded as i32,
+            ..failed.clone()
+        };
+        assert_eq!(
+            service.apply_agent_update(&succeeded).await?,
+            o3k_store::OperationState::Failed
+        );
+        let calls = projector_calls(&projector);
+        assert_eq!(calls.len(), 6);
+        assert!(calls[4..].iter().all(|call| matches!(
+            call,
+            ProjectorCall::CreateOutcome {
+                succeeded: false,
+                ..
+            }
+        )));
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_project_binding_outcomes_through_fake_provider()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-binding-lifecycle-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_binding_projector(projector.clone());
+        let flavor = service
+            .create_flavor("project-a", "tiny".to_owned(), 1, 512, 1)
+            .await?;
+        let server = service
+            .create_server(
+                "project-a",
+                "bound-server".to_owned(),
+                "image-1".to_owned(),
+                flavor.id,
+                vec!["port-1".to_owned()],
+                "binding-lifecycle".to_owned(),
+            )
+            .await?;
+        // The fake provider completes create synchronously; the reconcile
+        // path projects the terminal outcome.
+        assert_eq!(
+            projector_calls(&projector),
+            vec![ProjectorCall::CreateOutcome {
+                project: "project-a".to_owned(),
+                port: "port-1".to_owned(),
+                succeeded: true,
+            }]
+        );
+        service.delete_server("project-a", server.id).await?;
+        assert!(
+            projector_calls(&projector).contains(&ProjectorCall::Unbind {
+                project: "project-a".to_owned(),
+                port: "port-1".to_owned(),
+            })
+        );
+        // Deleting again takes the already-deleted shortcut and unbinds
+        // idempotently.
+        service.delete_server("project-a", server.id).await?;
+        assert_eq!(
+            projector_calls(&projector)
+                .iter()
+                .filter(|call| matches!(call, ProjectorCall::Unbind { .. }))
+                .count(),
+            2
+        );
+        std::fs::remove_file(database_path)?;
         Ok(())
     }
 

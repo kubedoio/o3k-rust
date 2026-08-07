@@ -20,6 +20,61 @@ struct DaemonCreateResolver {
     config_drive: o3k_config_drive::ConfigDriveStore,
 }
 
+/// Projects terminal compute outcomes into the durable port binding state of
+/// the network control plane. Wired only for the agent provider profile,
+/// where the resolver records binding intent at create dispatch.
+#[derive(Clone)]
+struct NetworkBindingProjector {
+    network: o3k_network::NetworkService,
+}
+
+#[async_trait]
+impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
+    async fn project_create_outcome(
+        &self,
+        project_id: &str,
+        port_id: &str,
+        succeeded: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let port_id = port_id.parse::<Uuid>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid port id {port_id:?}: {error}"),
+            )
+        })?;
+        let state = if succeeded {
+            o3k_network::PortBindingState::Bound
+        } else {
+            o3k_network::PortBindingState::Error
+        };
+        self.network
+            .project_create_outcome(project_id, port_id, state)
+            .await
+            .map(|_| ())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn unbind_port(
+        &self,
+        project_id: &str,
+        port_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let port_id = port_id.parse::<Uuid>().map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("invalid port id {port_id:?}: {error}"),
+            )
+        })?;
+        self.network
+            .unbind_port(project_id, port_id)
+            .await
+            .map(|_| ())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+}
+
 impl DaemonCreateResolver {
     fn config_drive_iso_path(
         generated_directory: &std::path::Path,
@@ -278,6 +333,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_artifact_resolver(resolver),
             ),
         )
+        .with_binding_projector(Arc::new(NetworkBindingProjector {
+            network: network_service.clone(),
+        }))
     } else {
         match config.provider {
             o3k_config::Provider::Libvirt => {
@@ -724,7 +782,8 @@ async fn shutdown_signal(state: o3k_api::AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::DaemonCreateResolver;
+    use super::{DaemonCreateResolver, NetworkBindingProjector};
+    use o3k_compute::PortBindingProjector;
     use std::net::Ipv4Addr;
     use std::path::Path;
     use std::sync::Arc;
@@ -860,6 +919,67 @@ mod tests {
         assert_eq!(after.binding_host, None);
         assert_eq!(after.binding_state, None);
         drop(resolver);
+        drop(network);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_binding_projector_reflects_outcomes_on_recorded_intent()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = std::env::temp_dir().join(format!("o3kd-projector-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+        let projector = NetworkBindingProjector {
+            network: network.clone(),
+        };
+        let net = network
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        network
+            .create_subnet(
+                "project-a",
+                net.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = network
+            .create_port("project-a", net.id, "one".to_owned())
+            .await?;
+        // Projection without a recorded intent is rejected (logged upstream).
+        assert!(
+            projector
+                .project_create_outcome("project-a", &port.id.to_string(), true)
+                .await
+                .is_err()
+        );
+        network
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        projector
+            .project_create_outcome("project-a", &port.id.to_string(), true)
+            .await?;
+        let bound = network.get_port("project-a", port.id).await?;
+        assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(bound.binding_state.as_deref(), Some("bound"));
+        projector
+            .unbind_port("project-a", &port.id.to_string())
+            .await?;
+        let unbound = network.get_port("project-a", port.id).await?;
+        assert_eq!(unbound.binding_host, None);
+        assert_eq!(unbound.binding_state, None);
+        drop(projector);
         drop(network);
         std::fs::remove_dir_all(&root)?;
         let _ = std::fs::remove_file(&sqlite_path);

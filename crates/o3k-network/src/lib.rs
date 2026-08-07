@@ -2076,6 +2076,57 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
+    /// Projects a terminal create outcome onto the port's binding using the
+    /// host recorded by the dispatch intent. The durable intent is
+    /// authoritative: the control plane selects the host, so a stale or
+    /// mismatched caller identity cannot override it. A port without a
+    /// recorded intent (never dispatched) rejects the projection.
+    pub async fn project_create_outcome(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+        state: PortBindingState,
+    ) -> Result<PortRecord, NetworkError> {
+        if !matches!(state, PortBindingState::Bound | PortBindingState::Error) {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        let port = self
+            .inner
+            .repository
+            .get_port(project_id, &port_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        let host = port.binding_host.as_deref().ok_or(NetworkError::Conflict)?;
+        self.inner
+            .repository
+            .update_port_binding(project_id, &port_id, Some(host), Some(state.as_str()))
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Clears the binding of a port whose server reached terminal deletion.
+    /// Idempotent: unbinding a port with no intent is a successful no-op.
+    pub async fn unbind_port(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+    ) -> Result<PortRecord, NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .get_port(project_id, &port_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        self.inner
+            .repository
+            .update_port_binding(project_id, &port_id, None, None)
+            .await
+            .map_err(map_store_error)
+    }
+
     async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.lock.lock().await
     }
@@ -2541,6 +2592,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_cross_instance_writers_conflict_deterministically_without_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("o3k-network-multiwriter-{}", Uuid::now_v7()));
+        let sqlite_path = path.with_extension("sqlite");
+        fs::create_dir_all(&path)?;
+        let store_a = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let store_b = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let service_a = NetworkService::open(&path, store_a).await?;
+        let service_b = NetworkService::open(&path, store_b).await?;
+        // Two writers create a network with the same name: exactly one wins.
+        let (first, second) = tokio::join!(
+            service_a.create_network("project-a", "flat".to_owned()),
+            service_b.create_network("project-a", "flat".to_owned()),
+        );
+        assert_eq!([&first, &second].iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            [&first, &second]
+                .iter()
+                .filter(|r| matches!(r, Err(NetworkError::Conflict)))
+                .count(),
+            1
+        );
+        let network_id = first
+            .or(second)
+            .map_err(|_| "expected one network create to succeed")?
+            .id;
+        // Same cidr on the same network: exactly one subnet survives.
+        let (subnet_first, subnet_second) = tokio::join!(
+            service_a.create_subnet(
+                "project-a",
+                network_id,
+                "lab".to_owned(),
+                "192.0.2.0/27".to_owned(),
+                None,
+                None,
+                None,
+            ),
+            service_b.create_subnet(
+                "project-a",
+                network_id,
+                "lab".to_owned(),
+                "192.0.2.0/27".to_owned(),
+                None,
+                None,
+                None,
+            ),
+        );
+        assert_eq!(
+            [&subnet_first, &subnet_second]
+                .iter()
+                .filter(|r| r.is_ok())
+                .count(),
+            1
+        );
+        assert_eq!(
+            [&subnet_first, &subnet_second]
+                .iter()
+                .filter(|r| matches!(r, Err(NetworkError::Conflict)))
+                .count(),
+            1
+        );
+        // 40 concurrent port creates across two writers over a 29-address
+        // pool: every allocation is distinct and the pool is exhausted
+        // deterministically.
+        let mut handles = Vec::new();
+        for index in 0..40 {
+            let service = if index % 2 == 0 {
+                service_a.clone()
+            } else {
+                service_b.clone()
+            };
+            handles.push(tokio::spawn(async move {
+                service
+                    .create_port("project-a", network_id, format!("port-{index}"))
+                    .await
+            }));
+        }
+        let mut ports = Vec::new();
+        let mut exhausted = 0;
+        for handle in handles {
+            match handle.await? {
+                Ok(port) => ports.push(port),
+                Err(NetworkError::PoolExhausted) => exhausted += 1,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert_eq!(ports.len(), 29);
+        assert_eq!(exhausted, 11);
+        let ips: HashSet<Ipv4Addr> = ports.iter().map(|port| port.fixed_ip).collect();
+        let macs: HashSet<String> = ports
+            .iter()
+            .map(|port| port.mac_address.to_ascii_lowercase())
+            .collect();
+        assert_eq!(ports.len(), ips.len());
+        assert_eq!(ports.len(), macs.len());
+        // Concurrent deletion of one port: exactly one writer wins.
+        let (delete_first, delete_second) = tokio::join!(
+            service_a.delete_port("project-a", ports[0].id),
+            service_b.delete_port("project-a", ports[0].id),
+        );
+        assert_eq!(
+            [&delete_first, &delete_second]
+                .iter()
+                .filter(|r| r.is_ok())
+                .count(),
+            1
+        );
+        assert_eq!(
+            [&delete_first, &delete_second]
+                .iter()
+                .filter(|r| matches!(r, Err(NetworkError::NotFound)))
+                .count(),
+            1
+        );
+        drop(service_a);
+        drop(service_b);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn binding_state_strings_round_trip_through_canonical_parsing() {
         for state in [
             PortBindingState::Binding,
@@ -2704,6 +2879,99 @@ mod tests {
             reopened.get_network("project-a", network.id).await,
             Err(NetworkError::NotFound)
         ));
+        drop(reopened);
+        drop(reopened_store);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_outcome_projection_and_unbind_are_durable_and_idempotent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("create-outcome");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        let _subnet = service
+            .create_subnet(
+                "project-a",
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port("project-a", network.id, "one".to_owned())
+            .await?;
+        // Without a recorded intent the projection is rejected.
+        assert!(matches!(
+            service
+                .project_create_outcome("project-a", port.id, PortBindingState::Bound)
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        service
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        // The observed state is set on the host recorded by the intent.
+        let bound = service
+            .project_create_outcome("project-a", port.id, PortBindingState::Bound)
+            .await?;
+        assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(bound.binding_state.as_deref(), Some("bound"));
+        // A failed outcome after a fresh intent projects `error`.
+        service
+            .project_binding_observation("project-a", port.id, "compute-1", "down")
+            .await?;
+        service
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        let errored = service
+            .project_create_outcome("project-a", port.id, PortBindingState::Error)
+            .await?;
+        assert_eq!(errored.binding_state.as_deref(), Some("error"));
+        // Only terminal create outcomes are projectable.
+        assert!(matches!(
+            service
+                .project_create_outcome("project-a", port.id, PortBindingState::Binding)
+                .await,
+            Err(NetworkError::InvalidRequest)
+        ));
+        assert!(matches!(
+            service
+                .project_create_outcome("project-a", Uuid::now_v7(), PortBindingState::Bound)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        // Unbind clears the binding idempotently and is durable.
+        let unbound = service.unbind_port("project-a", port.id).await?;
+        assert_eq!(unbound.binding_host, None);
+        assert_eq!(unbound.binding_state, None);
+        let again = service.unbind_port("project-a", port.id).await?;
+        assert_eq!(again.binding_host, None);
+        assert!(matches!(
+            service.unbind_port("project-a", Uuid::now_v7()).await,
+            Err(NetworkError::NotFound)
+        ));
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let restored = reopened.get_port("project-a", port.id).await?;
+        assert_eq!(restored.binding_host, None);
+        assert_eq!(restored.binding_state, None);
         drop(reopened);
         drop(reopened_store);
         fs::remove_dir_all(path)?;
