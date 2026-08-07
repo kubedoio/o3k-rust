@@ -13,6 +13,26 @@ application_crates = [
   "o3k-reconciler",
 ]
 
+# Every other workspace crate under crates/ is an infrastructure or adapter
+# crate and is deliberately NOT an application crate. This list must be
+# exhaustive with application_crates: the checker fails when a workspace crate
+# is unclassified, so a new crate cannot silently escape the boundary checks.
+non_application_crates = [
+  "o3k-api",
+  "o3k-cellhv",
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-config",
+  "o3k-config-drive",
+  "o3k-console",
+  "o3k-dhcp",
+  "o3k-domain",
+  "o3k-libvirt",
+  "o3k-provider",
+  "o3k-provider-contract",
+  "o3k-store",
+]
+
 [domain]
 crate = "o3k-domain"
 allowed_dependencies = ["serde", "thiserror", "uuid"]

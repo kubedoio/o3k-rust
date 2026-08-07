@@ -274,7 +274,12 @@ translation.
 `contracts/core-architecture-boundaries.toml` records machine-checkable
 boundaries and temporary known debt.
 
-Normal CI must fail when:
+The ratchet activates in normal CI when the contract status is `accepted`.
+While the contract is not yet accepted (e.g. `proposed`, awaiting the human
+decision PR), the checker runs in deferred mode: it still validates the
+contract structure and the exhaustive crate classification, but it does not
+reject changes based on boundary rules that have not been accepted. Once the
+decision is accepted, normal CI must fail when:
 
 - the domain gains a forbidden outward dependency;
 - a new application crate depends on protocol/database/execution adapters that
