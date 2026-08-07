@@ -1,0 +1,76 @@
+schema_version = 1
+status = "proposed"
+normative_adr = "docs/adr/ADR-0160-service-topology-and-execution-boundaries.md"
+normative_spec = "docs/specs/SPEC-0025-rust-rewrite-and-architecture-convergence.md"
+
+application_crates = [
+  "o3k-identity",
+  "o3k-image",
+  "o3k-network",
+  "o3k-compute",
+  "o3k-placement",
+  "o3k-scheduler",
+  "o3k-reconciler",
+]
+
+[domain]
+crate = "o3k-domain"
+allowed_dependencies = ["serde", "thiserror", "uuid"]
+forbidden_source_markers = [
+  "axum::",
+  "sqlx::",
+  "tonic::",
+  "prost::",
+  "hyper::",
+  "o3k_api",
+  "o3k_store",
+  "o3k_provider",
+  "o3k_provider_contract",
+  "o3k_compute_agent",
+  "o3k_libvirt",
+  "o3k_cellhv",
+  "o3k_cinder",
+]
+
+[application]
+# These dependencies are adapter/framework concerns. Application crates may not
+# acquire new dependencies on them. Existing debt is listed explicitly below
+# and is expected to shrink.
+hard_forbidden_dependencies = [
+  "o3k-api",
+  "axum",
+  "sqlx",
+  "hyper",
+  "tonic",
+  "rustls",
+  "o3k-libvirt",
+  "o3k-cellhv",
+]
+
+concrete_store_symbol = "SqliteStore"
+concrete_store_debt_files = [
+  "crates/o3k-compute/src/lib.rs",
+  "crates/o3k-identity/src/lib.rs",
+]
+
+[application.adapter_dependency_debt]
+# o3k-compute currently contains execution/external-service adapter logic that
+# should move behind bounded application ports. These are accepted as current
+# migration debt only; no additional dependency may be added silently.
+o3k-compute = [
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-provider-contract",
+  "prost",
+]
+
+# o3k-reconciler currently reads agent wire events directly. This should
+# converge toward application/domain observations behind an adapter boundary.
+o3k-reconciler = [
+  "o3k-provider-contract",
+]
+
+[ratchet]
+allow_debt_reduction = true
+allow_new_debt = false
+allow_broader_debt = false
