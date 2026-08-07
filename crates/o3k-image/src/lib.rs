@@ -1281,6 +1281,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_uploads_serialize_and_keep_one_published_artifact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("concurrent-upload");
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "test".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        let bytes_a = vec![0x41u8; 4096];
+        let bytes_b = vec![0x42u8; 4096];
+        let (first, second) = tokio::join!(
+            service.upload("project-a", image.id, &bytes_a),
+            service.upload("project-a", image.id, &bytes_b),
+        );
+        // The mutation lock serializes the two uploads: exactly one activates
+        // the record and the loser sees the already-active conflict without
+        // touching the published content file.
+        assert_eq!([&first, &second].iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(
+            [&first, &second]
+                .iter()
+                .filter(|r| matches!(r, Err(ImageError::Conflict)))
+                .count(),
+            1
+        );
+        let winner = first
+            .or(second)
+            .map_err(|_| "expected exactly one upload to succeed")?;
+        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        assert_eq!(artifact.size, 4096);
+        let sealed = format!("{:x}", Sha256::digest(&artifact.content));
+        assert_eq!(winner.checksum.as_deref(), Some(sealed.as_str()));
+        assert!(artifact.content == bytes_a || artifact.content == bytes_b);
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn active_metadata_with_missing_artifact_fails_closed()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("missing-artifact");
