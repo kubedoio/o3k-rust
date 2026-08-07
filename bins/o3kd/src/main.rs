@@ -69,13 +69,6 @@ impl DaemonCreateResolver {
                 .get_port(&request.project_id, port_id)
                 .await
                 .map_err(|_| ProviderError::InvalidRequest)?;
-            self.network
-                .record_binding_intent(&request.project_id, port_id, agent_id)
-                .await
-                .map_err(|error| match error {
-                    o3k_network::NetworkError::Conflict => ProviderError::Conflict,
-                    _ => ProviderError::InvalidRequest,
-                })?;
             let subnet = self
                 .network
                 .get_subnet(
@@ -84,6 +77,16 @@ impl DaemonCreateResolver {
                 )
                 .await
                 .map_err(|_| ProviderError::InvalidRequest)?;
+            // Record the selected-host intent only after the full attachment
+            // resolved; a port whose subnet cannot be resolved is never
+            // dispatched and must not carry a binding intent.
+            self.network
+                .record_binding_intent(&request.project_id, port_id, agent_id)
+                .await
+                .map_err(|error| match error {
+                    o3k_network::NetworkError::Conflict => ProviderError::Conflict,
+                    _ => ProviderError::InvalidRequest,
+                })?;
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
             attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
@@ -722,7 +725,9 @@ async fn shutdown_signal(state: o3k_api::AppState) {
 #[cfg(test)]
 mod tests {
     use super::DaemonCreateResolver;
+    use std::net::Ipv4Addr;
     use std::path::Path;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     #[test]
@@ -752,5 +757,114 @@ mod tests {
             Some("/tmp/valid-output.json"),
             Some("/tmp/valid-resource-file")
         ));
+    }
+
+    #[tokio::test]
+    async fn binding_intent_is_recorded_only_after_attachment_resolution_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-resolver-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let image = o3k_image::ImageService::open(
+            root.join("images"),
+            o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
+            store.clone(),
+        )
+        .await?;
+        let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+        let resolver = DaemonCreateResolver {
+            image,
+            network: network.clone(),
+            config_drive,
+        };
+        let net = network
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        let _subnet = network
+            .create_subnet(
+                "project-a",
+                net.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = network
+            .create_port("project-a", net.id, "one".to_owned())
+            .await?;
+        let request = o3k_provider::CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 1,
+            image_id: None,
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec![port.id.to_string()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "test".to_owned(),
+        };
+        let (attachments, _) = resolver.resolve_network(&request, "compute-1").await?;
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].port_id, port.id.to_string());
+        let bound = network.get_port("project-a", port.id).await?;
+        assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(bound.binding_state.as_deref(), Some("binding"));
+
+        let unresolved_port = o3k_store::PortRecord {
+            id: Uuid::now_v7(),
+            network_id: net.id,
+            subnet_id: None,
+            project_id: "project-a".to_owned(),
+            name: "legacy-unresolvable".to_owned(),
+            mac_address: "02:00:00:00:00:77".to_owned(),
+            fixed_ip: Ipv4Addr::new(192, 0, 2, 7),
+            status: "ACTIVE".to_owned(),
+            binding_host: None,
+            binding_state: None,
+        };
+        store.insert_port(&unresolved_port).await?;
+        let unresolved = o3k_provider::CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 1,
+            image_id: None,
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec![unresolved_port.id.to_string()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "test".to_owned(),
+        };
+        let failed = resolver.resolve_network(&unresolved, "compute-1").await;
+        assert!(failed.is_err());
+        let after = network.get_port("project-a", unresolved_port.id).await?;
+        assert_eq!(after.binding_host, None);
+        assert_eq!(after.binding_state, None);
+        drop(resolver);
+        drop(network);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
     }
 }
