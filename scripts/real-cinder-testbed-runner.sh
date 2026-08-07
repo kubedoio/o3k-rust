@@ -1332,13 +1332,27 @@ write("foreign-state-result.json", {
     "before": os.path.join(base, "foreign-state-before.json"),
     "after": os.path.join(base, "foreign-state-after.json"),
 })
-write("tempest-cinder-summary.json", {
-    "evidence_tier": "tempest",
-    "status": "not-executed",
-    "reason": "real Cinder profile must be running for the pinned Tempest subset",
-    "tempest_revision": "", "cinder_tempest_plugin": plugin_pin,
-    "test_ids": [], "passed": 0, "failed": 0, "skipped": 0,
-})
+# Tempest evidence reflects the actual subset run when one happened (the
+# tempest block copies tests/tempest-evidence/tempest-cinder-summary.json into
+# the evidence dir before this artifact generator runs); fall back to an honest
+# not-executed record otherwise.
+tempest_summary = os.path.join(base, "tempest-cinder-summary.json")
+if os.path.exists(tempest_summary):
+    try:
+        with open(tempest_summary, encoding="utf-8") as stream:
+            real_summary = json.load(stream)
+        real_summary.setdefault("cinder_tempest_plugin", plugin_pin)
+        write("tempest-cinder-summary.json", real_summary)
+    except (OSError, json.JSONDecodeError):
+        pass
+if not os.path.exists(os.path.join(base, "tempest-cinder-summary.json")):
+    write("tempest-cinder-summary.json", {
+        "evidence_tier": "tempest",
+        "status": "not-executed",
+        "reason": "real Cinder profile must be running for the pinned Tempest subset",
+        "tempest_revision": "", "cinder_tempest_plugin": plugin_pin,
+        "test_ids": [], "passed": 0, "failed": 0, "skipped": 0,
+    })
 write("real-cinder-runner-result.json", {
     "status": "runner-completed",
     "reason": "runner completed; aggregate pass/fail is decided by the post-run guard",
