@@ -1158,6 +1158,7 @@ export O3K_TEMPEST_VENV="${VENV_DIR}"
 TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 mkdir -p "${TEMPEST_WORKSPACE}"
 "${VENV_DIR}/bin/pip" install -q "tempest==${TEMPEST_PIN}" "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
+  "testrepository" "python-subunit" "stestr" \
   > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
 CLOUDS_DIR="${STATE_ROOT}/tempest-clouds"
 mkdir -p "${CLOUDS_DIR}/.config/openstack"
