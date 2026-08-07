@@ -186,6 +186,10 @@ admin_project_name = admin
 admin_domain_name = Default
 admin_user_domain_name = Default
 
+# O3K advertises the external Cinder service as service type volumev3.
+[volume]
+catalog_type = volumev3
+
 [validation]
 run_validation = False
 EOF
