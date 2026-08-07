@@ -1163,9 +1163,17 @@ fi
 "${TEMPEST_VENV}/bin/pip" install -q --upgrade pip wheel setuptools >/dev/null 2>&1 || true
 "${TEMPEST_VENV}/bin/pip" install -q "tempest==${TEMPEST_PIN}" \
   "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
-  "oslo_utils>=7.3.0" \
+  "oslo_utils>=7.3.0,<10.0.0" \
   "testrepository" "python-subunit" "stestr" \
   > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
+"${TEMPEST_VENV}/bin/pip" freeze 2>/dev/null \
+  | grep -iE "oslo_utils|tempest|stestr|testrepository|subunit" \
+  > "${EVIDENCE_DIR}/tempest-venv-freeze.txt" || true
+if ! "${TEMPEST_VENV}/bin/python" -c "import oslo_utils.secretutils as s; s.md5" 2>/dev/null; then
+  echo "WARN: oslo_utils in tempest venv lacks secretutils.md5; upgrading"
+  "${TEMPEST_VENV}/bin/pip" install -q --upgrade "oslo_utils>=7.3.0,<10.0.0" \
+    >> "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || true
+fi
 export O3K_TEMPEST_VENV="${TEMPEST_VENV}"
 export O3K_TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 export O3K_PW="${O3K_PW}"
