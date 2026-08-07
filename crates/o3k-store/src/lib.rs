@@ -2644,14 +2644,23 @@ impl DurableStore for SqliteStore {
 // The port implementations delegate to the inherent adapter methods, which
 // remain the canonical SQL bodies. Inherent methods take name-resolution
 // precedence over trait methods, so `self.method(...)` inside these bodies
-// resolves to the inherent implementation and cannot recurse into the trait.
+// resolves to the inherent implementation and does not recurse into the trait.
 //
-// Hazard: this is only safe while every inherent method keeps the exact
-// signature of its trait counterpart. If an inherent signature changes
-// without updating the delegation below, the call silently falls through to
-// the trait method and recurses until stack exhaustion. When an inherent
-// method is removed, delete its delegation as well (its other callers make
-// the removal a compile error, so the delegation is the only silent path).
+// Hazard: silent infinite recursion (stack exhaustion at runtime, not a
+// compile error) is still possible in exactly two cases:
+//   1. the inherent method is removed or renamed without deleting its
+//      delegation below — the trait method is then the only candidate, and
+//      the delegation calls itself (application code calls these methods
+//      through the ports, so removal is not guaranteed to error elsewhere);
+//   2. the inherent receiver changes from `&self` to `&mut self` — through
+//      `&SqliteStore` only the `&self` trait method is applicable, so the
+//      delegation resolves to itself.
+// An argument or return-type drift, by contrast, is a compile error at the
+// delegation site: once name resolution commits to the inherent method there
+// is no fallback to the trait. Keep each delegation paired with its inherent
+// method; the port conformance tests exercise every method and turn any
+// recursion into a loud test failure, but they are the safety net, not the
+// primary guard.
 
 #[async_trait]
 impl IdentityRepository for SqliteStore {
