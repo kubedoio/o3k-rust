@@ -50,6 +50,7 @@ hard_forbidden_dependencies = [
 # They are migration debt and may occur only where listed under
 # adapter_dependency_debt. The allowed set must shrink rather than spread.
 ratcheted_adapter_dependencies = [
+  "o3k-store",
   "o3k-cinder",
   "o3k-compute-agent",
   "o3k-provider-contract",
@@ -64,19 +65,29 @@ concrete_store_debt_files = [
 ]
 
 [application.adapter_dependency_debt]
-# o3k-compute currently contains execution/external-service adapter logic that
-# should move behind bounded application ports. These are accepted as current
-# migration debt only; no additional dependency may be added silently.
+# The current store crate contains both repository contracts and the concrete
+# SQLite adapter. Application dependencies on it are migration debt until
+# narrow ports move inward and SQLite remains selected only at composition.
+o3k-identity = [
+  "o3k-store",
+]
+
+# o3k-compute currently contains persistence, execution, wire, and
+# external-service adapter coupling that should move behind bounded
+# application ports. These are accepted as current migration debt only.
 o3k-compute = [
+  "o3k-store",
   "o3k-cinder",
   "o3k-compute-agent",
   "o3k-provider-contract",
   "prost",
 ]
 
-# o3k-reconciler currently reads agent wire events directly. This should
-# converge toward application/domain observations behind an adapter boundary.
+# o3k-reconciler currently depends on the store adapter crate and reads agent
+# wire events directly. Both should converge toward application/domain ports
+# and typed observations.
 o3k-reconciler = [
+  "o3k-store",
   "o3k-provider-contract",
 ]
 
