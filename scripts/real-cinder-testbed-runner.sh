@@ -1154,8 +1154,20 @@ echo "==> Workflow: run the pinned Tempest subset against the live profile..."
 # for the O3K port.
 export O3K_CINDER_ENDPOINT="${CINDER_PORT}"
 export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
-export O3K_TEMPEST_VENV="${VENV_DIR}"
+# A dedicated Tempest venv avoids pin conflicts with the Cinder venv (tempest
+# 46 requires a newer oslo_utils than cinder 28's pins).
+TEMPEST_VENV="${STATE_ROOT}/tempest-venv"
+if [ ! -x "${TEMPEST_VENV}/bin/python" ]; then
+  python3 -m venv "${TEMPEST_VENV}"
+fi
+"${TEMPEST_VENV}/bin/pip" install -q --upgrade pip wheel setuptools >/dev/null 2>&1 || true
+"${TEMPEST_VENV}/bin/pip" install -q "tempest==${TEMPEST_PIN}" \
+  "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
+  "testrepository" "python-subunit" "stestr" \
+  > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
+export O3K_TEMPEST_VENV="${TEMPEST_VENV}"
 export O3K_TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
+export O3K_PW="${O3K_PW}"
 TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 mkdir -p "${TEMPEST_WORKSPACE}"
 "${VENV_DIR}/bin/pip" install -q "tempest==${TEMPEST_PIN}" "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
