@@ -65,6 +65,7 @@ case "${CINDER_PROFILE}" in
   gazpacho)
     CINDER_PYPI_PIN="28.0.0"
     CINDER_TEMPEST_PLUGIN_PIN="1.21.0"
+    TEMPEST_PIN="46.0.0"
     CINDER_DISPLAY="Cinder 28.0.0 (2026.1 Gazpacho)"
     RELEASE_SERIES="2026.1"
     RELEASE_CODENAME="Gazpacho"
@@ -72,6 +73,7 @@ case "${CINDER_PROFILE}" in
   flamingo)
     CINDER_PYPI_PIN="27.0.0"
     CINDER_TEMPEST_PLUGIN_PIN="1.19.0"
+    TEMPEST_PIN="45.0.0"
     CINDER_DISPLAY="Cinder 27.0.0 (2025.2 Flamingo)"
     RELEASE_SERIES="2025.2"
     RELEASE_CODENAME="Flamingo"
@@ -1138,6 +1140,59 @@ done
 [ "${DETACH_OK}" = "yes" ] || { echo "ERROR: volume did not return to available (status=${VOL_STATUS})"; exit 1; }
 RUN_PHASE="volume-detached"
 echo "    volume ${VOLUME_ID} is available again"
+
+# ------------------------------------------------------------------------------
+# Pinned Tempest subset against the LIVE profile (before teardown). The subset
+# runs only the operations in the accepted compatibility manifest; every other
+# test is an explicit skip. The runner venv installs the pinned Tempest and
+# cinder-tempest-plugin so the evidence reflects an actual execution, not a
+# NOT_READY placeholder.
+# ------------------------------------------------------------------------------
+RUN_PHASE="tempest"
+echo "==> Workflow: run the pinned Tempest subset against the live profile..."
+export O3K_CINDER_ENDPOINT="http://127.0.0.1:${CINDER_PORT}"
+export O3K_TEMPEST_VENV="${VENV_DIR}"
+TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
+mkdir -p "${TEMPEST_WORKSPACE}"
+"${VENV_DIR}/bin/pip" install -q "tempest==${TEMPEST_PIN}" "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
+  > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
+CLOUDS_DIR="${STATE_ROOT}/tempest-clouds"
+mkdir -p "${CLOUDS_DIR}/.config/openstack"
+cat > "${CLOUDS_DIR}/.config/openstack/clouds.yaml" <<EOF
+clouds:
+  o3k-protected:
+    auth:
+      auth_url: "http://127.0.0.1:${O3K_PORT}/v3"
+      username: "admin"
+      password: "${O3K_PW}"
+      project_name: "admin"
+      project_domain_name: "Default"
+      user_domain_name: "Default"
+    region_name: "RegionOne"
+    interface: "public"
+    identity_api_version: 3
+EOF
+export OS_CLIENT_CONFIG_FILE="${CLOUDS_DIR}/.config/openstack/clouds.yaml"
+export HOME="${CLOUDS_DIR}"
+(
+  cd "${TEMPEST_WORKSPACE}" || exit 1
+  "${VENV_DIR}/bin/tempest" init >/dev/null 2>&1 || true
+)
+cat >> "${TEMPEST_WORKSPACE}/etc/tempest.conf" <<EOF
+
+[identity]
+uri = http://127.0.0.1:${O3K_PORT}/v3/
+auth_version = v3
+
+[validation]
+run_validation = False
+EOF
+PATH="${VENV_DIR}/bin:${PATH}" bash "${REPO_ROOT}/tests/tempest-cinder-subset.sh" --keep \
+  || echo "WARN: tempest subset recorded non-passing status"
+if [ -f "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" ]; then
+  cp "${REPO_ROOT}/tests/tempest-evidence/tempest-cinder-summary.json" "${EVIDENCE_DIR}/tempest-cinder-summary.json" || true
+  cp "${REPO_ROOT}/tests/tempest-evidence/tempest-status.yaml" "${EVIDENCE_DIR}/tempest-status.yaml" 2>/dev/null || true
+fi
 
 RUN_PHASE="cleanup"
 echo "==> Workflow: delete all run-owned resources and verify cleanup..."
