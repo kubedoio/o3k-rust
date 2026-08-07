@@ -104,15 +104,16 @@ test_path=${TEMPEST_PKG_DIR}/test_discover
 top_dir=${TEMPEST_PKG_DIR}
 group_regex=([^\.]*\.)*
 EOF
-  # Generate the full tempest.conf via tempest init, then apply the profile
-  # auth/identity overrides so the tests talk to O3K and the real Cinder.
+  # Write a complete tempest.conf deterministically (tempest reads
+  # ${TEMPEST_CONFIG_DIR}/${TEMPEST_CONFIG}, falling back to /etc/tempest when
+  # the file is absent). The auth/identity sections target O3K and the real
+  # Cinder service.
   O3K_AUTH_URL="http://127.0.0.1:${O3K_PORT_NO_HOST}/v3"
   O3K_PW="${O3K_PW:-password}"
-  (
-    cd "${TEMPEST_WORKSPACE}" || exit 1
-    "${TEMPEST_VENV_PY}" -m tempest init >/dev/null 2>&1 || true
-  )
-  cat >> "${TEMPEST_WORKSPACE}/etc/tempest.conf" <<EOF
+  cat > "${TEMPEST_WORKSPACE}/tempest.conf" <<EOF
+[DEFAULT]
+log_file = ${PROFILE_DIR}/tempest.log
+service_available = true
 
 [identity]
 uri = ${O3K_AUTH_URL}/
@@ -126,17 +127,23 @@ admin_project_name = admin
 admin_domain_name = Default
 admin_user_domain_name = Default
 
+[compute]
+image_ref =
+
+[volume]
+volume_type =
+
 [validation]
 run_validation = False
 EOF
   (
     cd "${TEMPEST_WORKSPACE}" || exit 1
-    # Tempest reads ${TEMPEST_CONFIG_DIR}/tempest.conf (tempest init writes
-    # etc/tempest.conf in the workspace).
-    export TEMPEST_CONFIG_DIR="${TEMPEST_WORKSPACE}/etc"
+    export TEMPEST_CONFIG_DIR="${TEMPEST_WORKSPACE}"
+    export TEMPEST_CONFIG="tempest.conf"
     "${TEMPEST_VENV_PY}" -m stestr init >/dev/null 2>&1 || true
     # stestr run takes positional regex filters (full test IDs); config is read
-    # from TEMPEST_CONFIG_DIR. --concurrency 1 avoids parallel DB conflicts.
+    # from TEMPEST_CONFIG_DIR/TEMPEST_CONFIG. --concurrency 1 avoids parallel DB
+    # conflicts.
     "${TEMPEST_VENV_PY}" -m stestr run --concurrency 1 "${ALLOWED_TEST_IDS[@]}" \
       > "${PROFILE_DIR}/tempest.log" 2>&1 || true
     # Convert the subunit stream to JUnit XML for the summary parser.
