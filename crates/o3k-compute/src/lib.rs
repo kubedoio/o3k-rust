@@ -3149,10 +3149,15 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        if matches!(
-            server_state_from_storage(&resource.observed_state),
-            Ok(ServerState::Deleted)
-        ) {
+        // The destructive path must fail closed on corrupt lifecycle state:
+        // deleting a row whose state cannot be decoded would dispatch a
+        // provider delete on an unknown instance and overwrite the evidence
+        // needed for repair. The decode error is propagated before any
+        // lifecycle operation begins; only a decodable `Deleted` row takes
+        // the already-deleted shortcut.
+        let observed =
+            server_state_from_storage(&resource.observed_state).map_err(ComputeError::Store)?;
+        if observed == ServerState::Deleted {
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
             self.release_placement_allocation(id.as_uuid(), &intent)?;
@@ -3476,6 +3481,19 @@ mod tests {
                 .await,
             Err(ComputeError::Conflict)
         ));
+        // The destructive path must also fail closed: delete rejects the
+        // corrupt row instead of dispatching a provider delete on an unknown
+        // instance and overwriting the evidence needed for repair.
+        assert!(matches!(
+            service
+                .delete_server("project-a", ServerId::from_uuid(corrupt_id))
+                .await,
+            Err(ComputeError::Store(StoreError::Corrupt(_)))
+        ));
+        assert_eq!(
+            service.store.get_resource(corrupt_id).await?.observed_state,
+            "garbage-state"
+        );
         Ok(())
     }
 
