@@ -1163,6 +1163,7 @@ fi
 "${TEMPEST_VENV}/bin/pip" install -q --upgrade pip wheel setuptools >/dev/null 2>&1 || true
 "${TEMPEST_VENV}/bin/pip" install -q "tempest==${TEMPEST_PIN}" \
   "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
+  "oslo_utils>=7.3.0" \
   "testrepository" "python-subunit" "stestr" \
   > "${EVIDENCE_DIR}/tempest-install.log" 2>&1 || echo "WARN: tempest install failed"
 export O3K_TEMPEST_VENV="${TEMPEST_VENV}"
