@@ -48,7 +48,7 @@ SELFTEST="${O3K_PREFLIGHT_SELFTEST:-0}"
 SKIP_INSTALL="${O3K_PREFLIGHT_SKIP_INSTALL:-0}"
 WORKDIR="${O3K_PREFLIGHT_WORKDIR:-$(mktemp -d "${TMPDIR:-/tmp}/o3k-tempest-preflight.XXXXXX")}"
 RESULT_PATH="${O3K_PREFLIGHT_RESULT:-${WORKDIR}/tempest-preflight-result.json}"
-mkdir -p "${WORKDIR}"
+mkdir -p "${WORKDIR}" "$(dirname "${RESULT_PATH}")"
 if [ "${SELFTEST}" = "1" ]; then
   TEMPEST_VENV=""
 else
