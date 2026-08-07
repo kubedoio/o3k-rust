@@ -13,6 +13,7 @@ workspace = true
 async-trait.workspace = true
 o3k-cinder = { path = "../o3k-cinder" }
 o3k-compute-agent = { path = "../o3k-compute-agent" }
+o3k-domain = { path = "../o3k-domain" }
 o3k-provider = { path = "../o3k-provider" }
 o3k-provider-contract = { path = "../o3k-provider-contract" }
 o3k-placement = { path = "../o3k-placement" }

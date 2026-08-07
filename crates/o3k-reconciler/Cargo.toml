@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+o3k-domain = { path = "../o3k-domain" }
 o3k-provider = { path = "../o3k-provider" }
 o3k-provider-contract = { path = "../o3k-provider-contract" }
 o3k-store = { path = "../o3k-store" }

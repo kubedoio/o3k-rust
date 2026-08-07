@@ -18,6 +18,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod artifact_transfer;
+mod server_state;
 
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so
@@ -41,6 +42,7 @@ pub use artifact_transfer::{
     ArtifactTransferRecord, ArtifactTransferState, ArtifactTransferUpdate,
     MAX_ARTIFACT_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_ARTIFACT_TRANSFER_RETRIES,
 };
+pub use server_state::{server_state_from_storage, server_state_to_storage};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseHealth {

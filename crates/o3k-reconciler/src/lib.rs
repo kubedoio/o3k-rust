@@ -3,13 +3,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use o3k_domain::ServerState;
 use o3k_provider::{
     ComputeProvider, CreateInstanceRequest, OperationState as ProviderOperationState, ProviderError,
 };
 use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_store::{
     DurableStore, ObservationUpdate, OperationRecord, OperationState, ProviderReference,
-    ResourceRecord, StoreError,
+    ResourceRecord, StoreError, server_state_to_storage,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -199,7 +200,7 @@ where
             observed_generation: 0,
             desired_state: serde_json::to_string(request)
                 .map_err(|_| ReconcileError::InvalidIntent)?,
-            observed_state: "requested".to_owned(),
+            observed_state: server_state_to_storage(ServerState::Requested).to_owned(),
             provider_id: None,
         };
         let operation = OperationRecord {
@@ -327,7 +328,7 @@ where
                     resource_id,
                     resource.generation,
                     &resource.desired_state,
-                    "ERROR",
+                    server_state_to_storage(ServerState::Error),
                     resource.generation,
                     resource.provider_id.as_deref(),
                 )
@@ -887,20 +888,14 @@ where
         provider_id: String,
     ) -> Result<OperationState, ReconcileError> {
         let observed_state = if action == LifecycleAction::Delete {
-            "DELETED".to_owned()
+            server_state_to_storage(ServerState::Deleted).to_owned()
         } else {
             match self.provider.get_instance(&provider_id).await {
-                Ok(instance) => match instance.state {
-                    o3k_provider::InstanceState::Running => "ACTIVE",
-                    o3k_provider::InstanceState::Stopped => "SHUTOFF",
-                    o3k_provider::InstanceState::Creating => "BUILD",
-                    o3k_provider::InstanceState::Deleting => "DELETING",
-                    o3k_provider::InstanceState::Deleted => "DELETED",
-                    o3k_provider::InstanceState::Error => "ERROR",
+                Ok(instance) => {
+                    server_state_to_storage(ServerState::from(instance.state)).to_owned()
                 }
-                .to_owned(),
                 Err(ProviderError::NotFound) if action == LifecycleAction::Delete => {
-                    "DELETED".to_owned()
+                    server_state_to_storage(ServerState::Deleted).to_owned()
                 }
                 Err(error) => return Err(ReconcileError::Provider(error)),
             }
@@ -1146,14 +1141,7 @@ where
     ) -> Result<OperationState, ReconcileError> {
         let provider_resource_id = provider_resource_id.ok_or(ReconcileError::InvalidIntent)?;
         let instance = self.provider.get_instance(&provider_resource_id).await?;
-        let observed_state = match instance.state {
-            o3k_provider::InstanceState::Running => "active",
-            o3k_provider::InstanceState::Creating => "BUILD",
-            o3k_provider::InstanceState::Stopped => "SHUTOFF",
-            o3k_provider::InstanceState::Deleting => "DELETING",
-            o3k_provider::InstanceState::Deleted => "DELETED",
-            o3k_provider::InstanceState::Error => "ERROR",
-        };
+        let observed_state = server_state_to_storage(ServerState::from(instance.state));
         if instance.state == o3k_provider::InstanceState::Error {
             self.store
                 .update_operation(
@@ -1240,7 +1228,7 @@ where
                 resource.id,
                 resource.generation,
                 &resource.desired_state,
-                "active",
+                server_state_to_storage(ServerState::Active),
                 resource.generation,
                 provider_resource_id.as_deref(),
             )
@@ -1341,15 +1329,18 @@ fn bounded_agent_failure_message(raw: &str) -> String {
 }
 
 fn agent_resource_state(value: i32) -> Result<&'static str, ReconcileError> {
-    match agent_proto::ResourceState::try_from(value).map_err(|_| ReconcileError::InvalidIntent)? {
-        agent_proto::ResourceState::Creating => Ok("BUILD"),
-        agent_proto::ResourceState::Running => Ok("ACTIVE"),
-        agent_proto::ResourceState::Stopped => Ok("SHUTOFF"),
-        agent_proto::ResourceState::Deleting => Ok("DELETING"),
-        agent_proto::ResourceState::Deleted => Ok("DELETED"),
-        agent_proto::ResourceState::Error => Ok("ERROR"),
-        agent_proto::ResourceState::Unspecified => Err(ReconcileError::InvalidIntent),
-    }
+    let state = match agent_proto::ResourceState::try_from(value)
+        .map_err(|_| ReconcileError::InvalidIntent)?
+    {
+        agent_proto::ResourceState::Creating => ServerState::Building,
+        agent_proto::ResourceState::Running => ServerState::Active,
+        agent_proto::ResourceState::Stopped => ServerState::Stopped,
+        agent_proto::ResourceState::Deleting => ServerState::Deleting,
+        agent_proto::ResourceState::Deleted => ServerState::Deleted,
+        agent_proto::ResourceState::Error => ServerState::Error,
+        agent_proto::ResourceState::Unspecified => return Err(ReconcileError::InvalidIntent),
+    };
+    Ok(server_state_to_storage(state))
 }
 
 fn validate_provider_operation_owner(
@@ -1507,7 +1498,7 @@ mod tests {
                 .get_resource(request.o3k_server_id)
                 .await?
                 .observed_state,
-            "active"
+            "ACTIVE"
         );
         assert_eq!(provider.instance_count(), 1);
         Ok(())
@@ -1695,7 +1686,7 @@ mod tests {
                 .get_resource(request.o3k_server_id)
                 .await?
                 .observed_state,
-            "requested"
+            "REQUESTED"
         );
         assert_eq!(
             store
@@ -1950,7 +1941,7 @@ mod tests {
         );
         assert_eq!(
             store.get_resource(resource.id).await?.observed_state,
-            "active"
+            "ACTIVE"
         );
         assert_eq!(provider.instance_count(), 1);
         Ok(())

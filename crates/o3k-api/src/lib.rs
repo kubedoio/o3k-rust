@@ -17,6 +17,7 @@ use axum::{
 use o3k_compute::{ComputeError, ComputeService, Flavor, Server};
 use o3k_compute_agent::NodeRegistry;
 use o3k_console::{ConsoleError, ConsoleService};
+use o3k_domain::{ServerId, ServerState};
 use o3k_identity::{AuthError, TokenRequest, TokenService};
 use o3k_image::{ImageError, ImageRecord, ImageService};
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
@@ -1649,6 +1650,25 @@ struct IdResponse {
     id: String,
 }
 
+/// Projects the canonical server lifecycle state into the Nova status string
+/// of the current response shape. Nova/OpenStack status strings live here,
+/// in the API crate; the canonical domain model and the persisted values are
+/// separate projections owned by `o3k-domain` and `o3k-store`.
+fn nova_status(state: ServerState) -> &'static str {
+    match state {
+        ServerState::Requested => "REQUESTED",
+        ServerState::Building => "BUILD",
+        ServerState::Active => "ACTIVE",
+        ServerState::Stopping => "STOPPING",
+        ServerState::Stopped => "SHUTOFF",
+        ServerState::Starting => "STARTING",
+        ServerState::Rebooting => "REBOOTING",
+        ServerState::Deleting => "DELETING",
+        ServerState::Deleted => "DELETED",
+        ServerState::Error => "ERROR",
+    }
+}
+
 fn server_response(server: Server, network_service: Option<&NetworkService>) -> ServerResponse {
     let mut addresses = serde_json::Map::new();
     if let Some(network_service) = network_service {
@@ -1674,7 +1694,7 @@ fn server_response(server: Server, network_service: Option<&NetworkService>) -> 
     ServerResponse {
         id: server.id.to_string(),
         name: server.name,
-        status: server.status,
+        status: nova_status(server.state).to_owned(),
         tenant_id: server.project_id.clone(),
         project_id: server.project_id,
         image: IdResponse {
@@ -2301,7 +2321,10 @@ async fn show_server(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.show_server(&token.project_id, id).await {
+    match service
+        .show_server(&token.project_id, ServerId::from_uuid(id))
+        .await
+    {
         Ok(server) => Json(ServerEnvelope {
             server: server_response(server, state.network.as_deref()),
         })
@@ -2323,7 +2346,10 @@ async fn delete_server(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_server(&token.project_id, id).await {
+    match service
+        .delete_server(&token.project_id, ServerId::from_uuid(id))
+        .await
+    {
         Ok(()) => {
             if let Some(console) = state.console.as_ref()
                 && let Err(error) = console.cleanup(id)
@@ -2375,7 +2401,10 @@ async fn server_action(
                     "console output is not configured",
                 );
             };
-            if let Err(error) = service.show_server(&token.project_id, id).await {
+            if let Err(error) = service
+                .show_server(&token.project_id, ServerId::from_uuid(id))
+                .await
+            {
                 return compute_error(error);
             }
             let options = body
@@ -2416,7 +2445,10 @@ async fn server_action(
             if should_query_live_console(offset)
                 && let Some(registry) = state.agent_registry.as_ref()
             {
-                match service.placement_provider_id(&token.project_id, id).await {
+                match service
+                    .placement_provider_id(&token.project_id, ServerId::from_uuid(id))
+                    .await
+                {
                     Ok(Some(agent_id)) => {
                         let Some(node) = registry.snapshot(&agent_id).await else {
                             return keystone_error(
@@ -2555,7 +2587,10 @@ async fn server_action(
             );
         }
     };
-    match service.action(&token.project_id, id, action).await {
+    match service
+        .action(&token.project_id, ServerId::from_uuid(id), action)
+        .await
+    {
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
@@ -2666,7 +2701,7 @@ async fn attach_volume(
     match compute
         .attach_volume(
             &project_id,
-            server_uuid,
+            ServerId::from_uuid(server_uuid),
             volume_uuid,
             request.volume_attachment.device,
             request.volume_attachment.tag,
@@ -2703,7 +2738,7 @@ async fn list_volume_attachments(
     };
 
     match compute
-        .list_volume_attachments(&project_id, server_uuid)
+        .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
         .await
     {
         Ok(records) => {
@@ -2743,7 +2778,7 @@ async fn show_volume_attachment(
     let at_289 = requested_compute_289(&headers);
 
     if let Ok(records) = compute
-        .list_volume_attachments(&project_id, server_uuid)
+        .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
         .await
     {
         for record in records {
@@ -2784,7 +2819,7 @@ async fn delete_volume_attachment(
 
     let target_uuid = if let Ok(uuid) = Uuid::parse_str(&attachment_id) {
         if compute
-            .get_volume_attachment(&project_id, server_uuid, uuid)
+            .get_volume_attachment(&project_id, ServerId::from_uuid(server_uuid), uuid)
             .await
             .is_ok()
         {
@@ -2800,7 +2835,7 @@ async fn delete_volume_attachment(
         Some(uuid) => uuid,
         None => {
             if let Ok(records) = compute
-                .list_volume_attachments(&project_id, server_uuid)
+                .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
                 .await
             {
                 let found = records.into_iter().find(|r| {
@@ -2818,7 +2853,7 @@ async fn delete_volume_attachment(
     };
 
     match compute
-        .detach_volume(&project_id, server_uuid, target_uuid)
+        .detach_volume(&project_id, ServerId::from_uuid(server_uuid), target_uuid)
         .await
     {
         Ok(()) => StatusCode::OK.into_response(),
@@ -2830,7 +2865,8 @@ async fn delete_volume_attachment(
 mod tests {
 
     use super::{
-        CONSOLE_AGENT_DISPATCH_TIMEOUT, Server, server_response, should_query_live_console,
+        CONSOLE_AGENT_DISPATCH_TIMEOUT, Server, ServerId, ServerState, server_response,
+        should_query_live_console,
     };
     use std::time::Duration;
     use uuid::Uuid;
@@ -2906,12 +2942,12 @@ mod tests {
     fn server_response_reports_requested_config_drive_without_exposing_payload()
     -> Result<(), serde_json::Error> {
         let server = Server {
-            id: Uuid::nil(),
+            id: ServerId::from_uuid(Uuid::nil()),
             name: "server".to_owned(),
             project_id: "project".to_owned(),
             flavor_id: Uuid::nil(),
             image_id: "image".to_owned(),
-            status: "ACTIVE".to_owned(),
+            state: ServerState::Active,
             key_name: Some("key".to_owned()),
             config_drive: true,
             network_ids: Vec::new(),
@@ -2932,12 +2968,12 @@ mod tests {
     #[test]
     fn server_response_reports_the_durable_placement_host() -> Result<(), serde_json::Error> {
         let server = Server {
-            id: Uuid::nil(),
+            id: ServerId::from_uuid(Uuid::nil()),
             name: "server".to_owned(),
             project_id: "project".to_owned(),
             flavor_id: Uuid::nil(),
             image_id: "image".to_owned(),
-            status: "ACTIVE".to_owned(),
+            state: ServerState::Active,
             key_name: None,
             config_drive: false,
             network_ids: Vec::new(),
@@ -2949,6 +2985,49 @@ mod tests {
             value.get("OS-EXT-SRV-ATTR:host"),
             Some(&serde_json::json!("node-a"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_server_states_project_to_the_nova_response_shape() {
+        let expected = [
+            (ServerState::Requested, "REQUESTED"),
+            (ServerState::Building, "BUILD"),
+            (ServerState::Active, "ACTIVE"),
+            (ServerState::Stopping, "STOPPING"),
+            (ServerState::Stopped, "SHUTOFF"),
+            (ServerState::Starting, "STARTING"),
+            (ServerState::Rebooting, "REBOOTING"),
+            (ServerState::Deleting, "DELETING"),
+            (ServerState::Deleted, "DELETED"),
+            (ServerState::Error, "ERROR"),
+        ];
+        assert_eq!(expected.len(), 10);
+        for (state, status) in expected {
+            assert_eq!(
+                super::nova_status(state),
+                status,
+                "{state:?} must project to {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn server_response_projects_the_canonical_state_as_status() -> Result<(), serde_json::Error> {
+        let server = Server {
+            id: ServerId::from_uuid(Uuid::nil()),
+            name: "server".to_owned(),
+            project_id: "project".to_owned(),
+            flavor_id: Uuid::nil(),
+            image_id: "image".to_owned(),
+            state: ServerState::Stopped,
+            key_name: None,
+            config_drive: false,
+            network_ids: Vec::new(),
+            host: None,
+        };
+        let value = serde_json::to_value(server_response(server, None))?;
+        assert_eq!(value.get("status"), Some(&serde_json::json!("SHUTOFF")));
         Ok(())
     }
 }

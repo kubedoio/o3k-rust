@@ -171,6 +171,24 @@ pub enum InstanceState {
     Error,
 }
 
+/// Explicit projection from a provider observation to the canonical O3K
+/// server lifecycle state. Provider state is deliberately separate: it
+/// describes what the execution boundary observes, while `o3k_domain`
+/// owns the durable lifecycle model. This projection is the only sanctioned
+/// bridge between the two.
+impl From<InstanceState> for o3k_domain::ServerState {
+    fn from(state: InstanceState) -> Self {
+        match state {
+            InstanceState::Creating => o3k_domain::ServerState::Building,
+            InstanceState::Running => o3k_domain::ServerState::Active,
+            InstanceState::Stopped => o3k_domain::ServerState::Stopped,
+            InstanceState::Deleting => o3k_domain::ServerState::Deleting,
+            InstanceState::Deleted => o3k_domain::ServerState::Deleted,
+            InstanceState::Error => o3k_domain::ServerState::Error,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation {
     pub provider_operation_id: Uuid,
@@ -893,6 +911,26 @@ pub async fn run_conformance<P: ComputeProvider>(provider: &P) -> Result<(), Pro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_observations_project_to_canonical_server_states() {
+        let expected = [
+            (InstanceState::Creating, o3k_domain::ServerState::Building),
+            (InstanceState::Running, o3k_domain::ServerState::Active),
+            (InstanceState::Stopped, o3k_domain::ServerState::Stopped),
+            (InstanceState::Deleting, o3k_domain::ServerState::Deleting),
+            (InstanceState::Deleted, o3k_domain::ServerState::Deleted),
+            (InstanceState::Error, o3k_domain::ServerState::Error),
+        ];
+        assert_eq!(expected.len(), 6);
+        for (observation, canonical) in expected {
+            assert_eq!(
+                o3k_domain::ServerState::from(observation),
+                canonical,
+                "{observation:?} must project to {canonical:?}"
+            );
+        }
+    }
 
     fn request(key: &str) -> CreateInstanceRequest {
         CreateInstanceRequest {

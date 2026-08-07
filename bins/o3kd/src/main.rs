@@ -3,6 +3,7 @@ use o3k_compute::{
     CreateArtifactResolver, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use o3k_compute_agent::NodeSnapshot;
+use o3k_domain::ServerId;
 use o3k_provider::{
     ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, OperationState, ProviderError,
 };
@@ -562,7 +563,11 @@ async fn run_agent_inspect_probe(
         };
         // Dispatch inspect (or re-check durable state if already terminal).
         let inspect_result = compute
-            .inspect_server(project_id, id, "o3k-agent-inspect-probe")
+            .inspect_server(
+                project_id,
+                ServerId::from_uuid(id),
+                "o3k-agent-inspect-probe",
+            )
             .await;
         match inspect_result {
             Ok(operation)
