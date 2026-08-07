@@ -162,6 +162,31 @@ TAP/bridge/DHCP execution and the ownership fences around foreign links
 remain agent-owned and unchanged; the first-alpha flat-network public
 behavior is unchanged.
 
+Issue #523 (step 5 of the required implementation sequence below) moved
+Placement provider inventory, generations, usage, and allocations behind the
+narrow `PlacementRepository` port on the SQLite adapter (migration 0017):
+provider state and generation, per-class inventories whose `used` values are
+derived from the durable allocation rows rather than trusted reports,
+allocations idempotent by the `allocation-{server_id}` key, and pending
+allocation intents. Mutations execute in BEGIN IMMEDIATE transactions with
+optimistic generation guards (`UPDATE ... WHERE generation = ?`), so
+concurrent scheduler attempts cannot over-allocate: a losing attempt observes
+a stale generation and the scheduler deterministically moves to the next
+candidate (executable multi-writer tests over one SQLite file). A restart
+reopens the same SQLite file and preserves provider generation, allocation,
+and intent identity, so it cannot forget an allocation and schedule a
+duplicate server. The previous `placement.json` and `allocation-intents.json`
+journals are imported once, idempotently and crash-resume safely
+(row-granular skip-if-present with the exact stored generation), then renamed
+so they are never read again. Server create still persists the selected
+provider/allocation identity before provider mutation (SPEC-0021 ordering
+unchanged), and an unknown provider outcome retains the allocation until a
+proven terminal outcome releases it exactly once. VCPU/MEMORY_MB/DISK_GB
+semantics, generation-conflict behavior, allocation idempotency, and the
+deterministic scheduler candidate order are unchanged; `GET /placement`
+discovery remains version-only, and no routers, floating IPs, security
+groups, VLAN/VXLAN, OVS, OVN, PostgreSQL, or edge/HA claims are added.
+
 ### 3. Durable control-plane metadata authority
 
 The durable store becomes authoritative for O3K-owned public metadata and

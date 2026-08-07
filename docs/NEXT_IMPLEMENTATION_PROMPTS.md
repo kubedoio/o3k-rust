@@ -274,6 +274,21 @@ Acceptance:
 
 ## Prompt 5 — persist Placement through a repository boundary
 
+> Completed by issue #523: Placement provider inventory, generations, usage,
+> and allocations now live behind the narrow `PlacementRepository` port
+> implemented on the SQLite adapter (migration 0017), with BEGIN IMMEDIATE
+> transactions, optimistic generation guards, and allocation idempotency by
+> the `allocation-{server_id}` key; concurrent scheduler attempts cannot
+> over-allocate (executable multi-writer tests). Restart reopens the same
+> SQLite file and preserves provider generation, allocation, and intent
+> identity. The previous `placement.json` and `allocation-intents.json`
+> journals are imported once, idempotently and crash-resume safely, then
+> renamed so they are never read again. Server create persists selected
+> provider/allocation identity before provider mutation (SPEC-0021 ordering
+> preserved), and unknown provider outcomes retain the allocation until a
+> proven terminal outcome releases it exactly once. The prompt below is
+> retained for historical reference.
+
 ```text
 Objective: make Placement provider inventory, generations, usage, and
 allocations durable through a repository port suitable for restart and later

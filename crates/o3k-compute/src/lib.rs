@@ -1165,11 +1165,13 @@ pub async fn sync_agent_inventory(
     placement: &o3k_placement::PlacementLedger,
 ) -> Result<(), SchedulerError> {
     for snapshot in registry.all().await {
-        placement.sync_provider(
-            &snapshot.agent_id,
-            agent_inventory(&snapshot.capabilities),
-            agent_provider_state(&snapshot),
-        )?;
+        placement
+            .sync_provider(
+                &snapshot.agent_id,
+                agent_inventory(&snapshot.capabilities),
+                agent_provider_state(&snapshot),
+            )
+            .await?;
     }
     Ok(())
 }
@@ -2288,9 +2290,11 @@ impl ComputeService {
             request.placement_allocation_id.as_deref(),
         ) && scheduler
             .validate_allocation(provider_id, allocation_id, &resource.id.to_string())
+            .await
             .is_ok()
         {
-            self.release_placement_allocation(resource.id, &request)?;
+            self.release_placement_allocation(resource.id, &request)
+                .await?;
         }
         Ok(())
     }
@@ -2756,15 +2760,20 @@ impl ComputeService {
                     })
                     .map(|node| node.agent_id)
                     .collect::<BTreeSet<_>>();
-                Some(scheduler.schedule_for_agents(
-                    &eligible,
-                    &server_id.to_string(),
-                    scheduler_flavor,
-                )?)
+                Some(
+                    self.schedule_server(
+                        scheduler,
+                        Some(&eligible),
+                        &server_id.to_string(),
+                        scheduler_flavor,
+                    )
+                    .await?,
+                )
             }
-            (Some(scheduler), None) => {
-                Some(scheduler.schedule(&server_id.to_string(), scheduler_flavor)?)
-            }
+            (Some(scheduler), None) => Some(
+                self.schedule_server(scheduler, None, &server_id.to_string(), scheduler_flavor)
+                    .await?,
+            ),
             (None, _) => None,
         };
         let request = CreateInstanceRequest {
@@ -2780,7 +2789,7 @@ impl ComputeService {
             Ok(servers) => servers,
             Err(error) => {
                 if let Some(decision) = placement.as_ref() {
-                    self.release_placement_decision(decision)?;
+                    self.release_placement_decision(decision).await?;
                 }
                 return Err(error);
             }
@@ -2789,8 +2798,40 @@ impl ComputeService {
             .iter()
             .any(|server| server.name == name && server.state != ServerState::Deleted)
         {
-            if let Some(decision) = placement.as_ref() {
-                self.release_placement_decision(decision)?;
+            // A racing identical request may have persisted this server while
+            // the schedule was in flight; its allocation idempotently backs
+            // that live row and must not be released. Only a decision that is
+            // not owned by a live row carrying the same placement binding is
+            // released here (a name conflict from a different request, or a
+            // decision that fell back to a provider the persisted row does
+            // not reference).
+            let owns_live_server = async {
+                let Some(decision) = placement.as_ref() else {
+                    return false;
+                };
+                let Ok(server_id) = Uuid::parse_str(&decision.allocation.consumer_id) else {
+                    return false;
+                };
+                let Ok(resource) = self.store.get_resource(server_id).await else {
+                    return false;
+                };
+                resource.kind == "compute_instance"
+                    && server_state_from_storage(&resource.observed_state).ok()
+                        != Some(ServerState::Deleted)
+                    && serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+                        .map(|intent| {
+                            intent.placement_provider_id.as_deref()
+                                == Some(decision.provider_id.as_str())
+                                && intent.placement_allocation_id.as_deref()
+                                    == Some(decision.allocation_id.as_str())
+                        })
+                        .unwrap_or(false)
+            }
+            .await;
+            if let Some(decision) = placement.as_ref()
+                && !owns_live_server
+            {
+                self.release_placement_decision(decision).await?;
             }
             return Err(ComputeError::Conflict);
         }
@@ -2815,7 +2856,7 @@ impl ComputeService {
                 if let Some(decision) = placement.as_ref()
                     && !owns_persisted_placement
                 {
-                    self.release_placement_decision(decision)?;
+                    self.release_placement_decision(decision).await?;
                 }
                 let legacy_keypair_intent =
                     requests_match_with_keypair_migration(&existing_request, &request);
@@ -2927,15 +2968,17 @@ impl ComputeService {
                 request.placement_provider_id.as_deref(),
                 request.placement_allocation_id.as_deref(),
             ) {
-                scheduler.release_terminal(&o3k_scheduler::ScheduleDecision {
-                    provider_id: provider_id.to_owned(),
-                    allocation_id: allocation_id.to_owned(),
-                    allocation: o3k_placement::Allocation {
+                scheduler
+                    .release_terminal(&o3k_scheduler::ScheduleDecision {
                         provider_id: provider_id.to_owned(),
-                        consumer_id: id.to_string(),
-                        resources: std::collections::BTreeMap::new(),
-                    },
-                })?;
+                        allocation_id: allocation_id.to_owned(),
+                        allocation: o3k_placement::Allocation {
+                            provider_id: provider_id.to_owned(),
+                            consumer_id: id.to_string(),
+                            resources: std::collections::BTreeMap::new(),
+                        },
+                    })
+                    .await?;
             }
             return Err(ComputeError::Conflict);
         }
@@ -3104,7 +3147,9 @@ impl ComputeService {
             .as_deref()
             .ok_or(ComputeError::Conflict)?;
         if let Some(scheduler) = &self.scheduler {
-            scheduler.validate_allocation(provider_id, allocation_id, &id.to_string())?;
+            scheduler
+                .validate_allocation(provider_id, allocation_id, &id.to_string())
+                .await?;
         } else {
             return Err(ComputeError::Conflict);
         }
@@ -3338,7 +3383,8 @@ impl ComputeService {
         if observed == ServerState::Deleted {
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
-            self.release_placement_allocation(id.as_uuid(), &intent)?;
+            self.release_placement_allocation(id.as_uuid(), &intent)
+                .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
             // The delete reached terminal success in a previous run; clear
             // any binding that was not yet unbound.
@@ -3369,7 +3415,8 @@ impl ComputeService {
         }
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
-        self.release_placement_allocation(id.as_uuid(), &intent)?;
+        self.release_placement_allocation(id.as_uuid(), &intent)
+            .await?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
         // Terminal delete success means the agent removed the host execution;
         // the ports are reusable and must no longer claim a binding.
@@ -3381,7 +3428,7 @@ impl ComputeService {
         Ok(())
     }
 
-    fn release_placement_allocation(
+    async fn release_placement_allocation(
         &self,
         server_id: Uuid,
         intent: &CreateInstanceRequest,
@@ -3391,27 +3438,59 @@ impl ComputeService {
             intent.placement_provider_id.as_deref(),
             intent.placement_allocation_id.as_deref(),
         ) {
-            scheduler.release_terminal(&o3k_scheduler::ScheduleDecision {
-                provider_id: provider_id.to_owned(),
-                allocation_id: allocation_id.to_owned(),
-                allocation: o3k_placement::Allocation {
+            scheduler
+                .release_terminal(&o3k_scheduler::ScheduleDecision {
                     provider_id: provider_id.to_owned(),
-                    consumer_id: server_id.to_string(),
-                    resources: std::collections::BTreeMap::new(),
-                },
-            })?;
+                    allocation_id: allocation_id.to_owned(),
+                    allocation: o3k_placement::Allocation {
+                        provider_id: provider_id.to_owned(),
+                        consumer_id: server_id.to_string(),
+                        resources: std::collections::BTreeMap::new(),
+                    },
+                })
+                .await?;
         }
         Ok(())
     }
 
-    fn release_placement_decision(
+    async fn release_placement_decision(
         &self,
         decision: &o3k_scheduler::ScheduleDecision,
     ) -> Result<(), ComputeError> {
         if let Some(scheduler) = self.scheduler.as_ref() {
-            scheduler.release_terminal(decision)?;
+            scheduler.release_terminal(decision).await?;
         }
         Ok(())
+    }
+
+    /// Schedules a create request. The ledger reports `InvalidAllocation`
+    /// when the `allocation-{server_id}` intent key for this server collided
+    /// with a concurrent identical request: the intent was consumed and this
+    /// call acquired no capacity. The racing request holds (or will hold) the
+    /// allocation, so the collision surfaces as a Conflict without releasing
+    /// anything; request-level validation errors are already fenced by the
+    /// ledger and the scheduler before this point.
+    async fn schedule_server(
+        &self,
+        scheduler: &Scheduler,
+        selected_agents: Option<&BTreeSet<String>>,
+        server_id: &str,
+        flavor: SchedulerFlavor,
+    ) -> Result<o3k_scheduler::ScheduleDecision, ComputeError> {
+        let attempt = match selected_agents {
+            Some(agents) => {
+                scheduler
+                    .schedule_for_agents(agents, server_id, flavor)
+                    .await
+            }
+            None => scheduler.schedule(server_id, flavor).await,
+        };
+        match attempt {
+            Err(o3k_scheduler::SchedulerError::Placement(
+                o3k_placement::PlacementError::InvalidAllocation,
+            )) => Err(ComputeError::Conflict),
+            result => result.map_err(ComputeError::from),
+        }
     }
 
     pub async fn action(
@@ -3797,40 +3876,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(&placement_path);
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement = o3k_placement::PlacementLedger::open(&placement_path)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_path, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        placement.register_provider(
-            "node-a",
-            std::collections::BTreeMap::from([
-                (
-                    o3k_placement::VCPU.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::MEMORY_MB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4096,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::DISK_GB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 100,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-            ]),
-        )?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4096,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
             .with_scheduler(Scheduler::new(placement.clone()));
         let server = service
@@ -3843,7 +3929,10 @@ mod tests {
                 "inspectable-request".to_owned(),
             )
             .await?;
-        let before = placement.provider("node-a")?;
+        let before = placement
+            .provider("node-a")
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let inspected = service
             .inspect_server("project-a", server.id, "inspectable-request")
             .await?;
@@ -3856,7 +3945,13 @@ mod tests {
             .inspect_server("project-a", server.id, "inspectable-request-2")
             .await?;
         assert_ne!(second_request.o3k_operation_id, inspected.o3k_operation_id);
-        assert_eq!(before, placement.provider("node-a")?);
+        assert_eq!(
+            before,
+            placement
+                .provider("node-a")
+                .await
+                .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
+        );
         assert!(matches!(
             service
                 .inspect_server("project-b", server.id, "inspectable-request")
@@ -3967,7 +4062,10 @@ mod tests {
             "/tmp/o3k-placement-agent-inventory-{}",
             Uuid::now_v7()
         ));
-        let placement = o3k_placement::PlacementLedger::open(&root)?;
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&root, placement_repository).await?;
         let registry = NodeRegistry::default();
         registry
             .register(&proto::RegisterRequest {
@@ -3986,28 +4084,30 @@ mod tests {
             .await?;
 
         sync_agent_inventory(&registry, &placement).await?;
-        let provider = placement.provider("agent-a")?;
+        let provider = placement.provider("agent-a").await?;
         assert_eq!(provider.state, o3k_placement::ProviderState::Enabled);
         assert_eq!(provider.inventories[o3k_placement::VCPU].total, 4);
         assert_eq!(provider.inventories[o3k_placement::MEMORY_MB].total, 4096);
         assert_eq!(provider.inventories[o3k_placement::DISK_GB].total, 20);
 
-        placement.allocate(
-            "agent-a",
-            "allocation-1",
-            "server-1",
-            BTreeMap::from([
-                (o3k_placement::VCPU.to_owned(), 1),
-                (o3k_placement::MEMORY_MB.to_owned(), 512),
-                (o3k_placement::DISK_GB.to_owned(), 1),
-            ]),
-            provider.generation,
-        )?;
+        placement
+            .allocate(
+                "agent-a",
+                "allocation-1",
+                "server-1",
+                BTreeMap::from([
+                    (o3k_placement::VCPU.to_owned(), 1),
+                    (o3k_placement::MEMORY_MB.to_owned(), 512),
+                    (o3k_placement::DISK_GB.to_owned(), 1),
+                ]),
+                provider.generation,
+            )
+            .await?;
         registry
             .set_desired_state("agent-a", proto::AdministrativeState::Draining)
             .await?;
         sync_agent_inventory(&registry, &placement).await?;
-        let refreshed = placement.provider("agent-a")?;
+        let refreshed = placement.provider("agent-a").await?;
         assert_eq!(refreshed.state, o3k_placement::ProviderState::Draining);
         assert_eq!(refreshed.allocations.len(), 1);
         assert_eq!(refreshed.inventories[o3k_placement::VCPU].used, 1);
@@ -4294,19 +4394,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&placement_path);
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
-        placement.register_provider(
-            "node-a",
-            std::collections::BTreeMap::from([(
-                o3k_placement::VCPU.to_owned(),
-                o3k_placement::Inventory {
-                    total: 4,
-                    reserved: 0,
-                    allocation_ratio: 1.0,
-                    used: 0,
-                },
-            )]),
-        )?;
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([(
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 4,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                )]),
+            )
+            .await?;
         let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
             .with_scheduler(Scheduler::new(placement.clone()));
         let keypair = service
@@ -4344,14 +4450,16 @@ mod tests {
             .store
             .attach_server_keypair(request.o3k_server_id, keypair.id)
             .await?;
-        let generation = placement.provider("node-a")?.generation;
-        placement.allocate(
-            "node-a",
-            "alloc-1",
-            &request.o3k_server_id.to_string(),
-            std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
-            generation,
-        )?;
+        let generation = placement.provider("node-a").await?.generation;
+        placement
+            .allocate(
+                "node-a",
+                "alloc-1",
+                &request.o3k_server_id.to_string(),
+                std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
+                generation,
+            )
+            .await?;
 
         let update = o3k_provider_contract::compute_proto::OperationUpdate {
             agent_id: "agent-1".to_owned(),
@@ -4382,7 +4490,7 @@ mod tests {
                 .await?,
             None
         );
-        assert!(placement.provider("node-a")?.allocations.is_empty());
+        assert!(placement.provider("node-a").await?.allocations.is_empty());
         // A replayed delivery of the same terminal update compensates safely.
         assert_eq!(
             service.apply_agent_update(&update).await?,
@@ -4603,7 +4711,11 @@ mod tests {
     -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-compute-{}", Uuid::now_v7()));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement
             .register_provider(
@@ -4638,6 +4750,7 @@ mod tests {
                     ),
                 ]),
             )
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let service = service("scheduler")
             .await?
@@ -4665,6 +4778,7 @@ mod tests {
         assert_eq!(
             placement
                 .provider("node-a")
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                 .allocations
                 .len(),
@@ -4685,6 +4799,7 @@ mod tests {
         assert_eq!(
             placement
                 .provider("node-a")
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                 .allocations
                 .len(),
@@ -4701,7 +4816,11 @@ mod tests {
             "/tmp/o3k-placement-duplicate-name-{}",
             Uuid::now_v7()
         ));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement
             .register_provider(
@@ -4736,6 +4855,7 @@ mod tests {
                     ),
                 ]),
             )
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let service = service("duplicate-name")
             .await?
@@ -4753,6 +4873,7 @@ mod tests {
             .await?;
         let generation_after_initial_create = placement
             .provider("node-a")
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
             .generation;
 
@@ -4773,6 +4894,7 @@ mod tests {
             assert_eq!(
                 placement
                     .provider("node-a")
+                    .await
                     .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                     .allocations
                     .len(),
@@ -4781,6 +4903,7 @@ mod tests {
             assert_eq!(
                 placement
                     .provider("node-a")
+                    .await
                     .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                     .generation,
                 generation_after_initial_create
@@ -4795,7 +4918,11 @@ mod tests {
     async fn create_race_releases_placement_not_owned_by_winner() -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-create-race-{}", Uuid::now_v7()));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let inventory = |vcpus| {
             std::collections::BTreeMap::from([
@@ -4830,9 +4957,11 @@ mod tests {
         };
         placement
             .register_provider("node-a", inventory(2))
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement
             .register_provider("node-b", inventory(3))
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let service = service("create-race")
             .await?
@@ -4866,6 +4995,7 @@ mod tests {
         );
         let allocation_count = placement
             .providers()
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
             .into_iter()
             .map(|provider| provider.allocations.len())
@@ -4876,13 +5006,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_scheduler_attempts_do_not_over_allocate() -> Result<(), ComputeError> {
+        // Two independent compute services over two store instances on one
+        // file database: provider capacity and allocations are shared through
+        // the repository, so the atomic allocation commit gates both create
+        // paths and exactly one may acquire the VCPU capacity. The losing
+        // service surfaces the scheduler's NoValidHost mapping to the API.
+        let database_path =
+            std::env::temp_dir().join(format!("o3k-compute-concurrent-{}.sqlite", Uuid::now_v7()));
+        let _ = std::fs::remove_file(&database_path);
+        let placement_root =
+            std::env::temp_dir().join(format!("o3k-compute-concurrent-pl-{}", Uuid::now_v7()));
+        let raw_store_a = o3k_store::testkit::open_file(&database_path).await?;
+        let raw_store_b = o3k_store::testkit::open_file(&database_path).await?;
+        let store_a: Arc<dyn ComputeRepository> = Arc::new(raw_store_a.clone());
+        let store_b: Arc<dyn ComputeRepository> = Arc::new(raw_store_b.clone());
+        let repository_a: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store_a);
+        let repository_b: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store_b);
+        let placement_a = o3k_placement::PlacementLedger::open(&placement_root, repository_a)
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let placement_b = o3k_placement::PlacementLedger::open(&placement_root, repository_b)
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        placement_a
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 2,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 2048,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 20,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        let service_a = ComputeService::new(store_a, Arc::new(FakeComputeProvider::new()))
+            .with_scheduler(Scheduler::new(placement_a.clone()));
+        let service_b = ComputeService::new(store_b, Arc::new(FakeComputeProvider::new()))
+            .with_scheduler(Scheduler::new(placement_b));
+        let flavor = service_a.flavors()[1].id;
+        let left = service_a.create_server(
+            "project-a",
+            "concurrent-a".to_owned(),
+            "image-1".to_owned(),
+            flavor,
+            vec!["network-1".to_owned()],
+            "concurrent-a-request".to_owned(),
+        );
+        let right = service_b.create_server(
+            "project-a",
+            "concurrent-b".to_owned(),
+            "image-1".to_owned(),
+            flavor,
+            vec!["network-1".to_owned()],
+            "concurrent-b-request".to_owned(),
+        );
+        let (left, right) = tokio::join!(left, right);
+        let mut created = 0;
+        let mut rejected = 0;
+        for result in [left, right] {
+            match result {
+                Ok(_) => created += 1,
+                Err(ComputeError::Scheduler(SchedulerError::NoValidHost)) => rejected += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        assert_eq!(created, 1);
+        assert_eq!(rejected, 1);
+        // The final state is deterministic: exactly one durable allocation
+        // and the reported VCPU usage reflects it on both stores.
+        let provider = placement_a
+            .provider("node-a")
+            .await
+            .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        assert_eq!(provider.allocations.len(), 1);
+        assert_eq!(provider.inventories[o3k_placement::VCPU].used, 2);
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_root);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn existing_resource_conflict_does_not_acquire_placement_allocation()
     -> Result<(), ComputeError> {
         let placement_root = PathBuf::from(format!(
             "/tmp/o3k-placement-existing-resource-{}",
             Uuid::now_v7()
         ));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement
             .register_provider(
@@ -4917,6 +5156,7 @@ mod tests {
                     ),
                 ]),
             )
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let service = service("existing-resource")
             .await?
@@ -4980,6 +5220,7 @@ mod tests {
         assert_eq!(
             placement
                 .provider("node-a")
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                 .allocations
                 .len(),
@@ -4994,13 +5235,141 @@ mod tests {
         Ok(())
     }
 
+    /// Test-only placement repository that fails a bounded number of
+    /// `release_allocation` calls at the repository port. The legacy
+    /// file-backed ledger test broke persistence by placing a directory at
+    /// the `placement.json` path; with the repository-backed ledger the
+    /// equivalent injection point is the port boundary itself. Every other
+    /// method delegates to the in-memory adapter.
+    struct FailingReleaseRepository {
+        inner: o3k_store::testkit::TestStore,
+        fail_releases: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl o3k_store::PlacementRepository for FailingReleaseRepository {
+        async fn get_provider(
+            &self,
+            provider_id: &str,
+        ) -> Result<Option<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
+            self.inner.get_provider(provider_id).await
+        }
+        async fn list_providers(
+            &self,
+        ) -> Result<Vec<o3k_store::PlacementProviderRecord>, o3k_store::StoreError> {
+            self.inner.list_providers().await
+        }
+        async fn register_provider(
+            &self,
+            node_id: &str,
+            inventories: &[o3k_store::PlacementInventoryRecord],
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner.register_provider(node_id, inventories).await
+        }
+        async fn sync_provider(
+            &self,
+            node_id: &str,
+            state: &str,
+            inventories: &[o3k_store::PlacementInventoryRecord],
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner.sync_provider(node_id, state, inventories).await
+        }
+        async fn refresh_inventories(
+            &self,
+            provider_id: &str,
+            expected_generation: u64,
+            inventories: &[o3k_store::PlacementInventoryRecord],
+        ) -> Result<o3k_store::PlacementProviderRecord, o3k_store::StoreError> {
+            self.inner
+                .refresh_inventories(provider_id, expected_generation, inventories)
+                .await
+        }
+        async fn set_provider_state(
+            &self,
+            provider_id: &str,
+            state: &str,
+        ) -> Result<(), o3k_store::StoreError> {
+            self.inner.set_provider_state(provider_id, state).await
+        }
+        async fn commit_allocation(
+            &self,
+            provider_id: &str,
+            expected_generation: u64,
+            allocation: &o3k_store::PlacementAllocationRecord,
+        ) -> Result<o3k_store::PlacementAllocationRecord, o3k_store::StoreError> {
+            self.inner
+                .commit_allocation(provider_id, expected_generation, allocation)
+                .await
+        }
+        async fn release_allocation(
+            &self,
+            provider_id: &str,
+            allocation_id: &str,
+        ) -> Result<(), o3k_store::StoreError> {
+            if self
+                .fail_releases
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(o3k_store::StoreError::ResourceNotFound);
+            }
+            self.inner
+                .release_allocation(provider_id, allocation_id)
+                .await
+        }
+        async fn upsert_intent(
+            &self,
+            intent: &o3k_store::PlacementIntentRecord,
+        ) -> Result<o3k_store::PlacementIntentRecord, o3k_store::StoreError> {
+            self.inner.upsert_intent(intent).await
+        }
+        async fn get_intent(
+            &self,
+            allocation_id: &str,
+        ) -> Result<Option<o3k_store::PlacementIntentRecord>, o3k_store::StoreError> {
+            self.inner.get_intent(allocation_id).await
+        }
+        async fn list_intents(
+            &self,
+        ) -> Result<Vec<o3k_store::PlacementIntentRecord>, o3k_store::StoreError> {
+            self.inner.list_intents().await
+        }
+        async fn delete_intent(&self, allocation_id: &str) -> Result<(), o3k_store::StoreError> {
+            self.inner.delete_intent(allocation_id).await
+        }
+        async fn reconcile_consumers(
+            &self,
+            durable_consumer_ids: &[String],
+        ) -> Result<o3k_store::PlacementReconcileRecord, o3k_store::StoreError> {
+            self.inner.reconcile_consumers(durable_consumer_ids).await
+        }
+        async fn import_provider(
+            &self,
+            provider: &o3k_store::PlacementProviderRecord,
+        ) -> Result<(), o3k_store::StoreError> {
+            self.inner.import_provider(provider).await
+        }
+    }
+
     #[tokio::test]
     async fn deleted_server_retries_failed_placement_release() -> Result<(), ComputeError> {
         let placement_root = PathBuf::from(format!(
             "/tmp/o3k-placement-delete-release-{}",
             Uuid::now_v7()
         ));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let fail_releases = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(FailingReleaseRepository {
+                inner: placement_store,
+                fail_releases: fail_releases.clone(),
+            });
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement
             .register_provider(
@@ -5035,7 +5404,11 @@ mod tests {
                     ),
                 ]),
             )
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
+        // The compute service is constructed once; the scheduler reaches the
+        // repository through the failing wrapper, so the release failure is
+        // injected before the first delete and the retry succeeds.
         let service = service("delete-release")
             .await?
             .with_scheduler(Scheduler::new(placement.clone()));
@@ -5050,26 +5423,20 @@ mod tests {
             )
             .await?;
 
-        std::fs::remove_file(placement_root.join("placement.json")).map_err(|error| {
-            ComputeError::Scheduler(SchedulerError::Placement(
-                o3k_placement::PlacementError::Storage(error),
-            ))
-        })?;
-        std::fs::create_dir(placement_root.join("placement.json")).map_err(|error| {
-            ComputeError::Scheduler(SchedulerError::Placement(
-                o3k_placement::PlacementError::Storage(error),
-            ))
-        })?;
-
+        // The first delete reaches terminal server deletion but the placement
+        // release fails once at the repository boundary (the repository-backed
+        // mapping of the legacy journal write failure). The allocation is
+        // retained so a retry can release it.
         assert!(matches!(
             service.delete_server("project-a", server.id).await,
             Err(ComputeError::Scheduler(SchedulerError::Placement(
-                o3k_placement::PlacementError::Storage(_)
+                o3k_placement::PlacementError::Store(_)
             )))
         ));
         assert_eq!(
             placement
                 .provider("node-a")
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                 .allocations
                 .len(),
@@ -5084,26 +5451,20 @@ mod tests {
             "DELETED"
         );
 
-        std::fs::remove_dir(placement_root.join("placement.json")).map_err(|error| {
-            ComputeError::Scheduler(SchedulerError::Placement(
-                o3k_placement::PlacementError::Storage(error),
-            ))
-        })?;
+        // The retried delete takes the already-deleted shortcut and releases
+        // the retained allocation.
         service.delete_server("project-a", server.id).await?;
         assert_eq!(
             placement
                 .provider("node-a")
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?
                 .allocations
                 .len(),
             0
         );
 
-        std::fs::remove_dir_all(placement_root).map_err(|error| {
-            ComputeError::Scheduler(SchedulerError::Placement(
-                o3k_placement::PlacementError::Storage(error),
-            ))
-        })?;
+        let _ = std::fs::remove_dir_all(placement_root);
         Ok(())
     }
 
@@ -5112,7 +5473,11 @@ mod tests {
     -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-registry-{}", Uuid::now_v7()));
-        let placement = o3k_placement::PlacementLedger::open(&placement_root)
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
+            .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         let inventory = || {
             std::collections::BTreeMap::from([
@@ -5148,6 +5513,7 @@ mod tests {
         for agent in ["unavailable", "draining", "disabled", "enabled"] {
             placement
                 .register_provider(agent, inventory())
+                .await
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         }
 
@@ -5831,39 +6197,45 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
-        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
-        placement.register_provider(
-            "node-a",
-            std::collections::BTreeMap::from([
-                (
-                    o3k_placement::VCPU.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::MEMORY_MB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4096,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::DISK_GB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 100,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-            ]),
-        )?;
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4096,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await?;
         let service = ComputeService::new(store, provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
 
@@ -5930,39 +6302,45 @@ mod tests {
         let store: Arc<dyn ComputeRepository> =
             Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
-        let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
-        placement.register_provider(
-            "node-a",
-            std::collections::BTreeMap::from([
-                (
-                    o3k_placement::VCPU.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::MEMORY_MB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 4096,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-                (
-                    o3k_placement::DISK_GB.to_owned(),
-                    o3k_placement::Inventory {
-                        total: 100,
-                        reserved: 0,
-                        allocation_ratio: 1.0,
-                        used: 0,
-                    },
-                ),
-            ]),
-        )?;
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4096,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await?;
         let service = ComputeService::new(store, provider.clone())
             .with_scheduler(Scheduler::new(placement.clone()));
 

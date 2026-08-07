@@ -44,18 +44,18 @@ impl Scheduler {
         Self { placement }
     }
 
-    pub fn schedule(
+    pub async fn schedule(
         &self,
         server_id: &str,
         flavor: Flavor,
     ) -> Result<ScheduleDecision, SchedulerError> {
-        self.schedule_internal(server_id, flavor, None)
+        self.schedule_internal(server_id, flavor, None).await
     }
 
     /// Schedules only on the explicitly named provider/agent identity.
     /// Placement provider IDs must be bound to the same identity by the
     /// control-plane integration layer before a command is dispatched.
-    pub fn schedule_for_agent(
+    pub async fn schedule_for_agent(
         &self,
         agent_id: &str,
         server_id: &str,
@@ -69,21 +69,23 @@ impl Scheduler {
             flavor,
             Some(&BTreeSet::from([agent_id.to_owned()])),
         )
+        .await
     }
 
     /// Schedules only on the currently eligible agent identities supplied by
     /// the control-plane registry. Placement remains authoritative for
     /// provider state, capacity, generation, and atomic allocation.
-    pub fn schedule_for_agents(
+    pub async fn schedule_for_agents(
         &self,
         agent_ids: &BTreeSet<String>,
         server_id: &str,
         flavor: Flavor,
     ) -> Result<ScheduleDecision, SchedulerError> {
         self.schedule_internal(server_id, flavor, Some(agent_ids))
+            .await
     }
 
-    fn schedule_internal(
+    async fn schedule_internal(
         &self,
         server_id: &str,
         flavor: Flavor,
@@ -94,7 +96,8 @@ impl Scheduler {
         }
         let mut candidates = self
             .placement
-            .providers()?
+            .providers()
+            .await?
             .into_iter()
             .filter(|provider| {
                 selected_providers.is_none_or(|selected| selected.contains(&provider.id))
@@ -134,18 +137,23 @@ impl Scheduler {
             (DISK_GB.to_owned(), flavor.disk_gb),
         ]);
         for candidate in candidates {
-            let intent = match self.placement.begin_allocation_intent(
-                &candidate.id,
-                &format!("allocation-{server_id}"),
-                server_id,
-                resources.clone(),
-            ) {
+            let intent = match self
+                .placement
+                .begin_allocation_intent(
+                    &candidate.id,
+                    &format!("allocation-{server_id}"),
+                    server_id,
+                    resources.clone(),
+                )
+                .await
+            {
                 Ok(intent) => intent,
                 Err(error) => return Err(SchedulerError::Placement(error)),
             };
             match self
                 .placement
                 .commit_allocation_intent(&intent, candidate.generation)
+                .await
             {
                 Ok(allocation) => {
                     return Ok(ScheduleDecision {
@@ -159,7 +167,7 @@ impl Scheduler {
                     | PlacementError::OverCapacity
                     | PlacementError::NotSchedulable,
                 ) => {
-                    self.placement.abandon_allocation_intent(&intent)?;
+                    self.placement.abandon_allocation_intent(&intent).await?;
                     continue;
                 }
                 Err(error) => return Err(SchedulerError::Placement(error)),
@@ -168,22 +176,26 @@ impl Scheduler {
         Err(SchedulerError::NoValidHost)
     }
 
-    pub fn release_terminal(&self, decision: &ScheduleDecision) -> Result<(), SchedulerError> {
+    pub async fn release_terminal(
+        &self,
+        decision: &ScheduleDecision,
+    ) -> Result<(), SchedulerError> {
         self.placement
             .release(&decision.provider_id, &decision.allocation_id)
+            .await
             .map_err(SchedulerError::Placement)
     }
 
     /// Validates an existing durable allocation without changing Placement.
     /// Read-only lifecycle and recovery queries must use this path instead of
     /// scheduling again, which could reserve capacity a second time.
-    pub fn validate_allocation(
+    pub async fn validate_allocation(
         &self,
         provider_id: &str,
         allocation_id: &str,
         consumer_id: &str,
     ) -> Result<Allocation, SchedulerError> {
-        let provider = self.placement.provider(provider_id)?;
+        let provider = self.placement.provider(provider_id).await?;
         if provider.state == ProviderState::Deleted {
             return Err(SchedulerError::NoValidHost);
         }
@@ -196,13 +208,19 @@ impl Scheduler {
         }
         Ok(allocation.clone())
     }
-    pub fn retain_unknown(&self, _: &ScheduleDecision) {}
+    pub async fn retain_unknown(&self, _: &ScheduleDecision) -> Result<(), SchedulerError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use o3k_placement::Inventory;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
     fn inv(vcpu: u64) -> BTreeMap<String, Inventory> {
         BTreeMap::from([
             (
@@ -234,46 +252,83 @@ mod tests {
             ),
         ])
     }
-    #[test]
-    fn deterministic_selection_and_terminal_release() -> Result<(), SchedulerError> {
-        let root = std::env::temp_dir().join(format!("o3k-scheduler-{}", std::process::id()));
-        let placement = PlacementLedger::open(&root)?;
-        placement.register_provider("node-b", inv(4))?;
-        placement.register_provider("node-a", inv(4))?;
-        let scheduler = Scheduler::new(placement.clone());
-        let decision = scheduler.schedule(
-            "server-1",
-            Flavor {
-                vcpus: 1,
-                memory_mb: 512,
-                disk_gb: 1,
-            },
-        )?;
-        assert_eq!(decision.provider_id, "node-a");
-        assert_eq!(placement.allocation_intent(&decision.allocation_id)?, None);
-        scheduler.release_terminal(&decision)?;
-        assert_eq!(placement.provider("node-a")?.allocations.len(), 0);
-        std::fs::remove_dir_all(root)
-            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
-        Ok(())
+
+    async fn test_scheduler() -> (Scheduler, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("o3k-scheduler-{}", Uuid::now_v7()));
+        let store = o3k_store::testkit::open_memory().await.expect("store");
+        let repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(store);
+        let ledger = PlacementLedger::open(&root, repository)
+            .await
+            .expect("ledger");
+        (Scheduler::new(ledger), root)
     }
-    #[test]
-    fn unavailable_and_insufficient_hosts_are_skipped() -> Result<(), SchedulerError> {
-        let root =
-            std::env::temp_dir().join(format!("o3k-scheduler-nohost-{}", std::process::id()));
-        let placement = PlacementLedger::open(&root)?;
-        placement.register_provider("node-a", inv(1))?;
-        placement.set_state("node-a", ProviderState::Unavailable)?;
-        let scheduler = Scheduler::new(placement);
-        assert!(matches!(
-            scheduler.schedule(
+
+    #[tokio::test]
+    async fn deterministic_selection_and_terminal_release() -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("node-b", inv(4))
+            .await?;
+        scheduler
+            .placement
+            .register_provider("node-a", inv(4))
+            .await?;
+        let decision = scheduler
+            .schedule(
                 "server-1",
                 Flavor {
-                    vcpus: 2,
+                    vcpus: 1,
                     memory_mb: 512,
-                    disk_gb: 1
-                }
-            ),
+                    disk_gb: 1,
+                },
+            )
+            .await?;
+        assert_eq!(decision.provider_id, "node-a");
+        assert_eq!(
+            scheduler
+                .placement
+                .allocation_intent(&decision.allocation_id)
+                .await?,
+            None
+        );
+        scheduler.release_terminal(&decision).await?;
+        assert_eq!(
+            scheduler
+                .placement
+                .provider("node-a")
+                .await?
+                .allocations
+                .len(),
+            0
+        );
+        std::fs::remove_dir_all(root)
+            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unavailable_and_insufficient_hosts_are_skipped() -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("node-a", inv(1))
+            .await?;
+        scheduler
+            .placement
+            .set_state("node-a", ProviderState::Unavailable)
+            .await?;
+        assert!(matches!(
+            scheduler
+                .schedule(
+                    "server-1",
+                    Flavor {
+                        vcpus: 2,
+                        memory_mb: 512,
+                        disk_gb: 1
+                    }
+                )
+                .await,
             Err(SchedulerError::NoValidHost)
         ));
         std::fs::remove_dir_all(root)
@@ -281,35 +336,43 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn agent_targeted_schedule_never_falls_back_to_another_provider() -> Result<(), SchedulerError>
-    {
-        let root = std::env::temp_dir().join(format!("o3k-scheduler-agent-{}", std::process::id()));
-        let placement = PlacementLedger::open(&root)?;
-        placement.register_provider("agent-a", inv(4))?;
-        placement.register_provider("agent-b", inv(4))?;
-        let scheduler = Scheduler::new(placement.clone());
-        let decision = scheduler.schedule_for_agent(
-            "agent-b",
-            "server-1",
-            Flavor {
-                vcpus: 1,
-                memory_mb: 512,
-                disk_gb: 1,
-            },
-        )?;
-        assert_eq!(decision.provider_id, "agent-b");
-        scheduler.release_terminal(&decision)?;
-        assert!(matches!(
-            scheduler.schedule_for_agent(
-                "missing-agent",
-                "server-2",
+    #[tokio::test]
+    async fn agent_targeted_schedule_never_falls_back_to_another_provider()
+    -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("agent-a", inv(4))
+            .await?;
+        scheduler
+            .placement
+            .register_provider("agent-b", inv(4))
+            .await?;
+        let decision = scheduler
+            .schedule_for_agent(
+                "agent-b",
+                "server-1",
                 Flavor {
                     vcpus: 1,
                     memory_mb: 512,
                     disk_gb: 1,
-                }
-            ),
+                },
+            )
+            .await?;
+        assert_eq!(decision.provider_id, "agent-b");
+        scheduler.release_terminal(&decision).await?;
+        assert!(matches!(
+            scheduler
+                .schedule_for_agent(
+                    "missing-agent",
+                    "server-2",
+                    Flavor {
+                        vcpus: 1,
+                        memory_mb: 512,
+                        disk_gb: 1,
+                    }
+                )
+                .await,
             Err(SchedulerError::NoValidHost)
         ));
         std::fs::remove_dir_all(root)
@@ -317,38 +380,45 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn eligible_agent_set_is_fail_closed_and_deterministic() -> Result<(), SchedulerError> {
-        let root =
-            std::env::temp_dir().join(format!("o3k-scheduler-eligible-{}", std::process::id()));
-        let placement = PlacementLedger::open(&root)?;
-        placement.register_provider("agent-a", inv(4))?;
-        placement.register_provider("agent-b", inv(4))?;
-        let scheduler = Scheduler::new(placement.clone());
+    #[tokio::test]
+    async fn eligible_agent_set_is_fail_closed_and_deterministic() -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("agent-a", inv(4))
+            .await?;
+        scheduler
+            .placement
+            .register_provider("agent-b", inv(4))
+            .await?;
 
         let eligible = BTreeSet::from(["agent-b".to_owned()]);
-        let decision = scheduler.schedule_for_agents(
-            &eligible,
-            "server-1",
-            Flavor {
-                vcpus: 1,
-                memory_mb: 512,
-                disk_gb: 1,
-            },
-        )?;
-        assert_eq!(decision.provider_id, "agent-b");
-        scheduler.release_terminal(&decision)?;
-
-        assert!(matches!(
-            scheduler.schedule_for_agents(
-                &BTreeSet::new(),
-                "server-2",
+        let decision = scheduler
+            .schedule_for_agents(
+                &eligible,
+                "server-1",
                 Flavor {
                     vcpus: 1,
                     memory_mb: 512,
                     disk_gb: 1,
-                }
-            ),
+                },
+            )
+            .await?;
+        assert_eq!(decision.provider_id, "agent-b");
+        scheduler.release_terminal(&decision).await?;
+
+        assert!(matches!(
+            scheduler
+                .schedule_for_agents(
+                    &BTreeSet::new(),
+                    "server-2",
+                    Flavor {
+                        vcpus: 1,
+                        memory_mb: 512,
+                        disk_gb: 1,
+                    }
+                )
+                .await,
             Err(SchedulerError::NoValidHost)
         ));
         std::fs::remove_dir_all(root)
@@ -356,32 +426,81 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn existing_allocation_validation_is_read_only_and_fenced() -> Result<(), SchedulerError> {
-        let root =
-            std::env::temp_dir().join(format!("o3k-scheduler-validate-{}", std::process::id()));
-        let placement = PlacementLedger::open(&root)?;
-        placement.register_provider("agent-a", inv(4))?;
-        let scheduler = Scheduler::new(placement.clone());
-        let decision = scheduler.schedule(
-            "server-1",
-            Flavor {
-                vcpus: 1,
-                memory_mb: 512,
-                disk_gb: 1,
-            },
-        )?;
-        let before = placement.provider("agent-a")?;
+    #[tokio::test]
+    async fn existing_allocation_validation_is_read_only_and_fenced() -> Result<(), SchedulerError>
+    {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("agent-a", inv(4))
+            .await?;
+        let decision = scheduler
+            .schedule(
+                "server-1",
+                Flavor {
+                    vcpus: 1,
+                    memory_mb: 512,
+                    disk_gb: 1,
+                },
+            )
+            .await?;
+        let before = scheduler.placement.provider("agent-a").await?;
         assert_eq!(
-            scheduler.validate_allocation("agent-a", &decision.allocation_id, "server-1")?,
+            scheduler
+                .validate_allocation("agent-a", &decision.allocation_id, "server-1")
+                .await?,
             decision.allocation
         );
-        let after = placement.provider("agent-a")?;
+        let after = scheduler.placement.provider("agent-a").await?;
         assert_eq!(before, after);
         assert!(matches!(
-            scheduler.validate_allocation("agent-a", &decision.allocation_id, "server-2"),
+            scheduler
+                .validate_allocation("agent-a", &decision.allocation_id, "server-2")
+                .await,
             Err(SchedulerError::AllocationMismatch)
         ));
+        std::fs::remove_dir_all(root)
+            .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scheduler_concurrent_attempts_never_over_allocate() -> Result<(), SchedulerError> {
+        let (scheduler, root) = test_scheduler().await;
+        scheduler
+            .placement
+            .register_provider("node-a", inv(2))
+            .await?;
+        let flavor = Flavor {
+            vcpus: 2,
+            memory_mb: 2048,
+            disk_gb: 1,
+        };
+        let first = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.schedule("server-1", flavor).await }
+        });
+        let second = tokio::spawn({
+            let scheduler = scheduler.clone();
+            async move { scheduler.schedule("server-2", flavor).await }
+        });
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("first scheduler task panicked");
+        let second = second.expect("second scheduler task panicked");
+        let mut scheduled = 0;
+        let mut rejected = 0;
+        for result in [first, second] {
+            match result {
+                Ok(_) => scheduled += 1,
+                Err(SchedulerError::NoValidHost) => rejected += 1,
+                Err(error) => return Err(error),
+            }
+        }
+        assert_eq!(scheduled, 1);
+        assert_eq!(rejected, 1);
+        let provider = scheduler.placement.provider("node-a").await?;
+        assert_eq!(provider.allocations.len(), 1);
+        assert_eq!(provider.inventories[VCPU].used, 2);
         std::fs::remove_dir_all(root)
             .map_err(|error| SchedulerError::Placement(PlacementError::Storage(error)))?;
         Ok(())

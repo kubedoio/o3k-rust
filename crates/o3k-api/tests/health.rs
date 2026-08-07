@@ -47,39 +47,43 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
         })
         .await?;
     let placement_root = format!("/tmp/o3k-api-agent-placement-{}", uuid::Uuid::now_v7());
-    let placement = o3k_placement::PlacementLedger::open(&placement_root)?;
-    placement.register_provider(
-        "agent-1",
-        std::collections::BTreeMap::from([
-            (
-                o3k_placement::VCPU.to_owned(),
-                o3k_placement::Inventory {
-                    total: 8,
-                    reserved: 0,
-                    allocation_ratio: 1.0,
-                    used: 0,
-                },
-            ),
-            (
-                o3k_placement::MEMORY_MB.to_owned(),
-                o3k_placement::Inventory {
-                    total: 8192,
-                    reserved: 0,
-                    allocation_ratio: 1.0,
-                    used: 0,
-                },
-            ),
-            (
-                o3k_placement::DISK_GB.to_owned(),
-                o3k_placement::Inventory {
-                    total: 100,
-                    reserved: 0,
-                    allocation_ratio: 1.0,
-                    used: 0,
-                },
-            ),
-        ]),
-    )?;
+    let placement_repository: std::sync::Arc<dyn o3k_store::PlacementRepository> = store.clone();
+    let placement =
+        o3k_placement::PlacementLedger::open(&placement_root, placement_repository).await?;
+    placement
+        .register_provider(
+            "agent-1",
+            std::collections::BTreeMap::from([
+                (
+                    o3k_placement::VCPU.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 8,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::MEMORY_MB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 8192,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+                (
+                    o3k_placement::DISK_GB.to_owned(),
+                    o3k_placement::Inventory {
+                        total: 100,
+                        reserved: 0,
+                        allocation_ratio: 1.0,
+                        used: 0,
+                    },
+                ),
+            ]),
+        )
+        .await?;
     let compute = ComputeService::new(store, provider)
         .with_scheduler(o3k_scheduler::Scheduler::new(placement))
         .with_agent_registry(registry.clone());
