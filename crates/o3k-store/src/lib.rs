@@ -3726,9 +3726,23 @@ pub async fn run_image_repository_conformance<S: ImageRepository>(
         checksum: None,
     };
     repository.insert_image(&second).await?;
+    let third = ImageMetadataRecord {
+        id: Uuid::now_v7(),
+        name: "alpha2".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "queued".to_owned(),
+        visibility: "private".to_owned(),
+        container_format: "bare".to_owned(),
+        disk_format: "raw".to_owned(),
+        size: None,
+        checksum: None,
+    };
+    repository.insert_image(&third).await?;
+    // list is project-scoped and deterministic: same-project images come
+    // back sorted by name.
     assert_eq!(
         repository.list_images("project-a").await?,
-        vec![first.clone()]
+        vec![first.clone(), third.clone()]
     );
     assert_eq!(
         repository.list_images("project-b").await?,
@@ -3850,7 +3864,9 @@ mod tests {
             reopened.get_image("project-a", &image.id).await,
             Ok(None)
         ));
-        fs::remove_file(path)?;
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
         Ok(())
     }
 

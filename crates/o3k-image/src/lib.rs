@@ -971,7 +971,9 @@ mod tests {
         assert_eq!(artifact.size, 11);
         assert_eq!(artifact.content, b"image-bytes");
         fs::remove_dir_all(path)?;
-        fs::remove_file(sqlite_path)?;
+        fs::remove_file(&sqlite_path)?;
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 
@@ -1223,7 +1225,9 @@ mod tests {
         assert_eq!(artifact.content, content);
         assert!(!path.join("metadata.json").exists());
         fs::remove_dir_all(path)?;
-        fs::remove_file(sqlite_path)?;
+        fs::remove_file(&sqlite_path)?;
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 
@@ -1249,11 +1253,15 @@ mod tests {
         service.upload("project-a", image.id, &payload).await?;
         drop(service);
         drop(store);
-        // The content file is the only place the payload may live; the SQLite
-        // file must not contain the bytes as a contiguous sequence. A 4 KiB
-        // chunk of the patterned payload stands in for the full 1 MiB so the
-        // scan stays fast while remaining distinctive.
-        let database = fs::read(&sqlite_path)?;
+        // The content file is the only place the payload may live; neither
+        // the SQLite main file nor its WAL journal (file stores run in WAL
+        // mode) may contain the bytes as a contiguous sequence. A 4 KiB chunk
+        // of the patterned payload stands in for the full 1 MiB so the scan
+        // stays fast while remaining distinctive.
+        let mut database = fs::read(&sqlite_path)?;
+        if let Ok(wal) = fs::read(format!("{sqlite_path}-wal")) {
+            database.extend_from_slice(&wal);
+        }
         let chunk = &payload[..4096];
         assert!(
             !database.windows(chunk.len()).any(|window| window == chunk),
@@ -1266,7 +1274,9 @@ mod tests {
         assert_eq!(artifact.size, payload.len() as u64);
         assert_eq!(artifact.content, payload);
         fs::remove_dir_all(path)?;
-        fs::remove_file(sqlite_path)?;
+        fs::remove_file(&sqlite_path)?;
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 
