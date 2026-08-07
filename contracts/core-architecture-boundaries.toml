@@ -65,6 +65,7 @@ concrete_store_debt_files = [
   "crates/o3k-compute/src/lib.rs",
   "crates/o3k-compute/src/attachment.rs",
   "crates/o3k-identity/src/lib.rs",
+  "crates/o3k-reconciler/src/lib.rs",
 ]
 
 [application.adapter_dependency_debt]
