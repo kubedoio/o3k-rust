@@ -1649,6 +1649,48 @@ fn interface_output_is_bridge(output: &str) -> bool {
 
 pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
 
+/// Canonical binding state of a port on its selected host.
+///
+/// The durable store persists the string projections (persistence
+/// projection); this service is the only authority that transitions between
+/// states. `None` in the store means no host was ever selected and no
+/// observation exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortBindingState {
+    /// A create dispatch selected a host but realization is not yet observed.
+    Binding,
+    /// The host observed the binding as realized.
+    Bound,
+    /// The host observed the binding as not realized.
+    Down,
+    /// The host observed a terminal failure.
+    Error,
+}
+
+impl PortBindingState {
+    /// The durable string projection.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PortBindingState::Binding => "binding",
+            PortBindingState::Bound => "bound",
+            PortBindingState::Down => "down",
+            PortBindingState::Error => "error",
+        }
+    }
+
+    /// Parses the durable string projection. Unknown values are rejected so
+    /// free-form state can never be persisted through the service.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "binding" => Some(PortBindingState::Binding),
+            "bound" => Some(PortBindingState::Bound),
+            "down" => Some(PortBindingState::Down),
+            "error" => Some(PortBindingState::Error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum NetworkError {
     #[error("network resource not found")]
@@ -1989,9 +2031,21 @@ impl NetworkService {
         {
             return Err(NetworkError::Conflict);
         }
+        // A create dispatch is underway: transitions from unbound, binding,
+        // down, and error to binding. A completed `bound` observation is kept:
+        // idempotent dispatch replays of an already-succeeded create must not
+        // downgrade durable observed state.
+        let next = match port
+            .binding_state
+            .as_deref()
+            .and_then(PortBindingState::parse)
+        {
+            Some(PortBindingState::Bound) => PortBindingState::Bound,
+            _ => PortBindingState::Binding,
+        };
         self.inner
             .repository
-            .update_port_binding(project_id, &port_id, Some(host), Some("binding"))
+            .update_port_binding(project_id, &port_id, Some(host), Some(next.as_str()))
             .await
             .map_err(map_store_error)
     }
@@ -2003,6 +2057,7 @@ impl NetworkService {
         host: &str,
         state: &str,
     ) -> Result<PortRecord, NetworkError> {
+        let state = PortBindingState::parse(state).ok_or(NetworkError::InvalidRequest)?;
         let _guard = self.lock().await;
         let port = self
             .inner
@@ -2016,7 +2071,7 @@ impl NetworkService {
         }
         self.inner
             .repository
-            .update_port_binding(project_id, &port_id, Some(host), Some(state))
+            .update_port_binding(project_id, &port_id, Some(host), Some(state.as_str()))
             .await
             .map_err(map_store_error)
     }
@@ -2118,10 +2173,13 @@ struct LegacyPort {
 
 /// Imports the legacy `metadata.json` file exactly once, in dependency order
 /// (networks, then subnets, then ports), and renames it so `open` never reads
-/// it again. Inserts skip records that are already present, which makes a
-/// partially completed previous import crash-resume safe. A corrupt file,
-/// duplicate MACs, or any non-already-exists insert error fails the import
-/// closed and leaves the file in place.
+/// it again. The rename is best-effort: when it fails, the next `open`
+/// re-reads the file, but the import is idempotent (records already present
+/// are skipped), so the file can never double-import. Inserts skip records
+/// that are already present, which makes a partially completed previous
+/// import crash-resume safe. A corrupt file, duplicate MACs, or any
+/// non-already-exists insert error fails the import closed and leaves the
+/// file in place.
 async fn import_legacy_metadata(
     root: &Path,
     repository: &dyn o3k_store::NetworkRepository,
@@ -2483,6 +2541,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn binding_state_strings_round_trip_through_canonical_parsing() {
+        for state in [
+            PortBindingState::Binding,
+            PortBindingState::Bound,
+            PortBindingState::Down,
+            PortBindingState::Error,
+        ] {
+            assert_eq!(PortBindingState::parse(state.as_str()), Some(state));
+        }
+        assert_eq!(PortBindingState::parse("unbound"), None);
+        assert_eq!(PortBindingState::parse("banana"), None);
+        assert_eq!(PortBindingState::parse(""), None);
+    }
+
+    #[tokio::test]
     async fn binding_intent_and_observation_projection_are_durable()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("binding");
@@ -2520,6 +2593,27 @@ mod tests {
         assert_eq!(observed.binding_state.as_deref(), Some("bound"));
         assert!(matches!(
             service
+                .project_binding_observation("project-a", port.id, "compute-1", "banana")
+                .await,
+            Err(NetworkError::InvalidRequest)
+        ));
+        // An idempotent dispatch replay of the same create must not downgrade
+        // the completed `bound` observation back to `binding`.
+        let replayed = service
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        assert_eq!(replayed.binding_state.as_deref(), Some("bound"));
+        // A fresh dispatch after an observed failure resets to `binding`.
+        let down = service
+            .project_binding_observation("project-a", port.id, "compute-1", "down")
+            .await?;
+        assert_eq!(down.binding_state.as_deref(), Some("down"));
+        let retried = service
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        assert_eq!(retried.binding_state.as_deref(), Some("binding"));
+        assert!(matches!(
+            service
                 .project_binding_observation("project-a", port.id, "compute-2", "bound")
                 .await,
             Err(NetworkError::Conflict)
@@ -2542,6 +2636,10 @@ mod tests {
                 .await,
             Err(NetworkError::InvalidRequest)
         ));
+        let final_observed = service
+            .project_binding_observation("project-a", port.id, "compute-1", "bound")
+            .await?;
+        assert_eq!(final_observed.binding_state.as_deref(), Some("bound"));
         drop(service);
         drop(store);
         let reopened_store =
