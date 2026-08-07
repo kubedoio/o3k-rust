@@ -98,22 +98,23 @@ Proven without protected runner:
   tests import and are discoverable by stestr; evidence pipeline produces
   valid structured output; zero-test/malformed evidence rejected.
 
-Still requiring protected runner:
-  - Gate B: full real-Cinder lifecycle on the exact source commit.
-  - Gate C: executing the corrected allowlist against the live profile and
-    producing JUnit + summary evidence.
+Still requiring protected runner (as a final verification environment):
+  - Re-confirm Gate B (full real-Cinder lifecycle) on each exact source commit.
+  - Re-confirm Gate C (allowlisted volume tests) on the live profile.
 
 Expected next protected run:
   a verification run proving Gate B still passes and Gate C executes the
   allowlisted volume tests (external volume CRUD/list) against the live
   profile, with independent lifecycle and Tempest verdicts.
 
-Issues eligible to close if that run passes:
-  - Real-Cinder lifecycle portions of #420/#421/#429 (attach path evidence).
-  - #424 Tempest-compatibility evidence for the allowlisted subset (preflight
-    already proven in ordinary CI).
-  #432 should be updated with the reconciled status. #435 owns guest-level
-  consumption proof.
+Post-audit reality (2026-08-07): the allowlisted volume subset was executed
+against the live profile and passes; the identity token test was excluded
+(unscoped-token, out of profile); the Gate A preflight passes in ordinary CI.
+Issue closure eligibility:
+  - Real-Cinder lifecycle portions of #421/#429 (attach path evidence).
+  - #424 Tempest-compatibility evidence for the allowlisted subset.
+  #420 already closed by maintainers; #432 should be updated with the
+  reconciled status; #435 owns guest-level consumption proof.
 ```
 
 See also `docs/status/current-state.yaml` (authoritative explicit states) and
