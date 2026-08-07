@@ -37,9 +37,15 @@ pins:
 tests:
 
   - test_id: tempest.api.identity.v3.test_tokens.TokensV3Test.test_create_token
-    disposition: allowlisted
+    disposition: excluded
     source: core tempest 46.0.0 (tempest/api/identity/v3/test_tokens.py)
-    primary_operation: identity token issuance (POST /v3/auth/tokens)
+    primary_operation: identity token issuance (POST /v3/auth/tokens) — UNSCOPED
+    reason: >-
+      The test issues an unscoped token (no project scope in the auth request).
+      O3K's openstack-service-testbed profile requires project-scoped tokens
+      and returns 400 for an unscoped request (observed in the protected run's
+      tempest_execution). Unscoped-token support is not part of the accepted
+      profile and is not added speculatively.
     required_services: [identity]
     setup_dependencies:
       - none (BaseIdentityV3Test sets up clients only; no users/projects/roles APIs)

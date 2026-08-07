@@ -12,10 +12,9 @@
 #   - Zero-test discovery is never accepted as evidence.
 #
 # Identity (o3k-implemented): token issuance through the public Identity v3
-# API. Token revocation is unsupported in the profile, so the revocation tests
-# (test_validate_token, test_token_auth_creation_existence_deletion) are NOT
-# allowlisted (see tempest-test-audit.yaml).
-tempest.api.identity.v3.test_tokens.TokensV3Test.test_create_token
+# API. The profile requires project-scoped tokens; unscoped token creation
+# (tempest TokensV3Test.test_create_token) and token revocation are
+# unsupported and therefore NOT allowlisted (see tempest-test-audit.yaml).
 
 # Volume lifecycle (external-hosted real Cinder): create/show/update/delete
 # through the volumev3 endpoint in the O3K-issued catalog.
