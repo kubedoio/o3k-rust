@@ -346,7 +346,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some(password), Some(signing_key)) => {
             let catalog_endpoint = format!("http://{}", config.listen_addr);
             o3k_identity::seed_identity_defaults(
-                &identity_store,
+                identity_store.as_ref(),
                 &o3k_identity::BootstrapConfig {
                     catalog_endpoint: catalog_endpoint.clone(),
                     bootstrap_password: o3k_identity::Secret::new(password.expose().to_owned()),

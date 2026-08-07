@@ -33,3 +33,27 @@ The public `run_conformance` routine defines the reusable baseline for future
 store adapters: persistence, stale-write rejection, unknown-outcome retention,
 operation updates, and provider-reference mapping. Additional SQLite tests
 cover duplicate IDs, atomic rollback, file restart, and corrupt database input.
+
+## Repository ports
+
+Application services depend on narrow repository ports defined in this crate,
+not on the concrete `SqliteStore` adapter:
+
+- `IdentityRepository` — the Keystone-compatible record surface used by
+  identity bootstrap seeding and snapshot load;
+- `KeypairRepository` and `VolumeAttachmentRepository` — the keypair and
+  attachment-record surfaces used by compute;
+- `ComputeRepository: DurableStore + KeypairRepository + VolumeAttachmentRepository`
+  with recovery listing — the compute use-case surface (the reconciler's
+  `OperationJournal` already consumes `DurableStore`);
+- `DurableStore` — the resource/operation/agent-command/artifact-transfer/
+  image-overlay/provider-reference surface.
+
+`SqliteStore` implements every port. The composition root (`o3kd`) opens the
+SQLite adapter and injects it through the ports. Each extracted port has an
+adapter-agnostic conformance routine
+(`run_identity_repository_conformance`, `run_keypair_repository_conformance`,
+`run_volume_attachment_repository_conformance`) exercised against the SQLite
+adapter, so a future adapter passes the same behavioral suite. The
+`testkit` module exists so application test code can construct the SQLite
+adapter without naming the concrete type in application sources.

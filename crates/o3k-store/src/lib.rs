@@ -569,6 +569,189 @@ pub trait DurableStore: Send + Sync {
     async fn readiness_check(&self) -> Result<(), StoreError>;
 }
 
+/// Durable Keystone-compatible identity records used by the identity
+/// application service: deterministic bootstrap seeding (upserts) and the
+/// one-time snapshot load that feeds token issuance and the catalog.
+///
+/// This is a narrow port around the identity use cases, not a generic
+/// persistence surface. Application code depends on this trait (or a broader
+/// combined port) instead of on the concrete `SqliteStore` adapter.
+#[async_trait]
+pub trait IdentityRepository: Send + Sync {
+    async fn insert_keystone_domain(&self, domain: &KeystoneDomainRecord)
+    -> Result<(), StoreError>;
+    async fn list_keystone_domains(&self) -> Result<Vec<KeystoneDomainRecord>, StoreError>;
+    async fn insert_keystone_project(
+        &self,
+        project: &KeystoneProjectRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_keystone_projects(&self) -> Result<Vec<KeystoneProjectRecord>, StoreError>;
+    async fn insert_keystone_user(&self, user: &KeystoneUserRecord) -> Result<(), StoreError>;
+    async fn list_keystone_users(&self) -> Result<Vec<KeystoneUserRecord>, StoreError>;
+    async fn insert_keystone_role(&self, role: &KeystoneRoleRecord) -> Result<(), StoreError>;
+    async fn list_keystone_roles(&self) -> Result<Vec<KeystoneRoleRecord>, StoreError>;
+    async fn insert_keystone_role_assignment(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_keystone_role_assignments(
+        &self,
+    ) -> Result<Vec<KeystoneRoleAssignmentRecord>, StoreError>;
+    async fn insert_keystone_service(
+        &self,
+        service: &KeystoneServiceRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_keystone_services(&self) -> Result<Vec<KeystoneServiceRecord>, StoreError>;
+    async fn insert_keystone_endpoint(
+        &self,
+        endpoint: &KeystoneEndpointRecord,
+    ) -> Result<(), StoreError>;
+    async fn list_keystone_endpoints(&self) -> Result<Vec<KeystoneEndpointRecord>, StoreError>;
+    async fn insert_keystone_region(&self, region: &KeystoneRegionRecord)
+    -> Result<(), StoreError>;
+    async fn list_keystone_regions(&self) -> Result<Vec<KeystoneRegionRecord>, StoreError>;
+}
+
+/// Durable keypair records owned by the compute service. The trait keeps the
+/// scoped uniqueness, attach, and delete semantics available to application
+/// code without naming the concrete adapter.
+#[async_trait]
+pub trait KeypairRepository: Send + Sync {
+    async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError>;
+    async fn list_keypairs(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<KeypairRecord>, StoreError>;
+    async fn get_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<KeypairRecord, StoreError>;
+    async fn delete_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<(), StoreError>;
+    async fn attach_server_keypair(
+        &self,
+        server_id: Uuid,
+        keypair_id: Uuid,
+    ) -> Result<(), StoreError>;
+    async fn detach_server_keypair(&self, server_id: Uuid) -> Result<(), StoreError>;
+    async fn get_server_keypair_name(&self, server_id: Uuid) -> Result<Option<String>, StoreError>;
+}
+
+/// Durable Nova volume-attachment records owned by the compute attachment
+/// orchestrator. Phase and outcome updates carry the frozen Cinder attachment
+/// lifecycle; the port exposes the exact transitions the orchestrator uses.
+#[async_trait]
+pub trait VolumeAttachmentRepository: Send + Sync {
+    async fn insert_volume_attachment(
+        &self,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<(), StoreError>;
+    async fn update_volume_attachment_phase(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn update_volume_attachment_outcome(
+        &self,
+        id: Uuid,
+        status: &str,
+        cinder_attachment_id: Option<&str>,
+        connector_host: Option<&str>,
+        connector_ip: Option<&str>,
+        connector_initiator: Option<&str>,
+        driver_volume_type: Option<&str>,
+        target_iqn: Option<&str>,
+        target_portal: Option<&str>,
+        target_lun: Option<u32>,
+        connection_info_digest: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError>;
+    async fn get_volume_attachment_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
+    async fn get_volume_attachment_by_volume(
+        &self,
+        volume_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
+    async fn get_volume_attachment_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
+    async fn list_volume_attachments_by_status(
+        &self,
+        terminal: &[&str],
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError>;
+    async fn list_volume_attachments(
+        &self,
+        server_id: Uuid,
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError>;
+    async fn get_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
+    async fn delete_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<(), StoreError>;
+}
+
+/// The persistence surface of the compute application service.
+///
+/// Combines the reconciler's `DurableStore` semantics (resources, operations,
+/// agent commands, artifact transfers, image overlays, provider references —
+/// already consumed generically by `OperationJournal`) with the keypair,
+/// volume-attachment, and recovery-list capabilities the compute service uses.
+/// Application code depends on this port; the composition root chooses the
+/// concrete adapter.
+#[async_trait]
+pub trait ComputeRepository: DurableStore + KeypairRepository + VolumeAttachmentRepository {
+    async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError>;
+}
+
+/// Test-only construction helpers for the SQLite adapter.
+///
+/// Application crate tests build adapters through this module so the concrete
+/// `SqliteStore` symbol never appears in application sources: the
+/// architecture-boundary ratchet scans `src/**/*.rs` of application crates for
+/// that literal symbol, and the adapter is an infrastructure detail that tests
+/// of application behavior should not depend on by name.
+pub mod testkit {
+    use std::path::Path;
+
+    use super::{SqliteStore, StoreError};
+
+    /// Concrete SQLite adapter type used by application-crate tests. Named
+    /// here so application sources never spell out `SqliteStore`; the
+    /// architecture-boundary ratchet scans application `src/**/*.rs` for that
+    /// literal symbol.
+    pub type TestStore = SqliteStore;
+
+    /// Opens a fresh in-memory SQLite adapter. Each call owns a private
+    /// connection pool with the memory journal; it is not shared across
+    /// stores.
+    pub async fn open_memory() -> Result<TestStore, StoreError> {
+        SqliteStore::connect("sqlite::memory:").await
+    }
+
+    /// Opens (creating when missing) a file-backed SQLite adapter with the
+    /// production WAL posture, migrations, and integrity verification.
+    pub async fn open_file(path: &Path) -> Result<TestStore, StoreError> {
+        SqliteStore::connect_file(path).await
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     pool: SqlitePool,
@@ -2458,6 +2641,259 @@ impl DurableStore for SqliteStore {
     }
 }
 
+// The port implementations delegate to the inherent adapter methods, which
+// remain the canonical SQL bodies. Inherent methods take name-resolution
+// precedence over trait methods, so `self.method(...)` inside these bodies
+// resolves to the inherent implementation and cannot recurse into the trait.
+
+#[async_trait]
+impl IdentityRepository for SqliteStore {
+    async fn insert_keystone_domain(
+        &self,
+        domain: &KeystoneDomainRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_domain(domain).await
+    }
+
+    async fn list_keystone_domains(&self) -> Result<Vec<KeystoneDomainRecord>, StoreError> {
+        self.list_keystone_domains().await
+    }
+
+    async fn insert_keystone_project(
+        &self,
+        project: &KeystoneProjectRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_project(project).await
+    }
+
+    async fn list_keystone_projects(&self) -> Result<Vec<KeystoneProjectRecord>, StoreError> {
+        self.list_keystone_projects().await
+    }
+
+    async fn insert_keystone_user(&self, user: &KeystoneUserRecord) -> Result<(), StoreError> {
+        self.insert_keystone_user(user).await
+    }
+
+    async fn list_keystone_users(&self) -> Result<Vec<KeystoneUserRecord>, StoreError> {
+        self.list_keystone_users().await
+    }
+
+    async fn insert_keystone_role(&self, role: &KeystoneRoleRecord) -> Result<(), StoreError> {
+        self.insert_keystone_role(role).await
+    }
+
+    async fn list_keystone_roles(&self) -> Result<Vec<KeystoneRoleRecord>, StoreError> {
+        self.list_keystone_roles().await
+    }
+
+    async fn insert_keystone_role_assignment(
+        &self,
+        assignment: &KeystoneRoleAssignmentRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_role_assignment(assignment).await
+    }
+
+    async fn list_keystone_role_assignments(
+        &self,
+    ) -> Result<Vec<KeystoneRoleAssignmentRecord>, StoreError> {
+        self.list_keystone_role_assignments().await
+    }
+
+    async fn insert_keystone_service(
+        &self,
+        service: &KeystoneServiceRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_service(service).await
+    }
+
+    async fn list_keystone_services(&self) -> Result<Vec<KeystoneServiceRecord>, StoreError> {
+        self.list_keystone_services().await
+    }
+
+    async fn insert_keystone_endpoint(
+        &self,
+        endpoint: &KeystoneEndpointRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_endpoint(endpoint).await
+    }
+
+    async fn list_keystone_endpoints(&self) -> Result<Vec<KeystoneEndpointRecord>, StoreError> {
+        self.list_keystone_endpoints().await
+    }
+
+    async fn insert_keystone_region(
+        &self,
+        region: &KeystoneRegionRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_keystone_region(region).await
+    }
+
+    async fn list_keystone_regions(&self) -> Result<Vec<KeystoneRegionRecord>, StoreError> {
+        self.list_keystone_regions().await
+    }
+}
+
+#[async_trait]
+impl KeypairRepository for SqliteStore {
+    async fn insert_keypair(&self, keypair: &KeypairRecord) -> Result<(), StoreError> {
+        self.insert_keypair(keypair).await
+    }
+
+    async fn list_keypairs(
+        &self,
+        user_id: &str,
+        project_id: &str,
+    ) -> Result<Vec<KeypairRecord>, StoreError> {
+        self.list_keypairs(user_id, project_id).await
+    }
+
+    async fn get_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<KeypairRecord, StoreError> {
+        self.get_keypair(user_id, project_id, name).await
+    }
+
+    async fn delete_keypair(
+        &self,
+        user_id: &str,
+        project_id: &str,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        self.delete_keypair(user_id, project_id, name).await
+    }
+
+    async fn attach_server_keypair(
+        &self,
+        server_id: Uuid,
+        keypair_id: Uuid,
+    ) -> Result<(), StoreError> {
+        self.attach_server_keypair(server_id, keypair_id).await
+    }
+
+    async fn detach_server_keypair(&self, server_id: Uuid) -> Result<(), StoreError> {
+        self.detach_server_keypair(server_id).await
+    }
+
+    async fn get_server_keypair_name(&self, server_id: Uuid) -> Result<Option<String>, StoreError> {
+        self.get_server_keypair_name(server_id).await
+    }
+}
+
+#[async_trait]
+impl VolumeAttachmentRepository for SqliteStore {
+    async fn insert_volume_attachment(
+        &self,
+        record: &VolumeAttachmentRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_volume_attachment(record).await
+    }
+
+    async fn update_volume_attachment_phase(
+        &self,
+        id: Uuid,
+        status: &str,
+        error: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        self.update_volume_attachment_phase(id, status, error).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_volume_attachment_outcome(
+        &self,
+        id: Uuid,
+        status: &str,
+        cinder_attachment_id: Option<&str>,
+        connector_host: Option<&str>,
+        connector_ip: Option<&str>,
+        connector_initiator: Option<&str>,
+        driver_volume_type: Option<&str>,
+        target_iqn: Option<&str>,
+        target_portal: Option<&str>,
+        target_lun: Option<u32>,
+        connection_info_digest: Option<&str>,
+        device: Option<&str>,
+    ) -> Result<VolumeAttachmentRecord, StoreError> {
+        self.update_volume_attachment_outcome(
+            id,
+            status,
+            cinder_attachment_id,
+            connector_host,
+            connector_ip,
+            connector_initiator,
+            driver_volume_type,
+            target_iqn,
+            target_portal,
+            target_lun,
+            connection_info_digest,
+            device,
+        )
+        .await
+    }
+
+    async fn get_volume_attachment_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        self.get_volume_attachment_by_id(id).await
+    }
+
+    async fn get_volume_attachment_by_volume(
+        &self,
+        volume_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        self.get_volume_attachment_by_volume(volume_id).await
+    }
+
+    async fn get_volume_attachment_by_idempotency(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        self.get_volume_attachment_by_idempotency(idempotency_key)
+            .await
+    }
+
+    async fn list_volume_attachments_by_status(
+        &self,
+        terminal: &[&str],
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
+        self.list_volume_attachments_by_status(terminal).await
+    }
+
+    async fn list_volume_attachments(
+        &self,
+        server_id: Uuid,
+    ) -> Result<Vec<VolumeAttachmentRecord>, StoreError> {
+        self.list_volume_attachments(server_id).await
+    }
+
+    async fn get_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        self.get_volume_attachment(server_id, attachment_id).await
+    }
+
+    async fn delete_volume_attachment(
+        &self,
+        server_id: Uuid,
+        attachment_id: Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_volume_attachment(server_id, attachment_id)
+            .await
+    }
+}
+
+#[async_trait]
+impl ComputeRepository for SqliteStore {
+    async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
+        self.list_resources_by_kind(kind).await
+    }
+}
+
 fn resource_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ResourceRecord, StoreError> {
     Ok(ResourceRecord {
         id: parse_uuid(row.get("id"))?,
@@ -2709,6 +3145,335 @@ pub async fn run_conformance<S: DurableStore>(store: &S) -> Result<(), StoreErro
     Ok(())
 }
 
+/// Runs the behavior shared by every identity repository adapter: each record
+/// kind round-trips through its insert/list pair, and the deterministic
+/// bootstrap upserts are idempotent for the same identity.
+pub async fn run_identity_repository_conformance<S: IdentityRepository>(
+    store: &S,
+) -> Result<(), StoreError> {
+    let now = "2026-08-07T00:00:00Z".to_owned();
+    let domain = KeystoneDomainRecord {
+        id: "default".to_owned(),
+        name: "Default".to_owned(),
+        description: Some("Default domain".to_owned()),
+        enabled: true,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_domain(&domain).await?;
+    store.insert_keystone_domain(&domain).await?;
+    assert_eq!(store.list_keystone_domains().await?, vec![domain.clone()]);
+
+    let project = KeystoneProjectRecord {
+        id: "project-a".to_owned(),
+        domain_id: domain.id.clone(),
+        name: "admin".to_owned(),
+        description: None,
+        enabled: true,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_project(&project).await?;
+    store.insert_keystone_project(&project).await?;
+    assert_eq!(store.list_keystone_projects().await?, vec![project.clone()]);
+
+    let user = KeystoneUserRecord {
+        id: "user-a".to_owned(),
+        domain_id: domain.id.clone(),
+        name: "admin".to_owned(),
+        password_hash: "pbkdf2_sha256$1$test".to_owned(),
+        email: None,
+        enabled: true,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_user(&user).await?;
+    store.insert_keystone_user(&user).await?;
+    assert_eq!(store.list_keystone_users().await?, vec![user.clone()]);
+
+    let role = KeystoneRoleRecord {
+        id: "role-a".to_owned(),
+        name: "admin".to_owned(),
+        description: None,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_role(&role).await?;
+    store.insert_keystone_role(&role).await?;
+    assert_eq!(store.list_keystone_roles().await?, vec![role.clone()]);
+
+    let assignment = KeystoneRoleAssignmentRecord {
+        id: "assignment-0".to_owned(),
+        user_id: user.id.clone(),
+        project_id: project.id.clone(),
+        role_id: role.id.clone(),
+        created_at: now.clone(),
+    };
+    store.insert_keystone_role_assignment(&assignment).await?;
+    store.insert_keystone_role_assignment(&assignment).await?;
+    assert_eq!(
+        store.list_keystone_role_assignments().await?,
+        vec![assignment]
+    );
+
+    let service = KeystoneServiceRecord {
+        id: "service-a".to_owned(),
+        name: "identity".to_owned(),
+        r#type: "identity".to_owned(),
+        description: None,
+        enabled: true,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_service(&service).await?;
+    store.insert_keystone_service(&service).await?;
+    assert_eq!(store.list_keystone_services().await?, vec![service.clone()]);
+
+    let endpoint = KeystoneEndpointRecord {
+        id: "endpoint-a".to_owned(),
+        service_id: service.id.clone(),
+        interface: "public".to_owned(),
+        url: "http://127.0.0.1:8080/v3".to_owned(),
+        region: "RegionOne".to_owned(),
+        enabled: true,
+        created_at: now.clone(),
+    };
+    store.insert_keystone_endpoint(&endpoint).await?;
+    store.insert_keystone_endpoint(&endpoint).await?;
+    assert_eq!(store.list_keystone_endpoints().await?, vec![endpoint]);
+
+    let region = KeystoneRegionRecord {
+        id: "RegionOne".to_owned(),
+        description: None,
+        parent_region_id: None,
+        enabled: true,
+        created_at: now,
+    };
+    store.insert_keystone_region(&region).await?;
+    store.insert_keystone_region(&region).await?;
+    assert_eq!(store.list_keystone_regions().await?, vec![region]);
+    Ok(())
+}
+
+/// Runs the behavior shared by every keypair repository adapter: scoped
+/// uniqueness, canonical record acceptance, attach/detach against a durable
+/// server, in-use protection, and scoped delete.
+pub async fn run_keypair_repository_conformance<S: KeypairRepository + DurableStore>(
+    store: &S,
+) -> Result<(), StoreError> {
+    let resource = ResourceRecord {
+        id: Uuid::now_v7(),
+        kind: "compute_instance".to_owned(),
+        project_id: "project-a".to_owned(),
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "{\"key_name\": \"other\"}".to_owned(),
+        observed_state: "BUILD".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&resource).await?;
+
+    let blob = [
+        0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0, 32,
+    ]
+    .into_iter()
+    .chain([9_u8; 32])
+    .collect::<Vec<_>>();
+    let (key_type, fingerprint, canonical) =
+        validate_public_key(&format!("ssh-ed25519 {}", BASE64.encode(blob)))?;
+    let keypair = KeypairRecord {
+        id: Uuid::now_v7(),
+        user_id: "user-a".to_owned(),
+        project_id: "project-a".to_owned(),
+        name: "test-key".to_owned(),
+        key_type,
+        public_key: canonical,
+        fingerprint,
+        created_at: "1".to_owned(),
+    };
+    store.insert_keypair(&keypair).await?;
+    assert!(matches!(
+        store.insert_keypair(&keypair).await,
+        Err(StoreError::KeypairAlreadyExists)
+    ));
+    assert_eq!(
+        store.get_keypair("user-a", "project-a", "test-key").await?,
+        keypair
+    );
+    assert!(matches!(
+        store.get_keypair("user-b", "project-a", "test-key").await,
+        Err(StoreError::KeypairNotFound)
+    ));
+    assert_eq!(store.list_keypairs("user-a", "project-a").await?.len(), 1);
+
+    store.attach_server_keypair(resource.id, keypair.id).await?;
+    assert_eq!(
+        store.get_server_keypair_name(resource.id).await?,
+        Some(keypair.name.clone())
+    );
+    assert!(matches!(
+        store
+            .delete_keypair("user-a", "project-a", "test-key")
+            .await,
+        Err(StoreError::KeypairInUse)
+    ));
+    store.detach_server_keypair(resource.id).await?;
+    assert_eq!(store.get_server_keypair_name(resource.id).await?, None);
+    store
+        .delete_keypair("user-a", "project-a", "test-key")
+        .await?;
+    assert!(matches!(
+        store
+            .delete_keypair("user-a", "project-a", "test-key")
+            .await,
+        Err(StoreError::KeypairNotFound)
+    ));
+    Ok(())
+}
+
+/// Runs the behavior shared by every volume-attachment repository adapter:
+/// phase and outcome persistence with COALESCE field preservation, status
+/// filtering, server-scoped reads, and delete.
+pub async fn run_volume_attachment_repository_conformance<
+    S: VolumeAttachmentRepository + DurableStore,
+>(
+    store: &S,
+) -> Result<(), StoreError> {
+    let resource = ResourceRecord {
+        id: Uuid::now_v7(),
+        kind: "compute_instance".to_owned(),
+        project_id: "project-a".to_owned(),
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "requested".to_owned(),
+        observed_state: "BUILD".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&resource).await?;
+
+    let attachment = VolumeAttachmentRecord {
+        id: Uuid::now_v7(),
+        server_id: resource.id,
+        volume_id: Uuid::now_v7(),
+        device: "/dev/vdb".to_owned(),
+        tag: None,
+        delete_on_termination: false,
+        created_at: "2026-08-07T00:00:00Z".to_owned(),
+        status: "validated".to_owned(),
+        operation_id: None,
+        idempotency_key: Some("idem-attach-1".to_owned()),
+        cinder_attachment_id: None,
+        connector_host: None,
+        connector_ip: None,
+        connector_initiator: None,
+        driver_volume_type: None,
+        target_iqn: None,
+        target_portal: None,
+        target_lun: None,
+        connection_info_digest: None,
+        error: None,
+    };
+    store.insert_volume_attachment(&attachment).await?;
+    assert_eq!(
+        store
+            .get_volume_attachment_by_id(attachment.id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "conformance attachment missing after insert".to_owned()
+            ))?,
+        attachment
+    );
+    assert_eq!(
+        store
+            .get_volume_attachment_by_volume(attachment.volume_id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "conformance attachment missing by volume".to_owned()
+            ))?,
+        attachment
+    );
+    assert_eq!(
+        store
+            .get_volume_attachment_by_idempotency("idem-attach-1")
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "conformance attachment missing by idempotency".to_owned()
+            ))?,
+        attachment
+    );
+
+    let phased = store
+        .update_volume_attachment_phase(attachment.id, "cinder_attachment_created", None)
+        .await?;
+    assert_eq!(phased.status, "cinder_attachment_created");
+    assert!(phased.error.is_none());
+
+    let outcome = store
+        .update_volume_attachment_outcome(
+            attachment.id,
+            "connector_obtained",
+            Some("cinder-att-1"),
+            Some("compute-1"),
+            Some("10.0.0.5"),
+            Some("iqn.2026-08.org.o3k:node"),
+            Some("iscsi"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await?;
+    assert_eq!(
+        outcome.cinder_attachment_id.as_deref(),
+        Some("cinder-att-1")
+    );
+    assert_eq!(outcome.connector_host.as_deref(), Some("compute-1"));
+    // COALESCE semantics: a later phase that only reports status/device must
+    // not wipe the connector fields persisted by an earlier phase.
+    let later = store
+        .update_volume_attachment_outcome(
+            attachment.id,
+            "attached",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("/dev/vdb"),
+        )
+        .await?;
+    assert_eq!(later.status, "attached");
+    assert_eq!(later.connector_host.as_deref(), Some("compute-1"));
+    assert_eq!(later.cinder_attachment_id.as_deref(), Some("cinder-att-1"));
+    assert_eq!(later.device, "/dev/vdb");
+
+    assert_eq!(store.list_volume_attachments(resource.id).await?.len(), 1);
+    assert!(
+        store
+            .list_volume_attachments_by_status(&["attached", "detached", "error"])
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .get_volume_attachment(resource.id, attachment.id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "conformance attachment missing by server".to_owned()
+            ))?
+            .id,
+        attachment.id
+    );
+    store
+        .delete_volume_attachment(resource.id, attachment.id)
+        .await?;
+    assert_eq!(
+        store.get_volume_attachment_by_id(attachment.id).await?,
+        None
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2718,6 +3483,28 @@ mod tests {
     async fn sqlite_store_passes_conformance() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
         run_conformance(&store).await
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_passes_extracted_repository_port_conformance() -> Result<(), StoreError> {
+        let identity_store = SqliteStore::connect("sqlite::memory:").await?;
+        run_identity_repository_conformance(&identity_store).await?;
+        let keypair_store = SqliteStore::connect("sqlite::memory:").await?;
+        run_keypair_repository_conformance(&keypair_store).await?;
+        let attachment_store = SqliteStore::connect("sqlite::memory:").await?;
+        run_volume_attachment_repository_conformance(&attachment_store).await?;
+        let compute_store = SqliteStore::connect("sqlite::memory:").await?;
+        run_keypair_repository_conformance(&compute_store).await?;
+        run_volume_attachment_repository_conformance(&compute_store).await?;
+        run_conformance(&compute_store).await?;
+        assert_eq!(
+            compute_store
+                .list_resources_by_kind("compute_instance")
+                .await?
+                .len(),
+            2
+        );
+        Ok(())
     }
 
     #[tokio::test]

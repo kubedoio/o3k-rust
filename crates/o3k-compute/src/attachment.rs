@@ -27,7 +27,7 @@ use std::{
 
 use o3k_cinder::{AttachTarget, CinderClient, CinderError, ComputeConnector};
 use o3k_provider::{BlockDeviceAttachment, ComputeProvider, ProviderError};
-use o3k_store::{DurableStore, SqliteStore, VolumeAttachmentRecord};
+use o3k_store::{ComputeRepository, VolumeAttachmentRecord};
 use uuid::Uuid;
 
 use crate::{ComputeError, ProviderBackend};
@@ -78,7 +78,7 @@ impl Drop for FlightGuard<'_> {
 
 #[derive(Clone)]
 pub struct AttachmentOrchestrator {
-    store: Arc<SqliteStore>,
+    store: Arc<dyn ComputeRepository>,
     provider: Arc<ProviderBackend>,
     cinder: Option<Arc<CinderClient>>,
     /// Durable attachment ids currently being processed by attach/detach.
@@ -88,7 +88,7 @@ pub struct AttachmentOrchestrator {
 
 impl AttachmentOrchestrator {
     pub fn new(
-        store: Arc<SqliteStore>,
+        store: Arc<dyn ComputeRepository>,
         provider: Arc<ProviderBackend>,
         cinder: Option<Arc<CinderClient>>,
     ) -> Self {
@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     struct TestHarness {
-        store: Arc<SqliteStore>,
+        store: Arc<dyn ComputeRepository>,
         fake_provider: Arc<FakeComputeProvider>,
         orchestrator: AttachmentOrchestrator,
         cinder_fake: o3k_cinder::testkit::FakeCinderState,
@@ -1415,7 +1415,7 @@ mod tests {
     }
 
     async fn harness() -> Result<TestHarness, Box<dyn std::error::Error>> {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let fake_provider = Arc::new(FakeComputeProvider::new());
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
         let (client, cinder_fake, _addr) =
@@ -1578,7 +1578,7 @@ mod tests {
     #[tokio::test]
     async fn connector_failure_compensates_by_terminating_cinder_attachment()
     -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let fake_provider = Arc::new(FakeComputeProvider::new());
         fake_provider.set_failure(FailureInjection::Terminal)?;
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
@@ -1690,7 +1690,7 @@ mod restart_tests {
     #[tokio::test]
     async fn restart_with_attached_device_reconciles_to_attached()
     -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let fake_provider = Arc::new(FakeComputeProvider::new());
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
         let (client, _fake, _addr) = start_testbed().await.map_err(|error| error.to_string())?;
@@ -1737,7 +1737,7 @@ mod restart_tests {
     #[tokio::test]
     async fn unknown_outcome_attachment_reconciles_by_observation()
     -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let fake_provider = Arc::new(FakeComputeProvider::new());
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
         let (client, fake, _addr) = start_testbed().await.map_err(|error| error.to_string())?;
@@ -1801,7 +1801,7 @@ mod replay_tests {
         timeout: Duration,
     ) -> Result<
         (
-            Arc<SqliteStore>,
+            Arc<dyn ComputeRepository>,
             Arc<FakeComputeProvider>,
             AttachmentOrchestrator,
             o3k_cinder::testkit::FakeCinderState,
@@ -1809,7 +1809,7 @@ mod replay_tests {
         ),
         Box<dyn std::error::Error>,
     > {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let fake_provider = Arc::new(FakeComputeProvider::new());
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
         let (client, fake, _addr) = start_testbed().await.map_err(|error| error.to_string())?;
@@ -1820,7 +1820,7 @@ mod replay_tests {
     }
 
     async fn seed_server(
-        store: &SqliteStore,
+        store: &dyn ComputeRepository,
         server_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
         store
@@ -1851,7 +1851,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         fake.set_fault(faults::missing_connection_info_on_update, true);
         let result = orchestrator
@@ -1880,7 +1880,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         fake.set_fault(faults::null_connection_info_on_update, true);
         let result = orchestrator
@@ -1905,7 +1905,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         fake.set_fault(faults::malformed_connection_info_on_update, true);
         let result = orchestrator
@@ -1934,7 +1934,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_millis(500)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         fake.set_fault(faults::timeout_update_connector, true);
         let result = orchestrator
@@ -1976,7 +1976,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
 
         // Prepare the Cinder-side attachment through the shared client (create
@@ -2046,7 +2046,7 @@ mod replay_tests {
         let (store, _fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
 
         let first = orchestrator
@@ -2069,7 +2069,7 @@ mod replay_tests {
         let (store, _fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_millis(500)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         fake.set_fault(faults::timeout_create_attachment, true);
         let result = orchestrator
@@ -2101,7 +2101,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         let record = orchestrator
             .attach(PROJECT, server_id, volume_id, None, None, false)
@@ -2135,7 +2135,7 @@ mod replay_tests {
         let (store, fake_provider, orchestrator, fake, client) =
             harness_with_timeout(Duration::from_secs(5)).await?;
         let server_id = Uuid::now_v7();
-        seed_server(&store, server_id).await?;
+        seed_server(store.as_ref(), server_id).await?;
         let volume_id = create_volume(&client).await?;
         let record = orchestrator
             .attach(PROJECT, server_id, volume_id, None, None, false)

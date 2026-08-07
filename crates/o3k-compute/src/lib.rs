@@ -19,7 +19,7 @@ use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, DurableStore, SqliteStore, StoreError, VolumeAttachmentRecord,
+    ArtifactTransferUpdate, ComputeRepository, StoreError, VolumeAttachmentRecord,
     server_state_from_storage, server_state_to_storage,
 };
 
@@ -93,9 +93,9 @@ pub enum ComputeError {
 
 #[derive(Clone)]
 pub struct ComputeService {
-    store: Arc<SqliteStore>,
+    store: Arc<dyn ComputeRepository>,
     provider: Arc<ProviderBackend>,
-    journal: OperationJournal<SqliteStore, ProviderBackend>,
+    journal: OperationJournal<dyn ComputeRepository, ProviderBackend>,
     scheduler: Option<Scheduler>,
     agent_registry: Option<NodeRegistry>,
     cinder: Option<Arc<CinderClient>>,
@@ -215,7 +215,7 @@ pub struct AgentComputeProvider {
     resolver: Arc<dyn ResolvedCreateResolver>,
     artifact_resolver: Arc<dyn CreateArtifactResolver>,
     state: Arc<RwLock<AgentProviderState>>,
-    store: Option<Arc<SqliteStore>>,
+    store: Option<Arc<dyn ComputeRepository>>,
     command_timeout: Duration,
 }
 
@@ -229,7 +229,7 @@ impl AgentComputeProvider {
     pub fn new_with_store(
         registry: NodeRegistry,
         resolver: Arc<dyn ResolvedCreateResolver>,
-        store: Option<Arc<SqliteStore>>,
+        store: Option<Arc<dyn ComputeRepository>>,
     ) -> Self {
         let state = Arc::new(RwLock::new(AgentProviderState::default()));
         let mut events = registry.subscribe_events();
@@ -239,7 +239,8 @@ impl AgentComputeProvider {
             loop {
                 match events.recv().await {
                     Ok(event) => {
-                        apply_agent_provider_event(&event_state, event_store.as_ref(), event).await
+                        apply_agent_provider_event(&event_state, event_store.as_deref(), event)
+                            .await
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         tracing::warn!(
@@ -560,7 +561,7 @@ async fn recover_artifact_transfers(
     registry: NodeRegistry,
     resolver: Arc<dyn ResolvedCreateResolver>,
     artifact_resolver: Arc<dyn CreateArtifactResolver>,
-    store: Arc<SqliteStore>,
+    store: Arc<dyn ComputeRepository>,
     timeout: Duration,
 ) {
     let transfers = match store.list_recoverable_artifact_transfers().await {
@@ -859,7 +860,7 @@ fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceSta
 }
 
 async fn apply_artifact_status(
-    store: &SqliteStore,
+    store: &dyn ComputeRepository,
     status: &agent_proto::ArtifactStatus,
 ) -> Result<(), StoreError> {
     let transfer = store.get_artifact_transfer(&status.transfer_id).await?;
@@ -924,7 +925,7 @@ async fn apply_artifact_status(
 
 async fn apply_agent_provider_event(
     state: &Arc<RwLock<AgentProviderState>>,
-    store: Option<&Arc<SqliteStore>>,
+    store: Option<&dyn ComputeRepository>,
     event: o3k_compute_agent::AgentEvent,
 ) {
     let mut state = state.write().await;
@@ -2007,7 +2008,7 @@ fn requests_match_with_keypair_migration(
 
 impl ComputeService {
     #[must_use]
-    pub fn new<P>(store: Arc<SqliteStore>, provider: Arc<P>) -> Self
+    pub fn new<P>(store: Arc<dyn ComputeRepository>, provider: Arc<P>) -> Self
     where
         Arc<P>: Into<ProviderBackend>,
     {
@@ -3415,7 +3416,7 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         Ok(ComputeService::new(
-            Arc::new(SqliteStore::connect_file(&path).await?),
+            Arc::new(o3k_store::testkit::open_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         ))
     }
@@ -3548,7 +3549,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let placement = o3k_placement::PlacementLedger::open(&placement_path)
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         placement.register_provider(
@@ -3628,7 +3630,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&path).await?);
         let service = ComputeService::new(store, Arc::new(FakeComputeProvider::new()));
         let flavor = service
             .create_flavor("project-a", "custom.small".to_owned(), 1, 1024, 5)
@@ -3651,7 +3654,7 @@ mod tests {
                 .any(|value| value == &flavor)
         );
         let reopened = ComputeService::new(
-            Arc::new(SqliteStore::connect_file(&path).await?),
+            Arc::new(o3k_store::testkit::open_file(&path).await?),
             Arc::new(FakeComputeProvider::new()),
         );
         assert_eq!(
@@ -3775,7 +3778,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store = Arc::new(SqliteStore::connect_file(&path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let service = ComputeService::new(store.clone(), provider.clone());
         let flavor = service.flavors()[0].id;
@@ -4042,7 +4046,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
         placement.register_provider(
             "node-a",
@@ -4879,7 +4884,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
         registry.register(&registered_agent("node-a")).await?;
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let server_id = Uuid::now_v7();
         let operation_id = Uuid::now_v7();
         let request = CreateInstanceRequest {
@@ -4935,7 +4940,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
         registry.register(&registered_agent("node-a")).await?;
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let server_id = Uuid::now_v7();
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
@@ -5282,7 +5287,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_status_rebinds_epoch_and_rejects_identity_conflicts()
     -> Result<(), Box<dyn std::error::Error>> {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await?);
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
         let operation_id = Uuid::now_v7();
         let resource_id = Uuid::now_v7();
         let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -5336,7 +5341,7 @@ mod tests {
         let state = Arc::new(RwLock::new(AgentProviderState::default()));
         apply_agent_provider_event(
             &state,
-            Some(&store),
+            Some(store.as_ref()),
             o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "command-1".to_owned(),
@@ -5357,7 +5362,7 @@ mod tests {
 
         apply_agent_provider_event(
             &state,
-            Some(&store),
+            Some(store.as_ref()),
             o3k_compute_agent::AgentEvent::ArtifactStatus(agent_proto::ArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "different-command".to_owned(),
@@ -5382,7 +5387,8 @@ mod tests {
         let database_path =
             std::env::temp_dir().join(format!("o3k-compute-notfound-{}.sqlite", Uuid::now_v7()));
         let _ = std::fs::remove_file(&database_path);
-        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let service = ComputeService::new(store, provider.clone());
 
@@ -5424,7 +5430,8 @@ mod tests {
             std::env::temp_dir().join(format!("o3k-compute-projid-pl-{}", Uuid::now_v7()));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
         placement.register_provider(
@@ -5522,7 +5529,8 @@ mod tests {
             std::env::temp_dir().join(format!("o3k-compute-isolation-pl-{}", Uuid::now_v7()));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store = Arc::new(SqliteStore::connect_file(&database_path).await?);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
         let provider = Arc::new(FakeComputeProvider::new());
         let placement = o3k_placement::PlacementLedger::open(&placement_path)?;
         placement.register_provider(

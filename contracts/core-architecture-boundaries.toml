@@ -81,12 +81,13 @@ ratcheted_adapter_dependencies = [
 ]
 
 concrete_store_symbol = "SqliteStore"
-concrete_store_debt_files = [
-  "crates/o3k-compute/src/lib.rs",
-  "crates/o3k-compute/src/attachment.rs",
-  "crates/o3k-identity/src/lib.rs",
-  "crates/o3k-reconciler/src/lib.rs",
-]
+# No application crate names the concrete adapter anymore: o3k-compute and
+# o3k-identity depend on the narrow ComputeRepository / IdentityRepository
+# ports (plus KeypairRepository, VolumeAttachmentRepository, and the existing
+# DurableStore) defined in this adapter crate, and the composition root
+# (o3kd) selects the SQLite adapter. The symbol check below still fails when
+# any application source re-introduces the concrete store.
+concrete_store_debt_files = []
 
 [application.adapter_dependency_debt]
 # o3k-compute currently contains execution/external-service adapter logic that
