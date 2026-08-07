@@ -1,5 +1,6 @@
 use std::{
     fs,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -98,6 +99,40 @@ pub struct ImageMetadataRecord {
     pub disk_format: String,
     pub size: Option<i64>,
     pub checksum: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub project_id: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubnetRecord {
+    pub id: Uuid,
+    pub network_id: Uuid,
+    pub name: String,
+    pub project_id: String,
+    pub cidr: String,
+    pub gateway_ip: Ipv4Addr,
+    pub allocation_start: Ipv4Addr,
+    pub allocation_end: Ipv4Addr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortRecord {
+    pub id: Uuid,
+    pub network_id: Uuid,
+    pub subnet_id: Option<Uuid>,
+    pub project_id: String,
+    pub name: String,
+    pub mac_address: String,
+    pub fixed_ip: Ipv4Addr,
+    pub status: String,
+    pub binding_host: Option<String>,
+    pub binding_state: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -459,6 +494,10 @@ pub enum StoreError {
     ImageOverlayConflict(String),
     #[error("invalid image overlay ownership: {0}")]
     InvalidImageOverlay(String),
+    #[error("network resource not found")]
+    NetworkNotFound,
+    #[error("network resource is still in use")]
+    NetworkInUse,
 }
 
 #[async_trait]
@@ -749,6 +788,58 @@ pub trait ImageRepository: Send + Sync {
         checksum: &str,
     ) -> Result<ImageMetadataRecord, StoreError>;
     async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+}
+
+/// Durable Neutron-compatible network/subnet/port metadata owned by the
+/// network service: project ownership, addressing and allocation ranges, and
+/// port binding state. This port owns only the metadata; network datapath
+/// behavior stays outside the store.
+///
+/// This is a narrow port around the network use cases, not a generic
+/// persistence surface. Application code depends on this trait instead of on
+/// the concrete `SqliteStore` adapter.
+#[async_trait]
+pub trait NetworkRepository: Send + Sync {
+    async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError>;
+    async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError>;
+    async fn get_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkRecord>, StoreError>;
+    async fn delete_network(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+
+    async fn insert_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError>;
+    async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, StoreError>;
+    async fn list_subnets_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<SubnetRecord>, StoreError>;
+    async fn get_subnet(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SubnetRecord>, StoreError>;
+    async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+
+    async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError>;
+    async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError>;
+    async fn list_ports_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<PortRecord>, StoreError>;
+    async fn get_port(&self, project_id: &str, id: &Uuid)
+    -> Result<Option<PortRecord>, StoreError>;
+    async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
+    async fn update_port_binding(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        binding_host: Option<&str>,
+        binding_state: Option<&str>,
+    ) -> Result<PortRecord, StoreError>;
 }
 
 /// The persistence surface of the compute application service.
@@ -1045,12 +1136,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 19 {
+        if table_count != 22 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -1906,6 +1997,259 @@ impl SqliteStore {
             Ok(())
         }
     }
+
+    pub async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO network_networks (id, name, project_id, status) VALUES (?, ?, ?, ?)",
+        )
+        .bind(network.id.to_string())
+        .bind(&network.name)
+        .bind(&network.project_id)
+        .bind(&network.status)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    // Lists are ordered by rowid so insertion order is preserved; this is
+    // deliberate and conformance-asserted.
+    pub async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, name, project_id, status FROM network_networks WHERE project_id = ? ORDER BY rowid",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(network_from_row).collect()
+    }
+
+    pub async fn get_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, project_id, status FROM network_networks WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(network_from_row).transpose()
+    }
+
+    pub async fn delete_network(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM network_networks WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM network_subnets WHERE network_id = network_networks.id) AND NOT EXISTS (SELECT 1 FROM network_ports WHERE network_id = network_networks.id)")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_network(project_id, id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::NetworkNotFound),
+            };
+        }
+        Ok(())
+    }
+
+    pub async fn insert_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO network_subnets (id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(subnet.id.to_string())
+        .bind(subnet.network_id.to_string())
+        .bind(&subnet.name)
+        .bind(&subnet.project_id)
+        .bind(&subnet.cidr)
+        .bind(subnet.gateway_ip.to_string())
+        .bind(subnet.allocation_start.to_string())
+        .bind(subnet.allocation_end.to_string())
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE project_id = ? ORDER BY rowid",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(subnet_from_row).collect()
+    }
+
+    pub async fn list_subnets_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<SubnetRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE project_id = ? AND network_id = ? ORDER BY rowid",
+        )
+        .bind(project_id)
+        .bind(network_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(subnet_from_row).collect()
+    }
+
+    pub async fn get_subnet(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SubnetRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, network_id, name, project_id, cidr, gateway_ip, allocation_start, allocation_end FROM network_subnets WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(subnet_from_row).transpose()
+    }
+
+    pub async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM network_subnets WHERE id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM network_ports WHERE network_id = network_subnets.network_id)")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_subnet(project_id, id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::NetworkNotFound),
+            };
+        }
+        Ok(())
+    }
+
+    pub async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO network_ports (id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(port.id.to_string())
+        .bind(port.network_id.to_string())
+        .bind(port.subnet_id.map(|value| value.to_string()))
+        .bind(&port.project_id)
+        .bind(&port.name)
+        .bind(port.mac_address.to_ascii_lowercase())
+        .bind(port.fixed_ip.to_string())
+        .bind(&port.status)
+        .bind(&port.binding_host)
+        .bind(&port.binding_state)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE project_id = ? ORDER BY rowid",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(port_from_row).collect()
+    }
+
+    pub async fn list_ports_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<PortRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE project_id = ? AND network_id = ? ORDER BY rowid",
+        )
+        .bind(project_id)
+        .bind(network_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(port_from_row).collect()
+    }
+
+    pub async fn get_port(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<PortRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, network_id, subnet_id, project_id, name, mac_address, fixed_ip, status, binding_host, binding_state FROM network_ports WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(port_from_row).transpose()
+    }
+
+    pub async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM network_ports WHERE id = ? AND project_id = ?")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            Err(StoreError::NetworkNotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub async fn update_port_binding(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        binding_host: Option<&str>,
+        binding_state: Option<&str>,
+    ) -> Result<PortRecord, StoreError> {
+        let result = sqlx::query(
+            "UPDATE network_ports SET binding_host = ?, binding_state = ? WHERE id = ? AND project_id = ?",
+        )
+        .bind(binding_host)
+        .bind(binding_state)
+        .bind(id.to_string())
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
+        self.get_port(project_id, id)
+            .await?
+            .ok_or(StoreError::Corrupt("updated port is missing".to_owned()))
+    }
     /// Runs one attempt of the observation update inside a BEGIN IMMEDIATE
     /// transaction. Errors are rolled back best-effort; the original error
     /// stays authoritative.
@@ -2034,6 +2378,58 @@ fn image_metadata_from_row(
         disk_format: row.get("disk_format"),
         size: row.get("size"),
         checksum: row.get("checksum"),
+    })
+}
+
+fn network_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkRecord, StoreError> {
+    Ok(NetworkRecord {
+        id: parse_uuid(row.get("id"))?,
+        name: row.get("name"),
+        project_id: row.get("project_id"),
+        status: row.get("status"),
+    })
+}
+
+fn subnet_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<SubnetRecord, StoreError> {
+    Ok(SubnetRecord {
+        id: parse_uuid(row.get("id"))?,
+        network_id: parse_uuid(row.get("network_id"))?,
+        name: row.get("name"),
+        project_id: row.get("project_id"),
+        cidr: row.get("cidr"),
+        gateway_ip: row
+            .get::<String, _>("gateway_ip")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+        allocation_start: row
+            .get::<String, _>("allocation_start")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+        allocation_end: row
+            .get::<String, _>("allocation_end")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+    })
+}
+
+fn port_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<PortRecord, StoreError> {
+    Ok(PortRecord {
+        id: parse_uuid(row.get("id"))?,
+        network_id: parse_uuid(row.get("network_id"))?,
+        subnet_id: row
+            .get::<Option<String>, _>("subnet_id")
+            .map(parse_uuid)
+            .transpose()?,
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        mac_address: row.get("mac_address"),
+        fixed_ip: row
+            .get::<String, _>("fixed_ip")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+        status: row.get("status"),
+        binding_host: row.get("binding_host"),
+        binding_state: row.get("binding_state"),
     })
 }
 
@@ -3095,6 +3491,96 @@ impl ImageRepository for SqliteStore {
 }
 
 #[async_trait]
+impl NetworkRepository for SqliteStore {
+    async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
+        self.insert_network(network).await
+    }
+
+    async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError> {
+        self.list_networks(project_id).await
+    }
+
+    async fn get_network(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkRecord>, StoreError> {
+        self.get_network(project_id, id).await
+    }
+
+    async fn delete_network(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_network(project_id, id).await
+    }
+
+    async fn insert_subnet(&self, subnet: &SubnetRecord) -> Result<(), StoreError> {
+        self.insert_subnet(subnet).await
+    }
+
+    async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, StoreError> {
+        self.list_subnets(project_id).await
+    }
+
+    async fn list_subnets_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<SubnetRecord>, StoreError> {
+        self.list_subnets_for_network(project_id, network_id).await
+    }
+
+    async fn get_subnet(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SubnetRecord>, StoreError> {
+        self.get_subnet(project_id, id).await
+    }
+
+    async fn delete_subnet(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_subnet(project_id, id).await
+    }
+
+    async fn insert_port(&self, port: &PortRecord) -> Result<(), StoreError> {
+        self.insert_port(port).await
+    }
+
+    async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, StoreError> {
+        self.list_ports(project_id).await
+    }
+
+    async fn list_ports_for_network(
+        &self,
+        project_id: &str,
+        network_id: &Uuid,
+    ) -> Result<Vec<PortRecord>, StoreError> {
+        self.list_ports_for_network(project_id, network_id).await
+    }
+
+    async fn get_port(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<PortRecord>, StoreError> {
+        self.get_port(project_id, id).await
+    }
+
+    async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_port(project_id, id).await
+    }
+
+    async fn update_port_binding(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        binding_host: Option<&str>,
+        binding_state: Option<&str>,
+    ) -> Result<PortRecord, StoreError> {
+        self.update_port_binding(project_id, id, binding_host, binding_state)
+            .await
+    }
+}
+
+#[async_trait]
 impl ComputeRepository for SqliteStore {
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
         self.list_resources_by_kind(kind).await
@@ -3792,6 +4278,417 @@ pub async fn run_image_repository_conformance<S: ImageRepository>(
     Ok(())
 }
 
+/// Runs the behavior shared by every network repository adapter: the
+/// network/subnet/port insert/get round-trips with all fields, project-scoped
+/// reads and lists in insertion order, unique-name and addressing conflicts,
+/// reference-counted deletes that reject in-use resources, and port binding
+/// updates.
+pub async fn run_network_repository_conformance<S: NetworkRepository>(
+    repository: &S,
+) -> Result<(), StoreError> {
+    let alpha = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "alpha".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&alpha).await?;
+    assert_eq!(
+        repository
+            .get_network("project-a", &alpha.id)
+            .await?
+            .as_ref(),
+        Some(&alpha)
+    );
+    assert_eq!(repository.get_network("project-b", &alpha.id).await?, None);
+    assert_eq!(
+        repository.get_network("project-a", &Uuid::now_v7()).await?,
+        None
+    );
+    assert_eq!(
+        repository.list_networks("project-a").await?,
+        vec![alpha.clone()]
+    );
+    assert!(repository.list_networks("project-b").await?.is_empty());
+
+    let beta = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "beta".to_owned(),
+        project_id: "project-b".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&beta).await?;
+    let gamma = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "gamma".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&gamma).await?;
+    // Lists preserve insertion order by rowid.
+    assert_eq!(
+        repository.list_networks("project-a").await?,
+        vec![alpha.clone(), gamma.clone()]
+    );
+    assert_eq!(
+        repository.list_networks("project-b").await?,
+        vec![beta.clone()]
+    );
+    let duplicate_name = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "alpha".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    assert!(matches!(
+        repository.insert_network(&duplicate_name).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    let duplicate_id = NetworkRecord {
+        id: alpha.id,
+        name: "alpha-copy".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    assert!(matches!(
+        repository.insert_network(&duplicate_id).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+
+    let subnet_network = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "subnet-network".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&subnet_network).await?;
+    let subnet = SubnetRecord {
+        id: Uuid::now_v7(),
+        network_id: subnet_network.id,
+        name: "sn".to_owned(),
+        project_id: "project-a".to_owned(),
+        cidr: "10.0.1.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::new(10, 0, 1, 1),
+        allocation_start: Ipv4Addr::new(10, 0, 1, 10),
+        allocation_end: Ipv4Addr::new(10, 0, 1, 200),
+    };
+    repository.insert_subnet(&subnet).await?;
+    assert_eq!(
+        repository
+            .get_subnet("project-a", &subnet.id)
+            .await?
+            .as_ref(),
+        Some(&subnet)
+    );
+    assert_eq!(repository.get_subnet("project-b", &subnet.id).await?, None);
+    let second_subnet = SubnetRecord {
+        id: Uuid::now_v7(),
+        network_id: subnet_network.id,
+        name: "sn2".to_owned(),
+        project_id: "project-a".to_owned(),
+        cidr: "10.0.2.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::new(10, 0, 2, 1),
+        allocation_start: Ipv4Addr::new(10, 0, 2, 10),
+        allocation_end: Ipv4Addr::new(10, 0, 2, 200),
+    };
+    repository.insert_subnet(&second_subnet).await?;
+    assert_eq!(
+        repository
+            .list_subnets_for_network("project-a", &subnet_network.id)
+            .await?,
+        vec![subnet.clone(), second_subnet.clone()]
+    );
+    let other_network = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "other".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&other_network).await?;
+    let foreign_subnet = SubnetRecord {
+        id: Uuid::now_v7(),
+        network_id: other_network.id,
+        name: "foreign".to_owned(),
+        project_id: "project-a".to_owned(),
+        cidr: "10.0.3.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::new(10, 0, 3, 1),
+        allocation_start: Ipv4Addr::new(10, 0, 3, 10),
+        allocation_end: Ipv4Addr::new(10, 0, 3, 200),
+    };
+    repository.insert_subnet(&foreign_subnet).await?;
+    // Subnets of other networks on the same project stay out of the list.
+    assert_eq!(
+        repository
+            .list_subnets_for_network("project-a", &subnet_network.id)
+            .await?,
+        vec![subnet.clone(), second_subnet.clone()]
+    );
+    assert!(matches!(
+        repository.insert_subnet(&subnet).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    let duplicate_cidr = SubnetRecord {
+        id: Uuid::now_v7(),
+        network_id: subnet_network.id,
+        name: "sn-copy".to_owned(),
+        project_id: "project-a".to_owned(),
+        cidr: subnet.cidr.clone(),
+        gateway_ip: Ipv4Addr::new(10, 0, 1, 1),
+        allocation_start: Ipv4Addr::new(10, 0, 1, 10),
+        allocation_end: Ipv4Addr::new(10, 0, 1, 200),
+    };
+    assert!(matches!(
+        repository.insert_subnet(&duplicate_cidr).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+
+    let port_network = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "port-network".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&port_network).await?;
+    let port_subnet = SubnetRecord {
+        id: Uuid::now_v7(),
+        network_id: port_network.id,
+        name: "port-subnet".to_owned(),
+        project_id: "project-a".to_owned(),
+        cidr: "10.0.4.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::new(10, 0, 4, 1),
+        allocation_start: Ipv4Addr::new(10, 0, 4, 10),
+        allocation_end: Ipv4Addr::new(10, 0, 4, 200),
+    };
+    repository.insert_subnet(&port_subnet).await?;
+    let port = PortRecord {
+        id: Uuid::now_v7(),
+        network_id: port_network.id,
+        subnet_id: Some(port_subnet.id),
+        project_id: "project-a".to_owned(),
+        name: "instance-port".to_owned(),
+        mac_address: "FA:16:3E:00:00:01".to_owned(),
+        fixed_ip: Ipv4Addr::new(10, 0, 4, 5),
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    repository.insert_port(&port).await?;
+    let restored = repository
+        .get_port("project-a", &port.id)
+        .await?
+        .ok_or(StoreError::NetworkNotFound)?;
+    assert_eq!(restored.id, port.id);
+    assert_eq!(restored.network_id, port.network_id);
+    assert_eq!(restored.subnet_id, port.subnet_id);
+    assert_eq!(restored.project_id, port.project_id);
+    assert_eq!(restored.name, port.name);
+    assert_eq!(restored.fixed_ip, port.fixed_ip);
+    assert_eq!(restored.status, port.status);
+    assert_eq!(restored.binding_host, None);
+    assert_eq!(restored.binding_state, None);
+    // MAC addresses are stored normalized to lower case.
+    assert_eq!(restored.mac_address, "fa:16:3e:00:00:01");
+    let mut stored_port = port.clone();
+    stored_port.mac_address = "fa:16:3e:00:00:01".to_owned();
+    let duplicate_ip = PortRecord {
+        id: Uuid::now_v7(),
+        network_id: port_network.id,
+        subnet_id: Some(port_subnet.id),
+        project_id: "project-a".to_owned(),
+        name: "dup-ip".to_owned(),
+        mac_address: "FA:16:3E:00:00:02".to_owned(),
+        fixed_ip: port.fixed_ip,
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    assert!(matches!(
+        repository.insert_port(&duplicate_ip).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    let duplicate_mac = PortRecord {
+        id: Uuid::now_v7(),
+        network_id: port_network.id,
+        subnet_id: Some(port_subnet.id),
+        project_id: "project-a".to_owned(),
+        name: "dup-mac".to_owned(),
+        mac_address: "fa:16:3e:00:00:01".to_owned(),
+        fixed_ip: Ipv4Addr::new(10, 0, 4, 6),
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    assert!(matches!(
+        repository.insert_port(&duplicate_mac).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    assert!(matches!(
+        repository.insert_port(&port).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    let unbound_port = PortRecord {
+        id: Uuid::now_v7(),
+        network_id: port_network.id,
+        subnet_id: None,
+        project_id: "project-a".to_owned(),
+        name: "unbound".to_owned(),
+        mac_address: "fa:16:3e:00:00:03".to_owned(),
+        fixed_ip: Ipv4Addr::new(10, 0, 4, 7),
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    // A port without a subnet is allowed; the store does not enforce
+    // subnet presence.
+    repository.insert_port(&unbound_port).await?;
+    assert_eq!(
+        repository
+            .get_port("project-a", &unbound_port.id)
+            .await?
+            .as_ref(),
+        Some(&unbound_port)
+    );
+    assert_eq!(
+        repository
+            .list_ports_for_network("project-a", &port_network.id)
+            .await?,
+        vec![stored_port.clone(), unbound_port.clone()]
+    );
+    assert_eq!(repository.get_port("project-b", &port.id).await?, None);
+    assert!(matches!(
+        repository.delete_port("project-b", &port.id).await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    assert!(matches!(
+        repository.delete_port("project-a", &Uuid::now_v7()).await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    let bound = repository
+        .update_port_binding("project-a", &port.id, Some("compute-1"), Some("active"))
+        .await?;
+    assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
+    assert_eq!(bound.binding_state.as_deref(), Some("active"));
+    let cleared = repository
+        .update_port_binding("project-a", &port.id, Some("compute-1"), None)
+        .await?;
+    assert_eq!(cleared.binding_host.as_deref(), Some("compute-1"));
+    assert_eq!(cleared.binding_state, None);
+    assert!(matches!(
+        repository
+            .update_port_binding("project-b", &port.id, Some("compute-2"), Some("active"))
+            .await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    assert!(matches!(
+        repository
+            .update_port_binding(
+                "project-a",
+                &Uuid::now_v7(),
+                Some("compute-2"),
+                Some("active")
+            )
+            .await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    repository
+        .delete_port("project-a", &unbound_port.id)
+        .await?;
+    assert_eq!(
+        repository.get_port("project-a", &unbound_port.id).await?,
+        None
+    );
+
+    let port_only_network = NetworkRecord {
+        id: Uuid::now_v7(),
+        name: "port-only".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    repository.insert_network(&port_only_network).await?;
+    let port_only_port = PortRecord {
+        id: Uuid::now_v7(),
+        network_id: port_only_network.id,
+        subnet_id: None,
+        project_id: "project-a".to_owned(),
+        name: "only-port".to_owned(),
+        mac_address: "fa:16:3e:00:00:04".to_owned(),
+        fixed_ip: Ipv4Addr::new(10, 0, 4, 8),
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    repository.insert_port(&port_only_port).await?;
+
+    // Reference counting: subnets and ports keep their network alive, and
+    // ports keep their network's subnets alive.
+    assert!(matches!(
+        repository
+            .delete_network("project-a", &subnet_network.id)
+            .await,
+        Err(StoreError::NetworkInUse)
+    ));
+    assert!(matches!(
+        repository
+            .delete_network("project-a", &port_network.id)
+            .await,
+        Err(StoreError::NetworkInUse)
+    ));
+    assert!(matches!(
+        repository
+            .delete_network("project-a", &port_only_network.id)
+            .await,
+        Err(StoreError::NetworkInUse)
+    ));
+    assert!(matches!(
+        repository.delete_subnet("project-a", &port_subnet.id).await,
+        Err(StoreError::NetworkInUse)
+    ));
+
+    repository.delete_port("project-a", &port.id).await?;
+    assert_eq!(repository.get_port("project-a", &port.id).await?, None);
+    repository
+        .delete_port("project-a", &port_only_port.id)
+        .await?;
+    assert_eq!(
+        repository.get_port("project-a", &port_only_port.id).await?,
+        None
+    );
+
+    repository.delete_subnet("project-a", &subnet.id).await?;
+    assert_eq!(repository.get_subnet("project-a", &subnet.id).await?, None);
+    assert!(matches!(
+        repository.delete_subnet("project-a", &subnet.id).await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    assert!(matches!(
+        repository
+            .delete_subnet("project-b", &second_subnet.id)
+            .await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    repository
+        .delete_subnet("project-a", &foreign_subnet.id)
+        .await?;
+    assert_eq!(
+        repository
+            .get_subnet("project-a", &foreign_subnet.id)
+            .await?,
+        None
+    );
+
+    repository.delete_network("project-a", &alpha.id).await?;
+    assert_eq!(repository.get_network("project-a", &alpha.id).await?, None);
+    assert!(matches!(
+        repository.delete_network("project-a", &alpha.id).await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    assert!(matches!(
+        repository.delete_network("project-b", &gamma.id).await,
+        Err(StoreError::NetworkNotFound)
+    ));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3811,13 +4708,15 @@ mod tests {
         run_volume_attachment_repository_conformance(&compute_store).await?;
         run_conformance(&compute_store).await?;
         run_image_repository_conformance(&compute_store).await?;
+        run_network_repository_conformance(&compute_store).await?;
         // Invariant: exactly two `compute_instance` rows survive the combined
         // run. The keypair suite leaves one (its server-create scenario) and
         // the volume-attachment suite leaves one; the identity suite, the
-        // generic `run_conformance`, and the image suite create none (keystone
-        // rows, a `server` resource, and `image_metadata` rows only). Keep
-        // this assertion on the shared store so a suite added to the combined
-        // run cannot silently change the count.
+        // generic `run_conformance`, the image suite, and the network suite
+        // create none (keystone rows, a `server` resource, `image_metadata`
+        // rows, and `network_networks`/`network_subnets`/`network_ports` rows
+        // only). Keep this assertion on the shared store so a suite added to
+        // the combined run cannot silently change the count.
         assert_eq!(
             compute_store
                 .list_resources_by_kind("compute_instance")
@@ -3864,6 +4763,76 @@ mod tests {
             reopened.get_image("project-a", &image.id).await,
             Ok(None)
         ));
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_metadata_survives_store_reopen() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!("/tmp/o3k-store-network-{}.sqlite", Uuid::now_v7()));
+        let network = NetworkRecord {
+            id: Uuid::now_v7(),
+            name: "survivor".to_owned(),
+            project_id: "project-a".to_owned(),
+            status: "ACTIVE".to_owned(),
+        };
+        let subnet = SubnetRecord {
+            id: Uuid::now_v7(),
+            network_id: network.id,
+            name: "survivor-subnet".to_owned(),
+            project_id: "project-a".to_owned(),
+            cidr: "10.0.9.0/24".to_owned(),
+            gateway_ip: Ipv4Addr::new(10, 0, 9, 1),
+            allocation_start: Ipv4Addr::new(10, 0, 9, 10),
+            allocation_end: Ipv4Addr::new(10, 0, 9, 200),
+        };
+        let port = PortRecord {
+            id: Uuid::now_v7(),
+            network_id: network.id,
+            subnet_id: Some(subnet.id),
+            project_id: "project-a".to_owned(),
+            name: "survivor-port".to_owned(),
+            mac_address: "fa:16:3e:00:00:99".to_owned(),
+            fixed_ip: Ipv4Addr::new(10, 0, 9, 5),
+            status: "DOWN".to_owned(),
+            binding_host: None,
+            binding_state: None,
+        };
+        {
+            let store = testkit::open_file(&path).await?;
+            store.insert_network(&network).await?;
+            store.insert_subnet(&subnet).await?;
+            store.insert_port(&port).await?;
+            let bound = store
+                .update_port_binding("project-a", &port.id, Some("compute-1"), Some("active"))
+                .await?;
+            assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
+            assert_eq!(bound.binding_state.as_deref(), Some("active"));
+        }
+        let reopened = testkit::open_file(&path).await?;
+        assert_eq!(
+            reopened.get_network("project-a", &network.id).await?,
+            Some(network.clone())
+        );
+        assert_eq!(
+            reopened.get_subnet("project-a", &subnet.id).await?,
+            Some(subnet.clone())
+        );
+        let restored_port = reopened
+            .get_port("project-a", &port.id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)?;
+        let mut expected_port = port.clone();
+        expected_port.binding_host = Some("compute-1".to_owned());
+        expected_port.binding_state = Some("active".to_owned());
+        assert_eq!(restored_port, expected_port);
+        assert_eq!(restored_port.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(restored_port.binding_state.as_deref(), Some("active"));
+        reopened.delete_port("project-a", &port.id).await?;
+        reopened.delete_subnet("project-a", &subnet.id).await?;
+        reopened.delete_network("project-a", &network.id).await?;
         fs::remove_file(&path)?;
         let _ = fs::remove_file(format!("{}-wal", path.display()));
         let _ = fs::remove_file(format!("{}-shm", path.display()));

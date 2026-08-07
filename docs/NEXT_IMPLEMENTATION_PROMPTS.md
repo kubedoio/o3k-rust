@@ -217,6 +217,17 @@ Acceptance:
 
 ## Prompt 4 — make Neutron intent and IP/MAC allocation durable
 
+> Completed by issue #516: network/subnet/port metadata, allocation intent,
+> and binding state now live behind the narrow `NetworkRepository` port
+> implemented on the SQLite adapter (migration 0016). The previous
+> `metadata.json` file is imported once, idempotently and crash-resume safely,
+> then renamed so it is never read again; UNIQUE constraints on
+> `(subnet_id, fixed_ip)` and `mac_address` with allocation retry prevent
+> duplicate allocation; binding intent is recorded at create dispatch and host
+> observations project into durable binding state. Host-local TAP/bridge/DHCP
+> execution and foreign-link ownership fences remain agent-owned and
+> unchanged. The prompt below is retained for historical reference.
+
 ```text
 Objective: move network/subnet/port control-plane metadata, allocation intent,
 and host binding state behind durable repository ports while keeping host-local

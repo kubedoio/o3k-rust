@@ -1177,9 +1177,10 @@ fn port_response(value: PortRecord) -> PortResponse {
         project_id: value.project_id,
         name: value.name,
         mac_address: value.mac_address,
-        fixed_ips: (!value.subnet_id.is_nil())
-            .then_some(FixedIpResponse {
-                subnet_id: value.subnet_id.to_string(),
+        fixed_ips: value
+            .subnet_id
+            .map(|subnet_id| FixedIpResponse {
+                subnet_id: subnet_id.to_string(),
                 ip_address: value.fixed_ip,
             })
             .into_iter()
@@ -1205,7 +1206,7 @@ fn network_error(error: NetworkError) -> axum::response::Response {
             "Bad Request",
             "invalid network request",
         ),
-        NetworkError::Storage(_) | NetworkError::CorruptMetadata(_) => keystone_error(
+        NetworkError::Store(_) | NetworkError::CorruptMetadata(_) => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
             "network storage is unavailable",
@@ -1257,7 +1258,10 @@ async fn create_network(
             "invalid network request",
         );
     };
-    match service.create_network(&token.project_id, body.network.name) {
+    match service
+        .create_network(&token.project_id, body.network.name)
+        .await
+    {
         Ok(value) => (
             StatusCode::CREATED,
             Json(NetworkEnvelope {
@@ -1281,7 +1285,7 @@ async fn list_networks(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_networks(&token.project_id) {
+    match service.list_networks(&token.project_id).await {
         Ok(values) => Json(NetworkList {
             networks: values.into_iter().map(network_response).collect(),
         })
@@ -1303,7 +1307,7 @@ async fn show_network(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_network(&token.project_id, id) {
+    match service.get_network(&token.project_id, id).await {
         Ok(value) => Json(NetworkEnvelope {
             network: network_response(value),
         })
@@ -1325,7 +1329,7 @@ async fn delete_network(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_network(&token.project_id, id) {
+    match service.delete_network(&token.project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
@@ -1368,15 +1372,18 @@ async fn create_subnet(
         .allocation_pools
         .as_ref()
         .and_then(|values| values.first());
-    match service.create_subnet(
-        &token.project_id,
-        body.subnet.network_id,
-        body.subnet.name,
-        body.subnet.cidr,
-        body.subnet.gateway_ip,
-        pool.map(|v| v.start),
-        pool.map(|v| v.end),
-    ) {
+    match service
+        .create_subnet(
+            &token.project_id,
+            body.subnet.network_id,
+            body.subnet.name,
+            body.subnet.cidr,
+            body.subnet.gateway_ip,
+            pool.map(|v| v.start),
+            pool.map(|v| v.end),
+        )
+        .await
+    {
         Ok(value) => (
             StatusCode::CREATED,
             Json(SubnetEnvelope {
@@ -1400,7 +1407,7 @@ async fn list_subnets(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_subnets(&token.project_id) {
+    match service.list_subnets(&token.project_id).await {
         Ok(values) => Json(SubnetList {
             subnets: values.into_iter().map(subnet_response).collect(),
         })
@@ -1422,7 +1429,7 @@ async fn show_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_subnet(&token.project_id, id) {
+    match service.get_subnet(&token.project_id, id).await {
         Ok(value) => Json(SubnetEnvelope {
             subnet: subnet_response(value),
         })
@@ -1444,7 +1451,7 @@ async fn delete_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_subnet(&token.project_id, id) {
+    match service.delete_subnet(&token.project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
@@ -1470,7 +1477,10 @@ async fn create_port(
             "invalid port request",
         );
     };
-    match service.create_port(&token.project_id, body.port.network_id, body.port.name) {
+    match service
+        .create_port(&token.project_id, body.port.network_id, body.port.name)
+        .await
+    {
         Ok(value) => (
             StatusCode::CREATED,
             Json(PortEnvelope {
@@ -1494,7 +1504,7 @@ async fn list_ports(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_ports(&token.project_id) {
+    match service.list_ports(&token.project_id).await {
         Ok(values) => Json(PortList {
             ports: values.into_iter().map(port_response).collect(),
         })
@@ -1516,7 +1526,7 @@ async fn show_port(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_port(&token.project_id, id) {
+    match service.get_port(&token.project_id, id).await {
         Ok(value) => Json(PortEnvelope {
             port: port_response(value),
         })
@@ -1538,7 +1548,7 @@ async fn delete_port(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_port(&token.project_id, id) {
+    match service.delete_port(&token.project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
@@ -1674,14 +1684,17 @@ fn nova_status(state: ServerState) -> &'static str {
     }
 }
 
-fn server_response(server: Server, network_service: Option<&NetworkService>) -> ServerResponse {
+async fn server_response(
+    server: Server,
+    network_service: Option<&NetworkService>,
+) -> ServerResponse {
     let mut addresses = serde_json::Map::new();
     if let Some(network_service) = network_service {
         for port_id in &server.network_ids {
             let Ok(port_id) = port_id.parse::<uuid::Uuid>() else {
                 continue;
             };
-            let Ok(port) = network_service.get_port(&server.project_id, port_id) else {
+            let Ok(port) = network_service.get_port(&server.project_id, port_id).await else {
                 continue;
             };
             let address_list = addresses
@@ -2253,7 +2266,7 @@ async fn create_server(
                     );
                 }
             };
-            if let Err(error) = network_service.get_port(&token.project_id, port_id) {
+            if let Err(error) = network_service.get_port(&token.project_id, port_id).await {
                 return network_error(error);
             }
         }
@@ -2280,7 +2293,7 @@ async fn create_server(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server, state.network.as_deref()),
+                server: server_response(server, state.network.as_deref()).await,
             }),
         )
             .into_response(),
@@ -2302,13 +2315,16 @@ async fn list_servers(
         Err(response) => return response,
     };
     match service.list_servers(&token.project_id).await {
-        Ok(servers) => Json(ServerListResponse {
-            servers: servers
-                .into_iter()
-                .map(|server| server_response(server, state.network.as_deref()))
-                .collect(),
-        })
-        .into_response(),
+        Ok(servers) => {
+            let mut server_responses = Vec::with_capacity(servers.len());
+            for server in servers {
+                server_responses.push(server_response(server, state.network.as_deref()).await);
+            }
+            Json(ServerListResponse {
+                servers: server_responses,
+            })
+            .into_response()
+        }
         Err(error) => compute_error(error),
     }
 }
@@ -2331,7 +2347,7 @@ async fn show_server(
         .await
     {
         Ok(server) => Json(ServerEnvelope {
-            server: server_response(server, state.network.as_deref()),
+            server: server_response(server, state.network.as_deref()).await,
         })
         .into_response(),
         Err(error) => compute_error(error),
@@ -2599,7 +2615,7 @@ async fn server_action(
         Ok(server) => (
             StatusCode::ACCEPTED,
             Json(ServerEnvelope {
-                server: server_response(server, state.network.as_deref()),
+                server: server_response(server, state.network.as_deref()).await,
             }),
         )
             .into_response(),
@@ -2943,8 +2959,8 @@ mod tests {
         assert!(super::config_drive_ssh_public_key(None, None).is_err());
     }
 
-    #[test]
-    fn server_response_reports_requested_config_drive_without_exposing_payload()
+    #[tokio::test]
+    async fn server_response_reports_requested_config_drive_without_exposing_payload()
     -> Result<(), serde_json::Error> {
         let server = Server {
             id: ServerId::from_uuid(Uuid::nil()),
@@ -2958,7 +2974,7 @@ mod tests {
             network_ids: Vec::new(),
             host: None,
         };
-        let response = server_response(server, None);
+        let response = server_response(server, None).await;
         let value = serde_json::to_value(response)?;
         assert_eq!(value.get("config_drive"), Some(&serde_json::json!(true)));
         assert!(value.get("user_data").is_none());
@@ -2970,8 +2986,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn server_response_reports_the_durable_placement_host() -> Result<(), serde_json::Error> {
+    #[tokio::test]
+    async fn server_response_reports_the_durable_placement_host() -> Result<(), serde_json::Error> {
         let server = Server {
             id: ServerId::from_uuid(Uuid::nil()),
             name: "server".to_owned(),
@@ -2984,7 +3000,7 @@ mod tests {
             network_ids: Vec::new(),
             host: Some("node-a".to_owned()),
         };
-        let response = server_response(server, None);
+        let response = server_response(server, None).await;
         let value = serde_json::to_value(response)?;
         assert_eq!(
             value.get("OS-EXT-SRV-ATTR:host"),
@@ -3017,8 +3033,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn server_response_projects_the_canonical_state_as_status() -> Result<(), serde_json::Error> {
+    #[tokio::test]
+    async fn server_response_projects_the_canonical_state_as_status()
+    -> Result<(), serde_json::Error> {
         let server = Server {
             id: ServerId::from_uuid(Uuid::nil()),
             name: "server".to_owned(),
@@ -3031,7 +3048,7 @@ mod tests {
             network_ids: Vec::new(),
             host: None,
         };
-        let value = serde_json::to_value(server_response(server, None))?;
+        let value = serde_json::to_value(server_response(server, None).await)?;
         assert_eq!(value.get("status"), Some(&serde_json::json!("SHUTOFF")));
         Ok(())
     }

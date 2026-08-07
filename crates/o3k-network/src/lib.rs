@@ -1647,39 +1647,7 @@ fn interface_output_is_bridge(output: &str) -> bool {
         .any(|line| line.trim_start().starts_with("bridge "))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NetworkRecord {
-    pub id: Uuid,
-    pub name: String,
-    pub project_id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SubnetRecord {
-    pub id: Uuid,
-    pub network_id: Uuid,
-    pub name: String,
-    pub project_id: String,
-    pub cidr: String,
-    pub gateway_ip: Ipv4Addr,
-    pub allocation_start: Ipv4Addr,
-    pub allocation_end: Ipv4Addr,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PortRecord {
-    pub id: Uuid,
-    pub network_id: Uuid,
-    #[serde(default)]
-    pub subnet_id: Uuid,
-    pub project_id: String,
-    pub name: String,
-    #[serde(default)]
-    pub mac_address: String,
-    pub fixed_ip: Ipv4Addr,
-    pub status: String,
-}
+pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
@@ -1691,73 +1659,55 @@ pub enum NetworkError {
     InvalidRequest,
     #[error("subnet allocation pool is exhausted")]
     PoolExhausted,
-    #[error("network storage error")]
-    Storage(#[source] io::Error),
+    #[error("network store error")]
+    Store(#[source] o3k_store::StoreError),
     #[error("network metadata is corrupt")]
     CorruptMetadata(#[source] serde_json::Error),
 }
 
-#[derive(Clone)]
-pub struct NetworkService {
-    inner: Arc<Mutex<Inner>>,
+fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
+    match error {
+        o3k_store::StoreError::ResourceAlreadyExists => NetworkError::Conflict,
+        o3k_store::StoreError::NetworkNotFound => NetworkError::NotFound,
+        o3k_store::StoreError::NetworkInUse => NetworkError::Conflict,
+        other => NetworkError::Store(other),
+    }
 }
 
-#[derive(Serialize, Deserialize, Default)]
-struct Persisted {
-    networks: Vec<NetworkRecord>,
-    subnets: Vec<SubnetRecord>,
-    ports: Vec<PortRecord>,
+#[derive(Clone)]
+pub struct NetworkService {
+    inner: Arc<Inner>,
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct Inner {
     root: PathBuf,
-    data: Persisted,
+    repository: Arc<dyn o3k_store::NetworkRepository>,
 }
 
 impl NetworkService {
-    pub fn open(root: impl Into<PathBuf>) -> Result<Self, NetworkError> {
+    pub async fn open(
+        root: impl Into<PathBuf>,
+        repository: Arc<dyn o3k_store::NetworkRepository>,
+    ) -> Result<Self, NetworkError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(NetworkError::Storage)?;
-        let path = root.join("metadata.json");
-        let mut data = if path.exists() {
-            serde_json::from_slice(&fs::read(path).map_err(NetworkError::Storage)?)
-                .map_err(NetworkError::CorruptMetadata)?
-        } else {
-            Persisted::default()
-        };
-        let mut migrated = false;
-        for port in &mut data.ports {
-            if port.mac_address.is_empty() {
-                port.mac_address = deterministic_port_mac(port.id);
-                migrated = true;
-            }
-            if port.subnet_id.is_nil()
-                && let Some(subnet) = data.subnets.iter().find(|subnet| {
-                    subnet.network_id == port.network_id && subnet.project_id == port.project_id
-                })
-            {
-                port.subnet_id = subnet.id;
-                migrated = true;
-            }
-        }
-        let mut macs = HashSet::new();
-        if data
-            .ports
-            .iter()
-            .any(|port| !macs.insert(port.mac_address.to_ascii_lowercase()))
-        {
-            return Err(NetworkError::Conflict);
-        }
-        let inner = Inner { root, data };
-        if migrated {
-            persist(&inner)?;
+        fs::create_dir_all(&root).map_err(|source| {
+            NetworkError::Store(o3k_store::StoreError::CreateDataDirectory {
+                path: root.clone(),
+                source,
+            })
+        })?;
+        let inner = Arc::new(Inner { root, repository });
+        if inner.root.join("metadata.json").exists() {
+            import_legacy_metadata(&inner.root, inner.repository.as_ref()).await?;
         }
         Ok(Self {
-            inner: Arc::new(Mutex::new(inner)),
+            inner,
+            lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
-    pub fn create_network(
+    pub async fn create_network(
         &self,
         project_id: &str,
         name: String,
@@ -1765,12 +1715,15 @@ impl NetworkService {
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
-        let mut inner = self.lock()?;
-        if inner
-            .data
-            .networks
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .list_networks(project_id)
+            .await
+            .map_err(map_store_error)?
             .iter()
-            .any(|network| network.project_id == project_id && network.name == name)
+            .any(|network| network.name == name)
         {
             return Err(NetworkError::Conflict);
         }
@@ -1780,52 +1733,48 @@ impl NetworkService {
             project_id: project_id.to_owned(),
             status: "ACTIVE".to_owned(),
         };
-        inner.data.networks.push(network.clone());
-        persist(&inner)?;
-        Ok(network)
+        match self.inner.repository.insert_network(&network).await {
+            Ok(()) => Ok(network),
+            Err(o3k_store::StoreError::ResourceAlreadyExists) => Err(NetworkError::Conflict),
+            Err(error) => Err(map_store_error(error)),
+        }
     }
 
-    pub fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, NetworkError> {
-        let inner = self.lock()?;
-        Ok(inner
-            .data
-            .networks
-            .iter()
-            .filter(|item| item.project_id == project_id)
-            .cloned()
-            .collect())
+    pub async fn list_networks(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_networks(project_id)
+            .await
+            .map_err(map_store_error)
     }
 
-    pub fn get_network(&self, project_id: &str, id: Uuid) -> Result<NetworkRecord, NetworkError> {
-        let inner = self.lock()?;
-        inner
-            .data
-            .networks
-            .iter()
-            .find(|item| item.id == id && item.project_id == project_id)
-            .cloned()
+    pub async fn get_network(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<NetworkRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_network(project_id, &id)
+            .await
+            .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)
     }
 
-    pub fn delete_network(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
-        let mut inner = self.lock()?;
-        let position = inner
-            .data
-            .networks
-            .iter()
-            .position(|item| item.id == id && item.project_id == project_id)
-            .ok_or(NetworkError::NotFound)?;
-        if inner.data.subnets.iter().any(|item| item.network_id == id)
-            || inner.data.ports.iter().any(|item| item.network_id == id)
-        {
-            return Err(NetworkError::Conflict);
-        }
-        inner.data.networks.remove(position);
-        persist(&inner)
+    pub async fn delete_network(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_network(project_id, &id)
+            .await
+            .map_err(map_store_error)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn create_subnet(
+    pub async fn create_subnet(
         &self,
         project_id: &str,
         network_id: Uuid,
@@ -1853,20 +1802,25 @@ impl NetworkService {
         {
             return Err(NetworkError::InvalidRequest);
         }
-        let mut inner = self.lock()?;
-        if !inner
-            .data
-            .networks
-            .iter()
-            .any(|item| item.id == network_id && item.project_id == project_id)
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
         {
             return Err(NetworkError::NotFound);
         }
-        if inner
-            .data
-            .subnets
+        if self
+            .inner
+            .repository
+            .list_subnets_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
             .iter()
-            .any(|item| item.network_id == network_id && item.cidr == cidr)
+            .any(|subnet| subnet.cidr == cidr)
         {
             return Err(NetworkError::Conflict);
         }
@@ -1880,84 +1834,80 @@ impl NetworkService {
             allocation_start: start,
             allocation_end: end,
         };
-        inner.data.subnets.push(subnet.clone());
-        persist(&inner)?;
-        Ok(subnet)
+        match self.inner.repository.insert_subnet(&subnet).await {
+            Ok(()) => Ok(subnet),
+            Err(o3k_store::StoreError::ResourceAlreadyExists) => Err(NetworkError::Conflict),
+            Err(error) => Err(map_store_error(error)),
+        }
     }
 
-    pub fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, NetworkError> {
-        let inner = self.lock()?;
-        Ok(inner
-            .data
-            .subnets
-            .iter()
-            .filter(|item| item.project_id == project_id)
-            .cloned()
-            .collect())
+    pub async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_subnets(project_id)
+            .await
+            .map_err(map_store_error)
     }
 
-    pub fn get_subnet(&self, project_id: &str, id: Uuid) -> Result<SubnetRecord, NetworkError> {
-        let inner = self.lock()?;
-        inner
-            .data
-            .subnets
-            .iter()
-            .find(|item| item.id == id && item.project_id == project_id)
-            .cloned()
+    pub async fn get_subnet(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<SubnetRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_subnet(project_id, &id)
+            .await
+            .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)
     }
 
-    pub fn delete_subnet(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
-        let mut inner = self.lock()?;
-        let position = inner
-            .data
-            .subnets
-            .iter()
-            .position(|item| item.id == id && item.project_id == project_id)
-            .ok_or(NetworkError::NotFound)?;
-        if inner
-            .data
-            .ports
-            .iter()
-            .any(|item| item.network_id == inner.data.subnets[position].network_id)
-        {
-            return Err(NetworkError::Conflict);
-        }
-        inner.data.subnets.remove(position);
-        persist(&inner)
+    pub async fn delete_subnet(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_subnet(project_id, &id)
+            .await
+            .map_err(map_store_error)
     }
 
-    pub fn create_port(
+    pub async fn create_port(
         &self,
         project_id: &str,
         network_id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
-        let mut inner = self.lock()?;
         if name.trim().is_empty() {
             return Err(NetworkError::InvalidRequest);
         }
-        if !inner
-            .data
-            .networks
-            .iter()
-            .any(|item| item.id == network_id && item.project_id == project_id)
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
         {
             return Err(NetworkError::NotFound);
         }
-        let subnet = inner
-            .data
-            .subnets
-            .iter()
-            .find(|item| item.network_id == network_id && item.project_id == project_id)
-            .cloned()
+        let subnet = self
+            .inner
+            .repository
+            .list_subnets_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
             .ok_or(NetworkError::NotFound)?;
-        let used: std::collections::HashSet<Ipv4Addr> = inner
-            .data
-            .ports
-            .iter()
-            .filter(|item| item.network_id == network_id)
-            .map(|item| item.fixed_ip)
+        let used: HashSet<Ipv4Addr> = self
+            .inner
+            .repository
+            .list_ports_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .map(|port| port.fixed_ip)
             .collect();
         let mut candidate = u32::from(subnet.allocation_start);
         let end = u32::from(subnet.allocation_end);
@@ -1966,70 +1916,113 @@ impl NetworkService {
             let address = Ipv4Addr::from(candidate);
             if address != gateway && !used.contains(&address) {
                 let id = Uuid::now_v7();
-                let mac_address = deterministic_port_mac(id);
-                if inner
-                    .data
-                    .ports
-                    .iter()
-                    .any(|port| port.mac_address.eq_ignore_ascii_case(&mac_address))
-                {
-                    return Err(NetworkError::Conflict);
-                }
                 let port = PortRecord {
                     id,
                     network_id,
-                    subnet_id: subnet.id,
+                    subnet_id: Some(subnet.id),
                     project_id: project_id.to_owned(),
-                    name,
-                    mac_address,
+                    name: name.clone(),
+                    mac_address: deterministic_port_mac(id),
                     fixed_ip: address,
                     status: "ACTIVE".to_owned(),
+                    binding_host: None,
+                    binding_state: None,
                 };
-                inner.data.ports.push(port.clone());
-                persist(&inner)?;
-                return Ok(port);
+                match self.inner.repository.insert_port(&port).await {
+                    Ok(()) => return Ok(port),
+                    Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+                    Err(error) => return Err(map_store_error(error)),
+                }
             }
             candidate = candidate.saturating_add(1);
         }
         Err(NetworkError::PoolExhausted)
     }
 
-    pub fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, NetworkError> {
-        let inner = self.lock()?;
-        Ok(inner
-            .data
-            .ports
-            .iter()
-            .filter(|item| item.project_id == project_id)
-            .cloned()
-            .collect())
+    pub async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_ports(project_id)
+            .await
+            .map_err(map_store_error)
     }
 
-    pub fn get_port(&self, project_id: &str, id: Uuid) -> Result<PortRecord, NetworkError> {
-        let inner = self.lock()?;
-        inner
-            .data
-            .ports
-            .iter()
-            .find(|item| item.id == id && item.project_id == project_id)
-            .cloned()
+    pub async fn get_port(&self, project_id: &str, id: Uuid) -> Result<PortRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_port(project_id, &id)
+            .await
+            .map_err(map_store_error)?
             .ok_or(NetworkError::NotFound)
     }
 
-    pub fn delete_port(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
-        let mut inner = self.lock()?;
-        let position = inner
-            .data
-            .ports
-            .iter()
-            .position(|item| item.id == id && item.project_id == project_id)
-            .ok_or(NetworkError::NotFound)?;
-        inner.data.ports.remove(position);
-        persist(&inner)
+    pub async fn delete_port(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_port(project_id, &id)
+            .await
+            .map_err(map_store_error)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>, NetworkError> {
-        self.inner.lock().map_err(|_| NetworkError::Conflict)
+    pub async fn record_binding_intent(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+        host: &str,
+    ) -> Result<PortRecord, NetworkError> {
+        if host.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        let port = self
+            .inner
+            .repository
+            .get_port(project_id, &port_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if port
+            .binding_host
+            .as_deref()
+            .is_some_and(|current| current != host)
+        {
+            return Err(NetworkError::Conflict);
+        }
+        self.inner
+            .repository
+            .update_port_binding(project_id, &port_id, Some(host), Some("binding"))
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn project_binding_observation(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+        host: &str,
+        state: &str,
+    ) -> Result<PortRecord, NetworkError> {
+        let _guard = self.lock().await;
+        let port = self
+            .inner
+            .repository
+            .get_port(project_id, &port_id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)?;
+        if port.binding_host.as_deref() != Some(host) {
+            return Err(NetworkError::Conflict);
+        }
+        self.inner
+            .repository
+            .update_port_binding(project_id, &port_id, Some(host), Some(state))
+            .await
+            .map_err(map_store_error)
+    }
+
+    async fn lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lock.lock().await
     }
 }
 
@@ -2079,18 +2072,128 @@ impl Ipv4Net {
     }
 }
 
-fn persist(inner: &Inner) -> Result<(), NetworkError> {
-    let path = inner.root.join("metadata.json");
-    let temporary = inner.root.join(format!("metadata.tmp-{}", Uuid::now_v7()));
-    let bytes = serde_json::to_vec_pretty(&inner.data).map_err(|_| NetworkError::Conflict)?;
-    if let Err(error) = fs::write(&temporary, bytes) {
-        let _ = fs::remove_file(&temporary);
-        return Err(NetworkError::Storage(error));
+/// The legacy `metadata.json` shape written by previous versions. It is
+/// parsed once, imported into the durable store, and the file is renamed so
+/// it is never read again.
+#[derive(serde::Deserialize)]
+struct LegacyFile {
+    networks: Vec<LegacyNetwork>,
+    subnets: Vec<LegacySubnet>,
+    ports: Vec<LegacyPort>,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyNetwork {
+    id: Uuid,
+    name: String,
+    project_id: String,
+    status: String,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacySubnet {
+    id: Uuid,
+    network_id: Uuid,
+    name: String,
+    project_id: String,
+    cidr: String,
+    gateway_ip: Ipv4Addr,
+    allocation_start: Ipv4Addr,
+    allocation_end: Ipv4Addr,
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyPort {
+    id: Uuid,
+    network_id: Uuid,
+    #[serde(default)]
+    subnet_id: Uuid,
+    project_id: String,
+    name: String,
+    #[serde(default)]
+    mac_address: String,
+    fixed_ip: Ipv4Addr,
+    status: String,
+}
+
+/// Imports the legacy `metadata.json` file exactly once, in dependency order
+/// (networks, then subnets, then ports), and renames it so `open` never reads
+/// it again. Inserts skip records that are already present, which makes a
+/// partially completed previous import crash-resume safe. A corrupt file,
+/// duplicate MACs, or any non-already-exists insert error fails the import
+/// closed and leaves the file in place.
+async fn import_legacy_metadata(
+    root: &Path,
+    repository: &dyn o3k_store::NetworkRepository,
+) -> Result<(), NetworkError> {
+    let path = root.join("metadata.json");
+    let file = fs::File::open(&path)
+        .map_err(|error| NetworkError::CorruptMetadata(serde_json::Error::io(error)))?;
+    let mut legacy: LegacyFile =
+        serde_json::from_reader(file).map_err(NetworkError::CorruptMetadata)?;
+    let mut macs = HashSet::new();
+    for port in &mut legacy.ports {
+        if port.mac_address.is_empty() {
+            port.mac_address = deterministic_port_mac(port.id);
+        }
+        if port.subnet_id.is_nil()
+            && let Some(subnet) = legacy.subnets.iter().find(|subnet| {
+                subnet.network_id == port.network_id && subnet.project_id == port.project_id
+            })
+        {
+            port.subnet_id = subnet.id;
+        }
+        if !macs.insert(port.mac_address.to_ascii_lowercase()) {
+            return Err(NetworkError::Conflict);
+        }
     }
-    if let Err(error) = fs::rename(&temporary, &path) {
-        let _ = fs::remove_file(temporary);
-        return Err(NetworkError::Storage(error));
+    for network in &legacy.networks {
+        let record = NetworkRecord {
+            id: network.id,
+            name: network.name.clone(),
+            project_id: network.project_id.clone(),
+            status: network.status.clone(),
+        };
+        match repository.insert_network(&record).await {
+            Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+            Err(error) => return Err(map_store_error(error)),
+        }
     }
+    for subnet in &legacy.subnets {
+        let record = SubnetRecord {
+            id: subnet.id,
+            network_id: subnet.network_id,
+            name: subnet.name.clone(),
+            project_id: subnet.project_id.clone(),
+            cidr: subnet.cidr.clone(),
+            gateway_ip: subnet.gateway_ip,
+            allocation_start: subnet.allocation_start,
+            allocation_end: subnet.allocation_end,
+        };
+        match repository.insert_subnet(&record).await {
+            Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+            Err(error) => return Err(map_store_error(error)),
+        }
+    }
+    for port in &legacy.ports {
+        let record = PortRecord {
+            id: port.id,
+            network_id: port.network_id,
+            subnet_id: (!port.subnet_id.is_nil()).then_some(port.subnet_id),
+            project_id: port.project_id.clone(),
+            name: port.name.clone(),
+            mac_address: port.mac_address.clone(),
+            fixed_ip: port.fixed_ip,
+            status: port.status.clone(),
+            binding_host: None,
+            binding_state: None,
+        };
+        match repository.insert_port(&record).await {
+            Ok(()) | Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
+            Err(error) => return Err(map_store_error(error)),
+        }
+    }
+    let _ = fs::rename(&path, root.join("metadata.json.imported"));
     Ok(())
 }
 
@@ -2111,125 +2214,467 @@ mod tests {
         PathBuf::from(format!("/tmp/o3k-network-{label}-{}", std::process::id()))
     }
 
-    #[test]
-    fn allocation_is_deterministic_collision_safe_and_restartable()
+    #[tokio::test]
+    async fn allocation_is_deterministic_collision_safe_and_restartable()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("allocation");
+        let sqlite_path = format!("{}.sqlite", path.display());
         let _ = fs::remove_dir_all(&path);
-        let service = NetworkService::open(&path)?;
-        let network = service.create_network("project-a", "flat".to_owned())?;
-        let subnet = service.create_subnet(
-            "project-a",
-            network.id,
-            "lab".to_owned(),
-            "192.0.2.0/29".to_owned(),
-            None,
-            None,
-            None,
-        )?;
-        let first = service.create_port("project-a", network.id, "one".to_owned())?;
-        let second = service.create_port("project-a", network.id, "two".to_owned())?;
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        let subnet = service
+            .create_subnet(
+                "project-a",
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let first = service
+            .create_port("project-a", network.id, "one".to_owned())
+            .await?;
+        let second = service
+            .create_port("project-a", network.id, "two".to_owned())
+            .await?;
         assert_ne!(first.fixed_ip, second.fixed_ip);
         assert_ne!(first.mac_address, second.mac_address);
         assert_eq!(first.mac_address, deterministic_port_mac(first.id));
         assert_eq!(first.fixed_ip, subnet.allocation_start);
-        let reopened = NetworkService::open(&path)?;
-        assert_eq!(reopened.get_port("project-a", first.id)?, first);
-        service.delete_port("project-a", first.id)?;
-        let replacement = service.create_port("project-a", network.id, "replacement".to_owned())?;
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        assert_eq!(reopened.get_port("project-a", first.id).await?, first);
+        reopened.delete_port("project-a", first.id).await?;
+        let replacement = reopened
+            .create_port("project-a", network.id, "replacement".to_owned())
+            .await?;
         assert_eq!(replacement.fixed_ip, first.fixed_ip);
         assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .contains("metadata.tmp-")
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            name.contains("metadata.tmp-") || name.contains("metadata.json")
         }));
+        drop(reopened);
+        drop(reopened_store);
         fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 
-    #[test]
-    fn opening_legacy_ports_migrates_the_deterministic_mac() -> Result<(), NetworkError> {
-        let path = root("port-mac-migration");
+    #[tokio::test]
+    async fn legacy_metadata_file_is_imported_once_and_never_read_again()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("legacy-import");
         let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).map_err(NetworkError::Storage)?;
-        let port_id = Uuid::now_v7();
+        fs::create_dir_all(&path)?;
         let network_id = Uuid::now_v7();
+        let subnet_id = Uuid::now_v7();
+        let port_with_mac = Uuid::now_v7();
+        let port_without_mac = Uuid::now_v7();
+        let port_without_subnet = Uuid::now_v7();
         let legacy = serde_json::json!({
+            "networks": [{
+                "id": network_id,
+                "name": "flat",
+                "project_id": "project-a",
+                "status": "ACTIVE"
+            }],
+            "subnets": [{
+                "id": subnet_id,
+                "network_id": network_id,
+                "name": "lab",
+                "project_id": "project-a",
+                "cidr": "192.0.2.0/29",
+                "gateway_ip": "192.0.2.1",
+                "allocation_start": "192.0.2.2",
+                "allocation_end": "192.0.2.14"
+            }],
+            "ports": [
+                {
+                    "id": port_with_mac,
+                    "network_id": network_id,
+                    "subnet_id": subnet_id,
+                    "project_id": "project-a",
+                    "name": "with-mac",
+                    "mac_address": "02:00:00:00:00:99",
+                    "fixed_ip": "192.0.2.2",
+                    "status": "ACTIVE"
+                },
+                {
+                    "id": port_without_mac,
+                    "network_id": network_id,
+                    "subnet_id": subnet_id,
+                    "project_id": "project-a",
+                    "name": "no-mac",
+                    "fixed_ip": "192.0.2.3",
+                    "status": "ACTIVE"
+                },
+                {
+                    "id": port_without_subnet,
+                    "network_id": network_id,
+                    "project_id": "project-a",
+                    "name": "no-subnet",
+                    "mac_address": "02:00:00:00:00:98",
+                    "fixed_ip": "192.0.2.4",
+                    "status": "ACTIVE"
+                }
+            ]
+        });
+        fs::write(path.join("metadata.json"), serde_json::to_vec(&legacy)?)?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        assert_eq!(service.list_networks("project-a").await?.len(), 1);
+        assert_eq!(service.list_subnets("project-a").await?.len(), 1);
+        assert_eq!(service.list_ports("project-a").await?.len(), 3);
+        let network = service.get_network("project-a", network_id).await?;
+        assert_eq!(network.id, network_id);
+        let subnet = service.get_subnet("project-a", subnet_id).await?;
+        assert_eq!(subnet.id, subnet_id);
+        let first = service.get_port("project-a", port_with_mac).await?;
+        assert_eq!(first.mac_address, "02:00:00:00:00:99");
+        assert_eq!(first.subnet_id, Some(subnet_id));
+        let migrated_mac = service.get_port("project-a", port_without_mac).await?;
+        assert_eq!(
+            migrated_mac.mac_address,
+            deterministic_port_mac(port_without_mac)
+        );
+        assert_eq!(migrated_mac.subnet_id, Some(subnet_id));
+        let migrated_subnet = service.get_port("project-a", port_without_subnet).await?;
+        assert_eq!(migrated_subnet.subnet_id, Some(subnet_id));
+        assert_eq!(migrated_subnet.mac_address, "02:00:00:00:00:98");
+        assert!(!path.join("metadata.json").exists());
+        assert!(path.join("metadata.json.imported").exists());
+        let second = NetworkService::open(&path, store).await?;
+        assert_eq!(second.list_networks("project-a").await?.len(), 1);
+        assert_eq!(second.list_subnets("project-a").await?.len(), 1);
+        assert_eq!(second.list_ports("project-a").await?.len(), 3);
+        drop(second);
+        fs::remove_dir_all(path)?;
+
+        let corrupt_path = root("legacy-import-corrupt");
+        let _ = fs::remove_dir_all(&corrupt_path);
+        fs::create_dir_all(&corrupt_path)?;
+        fs::write(corrupt_path.join("metadata.json"), b"not-json")?;
+        let corrupt_store = Arc::new(o3k_store::testkit::open_memory().await?);
+        assert!(matches!(
+            NetworkService::open(&corrupt_path, corrupt_store).await,
+            Err(NetworkError::CorruptMetadata(_))
+        ));
+        assert!(corrupt_path.join("metadata.json").exists());
+        fs::remove_dir_all(corrupt_path)?;
+
+        let duplicate_path = root("legacy-import-duplicate-mac");
+        let _ = fs::remove_dir_all(&duplicate_path);
+        fs::create_dir_all(&duplicate_path)?;
+        let duplicated = serde_json::json!({
             "networks": [],
             "subnets": [],
-            "ports": [{
-                "id": port_id,
-                "network_id": network_id,
-                "project_id": "project-a",
-                "name": "legacy",
-                "fixed_ip": "192.0.2.2",
-                "status": "ACTIVE"
-            }]
+            "ports": [
+                {
+                    "id": Uuid::now_v7(),
+                    "network_id": Uuid::now_v7(),
+                    "project_id": "project-a",
+                    "name": "one",
+                    "mac_address": "02:00:00:00:00:01",
+                    "fixed_ip": "192.0.2.2",
+                    "status": "ACTIVE"
+                },
+                {
+                    "id": Uuid::now_v7(),
+                    "network_id": Uuid::now_v7(),
+                    "project_id": "project-a",
+                    "name": "two",
+                    "mac_address": "02:00:00:00:00:01",
+                    "fixed_ip": "192.0.2.3",
+                    "status": "ACTIVE"
+                }
+            ]
         });
         fs::write(
-            path.join("metadata.json"),
-            serde_json::to_vec(&legacy).map_err(|_| NetworkError::Conflict)?,
-        )
-        .map_err(NetworkError::Storage)?;
-
-        let service = NetworkService::open(&path)?;
-        let port = service.get_port("project-a", port_id)?;
-        assert_eq!(port.mac_address, deterministic_port_mac(port_id));
-        let persisted =
-            fs::read_to_string(path.join("metadata.json")).map_err(NetworkError::Storage)?;
-        assert!(persisted.contains(&port.mac_address));
-        let _ = fs::remove_dir_all(path);
+            duplicate_path.join("metadata.json"),
+            serde_json::to_vec(&duplicated)?,
+        )?;
+        let duplicate_store = Arc::new(o3k_store::testkit::open_memory().await?);
+        assert!(matches!(
+            NetworkService::open(&duplicate_path, duplicate_store).await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(duplicate_path.join("metadata.json").exists());
+        fs::remove_dir_all(duplicate_path)?;
         Ok(())
     }
 
-    #[test]
-    fn invalid_cidr_exhaustion_and_project_isolation_are_enforced()
+    #[tokio::test]
+    async fn concurrent_port_creation_never_allocates_duplicate_ips_or_macs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!("o3k-network-concurrent-{}", Uuid::now_v7()));
+        let sqlite_path = path.with_extension("sqlite");
+        fs::create_dir_all(&path)?;
+        let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let setup = NetworkService::open(&path, setup_store.clone()).await?;
+        let network = setup.create_network("project-a", "flat".to_owned()).await?;
+        let subnet = setup
+            .create_subnet(
+                "project-a",
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/28".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(subnet.cidr, "192.0.2.0/28");
+        drop(setup);
+        drop(setup_store);
+
+        let store_a = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let store_b = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let service_a = NetworkService::open(&path, store_a).await?;
+        let service_b = NetworkService::open(&path, store_b).await?;
+        let mut handles = Vec::new();
+        for index in 0..12 {
+            let service = if index % 2 == 0 {
+                service_a.clone()
+            } else {
+                service_b.clone()
+            };
+            let network_id = network.id;
+            handles.push(tokio::spawn(async move {
+                service
+                    .create_port("project-a", network_id, format!("port-{index}"))
+                    .await
+            }));
+        }
+        let mut ports = Vec::new();
+        for handle in handles {
+            match handle.await? {
+                Ok(port) => ports.push(port),
+                Err(NetworkError::PoolExhausted) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert_eq!(ports.len(), 12);
+        let ips: HashSet<Ipv4Addr> = ports.iter().map(|port| port.fixed_ip).collect();
+        let macs: HashSet<String> = ports
+            .iter()
+            .map(|port| port.mac_address.to_ascii_lowercase())
+            .collect();
+        assert_eq!(ports.len(), ips.len());
+        assert_eq!(ports.len(), macs.len());
+        drop(service_a);
+        drop(service_b);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn binding_intent_and_observation_projection_are_durable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("binding");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        let _subnet = service
+            .create_subnet(
+                "project-a",
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port("project-a", network.id, "one".to_owned())
+            .await?;
+        let intended = service
+            .record_binding_intent("project-a", port.id, "compute-1")
+            .await?;
+        assert_eq!(intended.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(intended.binding_state.as_deref(), Some("binding"));
+        let observed = service
+            .project_binding_observation("project-a", port.id, "compute-1", "bound")
+            .await?;
+        assert_eq!(observed.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(observed.binding_state.as_deref(), Some("bound"));
+        assert!(matches!(
+            service
+                .project_binding_observation("project-a", port.id, "compute-2", "bound")
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .record_binding_intent("project-a", port.id, "compute-2")
+                .await,
+            Err(NetworkError::Conflict)
+        ));
+        assert!(matches!(
+            service
+                .project_binding_observation("project-a", Uuid::now_v7(), "compute-1", "bound")
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        assert!(matches!(
+            service
+                .record_binding_intent("project-a", port.id, "  ")
+                .await,
+            Err(NetworkError::InvalidRequest)
+        ));
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let restored = reopened.get_port("project-a", port.id).await?;
+        assert_eq!(restored.binding_host.as_deref(), Some("compute-1"));
+        assert_eq!(restored.binding_state.as_deref(), Some("bound"));
+        drop(reopened);
+        drop(reopened_store);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_cleanup_and_ip_reuse_after_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("delete-reuse");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let network = service
+            .create_network("project-a", "flat".to_owned())
+            .await?;
+        let subnet = service
+            .create_subnet(
+                "project-a",
+                network.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port("project-a", network.id, "one".to_owned())
+            .await?;
+        service.delete_port("project-a", port.id).await?;
+        assert!(matches!(
+            service.get_port("project-a", port.id).await,
+            Err(NetworkError::NotFound)
+        ));
+        drop(service);
+        drop(store);
+        let reopened_store =
+            Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
+        let replacement = reopened
+            .create_port("project-a", network.id, "replacement".to_owned())
+            .await?;
+        assert_eq!(replacement.fixed_ip, port.fixed_ip);
+        assert_ne!(replacement.mac_address, port.mac_address);
+        reopened.delete_port("project-a", replacement.id).await?;
+        reopened.delete_subnet("project-a", subnet.id).await?;
+        reopened.delete_network("project-a", network.id).await?;
+        assert!(matches!(
+            reopened.get_network("project-a", network.id).await,
+            Err(NetworkError::NotFound)
+        ));
+        drop(reopened);
+        drop(reopened_store);
+        fs::remove_dir_all(path)?;
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_cidr_exhaustion_and_project_isolation_are_enforced()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = root("validation");
         let _ = fs::remove_dir_all(&path);
-        let service = NetworkService::open(&path)?;
-        let network = service.create_network("project-a", "flat".to_owned())?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store).await?;
+        let network = service
+            .create_network("project-a", "flat".to_owned())
+            .await?;
         assert!(matches!(
-            service.create_subnet(
-                "project-a",
-                network.id,
-                "bad".to_owned(),
-                "192.0.2.1/31".to_owned(),
-                None,
-                None,
-                None
-            ),
+            service
+                .create_subnet(
+                    "project-a",
+                    network.id,
+                    "bad".to_owned(),
+                    "192.0.2.1/31".to_owned(),
+                    None,
+                    None,
+                    None
+                )
+                .await,
             Err(NetworkError::InvalidRequest)
         ));
-        let _ = service.create_subnet(
-            "project-a",
-            network.id,
-            "tiny".to_owned(),
-            "192.0.2.0/30".to_owned(),
-            None,
-            Some(Ipv4Addr::new(192, 0, 2, 2)),
-            Some(Ipv4Addr::new(192, 0, 2, 2)),
-        )?;
-        let _ = service.create_port("project-a", network.id, "one".to_owned())?;
+        let _ = service
+            .create_subnet(
+                "project-a",
+                network.id,
+                "tiny".to_owned(),
+                "192.0.2.0/30".to_owned(),
+                None,
+                Some(Ipv4Addr::new(192, 0, 2, 2)),
+                Some(Ipv4Addr::new(192, 0, 2, 2)),
+            )
+            .await?;
+        let _ = service
+            .create_port("project-a", network.id, "one".to_owned())
+            .await?;
         assert!(matches!(
-            service.create_port("project-a", network.id, "two".to_owned()),
+            service
+                .create_port("project-a", network.id, "two".to_owned())
+                .await,
             Err(NetworkError::PoolExhausted)
         ));
         assert!(matches!(
-            service.create_subnet(
-                "project-a",
-                network.id,
-                "gateway-overlap".to_owned(),
-                "198.51.100.0/29".to_owned(),
-                Some(Ipv4Addr::new(198, 51, 100, 3)),
-                Some(Ipv4Addr::new(198, 51, 100, 2)),
-                Some(Ipv4Addr::new(198, 51, 100, 4)),
-            ),
+            service
+                .create_subnet(
+                    "project-a",
+                    network.id,
+                    "gateway-overlap".to_owned(),
+                    "198.51.100.0/29".to_owned(),
+                    Some(Ipv4Addr::new(198, 51, 100, 3)),
+                    Some(Ipv4Addr::new(198, 51, 100, 2)),
+                    Some(Ipv4Addr::new(198, 51, 100, 4)),
+                )
+                .await,
             Err(NetworkError::InvalidRequest)
         ));
         assert!(matches!(
-            service.get_network("project-b", network.id),
+            service.get_network("project-b", network.id).await,
             Err(NetworkError::NotFound)
         ));
         fs::remove_dir_all(path)?;

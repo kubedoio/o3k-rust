@@ -139,6 +139,22 @@ verification, compute-host base images and overlays, and temporary publication
 files remain the artifact authority in the bounded filesystem store; image
 contents are not stored in SQLite.
 
+Issue #516 (step 4 of the required implementation sequence below) moved
+Neutron-compatible network/subnet/port control-plane metadata behind the
+narrow `NetworkRepository` port on the SQLite adapter: network/subnet/port
+identity and project ownership, subnet CIDR/gateway/allocation data,
+deterministic MAC and fixed-IP allocation, port dependency, and
+selected-host/binding intent with desired/observed binding state are
+durable-store authoritative. SQLite UNIQUE constraints on `(subnet_id,
+fixed_ip)` and `mac_address` make duplicate allocation impossible under the
+supported single-`o3kd` concurrency, with allocation retry on unique
+violation. The previous `metadata.json` file is imported once, idempotently
+and crash-resume safely, then renamed so it is never read again. Binding
+intent is recorded when a create dispatch selects a host, and host
+observations project into durable binding state. Host-local TAP/bridge/DHCP
+execution and the ownership fences around foreign links remain agent-owned
+and unchanged; the first-alpha flat-network public behavior is unchanged.
+
 ### 3. Durable control-plane metadata authority
 
 The durable store becomes authoritative for O3K-owned public metadata and

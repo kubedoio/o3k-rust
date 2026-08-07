@@ -47,9 +47,10 @@ impl DaemonCreateResolver {
             .map_err(|_| ProviderError::InvalidRequest)
     }
 
-    fn resolve_network(
+    async fn resolve_network(
         &self,
         request: &CreateInstanceRequest,
+        agent_id: &str,
     ) -> Result<
         (
             Vec<o3k_compute_agent::NetworkAttachmentSpec>,
@@ -66,10 +67,22 @@ impl DaemonCreateResolver {
             let port = self
                 .network
                 .get_port(&request.project_id, port_id)
+                .await
                 .map_err(|_| ProviderError::InvalidRequest)?;
+            self.network
+                .record_binding_intent(&request.project_id, port_id, agent_id)
+                .await
+                .map_err(|error| match error {
+                    o3k_network::NetworkError::Conflict => ProviderError::Conflict,
+                    _ => ProviderError::InvalidRequest,
+                })?;
             let subnet = self
                 .network
-                .get_subnet(&request.project_id, port.subnet_id)
+                .get_subnet(
+                    &request.project_id,
+                    port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
+                )
+                .await
                 .map_err(|_| ProviderError::InvalidRequest)?;
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
@@ -141,10 +154,11 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
     async fn resolve(
         &self,
         request: &CreateInstanceRequest,
-        _agent: &NodeSnapshot,
+        agent: &NodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         let image = self.resolve_image(request).await?;
-        let (network_attachments, network_data) = self.resolve_network(request)?;
+        let (network_attachments, network_data) =
+            self.resolve_network(request, &agent.agent_id).await?;
         let (iso, _) = self.materialize_config_drive(request, network_data)?;
         let flavor_id = (!request.flavor_id.trim().is_empty())
             .then(|| request.flavor_id.clone())
@@ -179,14 +193,14 @@ impl CreateArtifactResolver for DaemonCreateResolver {
     async fn resolve_artifacts(
         &self,
         request: &CreateInstanceRequest,
-        _agent: &NodeSnapshot,
+        agent: &NodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
         let image = self.resolve_image(request).await?;
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
         }
-        let (_, network_data) = self.resolve_network(request)?;
+        let (_, network_data) = self.resolve_network(request, &agent.agent_id).await?;
         let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
         if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
             return Err(ProviderError::Conflict);
@@ -230,7 +244,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         image_repository,
     )
     .await?;
-    let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
+    let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+    let network_service =
+        o3k_network::NetworkService::open(config.data_dir.join("network"), network_repository)
+            .await?;
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
