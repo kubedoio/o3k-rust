@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+echo "Running core architecture boundary ratchet..."
+bash "${repo_root}/tests/architecture-boundaries.sh"
+
 echo "Running primary ADR governance and normative drift validator..."
 python3 "${repo_root}/scripts/validate-adr-index.py" --root "${repo_root}"
 
@@ -102,4 +105,4 @@ if python3 "${repo_root}/scripts/validate-adr-index.py" --root "${temp_dir}" >/d
     exit 1
 fi
 
-echo "All ADR governance validation checks and negative test cases passed successfully!"
+echo "All ADR governance, architecture-boundary, and negative validation checks passed successfully!"
