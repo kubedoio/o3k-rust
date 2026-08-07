@@ -2173,6 +2173,9 @@ impl ComputeService {
     /// the intent the network service recorded at dispatch. Projection is
     /// best-effort and idempotent: it is a side observation, never a compute
     /// failure, and a replayed terminal update projects the same state again.
+    /// Integrity anomalies (a missing operation or resource, or an
+    /// unparseable desired-state snapshot) are surfaced as warnings instead
+    /// of failing the compute path.
     async fn project_terminal_binding_outcome(
         &self,
         operation_id: &str,
@@ -2182,16 +2185,34 @@ impl ComputeService {
             return;
         };
         let Ok(operation_id) = Uuid::parse_str(operation_id) else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                "port binding outcome skipped: operation id is not a UUID"
+            );
             return;
         };
         let Ok(operation) = self.store.get_operation(operation_id).await else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                "port binding outcome skipped: operation is missing from the durable store"
+            );
             return;
         };
         let Ok(resource) = self.store.get_resource(operation.resource_id).await else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                resource_id = %operation.resource_id,
+                "port binding outcome skipped: server resource is missing from the durable store"
+            );
             return;
         };
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
+            tracing::warn!(
+                operation_id = %operation_id,
+                resource_id = %operation.resource_id,
+                "port binding outcome skipped: server create intent is corrupt"
+            );
             return;
         };
         for port_id in &request.network_ids {

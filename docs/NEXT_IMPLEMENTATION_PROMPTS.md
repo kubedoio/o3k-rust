@@ -223,10 +223,14 @@ Acceptance:
 > `metadata.json` file is imported once, idempotently and crash-resume safely,
 > then renamed so it is never read again; UNIQUE constraints on
 > `(subnet_id, fixed_ip)` and `mac_address` with allocation retry prevent
-> duplicate allocation; binding intent is recorded at create dispatch and host
-> observations project into durable binding state. Host-local TAP/bridge/DHCP
-> execution and foreign-link ownership fences remain agent-owned and
-> unchanged. The prompt below is retained for historical reference.
+> duplicate allocation. Completed by issue #520: binding intent is recorded at
+> create dispatch and terminal create/delete outcomes project into the durable
+> binding state through the compute control plane (live agent updates and
+> reconcile paths; `bound`/`error` on create, unbind on delete success), and
+> multi-writer concurrency over one SQLite file is explicit and executable.
+> Host-local TAP/bridge/DHCP execution and foreign-link ownership fences
+> remain agent-owned and unchanged. The prompt below is retained for
+> historical reference.
 
 ```text
 Objective: move network/subnet/port control-plane metadata, allocation intent,
