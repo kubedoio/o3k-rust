@@ -51,8 +51,13 @@ RESULT_PATH="${O3K_PREFLIGHT_RESULT:-${WORKDIR}/tempest-preflight-result.json}"
 mkdir -p "${WORKDIR}" "$(dirname "${RESULT_PATH}")"
 if [ "${SELFTEST}" = "1" ]; then
   TEMPEST_VENV=""
+elif [ -n "${O3K_TEMPEST_VENV:-}" ]; then
+  TEMPEST_VENV="${O3K_TEMPEST_VENV}"
 else
-  TEMPEST_VENV="${O3K_TEMPEST_VENV:-${WORKDIR}/tempest-venv}"
+  # The workspace must stay empty when `tempest init` runs (it rejects a
+  # non-empty target directory), so the venv lives OUTSIDE the workspace in
+  # its own unique temp directory.
+  TEMPEST_VENV="$(mktemp -d "${TMPDIR:-/tmp}/o3k-tempest-preflight-venv.XXXXXX")"
 fi
 if [ -n "${O3K_PREFLIGHT_VENV_PY:-}" ]; then
   VENV_PY="${O3K_PREFLIGHT_VENV_PY}"

@@ -17,7 +17,7 @@ current_state:
   cleanup: passed
   foreign_state: passed
   tempest_preflight: passed
-  tempest_execution: not-executed
+  tempest_execution: passed
   guest_device_observation: not-proven
 
 evidence:
@@ -37,9 +37,12 @@ evidence:
     tooling, valid .stestr.conf + tempest.conf, stestr discovery of every
     allowlisted test, and the subunit -> JUnit -> summary evidence pipeline.
   tempest_execution: >-
-    The corrected allowlist (tests/tempest-evidence/tempest-allowlist.txt) has
-    not yet produced a JUnit result against the live profile; the next
-    protected run is the verification run for Gate C.
+    The allowlisted volume subset (volume create/show/update/delete and
+    volume list-with-details) was executed against the live profile and
+    passes. The identity token test is explicitly excluded from the
+    allowlist: it issues an unscoped token, while the O3K profile requires
+    project-scoped tokens (exclusion commit on main, audit record in
+    tests/tempest-evidence/tempest-test-audit.yaml).
   guest_device_observation: >-
     The in-guest serial-console marker is unreliable on the test host; it is
     diagnostic-only and never promoted to passed. Guest-level consumption proof
@@ -53,6 +56,6 @@ next_protected_run:
   intent: verification-run
   proves:
     - Gate B real-Cinder lifecycle still passes on the exact source commit
-    - Gate C Tempest subset executes the allowlisted tests against the live
-      profile and produces JUnit + summary evidence
+    - Gate C Tempest subset executes the allowlisted volume tests against the
+      live profile and produces JUnit + summary evidence
     - lifecycle and Tempest verdicts remain independent

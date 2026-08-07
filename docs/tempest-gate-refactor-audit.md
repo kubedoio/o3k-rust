@@ -18,11 +18,13 @@ Related: issues #420, #421, #424, #429, #432, #435; PR #501.
 
 ## 2. What is still genuinely unproven
 
-- Tempest execution of the corrected allowlist against the live profile (Gate C
-  run result). The allowlist that existed on `main` referenced test IDs that do
-  not exist at the pinned tempest 46.0.0 / cinder-tempest-plugin 1.21.0.
 - Guest-level block-device consumption (in-guest marker). Deliberately
   diagnostic-only; ownership in #435.
+
+Since this audit was written, a maintainer executed the allowlisted volume
+subset against the live profile and recorded it as passing; the identity token
+test was then explicitly excluded (it issues an unscoped token; the O3K profile
+requires project-scoped tokens).
 
 ## 3. Product failures vs test-harness failures (determination)
 
@@ -103,8 +105,8 @@ Still requiring protected runner:
 
 Expected next protected run:
   a verification run proving Gate B still passes and Gate C executes the
-  allowlisted tests (identity token issuance + external volume CRUD/list)
-  against the live profile, with independent lifecycle and Tempest verdicts.
+  allowlisted volume tests (external volume CRUD/list) against the live
+  profile, with independent lifecycle and Tempest verdicts.
 
 Issues eligible to close if that run passes:
   - Real-Cinder lifecycle portions of #420/#421/#429 (attach path evidence).
