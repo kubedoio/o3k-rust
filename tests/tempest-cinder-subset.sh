@@ -92,9 +92,51 @@ if [ "${REAL_CINDER_UP}" = true ] && [ -n "${TEMPEST_BIN}" ]; then
   "${TEMPEST_VENV_PY}" -c "import cinder_tempest_plugin" 2>/dev/null || \
     "${TEMPEST_VENV_PY}" -m pip install "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}"
   SELECTED_IDS="$(printf '%s,' "${ALLOWED_TEST_IDS[@]}" | sed 's/,$//')"
-  tempest run --test-ids "${SELECTED_IDS}" --os-cloud o3k-protected \
-    --testr-args='' --log-file "${PROFILE_DIR}/tempest.log" \
-    --output "${PROFILE_DIR}" || true
+  # Tempest 46 removed the `tempest run` command in favor of `stestr run`.
+  # Configure a workspace (or reuse O3K_TEMPEST_WORKSPACE) and run the
+  # explicit allowlist through stestr.
+  TEMPEST_WORKSPACE="${O3K_TEMPEST_WORKSPACE:-${PROFILE_DIR}/tempest-workspace}"
+  mkdir -p "${TEMPEST_WORKSPACE}"
+  TEMPEST_PKG_DIR="$("${TEMPEST_VENV_PY}" -c 'import tempest, os; print(os.path.dirname(tempest.__file__))' 2>/dev/null || echo '')"
+  cat > "${TEMPEST_WORKSPACE}/.stestr.conf" <<EOF
+[DEFAULT]
+test_path=${TEMPEST_PKG_DIR}/test_discover
+top_dir=${TEMPEST_PKG_DIR}
+group_regex=([^\.]*\.)*
+EOF
+  # Auth/identity config for the profile (admin over the O3K identity surface).
+  O3K_AUTH_URL="http://127.0.0.1:${O3K_PORT_NO_HOST}/v3"
+  O3K_PW="${O3K_PW:-password}"
+  cat > "${TEMPEST_WORKSPACE}/tempest.conf" <<EOF
+[DEFAULT]
+log_file = ${PROFILE_DIR}/tempest.log
+
+[identity]
+uri = ${O3K_AUTH_URL}/
+auth_version = v3
+
+[auth]
+use_dynamic_credentials = false
+admin_username = admin
+admin_password = ${O3K_PW}
+admin_project_name = admin
+admin_domain_name = Default
+admin_user_domain_name = Default
+
+[validation]
+run_validation = False
+EOF
+  (
+    cd "${TEMPEST_WORKSPACE}" || exit 1
+    "${TEMPEST_VENV_PY}" -m stestr init >/dev/null 2>&1 || true
+    "${TEMPEST_VENV_PY}" -m stestr run --test-ids "${SELECTED_IDS}" \
+      --config-file "${TEMPEST_WORKSPACE}/tempest.conf" \
+      > "${PROFILE_DIR}/tempest.log" 2>&1 || true
+    # Convert the subunit stream to JUnit XML for the summary parser.
+    "${TEMPEST_VENV_PY}" -m stestr last --subunit 2>/dev/null \
+      | "${TEMPEST_VENV_PY}" -m subunit2junitxml -o "${PROFILE_DIR}/tempest-results.xml" \
+      >/dev/null 2>&1 || true
+  )
   python3 - "${PROFILE_DIR}" "${TEMPEST_PIN}" "${CINDER_TEMPEST_PLUGIN_PIN}" "${SELECTED_IDS}" <<'PY'
 import json, sys, pathlib
 out_dir, tempest_pin, plugin_pin, selected_ids = sys.argv[1:]

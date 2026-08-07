@@ -1155,6 +1155,7 @@ echo "==> Workflow: run the pinned Tempest subset against the live profile..."
 export O3K_CINDER_ENDPOINT="${CINDER_PORT}"
 export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
 export O3K_TEMPEST_VENV="${VENV_DIR}"
+export O3K_TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 TEMPEST_WORKSPACE="${STATE_ROOT}/tempest-workspace"
 mkdir -p "${TEMPEST_WORKSPACE}"
 "${VENV_DIR}/bin/pip" install -q "tempest==${TEMPEST_PIN}" "cinder-tempest-plugin==${CINDER_TEMPEST_PLUGIN_PIN}" \
