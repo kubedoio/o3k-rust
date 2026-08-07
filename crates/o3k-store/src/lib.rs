@@ -87,6 +87,19 @@ pub struct KeypairRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageMetadataRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub project_id: String,
+    pub status: String,
+    pub visibility: String,
+    pub container_format: String,
+    pub disk_format: String,
+    pub size: Option<i64>,
+    pub checksum: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct VolumeAttachmentRecord {
     pub id: Uuid,
@@ -426,6 +439,10 @@ pub enum StoreError {
     KeypairInUse,
     #[error("keypair and server ownership do not match")]
     KeypairOwnershipConflict,
+    #[error("image not found")]
+    ImageNotFound,
+    #[error("image is already active")]
+    ImageAlreadyActive,
     #[error("artifact transfer not found")]
     ArtifactTransferNotFound,
     #[error("artifact transfer epoch does not match durable state")]
@@ -705,6 +722,33 @@ pub trait VolumeAttachmentRepository: Send + Sync {
         server_id: Uuid,
         attachment_id: Uuid,
     ) -> Result<(), StoreError>;
+}
+
+/// Durable Glance-compatible image metadata owned by the image service:
+/// project ownership, format/visibility, and the size/checksum sealed by the
+/// queued -> active transition. The bounded artifact bytes stay in the
+/// filesystem content directory; this port owns only the metadata.
+///
+/// This is a narrow port around the image use cases, not a generic
+/// persistence surface. Application code depends on this trait instead of on
+/// the concrete `SqliteStore` adapter.
+#[async_trait]
+pub trait ImageRepository: Send + Sync {
+    async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError>;
+    async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError>;
+    async fn get_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<ImageMetadataRecord>, StoreError>;
+    async fn activate_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        size: u64,
+        checksum: &str,
+    ) -> Result<ImageMetadataRecord, StoreError>;
+    async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError>;
 }
 
 /// The persistence surface of the compute application service.
@@ -1001,12 +1045,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 18 {
+        if table_count != 19 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
@@ -1764,6 +1808,104 @@ impl SqliteStore {
         sqlx::query_scalar("SELECT keypairs.name FROM server_keypairs JOIN keypairs ON keypairs.id = server_keypairs.keypair_id WHERE server_keypairs.server_id = ?")
             .bind(server_id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)
     }
+
+    pub async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "INSERT INTO image_metadata (id, name, project_id, status, visibility, container_format, disk_format, size, checksum) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(image.id.to_string())
+        .bind(&image.name)
+        .bind(&image.project_id)
+        .bind(&image.status)
+        .bind(&image.visibility)
+        .bind(&image.container_format)
+        .bind(&image.disk_format)
+        .bind(image.size)
+        .bind(&image.checksum)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn list_images(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, name, project_id, status, visibility, container_format, disk_format, size, checksum FROM image_metadata WHERE project_id = ? ORDER BY name ASC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(image_metadata_from_row).collect()
+    }
+
+    pub async fn get_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<ImageMetadataRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, name, project_id, status, visibility, container_format, disk_format, size, checksum FROM image_metadata WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(image_metadata_from_row).transpose()
+    }
+
+    pub async fn activate_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        size: u64,
+        checksum: &str,
+    ) -> Result<ImageMetadataRecord, StoreError> {
+        let size = i64::try_from(size)
+            .map_err(|_| StoreError::Corrupt("image size exceeds SQLite range".to_owned()))?;
+        let result = sqlx::query(
+            "UPDATE image_metadata SET status = 'active', size = ?, checksum = ? WHERE id = ? AND project_id = ? AND status = 'queued'",
+        )
+        .bind(size)
+        .bind(checksum)
+        .bind(id.to_string())
+        .bind(project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_image(project_id, id).await? {
+                Some(_) => Err(StoreError::ImageAlreadyActive),
+                None => Err(StoreError::ImageNotFound),
+            };
+        }
+        self.get_image(project_id, id)
+            .await?
+            .ok_or(StoreError::Corrupt("activated image is missing".to_owned()))
+    }
+
+    pub async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM image_metadata WHERE id = ? AND project_id = ?")
+            .bind(id.to_string())
+            .bind(project_id)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            Err(StoreError::ImageNotFound)
+        } else {
+            Ok(())
+        }
+    }
     /// Runs one attempt of the observation update inside a BEGIN IMMEDIATE
     /// transaction. Errors are rolled back best-effort; the original error
     /// stays authoritative.
@@ -1876,6 +2018,22 @@ fn keypair_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<KeypairRecord, Stor
         public_key: row.get("public_key"),
         fingerprint: row.get("fingerprint"),
         created_at: row.get("created_at"),
+    })
+}
+
+fn image_metadata_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<ImageMetadataRecord, StoreError> {
+    Ok(ImageMetadataRecord {
+        id: parse_uuid(row.get("id"))?,
+        name: row.get("name"),
+        project_id: row.get("project_id"),
+        status: row.get("status"),
+        visibility: row.get("visibility"),
+        container_format: row.get("container_format"),
+        disk_format: row.get("disk_format"),
+        size: row.get("size"),
+        checksum: row.get("checksum"),
     })
 }
 
@@ -2904,6 +3062,39 @@ impl VolumeAttachmentRepository for SqliteStore {
 }
 
 #[async_trait]
+impl ImageRepository for SqliteStore {
+    async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError> {
+        self.insert_image(image).await
+    }
+
+    async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError> {
+        self.list_images(project_id).await
+    }
+
+    async fn get_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<ImageMetadataRecord>, StoreError> {
+        self.get_image(project_id, id).await
+    }
+
+    async fn activate_image(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        size: u64,
+        checksum: &str,
+    ) -> Result<ImageMetadataRecord, StoreError> {
+        self.activate_image(project_id, id, size, checksum).await
+    }
+
+    async fn delete_image(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_image(project_id, id).await
+    }
+}
+
+#[async_trait]
 impl ComputeRepository for SqliteStore {
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError> {
         self.list_resources_by_kind(kind).await
@@ -3490,6 +3681,117 @@ pub async fn run_volume_attachment_repository_conformance<
     Ok(())
 }
 
+/// Runs the behavior shared by every image repository adapter: the
+/// insert/get round-trip with all fields, project-scoped reads and lists,
+/// the queued -> active activation transition that seals size and checksum,
+/// and scoped delete.
+pub async fn run_image_repository_conformance<S: ImageRepository>(
+    repository: &S,
+) -> Result<(), StoreError> {
+    let first = ImageMetadataRecord {
+        id: Uuid::now_v7(),
+        name: "alpha".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "queued".to_owned(),
+        visibility: "private".to_owned(),
+        container_format: "bare".to_owned(),
+        disk_format: "raw".to_owned(),
+        size: None,
+        checksum: None,
+    };
+    repository.insert_image(&first).await?;
+    assert_eq!(
+        repository.get_image("project-a", &first.id).await?.as_ref(),
+        Some(&first)
+    );
+    assert_eq!(
+        repository.get_image("project-a", &Uuid::now_v7()).await?,
+        None
+    );
+    assert_eq!(repository.get_image("project-b", &first.id).await?, None);
+    assert_eq!(
+        repository.list_images("project-a").await?,
+        vec![first.clone()]
+    );
+
+    let second = ImageMetadataRecord {
+        id: Uuid::now_v7(),
+        name: "beta".to_owned(),
+        project_id: "project-b".to_owned(),
+        status: "queued".to_owned(),
+        visibility: "private".to_owned(),
+        container_format: "bare".to_owned(),
+        disk_format: "qcow2".to_owned(),
+        size: None,
+        checksum: None,
+    };
+    repository.insert_image(&second).await?;
+    let third = ImageMetadataRecord {
+        id: Uuid::now_v7(),
+        name: "alpha2".to_owned(),
+        project_id: "project-a".to_owned(),
+        status: "queued".to_owned(),
+        visibility: "private".to_owned(),
+        container_format: "bare".to_owned(),
+        disk_format: "raw".to_owned(),
+        size: None,
+        checksum: None,
+    };
+    repository.insert_image(&third).await?;
+    // list is project-scoped and deterministic: same-project images come
+    // back sorted by name.
+    assert_eq!(
+        repository.list_images("project-a").await?,
+        vec![first.clone(), third.clone()]
+    );
+    assert_eq!(
+        repository.list_images("project-b").await?,
+        vec![second.clone()]
+    );
+
+    let checksum = "a".repeat(64);
+    let active = repository
+        .activate_image("project-a", &first.id, 11, &checksum)
+        .await?;
+    assert_eq!(active.status, "active");
+    assert_eq!(active.size, Some(11));
+    assert_eq!(active.checksum.as_deref(), Some(checksum.as_str()));
+    assert_eq!(active.name, first.name);
+    assert_eq!(active.visibility, first.visibility);
+    assert_eq!(active.container_format, first.container_format);
+    assert_eq!(active.disk_format, first.disk_format);
+    assert!(matches!(
+        repository
+            .activate_image("project-a", &first.id, 12, &checksum)
+            .await,
+        Err(StoreError::ImageAlreadyActive)
+    ));
+    assert!(matches!(
+        repository
+            .activate_image("project-a", &Uuid::now_v7(), 1, &checksum)
+            .await,
+        Err(StoreError::ImageNotFound)
+    ));
+    assert!(matches!(
+        repository
+            .activate_image("project-b", &first.id, 1, &checksum)
+            .await,
+        Err(StoreError::ImageNotFound)
+    ));
+
+    repository.delete_image("project-a", &first.id).await?;
+    assert_eq!(repository.get_image("project-a", &first.id).await?, None);
+    assert!(matches!(
+        repository.delete_image("project-a", &first.id).await,
+        Err(StoreError::ImageNotFound)
+    ));
+    assert!(matches!(
+        repository.insert_image(&second).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3508,12 +3810,14 @@ mod tests {
         run_keypair_repository_conformance(&compute_store).await?;
         run_volume_attachment_repository_conformance(&compute_store).await?;
         run_conformance(&compute_store).await?;
+        run_image_repository_conformance(&compute_store).await?;
         // Invariant: exactly two `compute_instance` rows survive the combined
         // run. The keypair suite leaves one (its server-create scenario) and
-        // the volume-attachment suite leaves one; the identity suite and the
-        // generic `run_conformance` create none (keystone rows and a `server`
-        // resource only). Keep this assertion on the shared store so a suite
-        // added to the combined run cannot silently change the count.
+        // the volume-attachment suite leaves one; the identity suite, the
+        // generic `run_conformance`, and the image suite create none (keystone
+        // rows, a `server` resource, and `image_metadata` rows only). Keep
+        // this assertion on the shared store so a suite added to the combined
+        // run cannot silently change the count.
         assert_eq!(
             compute_store
                 .list_resources_by_kind("compute_instance")
@@ -3521,6 +3825,48 @@ mod tests {
                 .len(),
             2
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_metadata_survives_store_reopen() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!("/tmp/o3k-store-image-{}.sqlite", Uuid::now_v7()));
+        let image = ImageMetadataRecord {
+            id: Uuid::now_v7(),
+            name: "survivor".to_owned(),
+            project_id: "project-a".to_owned(),
+            status: "queued".to_owned(),
+            visibility: "private".to_owned(),
+            container_format: "bare".to_owned(),
+            disk_format: "raw".to_owned(),
+            size: None,
+            checksum: None,
+        };
+        let checksum = "b".repeat(64);
+        {
+            let store = testkit::open_file(&path).await?;
+            store.insert_image(&image).await?;
+            let active = store
+                .activate_image("project-a", &image.id, 7, &checksum)
+                .await?;
+            assert_eq!(active.status, "active");
+        }
+        let reopened = testkit::open_file(&path).await?;
+        let restored = reopened
+            .get_image("project-a", &image.id)
+            .await?
+            .ok_or(StoreError::ImageNotFound)?;
+        assert_eq!(restored.status, "active");
+        assert_eq!(restored.size, Some(7));
+        assert_eq!(restored.checksum.as_deref(), Some(checksum.as_str()));
+        reopened.delete_image("project-a", &image.id).await?;
+        assert!(matches!(
+            reopened.get_image("project-a", &image.id).await,
+            Ok(None)
+        ));
+        fs::remove_file(&path)?;
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
         Ok(())
     }
 

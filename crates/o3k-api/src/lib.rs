@@ -826,11 +826,13 @@ fn image_error(error: ImageError) -> axum::response::Response {
             "Internal Server Error",
             "image overlay creation failed",
         ),
-        ImageError::Storage(_) | ImageError::CorruptMetadata(_) => keystone_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal Server Error",
-            "image storage is unavailable",
-        ),
+        ImageError::Storage(_) | ImageError::CorruptMetadata(_) | ImageError::Store(_) => {
+            keystone_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal Server Error",
+                "image storage is unavailable",
+            )
+        }
     }
 }
 
@@ -850,7 +852,7 @@ async fn download_image(
             "image service is not configured",
         );
     };
-    match service.resolve_artifact(&token.project_id, id) {
+    match service.resolve_artifact(&token.project_id, id).await {
         Ok(artifact) => {
             let mut response = (StatusCode::OK, artifact.content).into_response();
             response.headers_mut().insert(
@@ -891,13 +893,16 @@ async fn create_image(
             "invalid image metadata",
         );
     };
-    match service.create(
-        &token.project_id,
-        request.name,
-        request.visibility,
-        request.container_format,
-        request.disk_format,
-    ) {
+    match service
+        .create(
+            &token.project_id,
+            request.name,
+            request.visibility,
+            request.container_format,
+            request.disk_format,
+        )
+        .await
+    {
         Ok(image) => (StatusCode::CREATED, Json(image_response(image))).into_response(),
         Err(error) => image_error(error),
     }
@@ -918,7 +923,7 @@ async fn list_images(
             "image service is not configured",
         );
     };
-    match service.list(&token.project_id) {
+    match service.list(&token.project_id).await {
         Ok(images) => Json(ImageListResponse {
             images: images.into_iter().map(image_response).collect(),
         })
@@ -943,7 +948,7 @@ async fn show_image(
             "image service is not configured",
         );
     };
-    match service.get(&token.project_id, id) {
+    match service.get(&token.project_id, id).await {
         Ok(image) => Json(image_response(image)).into_response(),
         Err(error) => image_error(error),
     }
@@ -1015,7 +1020,7 @@ async fn upload_image(
             );
         }
     }
-    match service.upload(&token.project_id, id, &body) {
+    match service.upload(&token.project_id, id, &body).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => image_error(error),
     }
@@ -1037,7 +1042,7 @@ async fn delete_image(
             "image service is not configured",
         );
     };
-    match service.delete(&token.project_id, id) {
+    match service.delete(&token.project_id, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => image_error(error),
     }
@@ -2223,7 +2228,7 @@ async fn create_server(
                 );
             }
         };
-        match image_service.get(&token.project_id, image_id) {
+        match image_service.get(&token.project_id, image_id).await {
             Ok(record) if record.status == o3k_image::ImageStatus::Active => {}
             Ok(_) => {
                 return keystone_error(StatusCode::CONFLICT, "Conflict", "image is not active");

@@ -31,7 +31,7 @@ impl DaemonCreateResolver {
         Ok(output_root.join(format!("{server_id}.iso")))
     }
 
-    fn resolve_image(
+    async fn resolve_image(
         &self,
         request: &CreateInstanceRequest,
     ) -> Result<o3k_image::ImageArtifact, ProviderError> {
@@ -43,6 +43,7 @@ impl DaemonCreateResolver {
             .map_err(|_| ProviderError::InvalidRequest)?;
         self.image
             .resolve_artifact(&request.project_id, image_id)
+            .await
             .map_err(|_| ProviderError::InvalidRequest)
     }
 
@@ -142,7 +143,7 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         request: &CreateInstanceRequest,
         _agent: &NodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
-        let image = self.resolve_image(request)?;
+        let image = self.resolve_image(request).await?;
         let (network_attachments, network_data) = self.resolve_network(request)?;
         let (iso, _) = self.materialize_config_drive(request, network_data)?;
         let flavor_id = (!request.flavor_id.trim().is_empty())
@@ -181,7 +182,7 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         _agent: &NodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
-        let image = self.resolve_image(request)?;
+        let image = self.resolve_image(request).await?;
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
         }
@@ -222,10 +223,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database_path = config.data_dir.join("o3k.sqlite");
     let store = Arc::new(o3k_store::SqliteStore::connect_file(&database_path).await?);
     let identity_store = store.clone();
+    let image_repository: Arc<dyn o3k_store::ImageRepository> = store.clone();
     let image_service = o3k_image::ImageService::open(
         config.data_dir.join("images"),
         o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
-    )?;
+        image_repository,
+    )
+    .await?;
     let network_service = o3k_network::NetworkService::open(config.data_dir.join("network"))?;
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;

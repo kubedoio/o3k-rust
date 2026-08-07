@@ -435,7 +435,8 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!("/tmp/o3k-api-images-{}", std::process::id()));
     let identity = test_service("http://127.0.0.1:8080").await?;
-    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES)?;
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_image(image);

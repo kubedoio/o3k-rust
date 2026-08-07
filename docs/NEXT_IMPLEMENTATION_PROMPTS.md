@@ -158,6 +158,14 @@ Acceptance:
 
 ## Prompt 3 — make image metadata durable; keep image bytes out of SQLite
 
+> Completed by issue #514: image metadata now lives behind the narrow
+> `ImageRepository` port implemented on the SQLite adapter; the composition
+> root (o3kd) wires the store into `ImageService`, restart reconstructs public
+> image metadata from the durable store, and missing/corrupt artifacts for
+> active metadata fail closed. Image bytes remain in the bounded filesystem
+> artifact store (content directory and content-addressed cache). The prompt
+> below is retained for historical reference.
+
 ```text
 Objective: move Glance-compatible image metadata and control-plane ownership
 behind the durable repository boundary while preserving the existing bounded,
