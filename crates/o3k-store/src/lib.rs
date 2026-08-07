@@ -2645,6 +2645,13 @@ impl DurableStore for SqliteStore {
 // remain the canonical SQL bodies. Inherent methods take name-resolution
 // precedence over trait methods, so `self.method(...)` inside these bodies
 // resolves to the inherent implementation and cannot recurse into the trait.
+//
+// Hazard: this is only safe while every inherent method keeps the exact
+// signature of its trait counterpart. If an inherent signature changes
+// without updating the delegation below, the call silently falls through to
+// the trait method and recurses until stack exhaustion. When an inherent
+// method is removed, delete its delegation as well (its other callers make
+// the removal a compile error, so the delegation is the only silent path).
 
 #[async_trait]
 impl IdentityRepository for SqliteStore {

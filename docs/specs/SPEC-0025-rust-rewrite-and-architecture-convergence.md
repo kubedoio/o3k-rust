@@ -122,9 +122,11 @@ Requirements:
 - PostgreSQL remains planned until a real adapter passes the same applicable
   conformance suite.
 
-Current direct `SqliteStore` use in application code is explicit migration debt.
-The architecture-boundary ratchet prevents new occurrences while coherent
-follow-up work removes the existing exceptions.
+Direct `SqliteStore` use in application code was explicit migration debt.
+Issue #510 (step 2 of the required implementation sequence below) removed the
+existing exceptions behind the narrow `IdentityRepository`,
+`KeypairRepository`, `VolumeAttachmentRepository`, and `ComputeRepository`
+ports; the architecture-boundary ratchet continues to prevent new occurrences.
 
 ### 3. Durable control-plane metadata authority
 
