@@ -201,21 +201,21 @@ cat > "${INVENTORY_BEFORE}" <<EOF
     "targets_conf_hash_before": "$(sha256sum "${TGT_CONF_PATH}" 2>/dev/null | awk '{print $1}' || echo none)"
   },
   "maria": {
-    "databases": $(mysql -N -e "SHOW DATABASES;" 2>/dev/null | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-    "users": $(mysql -N -e "SELECT CONCAT(User,'@',Host) FROM mysql.user;" 2>/dev/null | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]')
+    "databases": $(mysql -N -e "SHOW DATABASES;" 2>/dev/null | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+    "users": $(mysql -N -e "SELECT CONCAT(User,'@',Host) FROM mysql.user;" 2>/dev/null | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true)
   },
   "rabbitmq": {
-    "users": $(rabbitmqctl list_users 2>/dev/null | tail -n +2 | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-    "vhosts": $(rabbitmqctl list_vhosts 2>/dev/null | tail -n +2 | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]')
+    "users": $(rabbitmqctl list_users 2>/dev/null | tail -n +2 | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+    "vhosts": $(rabbitmqctl list_vhosts 2>/dev/null | tail -n +2 | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true)
   },
   "lvm": {
-    "volume_groups": $(vgs --noheadings -o vg_name 2>/dev/null | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-    "logical_volumes": $(lvs --noheadings -o lv_name,vg_name 2>/dev/null | awk '{print $1"/"$2}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]')
+    "volume_groups": $(vgs --noheadings -o vg_name 2>/dev/null | awk '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+    "logical_volumes": $(lvs --noheadings -o lv_name,vg_name 2>/dev/null | awk '{print $1"/"$2}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true)
   },
-  "loop_devices": $(losetup -a 2>/dev/null | awk -F: '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-  "iscsi_sessions": $(iscsiadm -m session 2>/dev/null | awk '{print $3}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-  "libvirt_domains": $(virsh list --all --name 2>/dev/null | grep -v '^$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]'),
-  "bridges_and_taps": $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(br|tap|vnet)' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || echo '[]')
+  "loop_devices": $(losetup -a 2>/dev/null | awk -F: '{print $1}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+  "iscsi_sessions": $(iscsiadm -m session 2>/dev/null | awk '{print $3}' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+  "libvirt_domains": $(virsh list --all --name 2>/dev/null | grep -v '^$' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true),
+  "bridges_and_taps": $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -E '^(br|tap|vnet)' | sort | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))' || true)
 }
 EOF
 echo "    foreign-state-before.json recorded"
