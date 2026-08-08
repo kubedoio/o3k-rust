@@ -1,6 +1,6 @@
 # ADR-0160 — Service topology and execution boundaries
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-04
 Supersedes: none
 Superseded-by: none

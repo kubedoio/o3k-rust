@@ -553,3 +553,121 @@ Acceptance:
 - no product claim exceeds measured evidence;
 - the Rust architecture remains simpler than the reference implementation.
 ```
+
+---
+
+## Prompt 11 — accept and enforce the Rust architecture
+
+> Completed by the architecture-convergence acceptance: ADR-0160 and SPEC-0025
+> are now `Accepted` and `contracts/core-architecture-boundaries.toml` is
+> `status = "accepted"`, which activates the ratchet in enforcement mode in
+> normal CI (`tests/adr-governance.sh` -> `tests/architecture-boundaries.sh` ->
+> `scripts/check-architecture-boundaries.py`). Verification of SPEC-0025 steps
+> 1-7 (canonical server domain lifecycle, repository ports, durable metadata
+> authority, blob/artifact separation, application-level provider ports,
+> protobuf/Cinder/agent isolation, o3k-api adapter split) found no remaining
+> violations: `concrete_store_debt_files` and
+> `ratcheted_adapter_dependencies` are empty, former adapter dependencies are
+> hard-forbidden, and the checker detects target-specific and renamed
+> dependency bypasses. The prompt below is retained for historical reference.
+
+```text
+Objective: formally complete the architecture-convergence phase by reviewing
+and, if justified by the current implementation, accepting ADR-0160 and
+SPEC-0025 and activating the architecture boundary contract.
+
+Before editing, inspect docs/adr/ADR-0160, docs/specs/SPEC-0025,
+contracts/core-architecture-boundaries.toml,
+scripts/check-architecture-boundaries.py, issue #425, the implementation
+produced by SPEC-0025 steps 1-7, and the current architecture-boundary CI
+tests.
+
+This is a governance/architecture review, not another refactoring project.
+Verify that the implementation satisfies the important ADR-0160 / SPEC-0025
+decisions and confirm the debt lists are empty, removed adapter dependencies
+are hard-forbidden, no hidden dependency bypass exists, and CI exercises
+enforcement mode. If the architecture is genuinely implemented, move the
+decisions to Accepted and activate enforcement. If a real violation exists,
+do not mark the decisions accepted; document the exact blocker and fix only
+the minimum required defect.
+
+Do not add features, endpoints, PostgreSQL, daemons, compatibility breadth,
+or change release claims.
+
+Acceptance:
+- architecture rules are either honestly accepted and actively enforced, or
+  there is one clearly documented blocker;
+- no accepted implementation depends on a merely Proposed architecture
+  decision;
+- zero new architecture debt is introduced.
+```
+
+---
+
+## Prompt 12 — reconcile project status around the native alpha
+
+> Completed by the profile-status governance change:
+> `docs/status/current-state.yaml` (schema_version 2) now records
+> `native-rust-testlab`, `openstack-service-testbed`, and `small-edge-cloud`
+> independently, each with source commit, implementation state, portable /
+> protected / full-profile evidence, release relevance, blockers, next
+> evidence action, and explicitly unproven claims. Evidence is profile-scoped:
+> the native profile carries no Cinder/Tempest evidence, the testbed profile
+> retains the real-Cinder/Tempest evidence bound to protected run
+> local-1786012319 (branch "after #493/#495/#496/#498"), and the edge profile
+> claims nothing. `scripts/validate-profile-state.py` enforces the profile
+> set, field contract, evidence vocabulary, native alpha isolation, source
+> commit resolvability in git history, and consistency with
+> `docs/release-tracker.md` (native full-profile evidence cannot be `passed`
+> while the tracker remains blocked); `tests/profile-state.sh` runs it in
+> normal CI. The prompt below is retained for historical reference.
+
+```text
+Objective: make repository status documentation describe the real current
+state of each O3K product profile without confusing external-Cinder success
+with native-rust-testlab release readiness.
+
+This is documentation/status governance only. Do not change runtime
+behavior.
+
+Inspect docs/status/current-state.yaml, docs/release-tracker.md,
+compatibility/product-profiles.yaml, SPEC-0022/0023/0024/0025, issue #93,
+issue #94, and the latest merged commits implementing SPEC-0025 prompts
+1-10.
+
+The current status records can make the external-Cinder service-testbed
+appear further along than the native libvirt alpha. Those are different
+profiles and must never be conflated.
+
+Create or update machine-readable status so native-rust-testlab,
+openstack-service-testbed, and small-edge-cloud are independently
+represented, each with: source commit; implementation state; portable
+evidence; protected/component evidence; full-profile evidence; release
+relevance; current blockers; next evidence action; explicitly unproven
+claims.
+
+For native-rust-testlab, make explicit that architecture convergence is
+complete or near-complete, portable CI is strong, the alpha remains
+blocked on source-bound real-host/release evidence, and external
+Cinder/Tempest success does not satisfy the native alpha gate. For
+openstack-service-testbed, retain the real Cinder/Tempest evidence
+honestly. For small-edge-cloud, keep production/HA/multi-controller
+claims unproven.
+
+Ensure the release tracker and status files cannot contradict each other
+silently. Add validation if necessary, but keep the solution small.
+
+Do not change runtime behavior, promote evidence, close host-gated
+issues merely because repository tests pass, or claim production
+readiness.
+
+Acceptance:
+- a new maintainer or LLM can immediately distinguish the three product
+  profiles;
+- "passed external Cinder" can never be interpreted as "native alpha
+  ready";
+- current status is bound to current main or explicitly names older
+  evidence commits;
+- the release tracker remains the authoritative release gate where
+  appropriate.
+```
