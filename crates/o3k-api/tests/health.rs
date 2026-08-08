@@ -86,7 +86,7 @@ async fn registered_agent_console_reads_fall_back_to_durable_cache()
         .await?;
     let compute = ComputeService::new(store, provider)
         .with_scheduler(o3k_scheduler::Scheduler::new(placement))
-        .with_agent_registry(registry.clone());
+        .with_agent_registry(std::sync::Arc::new(registry.clone()));
     let console = o3k_console::ConsoleService::open(format!(
         "/tmp/o3k-api-agent-console-cache-{}",
         uuid::Uuid::now_v7()

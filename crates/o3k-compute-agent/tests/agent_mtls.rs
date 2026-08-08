@@ -1,12 +1,15 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use o3k_compute::{AgentComputeProvider, ResolvedCreateInputs, ResolvedCreateResolver};
 use o3k_compute_agent::{
-    AgentClient, AgentConfig, AuthorizedAgent, ControlPlaneServer, ControlPlaneTls,
-    FakeCommandExecutor, NetworkAttachmentSpec, NodeRegistry, TlsFiles,
+    AgentClient, AgentComputeProvider, AgentConfig, AuthorizedAgent, ControlPlaneServer,
+    ControlPlaneTls, FakeCommandExecutor, NodeRegistry, TlsFiles,
 };
-use o3k_provider::{ComputeProvider, CreateInstanceRequest, OperationState, ProviderError};
+use o3k_provider::{
+    AgentNodeSnapshot, ArtifactKind, ComputeProvider, CreateArtifactResolver,
+    CreateInstanceRequest, NetworkAttachmentSpec, OperationState, ProviderError,
+    ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
+};
 use o3k_provider_contract::compute_proto as proto;
 use tokio::{sync::oneshot, time};
 use uuid::Uuid;
@@ -25,7 +28,7 @@ impl ResolvedCreateResolver for TestResolver {
     async fn resolve(
         &self,
         _request: &CreateInstanceRequest,
-        _agent: &o3k_compute_agent::NodeSnapshot,
+        _agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         Ok(ResolvedCreateInputs {
             flavor_id: "flavor.test".to_owned(),
@@ -52,24 +55,24 @@ impl ResolvedCreateResolver for TestResolver {
 struct TestArtifactResolver;
 
 #[async_trait]
-impl o3k_compute::CreateArtifactResolver for TestArtifactResolver {
+impl CreateArtifactResolver for TestArtifactResolver {
     async fn resolve_artifacts(
         &self,
         _request: &CreateInstanceRequest,
-        _agent: &o3k_compute_agent::NodeSnapshot,
+        _agent: &AgentNodeSnapshot,
         inputs: &ResolvedCreateInputs,
-    ) -> Result<Vec<o3k_compute::ResolvedCreateArtifact>, ProviderError> {
+    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
         Ok(vec![
-            o3k_compute::ResolvedCreateArtifact {
+            ResolvedCreateArtifact {
                 artifact_id: inputs.image_artifact_id.clone(),
-                kind: proto::ArtifactKind::ImageBase,
+                kind: ArtifactKind::ImageBase,
                 sha256: inputs.image_sha256.clone(),
                 format: inputs.image_format.clone(),
                 bytes: b"image-artifact".to_vec(),
             },
-            o3k_compute::ResolvedCreateArtifact {
+            ResolvedCreateArtifact {
                 artifact_id: inputs.config_drive_artifact_id.clone(),
-                kind: proto::ArtifactKind::ConfigDriveIso,
+                kind: ArtifactKind::ConfigDriveIso,
                 sha256: inputs.config_drive_sha256.clone(),
                 format: "iso".to_owned(),
                 bytes: b"config-drive-artifact".to_vec(),

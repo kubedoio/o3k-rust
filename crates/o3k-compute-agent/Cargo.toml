@@ -14,9 +14,11 @@ async-trait.workspace = true
 base64.workspace = true
 http.workspace = true
 hyper-util.workspace = true
+o3k-domain = { path = "../o3k-domain" }
 o3k-provider = { path = "../o3k-provider" }
 o3k-provider-contract = { path = "../o3k-provider-contract" }
 o3k-image = { path = "../o3k-image" }
+o3k-store = { path = "../o3k-store" }
 prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true

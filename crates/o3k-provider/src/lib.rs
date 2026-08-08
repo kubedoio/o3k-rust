@@ -9,11 +9,18 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod agent;
+pub mod node;
 
 pub use agent::{
     AgentArtifactAck, AgentArtifactStatus, AgentCommandAccepted, AgentErrorCategory, AgentEvent,
     AgentObservation, AgentOperationState, AgentOperationUpdate, AgentProtocolError,
     ArtifactTransferState,
+};
+pub use node::{
+    AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentCapabilityFlag,
+    AgentNodeRegistry, AgentNodeSnapshot, ArtifactKind, CreateArtifactResolver,
+    NetworkAttachmentSpec, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
+    UnconfiguredCreateArtifactResolver, UnconfiguredResolvedCreateResolver,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

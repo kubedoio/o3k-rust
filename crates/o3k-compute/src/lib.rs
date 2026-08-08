@@ -2,35 +2,28 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use o3k_cinder::CinderClient;
-use o3k_compute_agent::{
-    Availability, CreateCommandSpec, LifecycleCommand, NetworkAttachmentSpec, NodeRegistry,
-    NodeSnapshot, build_block_device_command, build_create_command, build_lifecycle_command,
-};
 pub use o3k_domain::{Server, ServerId, ServerState};
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
-    BlockDeviceAttachment, BlockDeviceObservation, Capabilities, ComputeProvider,
-    ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest, DeleteInstanceRequest, Instance,
-    InstanceAction, Operation, ProviderError,
+    AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentNodeRegistry,
+    AgentNodeSnapshot, BlockDeviceAttachment, BlockDeviceObservation, Capabilities,
+    ComputeProvider, ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest,
+    DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
 };
-use o3k_provider_contract::compute_proto as agent_proto;
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
 use o3k_store::{
-    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, ComputeRepository, StoreError, VolumeAttachmentRecord,
-    server_state_from_storage, server_state_to_storage,
+    ComputeRepository, StoreError, VolumeAttachmentRecord, server_state_from_storage,
+    server_state_to_storage,
 };
 
-use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub mod attachment;
@@ -97,7 +90,7 @@ pub struct ComputeService {
     provider: Arc<ProviderBackend>,
     journal: OperationJournal<dyn ComputeRepository, ProviderBackend>,
     scheduler: Option<Scheduler>,
-    agent_registry: Option<NodeRegistry>,
+    agent_registry: Option<Arc<dyn AgentNodeRegistry>>,
     cinder: Option<Arc<CinderClient>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
@@ -105,88 +98,6 @@ pub struct ComputeService {
 
 #[derive(Clone)]
 pub struct ProviderBackend(Arc<dyn ComputeProvider>);
-
-/// Fully resolved, immutable inputs required by the compute-agent create
-/// command.  The control plane may construct this value from its image,
-/// network, and config-drive services, but the agent provider never guesses
-/// paths, checksums, addresses, or flavor values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedCreateInputs {
-    pub flavor_id: String,
-    pub image_artifact_id: String,
-    pub image_sha256: String,
-    pub image_format: String,
-    pub disk_gib: u64,
-    pub config_drive_artifact_id: String,
-    pub config_drive_sha256: String,
-    pub network_attachments: Vec<NetworkAttachmentSpec>,
-}
-
-/// Verified bytes that must be present on the agent before a create command
-/// is dispatched. Implementations must source these bytes from managed,
-/// digest-checked stores; paths are intentionally not part of this contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResolvedCreateArtifact {
-    pub artifact_id: String,
-    pub kind: agent_proto::ArtifactKind,
-    pub sha256: String,
-    pub format: String,
-    pub bytes: Vec<u8>,
-}
-
-#[async_trait]
-pub trait CreateArtifactResolver: Send + Sync {
-    async fn resolve_artifacts(
-        &self,
-        request: &CreateInstanceRequest,
-        agent: &NodeSnapshot,
-        inputs: &ResolvedCreateInputs,
-    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError>;
-}
-
-#[derive(Debug, Default)]
-pub struct UnconfiguredCreateArtifactResolver;
-
-#[async_trait]
-impl CreateArtifactResolver for UnconfiguredCreateArtifactResolver {
-    async fn resolve_artifacts(
-        &self,
-        _request: &CreateInstanceRequest,
-        _agent: &NodeSnapshot,
-        _inputs: &ResolvedCreateInputs,
-    ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
-        Err(ProviderError::InvalidRequest)
-    }
-}
-
-/// Resolves control-plane-owned resources into the bounded protocol inputs
-/// required by an agent. Implementations must return verified references and
-/// digests; returning placeholder values is intentionally not supported.
-#[async_trait]
-pub trait ResolvedCreateResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        request: &CreateInstanceRequest,
-        agent: &NodeSnapshot,
-    ) -> Result<ResolvedCreateInputs, ProviderError>;
-}
-
-/// A resolver used by profiles that have not yet wired image/config-drive/
-/// network realization. It fails closed, making the missing integration
-/// explicit instead of sending fabricated protocol data to a host.
-#[derive(Debug, Default)]
-pub struct UnconfiguredResolvedCreateResolver;
-
-#[async_trait]
-impl ResolvedCreateResolver for UnconfiguredResolvedCreateResolver {
-    async fn resolve(
-        &self,
-        _request: &CreateInstanceRequest,
-        _agent: &NodeSnapshot,
-    ) -> Result<ResolvedCreateInputs, ProviderError> {
-        Err(ProviderError::InvalidRequest)
-    }
-}
 
 /// Projects terminal compute outcomes into the durable port binding state
 /// owned by the network control plane. Implementations are provided by the
@@ -213,594 +124,91 @@ pub trait PortBindingProjector: Send + Sync {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }
 
-#[derive(Debug, Clone)]
-struct AgentBinding {
-    resource_id: String,
-    agent_id: String,
-    agent_epoch: String,
-    provider_resource_id: Option<String>,
+/// Projects one authenticated agent capability snapshot into the inventory
+/// shape required by the scheduler. Missing capacity is represented as zero
+/// and makes the provider unschedulable; capability flags and disk formats are
+/// never treated as capacity.
+pub fn agent_inventory(
+    capabilities: &AgentCapabilities,
+) -> BTreeMap<String, o3k_placement::Inventory> {
+    BTreeMap::from([
+        (
+            o3k_placement::VCPU.to_owned(),
+            o3k_placement::Inventory {
+                total: capabilities.max_vcpus,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+        (
+            o3k_placement::MEMORY_MB.to_owned(),
+            o3k_placement::Inventory {
+                total: capabilities.max_memory_mib,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+        (
+            o3k_placement::DISK_GB.to_owned(),
+            o3k_placement::Inventory {
+                total: capabilities.max_disk_gb,
+                reserved: 0,
+                allocation_ratio: 1.0,
+                used: 0,
+            },
+        ),
+    ])
 }
 
-#[derive(Default)]
-struct AgentProviderState {
-    operations: HashMap<Uuid, Operation>,
-    instances: HashMap<String, Instance>,
-    bindings: HashMap<String, AgentBinding>,
-}
-
-/// ComputeProvider adapter that sends all host lifecycle commands through a
-/// selected, authenticated NodeRegistry connection.
-///
-/// The adapter deliberately returns an accepted provider operation after the
-/// command is put on the fenced control stream. Later operation and
-/// observation events update the adapter's projection; the durable O3K
-/// journal remains the recovery authority.
-#[derive(Clone)]
-pub struct AgentComputeProvider {
-    registry: NodeRegistry,
-    resolver: Arc<dyn ResolvedCreateResolver>,
-    artifact_resolver: Arc<dyn CreateArtifactResolver>,
-    state: Arc<RwLock<AgentProviderState>>,
-    store: Option<Arc<dyn ComputeRepository>>,
-    command_timeout: Duration,
-}
-
-impl AgentComputeProvider {
-    #[must_use]
-    pub fn new(registry: NodeRegistry, resolver: Arc<dyn ResolvedCreateResolver>) -> Self {
-        Self::new_with_store(registry, resolver, None)
-    }
-
-    #[must_use]
-    pub fn new_with_store(
-        registry: NodeRegistry,
-        resolver: Arc<dyn ResolvedCreateResolver>,
-        store: Option<Arc<dyn ComputeRepository>>,
-    ) -> Self {
-        let state = Arc::new(RwLock::new(AgentProviderState::default()));
-        let mut events = registry.subscribe_events();
-        let event_state = state.clone();
-        let event_store = store.clone();
-        tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(event) => {
-                        apply_agent_provider_event(&event_state, event_store.as_deref(), event)
-                            .await
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        tracing::warn!(
-                            "agent provider event projection lagged; durable recovery is required"
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        Self {
-            registry,
-            resolver,
-            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
-            state,
-            store,
-            command_timeout: Duration::from_secs(30),
-        }
-    }
-
-    #[must_use]
-    pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
-        self.command_timeout = timeout;
-        self
-    }
-
-    /// Resolves the fenced agent bound to a server resource.
-    pub async fn agent_for_server(
-        &self,
-        resource_id: Uuid,
-    ) -> Result<(NodeSnapshot, String), ProviderError> {
-        let binding = {
-            let state = self.state.read().await;
-            state
-                .bindings
-                .values()
-                .find(|binding| binding.resource_id == resource_id.to_string())
-                .cloned()
-        };
-        let binding = binding.ok_or(ProviderError::NotFound)?;
-        let agent = self.selected_agent(&binding.agent_id).await?;
-        if agent.agent_epoch != binding.agent_epoch {
-            return Err(ProviderError::StaleState);
-        }
-        Ok((agent, binding.resource_id))
-    }
-
-    /// Persists and dispatches a block-device command, waiting for the bound
-    /// observation. A timeout is an unknown outcome requiring observation
-    /// before retry.
-    pub async fn dispatch_block_device_and_wait(
-        &self,
-        command: o3k_provider_contract::compute_proto::Command,
-        operation_id: Uuid,
-        timeout: Duration,
-    ) -> Result<o3k_provider::BlockDeviceObservation, ProviderError> {
-        self.persist_pending_command(&command, operation_id).await?;
-        self.registry
-            .dispatch_command_and_wait(command, timeout)
-            .await
-            .map_err(|error| match error {
-                o3k_compute_agent::AgentError::Protocol(message)
-                    if message.contains("observation timed out") =>
-                {
-                    ProviderError::UnknownOutcome { operation_id }
-                }
-                other => map_agent_error(other),
-            })?
-            .block_device
-            .ok_or(ProviderError::Terminal)
-    }
-
-    #[must_use]
-    pub fn with_artifact_resolver(mut self, resolver: Arc<dyn CreateArtifactResolver>) -> Self {
-        self.artifact_resolver = resolver.clone();
-        if let Some(recovery_store) = self.store.clone() {
-            let recovery_registry = self.registry.clone();
-            let recovery_resolver = self.resolver.clone();
-            let recovery_timeout = self.command_timeout;
-            tokio::spawn(async move {
-                recover_artifact_transfers(
-                    recovery_registry,
-                    recovery_resolver,
-                    resolver,
-                    recovery_store,
-                    recovery_timeout,
-                )
-                .await;
-            });
-        }
-        self
-    }
-
-    /// Rebuilds the provider's volatile instance/binding projection from the
-    /// durable resource ledger after a daemon restart or agent reconnect.
-    /// Provider references and the currently authenticated agent epoch are
-    /// both required; stale or conflicting ownership evidence is rejected.
-    pub async fn rehydrate(&self) -> Result<(), ProviderError> {
-        let Some(store) = &self.store else {
-            return Ok(());
-        };
-        let resources = store
-            .list_resources_by_kind("compute_instance")
-            .await
-            .map_err(|_| ProviderError::Retryable)?;
-        let mut instances = HashMap::new();
-        let mut bindings = HashMap::new();
-        for resource in resources {
-            if matches!(
-                server_state_from_storage(&resource.observed_state),
-                Ok(ServerState::Deleted)
-            ) {
-                continue;
-            }
-            let Some(provider_id) = resource.provider_id.clone() else {
-                continue;
-            };
-            let reference = store
-                .get_provider_reference(resource.id, "agent")
-                .await
-                .map_err(|_| ProviderError::Conflict)?;
-            if reference.provider_resource_id != provider_id {
-                return Err(ProviderError::Conflict);
-            }
-            let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
-                .map_err(|_| ProviderError::Conflict)?;
-            let Some(agent_id) = request.placement_provider_id.as_deref() else {
-                return Err(ProviderError::Conflict);
-            };
-            let Some(agent) = self.registry.snapshot(agent_id).await else {
-                continue;
-            };
-            if agent.agent_epoch.trim().is_empty() {
-                return Err(ProviderError::Conflict);
-            }
-            let state = instance_state_from_observed(&resource.observed_state)
-                .ok_or(ProviderError::Conflict)?;
-            instances.insert(
-                provider_id.clone(),
-                Instance {
-                    provider_instance_id: provider_id.clone(),
-                    o3k_server_id: resource.id,
-                    state,
-                    observed_message: None,
-                },
-            );
-            bindings.insert(
-                provider_id,
-                AgentBinding {
-                    resource_id: resource.id.to_string(),
-                    agent_id: agent.agent_id,
-                    agent_epoch: agent.agent_epoch,
-                    provider_resource_id: resource.provider_id,
-                },
-            );
-        }
-        let mut state = self.state.write().await;
-        state
-            .instances
-            .retain(|provider_id, _| instances.contains_key(provider_id));
-        state
-            .bindings
-            .retain(|provider_id, _| bindings.contains_key(provider_id));
-        state.instances.extend(instances);
-        state.bindings.extend(bindings);
-        Ok(())
-    }
-
-    async fn selected_agent(&self, provider_id: &str) -> Result<NodeSnapshot, ProviderError> {
-        let snapshot = self
-            .registry
-            .snapshot(provider_id)
-            .await
-            .ok_or(ProviderError::NotFound)?;
-        if snapshot.availability != Availability::Available {
-            return Err(ProviderError::Retryable);
-        }
-        if snapshot.desired_state
-            != o3k_provider_contract::compute_proto::AdministrativeState::Enabled as i32
-        {
-            return Err(ProviderError::Retryable);
-        }
-        Ok(snapshot)
-    }
-
-    async fn dispatch(
-        &self,
-        command: o3k_provider_contract::compute_proto::Command,
-    ) -> Result<(), ProviderError> {
-        self.registry
-            .dispatch_command(command)
-            .await
-            .map_err(map_agent_error)
-    }
-
-    async fn accepted_operation(&self, operation_id: Uuid) -> Result<Operation, ProviderError> {
-        let operation = Operation {
-            provider_operation_id: operation_id,
-            o3k_operation_id: operation_id,
-            state: o3k_provider::OperationState::Accepted,
-            error_category: None,
-            provider_resource_id: None,
-        };
-        self.state
-            .write()
-            .await
-            .operations
-            .insert(operation_id, operation.clone());
-        Ok(operation)
-    }
-
-    async fn dispatch_recorded(
-        &self,
-        command: o3k_provider_contract::compute_proto::Command,
-        operation_id: Uuid,
-    ) -> Result<Operation, ProviderError> {
-        if let Some(store) = &self.store {
-            if let Ok(existing) = store.get_agent_command_by_operation(operation_id).await {
-                // A repeated reconcile pass for the same operation must reuse
-                // the durable command payload: rebuilding it would drift the
-                // embedded deadline and break the agent journal's idempotent
-                // replay with an identity conflict.
-                if matches!(
-                    existing.state,
-                    AgentCommandState::Succeeded | AgentCommandState::Failed
-                ) {
-                    return self.get_operation(operation_id).await;
-                }
-                let recorded = o3k_provider_contract::compute_proto::Command::decode(
-                    existing.payload.as_slice(),
-                )
-                .map_err(|_| ProviderError::Storage)?;
-                return self.dispatch_accepted(recorded, operation_id).await;
-            }
-            let record = AgentCommandRecord {
-                command_id: command.command_id.clone(),
-                idempotency_key: command.idempotency_key.clone(),
-                operation_id,
-                resource_id: Uuid::parse_str(&command.resource_id)
-                    .map_err(|_| ProviderError::InvalidRequest)?,
-                agent_id: command.agent_id.clone(),
-                agent_epoch: command.agent_epoch.clone(),
-                payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
-                payload: command.encode_to_vec(),
-                state: AgentCommandState::Pending,
-                accepted_sequence: 0,
-                last_sequence: 0,
-                provider_operation_id: Some(operation_id.to_string()),
-                provider_resource_id: None,
-            };
-            store
-                .insert_agent_command(&record)
-                .await
-                .map_err(|_| ProviderError::Conflict)?;
-        }
-        self.dispatch_accepted(command, operation_id).await
-    }
-
-    async fn dispatch_accepted(
-        &self,
-        command: o3k_provider_contract::compute_proto::Command,
-        operation_id: Uuid,
-    ) -> Result<Operation, ProviderError> {
-        let operation = self.accepted_operation(operation_id).await?;
-        if let Err(error) = self.dispatch(command).await {
-            self.state.write().await.operations.remove(&operation_id);
-            return Err(error);
-        }
-        Ok(operation)
-    }
-
-    pub async fn persist_pending_command(
-        &self,
-        command: &o3k_provider_contract::compute_proto::Command,
-        operation_id: Uuid,
-    ) -> Result<Option<AgentCommandRecord>, ProviderError> {
-        let Some(store) = &self.store else {
-            return Ok(None);
-        };
-        let record = AgentCommandRecord {
-            command_id: command.command_id.clone(),
-            idempotency_key: command.idempotency_key.clone(),
-            operation_id,
-            resource_id: Uuid::parse_str(&command.resource_id)
-                .map_err(|_| ProviderError::InvalidRequest)?,
-            agent_id: command.agent_id.clone(),
-            agent_epoch: command.agent_epoch.clone(),
-            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
-            payload: command.encode_to_vec(),
-            state: AgentCommandState::Pending,
-            accepted_sequence: 0,
-            last_sequence: 0,
-            provider_operation_id: Some(operation_id.to_string()),
-            provider_resource_id: None,
-        };
-        if store.get_operation(operation_id).await.is_err() {
-            let _ = store
-                .insert_operation(&o3k_store::OperationRecord {
-                    id: operation_id,
-                    resource_id: record.resource_id,
-                    kind: "command".to_owned(),
-                    state: o3k_store::OperationState::Running,
-                    provider_operation_id: Some(operation_id.to_string()),
-                    error_category: None,
-                    error_message: None,
-                })
-                .await;
-        }
-        let existing = store
-            .insert_agent_command(&record)
-            .await
-            .map_err(|_| ProviderError::Conflict)?;
-        Ok(Some(existing))
+fn agent_provider_state(snapshot: &AgentNodeSnapshot) -> o3k_placement::ProviderState {
+    if snapshot.availability != AgentAvailability::Available
+        || snapshot.administrative_state == AgentAdministrativeState::Disabled
+        || snapshot.capabilities.max_vcpus == 0
+        || snapshot.capabilities.max_memory_mib == 0
+        || snapshot.capabilities.max_disk_gb == 0
+    {
+        o3k_placement::ProviderState::Unavailable
+    } else if snapshot.administrative_state == AgentAdministrativeState::Draining {
+        o3k_placement::ProviderState::Draining
+    } else {
+        o3k_placement::ProviderState::Enabled
     }
 }
 
-async fn recover_artifact_transfers(
-    registry: NodeRegistry,
-    resolver: Arc<dyn ResolvedCreateResolver>,
-    artifact_resolver: Arc<dyn CreateArtifactResolver>,
-    store: Arc<dyn ComputeRepository>,
-    timeout: Duration,
-) {
-    let transfers = match store.list_recoverable_artifact_transfers().await {
-        Ok(transfers) => transfers,
-        Err(error) => {
-            tracing::warn!(%error, "artifact transfer recovery listing failed");
-            return;
-        }
-    };
-    for transfer in transfers {
-        if transfer.expires_at_unix_ms <= unix_ms() {
-            if let Err(error) = store
-                .update_artifact_transfer(
-                    &transfer.transfer_id,
-                    &transfer.agent_epoch,
-                    ArtifactTransferUpdate {
-                        state: ArtifactTransferState::Expired,
-                        contiguous_bytes: transfer.contiguous_bytes,
-                        next_chunk_index: transfer.next_chunk_index,
-                        retry_count: transfer.retry_count,
-                    },
-                )
-                .await
-            {
-                tracing::warn!(
-                    transfer_id = %transfer.transfer_id,
-                    %error,
-                    "expired artifact transfer could not be fenced"
-                );
-            }
-            continue;
-        }
-        let Some(agent) = registry.snapshot(&transfer.agent_id).await else {
-            continue;
-        };
-        let transfer = if agent.agent_epoch != transfer.agent_epoch {
-            match store
-                .rebind_artifact_transfer_epoch(
-                    &transfer.transfer_id,
-                    &transfer.agent_epoch,
-                    &agent.agent_epoch,
-                )
-                .await
-            {
-                Ok(transfer) => transfer,
-                Err(error) => {
-                    tracing::warn!(
-                        transfer_id = %transfer.transfer_id,
-                        %error,
-                        "artifact transfer recovery could not rebind agent epoch"
-                    );
-                    continue;
-                }
-            }
-        } else {
-            transfer
-        };
-        let resource = match store.get_resource(transfer.resource_id).await {
-            Ok(resource) => resource,
-            Err(error) => {
-                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer intent missing");
-                continue;
-            }
-        };
-        let request: CreateInstanceRequest = match serde_json::from_str(&resource.desired_state) {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer intent is invalid");
-                continue;
-            }
-        };
-        let inputs = match resolver.resolve(&request, &agent).await {
-            Ok(inputs) => inputs,
-            Err(error) => {
-                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer source recovery failed");
-                continue;
-            }
-        };
-        let artifacts = match artifact_resolver
-            .resolve_artifacts(&request, &agent, &inputs)
-            .await
-        {
-            Ok(artifacts) => artifacts,
-            Err(error) => {
-                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer bytes recovery failed");
-                continue;
-            }
-        };
-        let Some(artifact) = artifacts.into_iter().find(|artifact| {
-            artifact.artifact_id == transfer.artifact_id
-                && artifact.sha256 == transfer.sha256
-                && artifact.format == transfer.format
-                && artifact_kind_name(artifact.kind) == transfer.artifact_kind
-        }) else {
-            tracing::warn!(transfer_id = %transfer.transfer_id, "artifact transfer identity has no matching source");
-            continue;
-        };
-        let kind = match transfer.artifact_kind.as_str() {
-            "image_base" => agent_proto::ArtifactKind::ImageBase,
-            "config_drive_iso" => agent_proto::ArtifactKind::ConfigDriveIso,
-            _ => continue,
-        };
-        let offer = agent_proto::ArtifactOffer {
-            transfer_id: transfer.transfer_id.clone(),
-            command_id: transfer.command_id.clone(),
-            operation_id: transfer.operation_id.to_string(),
-            resource_id: transfer.resource_id.to_string(),
-            agent_id: transfer.agent_id.clone(),
-            artifact_id: transfer.artifact_id.clone(),
-            kind: kind as i32,
-            sha256: transfer.sha256.clone(),
-            size_bytes: transfer.size_bytes,
-            format: transfer.format.clone(),
-            chunk_size_bytes: transfer.chunk_size_bytes as u32,
-            chunk_count: transfer.chunk_count as u32,
-            expires_at_unix_ms: transfer.expires_at_unix_ms,
-        };
-        let Ok(start_chunk_index) = u32::try_from(transfer.next_chunk_index) else {
-            tracing::warn!(transfer_id = %transfer.transfer_id, "artifact transfer resume index is invalid");
-            continue;
-        };
-        match registry
-            .dispatch_artifact_and_wait_from(offer, artifact.bytes, start_chunk_index, timeout)
-            .await
-        {
-            Ok(_) => {
-                let _ = store
-                    .update_artifact_transfer(
-                        &transfer.transfer_id,
-                        &transfer.agent_epoch,
-                        ArtifactTransferUpdate {
-                            state: ArtifactTransferState::Committed,
-                            contiguous_bytes: transfer.size_bytes,
-                            next_chunk_index: transfer.chunk_count,
-                            retry_count: transfer.retry_count,
-                        },
-                    )
-                    .await;
-            }
-            Err(error) => {
-                tracing::warn!(transfer_id = %transfer.transfer_id, %error, "artifact transfer recovery dispatch failed")
-            }
-        }
+/// Synchronizes the current authenticated agent snapshots into Placement.
+/// The stable agent ID is the Placement provider ID, so reconnects update the
+/// same provider and preserve durable allocations.
+pub async fn sync_agent_inventory(
+    registry: &dyn AgentNodeRegistry,
+    placement: &o3k_placement::PlacementLedger,
+) -> Result<(), SchedulerError> {
+    for snapshot in registry.all().await {
+        placement
+            .sync_provider(
+                &snapshot.agent_id,
+                agent_inventory(&snapshot.capabilities),
+                agent_provider_state(&snapshot),
+            )
+            .await?;
     }
+    Ok(())
 }
 
-fn map_agent_error(error: o3k_compute_agent::AgentError) -> ProviderError {
-    match error {
-        o3k_compute_agent::AgentError::Protocol(message) => {
-            let message = message.to_ascii_lowercase();
-            if message.contains("unavailable")
-                || message.contains("closed")
-                || message.contains("timeout")
-            {
-                ProviderError::Retryable
-            } else if message.contains("fenced") || message.contains("not registered") {
-                ProviderError::StaleState
-            } else {
-                ProviderError::InvalidRequest
+/// Starts the bounded periodic inventory publisher used by `o3kd`.
+pub fn spawn_agent_inventory_publisher(
+    registry: Arc<dyn AgentNodeRegistry>,
+    placement: o3k_placement::PlacementLedger,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            if let Err(error) = sync_agent_inventory(registry.as_ref(), &placement).await {
+                tracing::warn!(%error, "agent inventory publication failed");
             }
         }
-        o3k_compute_agent::AgentError::Transport(_)
-        | o3k_compute_agent::AgentError::IdentityStore(_)
-        | o3k_compute_agent::AgentError::TlsMaterial
-        | o3k_compute_agent::AgentError::InvalidConfiguration(_) => ProviderError::Retryable,
-    }
-}
-
-fn artifact_kind_name(kind: agent_proto::ArtifactKind) -> &'static str {
-    match kind {
-        agent_proto::ArtifactKind::ImageBase => "image_base",
-        agent_proto::ArtifactKind::ConfigDriveIso => "config_drive_iso",
-        agent_proto::ArtifactKind::Unspecified => "unspecified",
-    }
-}
-
-fn unix_ms_after(duration: Duration) -> i64 {
-    unix_ms().saturating_add(duration.as_millis().min(i64::MAX as u128) as i64)
-}
-
-fn unix_ms() -> i64 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    now.as_millis().min(i64::MAX as u128) as i64
-}
-
-fn agent_operation_state(
-    state: o3k_provider::AgentOperationState,
-) -> Option<o3k_provider::OperationState> {
-    use o3k_provider::AgentOperationState as AgentState;
-    Some(match state {
-        AgentState::Accepted => o3k_provider::OperationState::Accepted,
-        AgentState::Running => o3k_provider::OperationState::Running,
-        AgentState::Succeeded => o3k_provider::OperationState::Succeeded,
-        AgentState::Failed => o3k_provider::OperationState::Failed,
-        AgentState::UnknownOutcome => o3k_provider::OperationState::UnknownOutcome,
-    })
-}
-
-fn agent_error_category(
-    category: Option<o3k_provider::AgentErrorCategory>,
-) -> Option<o3k_provider::ErrorCategory> {
-    use o3k_provider::AgentErrorCategory as AgentCategory;
-    category.and_then(|category| match category {
-        AgentCategory::InvalidRequest => Some(o3k_provider::ErrorCategory::InvalidRequest),
-        AgentCategory::Conflict => Some(o3k_provider::ErrorCategory::Conflict),
-        AgentCategory::Capacity => Some(o3k_provider::ErrorCategory::Capacity),
-        AgentCategory::NotFound => Some(o3k_provider::ErrorCategory::NotFound),
-        AgentCategory::Retryable => Some(o3k_provider::ErrorCategory::Retryable),
-        AgentCategory::UnknownOutcome => Some(o3k_provider::ErrorCategory::UnknownOutcome),
-        AgentCategory::Terminal => Some(o3k_provider::ErrorCategory::Terminal),
-        AgentCategory::Unauthenticated | AgentCategory::Unauthorized => None,
     })
 }
 
@@ -834,1043 +242,9 @@ fn durable_inspect_error(error: &ProviderError) -> (o3k_store::OperationState, &
     }
 }
 
-/// Decodes a durable observed value into the provider's own instance-state
-/// vocabulary for the agent provider's rehydrate projection. The durable
-/// value is decoded through the canonical fail-closed store decoder first, so
-/// the provider vocabulary is a projection of the canonical model rather than
-/// a second decoder of persisted strings.
-fn instance_state_from_observed(value: &str) -> Option<o3k_provider::InstanceState> {
-    let state = server_state_from_storage(value).ok()?;
-    match state {
-        ServerState::Requested
-        | ServerState::Building
-        | ServerState::Stopping
-        | ServerState::Starting
-        | ServerState::Rebooting => Some(o3k_provider::InstanceState::Creating),
-        ServerState::Active => Some(o3k_provider::InstanceState::Running),
-        ServerState::Stopped => Some(o3k_provider::InstanceState::Stopped),
-        ServerState::Deleting => Some(o3k_provider::InstanceState::Deleting),
-        ServerState::Deleted => Some(o3k_provider::InstanceState::Deleted),
-        ServerState::Error => Some(o3k_provider::InstanceState::Error),
-    }
-}
-
-async fn apply_artifact_status(
-    store: &dyn ComputeRepository,
-    status: &o3k_provider::AgentArtifactStatus,
-) -> Result<(), StoreError> {
-    let transfer = store.get_artifact_transfer(&status.transfer_id).await?;
-    if transfer.command_id != status.command_id
-        || transfer.operation_id != status.operation_id
-        || transfer.resource_id != status.resource_id
-        || transfer.agent_id != status.agent_id
-    {
-        return Err(StoreError::ArtifactTransferConflict(
-            "artifact status identity conflicts with durable state".to_owned(),
-        ));
-    }
-    let state = match status.state {
-        o3k_provider::ArtifactTransferState::Offered => ArtifactTransferState::Offered,
-        o3k_provider::ArtifactTransferState::Receiving => ArtifactTransferState::Receiving,
-        o3k_provider::ArtifactTransferState::Committed => ArtifactTransferState::Committed,
-        o3k_provider::ArtifactTransferState::Rejected => ArtifactTransferState::Rejected,
-        o3k_provider::ArtifactTransferState::Expired => ArtifactTransferState::Expired,
-    };
-    if transfer.agent_epoch != status.agent_epoch {
-        if matches!(
-            transfer.state,
-            ArtifactTransferState::Committed
-                | ArtifactTransferState::Rejected
-                | ArtifactTransferState::Expired
-        ) {
-            return Err(StoreError::ArtifactTransferEpochConflict);
-        }
-        store
-            .rebind_artifact_transfer_epoch(
-                &transfer.transfer_id,
-                &transfer.agent_epoch,
-                &status.agent_epoch,
-            )
-            .await?;
-    }
-    store
-        .update_artifact_transfer(
-            &status.transfer_id,
-            &status.agent_epoch,
-            ArtifactTransferUpdate {
-                state,
-                contiguous_bytes: status.contiguous_bytes,
-                next_chunk_index: u64::from(status.next_chunk_index),
-                retry_count: transfer.retry_count,
-            },
-        )
-        .await
-        .map(|_| ())
-}
-
-async fn apply_agent_provider_event(
-    state: &Arc<RwLock<AgentProviderState>>,
-    store: Option<&dyn ComputeRepository>,
-    event: o3k_provider::AgentEvent,
-) {
-    let mut state = state.write().await;
-    match event {
-        o3k_provider::AgentEvent::CommandAccepted(accepted) => {
-            if let Some(store) = store
-                && let Err(error) = store
-                    .update_agent_command(
-                        &accepted.command_id,
-                        AgentCommandState::Accepted,
-                        accepted.operation_sequence,
-                        accepted.operation_sequence,
-                        Some(&accepted.operation_id.to_string()),
-                        None,
-                    )
-                    .await
-            {
-                tracing::debug!(%error, command_id = %accepted.command_id, "agent command acceptance was not durably projected");
-            }
-            if let Some(operation) = state.operations.get_mut(&accepted.operation_id)
-                && let Some(next) = agent_operation_state(accepted.state)
-            {
-                operation.state = next;
-            }
-        }
-        o3k_provider::AgentEvent::Operation(update) => {
-            if let Some(store) = store
-                && let Ok(command) = store
-                    .get_agent_command_by_operation(update.operation_id)
-                    .await
-            {
-                let state = match agent_operation_state(update.state) {
-                    Some(o3k_provider::OperationState::Succeeded) => AgentCommandState::Succeeded,
-                    Some(o3k_provider::OperationState::Retryable) => AgentCommandState::Retryable,
-                    Some(o3k_provider::OperationState::UnknownOutcome) => {
-                        AgentCommandState::UnknownOutcome
-                    }
-                    Some(o3k_provider::OperationState::Failed) => AgentCommandState::Failed,
-                    _ => AgentCommandState::Running,
-                };
-                if let Err(error) = store
-                    .update_agent_command(
-                        &command.command_id,
-                        state,
-                        command.accepted_sequence,
-                        update.operation_sequence,
-                        command.provider_operation_id.as_deref(),
-                        update.provider_resource_id.as_deref(),
-                    )
-                    .await
-                {
-                    tracing::debug!(%error, operation_id = %update.operation_id, "agent operation was not durably projected");
-                }
-            }
-            if let Some(operation) = state.operations.get_mut(&update.operation_id) {
-                if let Some(next) = agent_operation_state(update.state) {
-                    operation.state = next;
-                }
-                operation.error_category = agent_error_category(update.error_category);
-                if let Some(provider_resource_id) = update.provider_resource_id {
-                    operation.provider_resource_id = Some(provider_resource_id);
-                }
-            }
-        }
-        o3k_provider::AgentEvent::Observation(observation) => {
-            let instance_state = observation.state;
-            let provider_id = observation.provider_resource_id.clone();
-            if let Some(provider_id) = provider_id.as_deref() {
-                if let Some(store) = store {
-                    let reference = o3k_store::ProviderReference {
-                        resource_id: observation.resource_id,
-                        provider_name: "agent".to_owned(),
-                        provider_resource_id: provider_id.to_owned(),
-                    };
-                    if let Err(error) = store.attach_provider_reference(&reference).await
-                        && !matches!(error, StoreError::ProviderReferenceAlreadyExists)
-                    {
-                        tracing::debug!(%error, resource_id = %observation.resource_id, "agent provider reference was not durably projected");
-                    }
-                }
-                state.bindings.insert(
-                    provider_id.to_owned(),
-                    AgentBinding {
-                        resource_id: observation.resource_id.to_string(),
-                        agent_id: observation.agent_id.clone(),
-                        agent_epoch: observation.agent_epoch.clone(),
-                        provider_resource_id: Some(provider_id.to_owned()),
-                    },
-                );
-                state.instances.insert(
-                    provider_id.to_owned(),
-                    Instance {
-                        provider_instance_id: provider_id.to_owned(),
-                        o3k_server_id: observation.resource_id,
-                        state: instance_state,
-                        observed_message: observation.redacted_message.clone(),
-                    },
-                );
-            }
-            if let Some(operation) = state.operations.get_mut(&observation.operation_id) {
-                if let Some(next) = agent_operation_state(observation.operation_state) {
-                    operation.state = next;
-                }
-                if let Some(provider_id) = provider_id {
-                    operation.provider_resource_id = Some(provider_id);
-                }
-            }
-        }
-        o3k_provider::AgentEvent::Error(error) => {
-            if let Some(operation_id) = error.operation_id
-                && let Some(operation) = state.operations.get_mut(&operation_id)
-            {
-                operation.state = if error.retryable {
-                    o3k_provider::OperationState::Retryable
-                } else {
-                    o3k_provider::OperationState::Failed
-                };
-                operation.error_category = agent_error_category(error.category);
-            }
-        }
-        o3k_provider::AgentEvent::ArtifactAck(_ack) => {
-            // The foreground create path owns the durable commit after its
-            // waiter receives this acknowledgement. Persisting the same
-            // transition here races that writer on SQLite. ArtifactStatus
-            // events remain the asynchronous recovery projection.
-        }
-        o3k_provider::AgentEvent::ArtifactStatus(status) => {
-            if let Some(store) = store
-                && let Err(error) = apply_artifact_status(store, &status).await
-            {
-                tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
-            }
-        }
-    }
-}
-
-/// Projects one authenticated agent capability snapshot into the inventory
-/// shape required by the scheduler. Missing capacity is represented as zero
-/// and makes the provider unschedulable; capability flags and disk formats are
-/// never treated as capacity.
-pub fn agent_inventory(
-    capabilities: &o3k_provider_contract::compute_proto::Capabilities,
-) -> BTreeMap<String, o3k_placement::Inventory> {
-    BTreeMap::from([
-        (
-            o3k_placement::VCPU.to_owned(),
-            o3k_placement::Inventory {
-                total: u64::from(capabilities.max_vcpus),
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-        (
-            o3k_placement::MEMORY_MB.to_owned(),
-            o3k_placement::Inventory {
-                total: capabilities.max_memory_mib,
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-        (
-            o3k_placement::DISK_GB.to_owned(),
-            o3k_placement::Inventory {
-                total: capabilities.max_disk_gb,
-                reserved: 0,
-                allocation_ratio: 1.0,
-                used: 0,
-            },
-        ),
-    ])
-}
-
-fn agent_provider_state(
-    snapshot: &o3k_compute_agent::NodeSnapshot,
-) -> o3k_placement::ProviderState {
-    use o3k_compute_agent::Availability;
-    use o3k_provider_contract::compute_proto::AdministrativeState;
-
-    if snapshot.availability != Availability::Available
-        || snapshot.desired_state == AdministrativeState::Disabled as i32
-        || snapshot.capabilities.max_vcpus == 0
-        || snapshot.capabilities.max_memory_mib == 0
-        || snapshot.capabilities.max_disk_gb == 0
-    {
-        o3k_placement::ProviderState::Unavailable
-    } else if snapshot.desired_state == AdministrativeState::Draining as i32 {
-        o3k_placement::ProviderState::Draining
-    } else {
-        o3k_placement::ProviderState::Enabled
-    }
-}
-
-/// Synchronizes the current authenticated agent snapshots into Placement.
-/// The stable agent ID is the Placement provider ID, so reconnects update the
-/// same provider and preserve durable allocations.
-pub async fn sync_agent_inventory(
-    registry: &NodeRegistry,
-    placement: &o3k_placement::PlacementLedger,
-) -> Result<(), SchedulerError> {
-    for snapshot in registry.all().await {
-        placement
-            .sync_provider(
-                &snapshot.agent_id,
-                agent_inventory(&snapshot.capabilities),
-                agent_provider_state(&snapshot),
-            )
-            .await?;
-    }
-    Ok(())
-}
-
-/// Starts the bounded periodic inventory publisher used by `o3kd`.
-pub fn spawn_agent_inventory_publisher(
-    registry: NodeRegistry,
-    placement: o3k_placement::PlacementLedger,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5));
-        loop {
-            interval.tick().await;
-            if let Err(error) = sync_agent_inventory(&registry, &placement).await {
-                tracing::warn!(%error, "agent inventory publication failed");
-            }
-        }
-    })
-}
-
 impl<P: ComputeProvider + 'static> From<Arc<P>> for ProviderBackend {
     fn from(provider: Arc<P>) -> Self {
         Self(provider)
-    }
-}
-
-#[async_trait]
-impl ComputeProvider for AgentComputeProvider {
-    async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
-        let mut nodes = self.registry.all().await;
-        nodes.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
-        let node = nodes
-            .into_iter()
-            .find(|node| {
-                node.availability == Availability::Available
-                    && node.desired_state
-                        == o3k_provider_contract::compute_proto::AdministrativeState::Enabled as i32
-            })
-            .ok_or(ProviderError::Retryable)?;
-        Ok(Capabilities {
-            provider_name: node.capabilities.agent_provider_name,
-            provider_version: node.capabilities.agent_provider_version,
-            capabilities: node
-                .capabilities
-                .lifecycle_actions
-                .into_iter()
-                .chain(
-                    node.capabilities
-                        .console_log
-                        .then_some("compute.console_log".to_owned()),
-                )
-                .collect(),
-        })
-    }
-
-    async fn create_instance(
-        &self,
-        request: CreateInstanceRequest,
-    ) -> Result<Operation, ProviderError> {
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            operation_id = %request.operation_id,
-            "agent create provider entered"
-        );
-        let provider_id = request.placement_provider_id.as_deref().ok_or_else(|| {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                "create request has no placement provider identity"
-            );
-            ProviderError::InvalidRequest
-        })?;
-        let agent = self.selected_agent(provider_id).await.map_err(|error| {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                error = %error,
-                "agent create agent selection rejected"
-            );
-            error
-        })?;
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            agent_id = %agent.agent_id,
-            "agent create agent selected"
-        );
-        if request.config_drive.is_some()
-            && !agent
-                .capabilities
-                .flags
-                .iter()
-                .any(|flag| flag.name == "config_drive" && flag.supported)
-        {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                agent_id = %agent.agent_id,
-                capability_flags = ?agent
-                    .capabilities
-                    .flags
-                    .iter()
-                    .map(|flag| format!("{}={}", flag.name, flag.supported))
-                    .collect::<Vec<_>>(),
-                "create request requires an unsupported config-drive capability"
-            );
-            return Err(ProviderError::InvalidRequest);
-        }
-        let resolved = self
-            .resolver
-            .resolve(&request, &agent)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    error = %error,
-                    "create resolver rejected request"
-                );
-                error
-            })?;
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            "agent create inputs resolved"
-        );
-        let image_id = request.image_id.as_deref().ok_or_else(|| {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                "create request has no image identity"
-            );
-            ProviderError::InvalidRequest
-        })?;
-        let artifact_inputs = resolved.clone();
-        let command = build_create_command(CreateCommandSpec {
-            agent_id: agent.agent_id.clone(),
-            agent_epoch: agent.agent_epoch.clone(),
-            project_id: request.project_id.clone(),
-            operation_id: request.operation_id.to_string(),
-            resource_id: request.o3k_server_id.to_string(),
-            idempotency_key: request.idempotency_key.clone(),
-            deadline_unix_ms: unix_ms_after(self.command_timeout),
-            image_id: image_id.to_owned(),
-            flavor_id: resolved.flavor_id,
-            image_artifact_id: resolved.image_artifact_id,
-            image_sha256: resolved.image_sha256,
-            image_format: resolved.image_format,
-            vcpus: request.vcpus,
-            memory_mib: request.memory_mib,
-            disk_gib: resolved.disk_gib,
-            config_drive_artifact_id: resolved.config_drive_artifact_id,
-            config_drive_sha256: resolved.config_drive_sha256,
-            network_attachments: resolved.network_attachments.clone(),
-        })
-        .map_err(|error| {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                error = %error,
-                "create command construction rejected request"
-            );
-            map_agent_error(error)
-        })?;
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            "agent create command built"
-        );
-        if let Some(existing) = self
-            .persist_pending_command(&command, request.operation_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    error = %error,
-                    "agent create pending command persistence rejected"
-                );
-                error
-            })?
-            && matches!(
-                existing.state,
-                AgentCommandState::Succeeded | AgentCommandState::Failed
-            )
-        {
-            return self.get_operation(request.operation_id).await;
-        }
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            "agent create pending command persisted"
-        );
-        let artifacts = self
-            .artifact_resolver
-            .resolve_artifacts(&request, &agent, &artifact_inputs)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    error = %error,
-                    "create artifact resolver rejected request"
-                );
-                error
-            })?;
-        tracing::warn!(
-            resource_id = %request.o3k_server_id,
-            artifact_count = artifacts.len(),
-            "agent create artifacts resolved"
-        );
-        if artifacts.len() != 2 {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                artifact_count = artifacts.len(),
-                "create artifact resolver returned an unexpected artifact count"
-            );
-            return Err(ProviderError::InvalidRequest);
-        }
-        let required = [
-            (
-                agent_proto::ArtifactKind::ImageBase,
-                &artifact_inputs.image_artifact_id,
-                &artifact_inputs.image_sha256,
-                artifact_inputs.image_format.as_str(),
-            ),
-            (
-                agent_proto::ArtifactKind::ConfigDriveIso,
-                &artifact_inputs.config_drive_artifact_id,
-                &artifact_inputs.config_drive_sha256,
-                "iso",
-            ),
-        ];
-        let mut seen = [false; 2];
-        for artifact in artifacts {
-            let expected_index = required
-                .iter()
-                .position(|(kind, artifact_id, _, _)| {
-                    *kind == artifact.kind && artifact_id.as_str() == artifact.artifact_id
-                })
-                .ok_or_else(|| {
-                    tracing::warn!(
-                        resource_id = %request.o3k_server_id,
-                        artifact_kind = artifact_kind_name(artifact.kind),
-                        "create artifact did not match a required reference"
-                    );
-                    ProviderError::InvalidRequest
-                })?;
-            if seen[expected_index] {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    artifact_kind = artifact_kind_name(artifact.kind),
-                    "create artifact was duplicated"
-                );
-                return Err(ProviderError::InvalidRequest);
-            }
-            seen[expected_index] = true;
-            let expected = &required[expected_index];
-            let size_bytes = u64::try_from(artifact.bytes.len()).map_err(|_| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    artifact_kind = artifact_kind_name(artifact.kind),
-                    "create artifact size could not be represented"
-                );
-                ProviderError::InvalidRequest
-            })?;
-            if size_bytes == 0
-                || artifact.artifact_id.trim().is_empty()
-                || artifact.sha256.len() != 64
-                || artifact.format.trim().is_empty()
-                || artifact.kind == agent_proto::ArtifactKind::Unspecified
-                || artifact.sha256 != *expected.2
-                || artifact.format != expected.3
-            {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    artifact_kind = artifact_kind_name(artifact.kind),
-                    "create artifact metadata or digest validation failed"
-                );
-                return Err(ProviderError::InvalidRequest);
-            }
-            let chunk_size = o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u64;
-            let chunk_count = u32::try_from(size_bytes.div_ceil(chunk_size)).map_err(|_| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    artifact_kind = artifact_kind_name(artifact.kind),
-                    "create artifact chunk count is invalid"
-                );
-                ProviderError::InvalidRequest
-            })?;
-            let transfer_id = o3k_compute_agent::deterministic_artifact_transfer_id(
-                &command.command_id,
-                artifact.kind,
-                &artifact.artifact_id,
-            );
-            let offer = agent_proto::ArtifactOffer {
-                transfer_id,
-                command_id: command.command_id.clone(),
-                operation_id: command.operation_id.clone(),
-                resource_id: command.resource_id.clone(),
-                agent_id: agent.agent_id.clone(),
-                artifact_id: artifact.artifact_id,
-                kind: artifact.kind as i32,
-                sha256: artifact.sha256,
-                size_bytes,
-                format: artifact.format,
-                chunk_size_bytes: o3k_compute_agent::MAX_ARTIFACT_CHUNK_BYTES as u32,
-                chunk_count,
-                expires_at_unix_ms: command.deadline_unix_ms,
-            };
-            if let Some(store) = &self.store {
-                let transfer = ArtifactTransferRecord {
-                    transfer_id: offer.transfer_id.clone(),
-                    command_id: offer.command_id.clone(),
-                    operation_id: request.operation_id,
-                    resource_id: request.o3k_server_id,
-                    agent_id: offer.agent_id.clone(),
-                    agent_epoch: agent.agent_epoch.clone(),
-                    artifact_id: offer.artifact_id.clone(),
-                    artifact_kind: artifact_kind_name(artifact.kind).to_owned(),
-                    sha256: offer.sha256.clone(),
-                    size_bytes: offer.size_bytes,
-                    expires_at_unix_ms: offer.expires_at_unix_ms,
-                    format: offer.format.clone(),
-                    chunk_size_bytes: offer.chunk_size_bytes as u64,
-                    chunk_count: offer.chunk_count as u64,
-                    state: ArtifactTransferState::Offered,
-                    contiguous_bytes: 0,
-                    next_chunk_index: 0,
-                    retry_count: 0,
-                    created_at: String::new(),
-                    updated_at: String::new(),
-                };
-                let existing = match store.insert_artifact_transfer(&transfer).await {
-                    Ok(existing) => existing,
-                    Err(StoreError::ArtifactTransferConflict(_)) => {
-                        let previous = store
-                            .get_artifact_transfer(&transfer.transfer_id)
-                            .await
-                            .map_err(|_| ProviderError::Conflict)?;
-                        if previous.state == ArtifactTransferState::Committed {
-                            previous
-                        } else if previous.command_id == transfer.command_id
-                            && previous.operation_id == transfer.operation_id
-                            && previous.resource_id == transfer.resource_id
-                            && previous.agent_id == transfer.agent_id
-                            && previous.artifact_id == transfer.artifact_id
-                            && previous.artifact_kind == transfer.artifact_kind
-                            && previous.sha256 == transfer.sha256
-                            && previous.size_bytes == transfer.size_bytes
-                            && previous.format == transfer.format
-                            && previous.chunk_size_bytes == transfer.chunk_size_bytes
-                            && previous.chunk_count == transfer.chunk_count
-                        {
-                            store
-                                .rebind_artifact_transfer_epoch(
-                                    &transfer.transfer_id,
-                                    &previous.agent_epoch,
-                                    &transfer.agent_epoch,
-                                )
-                                .await
-                                .map_err(|_| ProviderError::Conflict)?
-                        } else {
-                            return Err(ProviderError::Conflict);
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            resource_id = %request.o3k_server_id,
-                            artifact_kind = artifact_kind_name(artifact.kind),
-                            error = %error,
-                            "artifact transfer insert failed"
-                        );
-                        return Err(ProviderError::Conflict);
-                    }
-                };
-                if existing.state == ArtifactTransferState::Committed {
-                    continue;
-                }
-                if matches!(
-                    existing.state,
-                    ArtifactTransferState::Rejected | ArtifactTransferState::Expired
-                ) {
-                    return Err(ProviderError::Conflict);
-                }
-            }
-            self.registry
-                .dispatch_artifact_and_wait(offer.clone(), artifact.bytes, self.command_timeout)
-                .await
-                .map_err(|error| {
-                    tracing::warn!(
-                        resource_id = %request.o3k_server_id,
-                        artifact_kind = artifact_kind_name(artifact.kind),
-                        error = %error,
-                        "create artifact transfer was rejected"
-                    );
-                    map_agent_error(error)
-                })?;
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                artifact_kind = artifact_kind_name(artifact.kind),
-                "agent create artifact transfer committed"
-            );
-            if let Some(store) = &self.store {
-                store
-                    .update_artifact_transfer(
-                        &offer.transfer_id,
-                        &agent.agent_epoch,
-                        ArtifactTransferUpdate {
-                            state: ArtifactTransferState::Committed,
-                            contiguous_bytes: offer.size_bytes,
-                            next_chunk_index: offer.chunk_count as u64,
-                            retry_count: 0,
-                        },
-                    )
-                    .await
-                    .map_err(|error| {
-                        tracing::warn!(
-                            resource_id = %request.o3k_server_id,
-                            artifact_kind = artifact_kind_name(artifact.kind),
-                            error = %error,
-                            "artifact transfer commit update failed"
-                        );
-                        ProviderError::Conflict
-                    })?;
-            }
-        }
-        if seen != [true, true] {
-            tracing::warn!(
-                resource_id = %request.o3k_server_id,
-                image_seen = seen[0],
-                config_drive_seen = seen[1],
-                "create artifacts did not include every required artifact"
-            );
-            return Err(ProviderError::InvalidRequest);
-        }
-        let operation = self
-            .dispatch_recorded(command, request.operation_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    resource_id = %request.o3k_server_id,
-                    error = %error,
-                    "create command dispatch was rejected"
-                );
-                error
-            })?;
-        self.state.write().await.bindings.insert(
-            request.o3k_server_id.to_string(),
-            AgentBinding {
-                resource_id: request.o3k_server_id.to_string(),
-                agent_id: agent.agent_id,
-                agent_epoch: agent.agent_epoch,
-                provider_resource_id: None,
-            },
-        );
-        Ok(operation)
-    }
-
-    async fn get_instance(&self, id: &str) -> Result<Instance, ProviderError> {
-        self.rehydrate().await?;
-        self.state
-            .read()
-            .await
-            .instances
-            .get(id)
-            .cloned()
-            .ok_or(ProviderError::NotFound)
-    }
-
-    async fn inspect_instance(
-        &self,
-        provider_id: &str,
-        resource_id: &str,
-        provider_instance_id: &str,
-        operation_id: Uuid,
-        idempotency_key: &str,
-    ) -> Result<Operation, ProviderError> {
-        if idempotency_key.trim().is_empty() {
-            return Err(ProviderError::InvalidRequest);
-        }
-        let binding = {
-            let state = self.state.read().await;
-            state.bindings.get(resource_id).cloned().or_else(|| {
-                state
-                    .bindings
-                    .values()
-                    .find(|binding| binding.resource_id == resource_id)
-                    .cloned()
-            })
-        };
-        if let Some(binding) = binding.as_ref()
-            && let Some(expected) = binding.provider_resource_id.as_deref()
-            && expected != provider_instance_id
-        {
-            return Err(ProviderError::Conflict);
-        }
-        let agent = self.selected_agent(provider_id).await?;
-        if let Some(binding) = binding.as_ref()
-            && (binding.agent_id != provider_id || binding.agent_epoch != agent.agent_epoch)
-        {
-            return Err(ProviderError::StaleState);
-        }
-        let mut command = build_lifecycle_command(
-            LifecycleCommand::Inspect,
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            resource_id,
-        )
-        .map_err(map_agent_error)?;
-        command.idempotency_key = idempotency_key.to_owned();
-        self.dispatch_recorded(command, operation_id).await
-    }
-
-    async fn delete_instance(
-        &self,
-        request: DeleteInstanceRequest,
-    ) -> Result<Operation, ProviderError> {
-        self.rehydrate().await?;
-        let binding = self
-            .state
-            .read()
-            .await
-            .bindings
-            .get(&request.provider_instance_id)
-            .cloned();
-        let binding = binding.ok_or(ProviderError::NotFound)?;
-        let agent = self.selected_agent(&binding.agent_id).await?;
-        if agent.agent_epoch != binding.agent_epoch {
-            return Err(ProviderError::StaleState);
-        }
-        // The command resource identity is the O3K server id, never the
-        // provider (libvirt domain) name: the agent derives the domain from
-        // the server id and the durable command store requires a UUID.
-        let command = build_lifecycle_command(
-            LifecycleCommand::Delete,
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &request.operation_id.to_string(),
-            &binding.resource_id,
-        )
-        .map_err(map_agent_error)?;
-        self.dispatch_recorded(command, request.operation_id).await
-    }
-
-    async fn action_instance(
-        &self,
-        id: &str,
-        action: InstanceAction,
-        operation_id: Uuid,
-        _idempotency_key: &str,
-    ) -> Result<Operation, ProviderError> {
-        self.rehydrate().await?;
-        let binding = self
-            .state
-            .read()
-            .await
-            .bindings
-            .get(id)
-            .cloned()
-            .ok_or(ProviderError::NotFound)?;
-        let agent = self.selected_agent(&binding.agent_id).await?;
-        if agent.agent_epoch != binding.agent_epoch {
-            return Err(ProviderError::StaleState);
-        }
-        let command_action = match action {
-            InstanceAction::Start => LifecycleCommand::Start,
-            InstanceAction::Stop => LifecycleCommand::Stop,
-            InstanceAction::Reboot => LifecycleCommand::HardReboot,
-        };
-        let command = build_lifecycle_command(
-            command_action,
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            &binding.resource_id,
-        )
-        .map_err(map_agent_error)?;
-        self.dispatch_recorded(command, operation_id).await
-    }
-
-    async fn get_operation(&self, id: Uuid) -> Result<Operation, ProviderError> {
-        if let Some(store) = &self.store
-            && let Ok(record) = store.get_operation(id).await
-        {
-            let provider_resource_id =
-                if let Ok(command) = store.get_agent_command_by_operation(id).await {
-                    let reference = match store
-                        .get_provider_reference(command.resource_id, "compute")
-                        .await
-                    {
-                        Ok(reference) => Some(reference),
-                        Err(_) => store
-                            .get_provider_reference(command.resource_id, "agent")
-                            .await
-                            .ok(),
-                    };
-                    reference.map(|reference| reference.provider_resource_id)
-                } else {
-                    None
-                };
-            let state = match record.state {
-                o3k_store::OperationState::Pending => o3k_provider::OperationState::Accepted,
-                o3k_store::OperationState::Running => o3k_provider::OperationState::Running,
-                o3k_store::OperationState::Succeeded => o3k_provider::OperationState::Succeeded,
-                o3k_store::OperationState::Retryable => o3k_provider::OperationState::Retryable,
-                o3k_store::OperationState::UnknownOutcome => {
-                    o3k_provider::OperationState::UnknownOutcome
-                }
-                o3k_store::OperationState::Failed => o3k_provider::OperationState::Failed,
-            };
-            return Ok(Operation {
-                provider_operation_id: record
-                    .provider_operation_id
-                    .as_deref()
-                    .and_then(|value| Uuid::parse_str(value).ok())
-                    .unwrap_or(id),
-                o3k_operation_id: id,
-                state,
-                error_category: record
-                    .error_category
-                    .as_deref()
-                    .and_then(|value| match value {
-                        "invalid_request" => Some(o3k_provider::ErrorCategory::InvalidRequest),
-                        "conflict" => Some(o3k_provider::ErrorCategory::Conflict),
-                        "capacity" => Some(o3k_provider::ErrorCategory::Capacity),
-                        "not_found" => Some(o3k_provider::ErrorCategory::NotFound),
-                        "retryable" => Some(o3k_provider::ErrorCategory::Retryable),
-                        "unknown_outcome" => Some(o3k_provider::ErrorCategory::UnknownOutcome),
-                        "terminal" => Some(o3k_provider::ErrorCategory::Terminal),
-                        _ => None,
-                    }),
-                provider_resource_id,
-            });
-        }
-        self.state
-            .read()
-            .await
-            .operations
-            .get(&id)
-            .cloned()
-            .ok_or(ProviderError::NotFound)
-    }
-
-    async fn collect_connector(&self, resource_id: Uuid) -> Result<ConnectorInfo, ProviderError> {
-        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
-        let operation_id = Uuid::now_v7();
-        let command = build_block_device_command(
-            o3k_compute_agent::BlockDeviceCommand::CollectConnector,
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            &binding_resource,
-        )
-        .map_err(map_agent_error)?;
-        let observation = self
-            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
-            .await?;
-        Ok(ConnectorInfo {
-            host: observation.host_name.clone().unwrap_or_default(),
-            ip: observation.ip_address.clone().unwrap_or_default(),
-            platform: "x86_64".to_owned(),
-            os_type: "linux".to_owned(),
-            multipath: false,
-            initiator: observation.initiator.clone(),
-        })
-    }
-
-    async fn attach_block_device(
-        &self,
-        resource_id: Uuid,
-        device: &BlockDeviceAttachment,
-    ) -> Result<BlockDeviceObservation, ProviderError> {
-        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
-        let operation_id = Uuid::now_v7();
-        let command = build_block_device_command(
-            o3k_compute_agent::BlockDeviceCommand::Attach {
-                device: o3k_provider_contract::compute_proto::AttachDiskCommand {
-                    volume_id: device.volume_id.clone(),
-                    attachment_id: device.attachment_id.clone(),
-                    driver_volume_type: device.driver_volume_type.clone(),
-                    target_iqn: device.target_iqn.clone().unwrap_or_default(),
-                    target_portal: device.target_portal.clone().unwrap_or_default(),
-                    target_lun: device.target_lun.unwrap_or(0),
-                    device_path: device.local_path.clone().unwrap_or_default(),
-                    multipath: device.multipath,
-                    initiator: device.initiator.clone().unwrap_or_default(),
-                    auth_method: device.auth_method.clone().unwrap_or_default(),
-                    auth_username: device.auth_username.clone().unwrap_or_default(),
-                    auth_password: device.auth_password.clone().unwrap_or_default(),
-                },
-            },
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            &binding_resource,
-        )
-        .map_err(map_agent_error)?;
-        let observation = self
-            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
-            .await?;
-        Ok(observation)
-    }
-
-    async fn detach_block_device(
-        &self,
-        resource_id: Uuid,
-        device: &BlockDeviceAttachment,
-    ) -> Result<BlockDeviceObservation, ProviderError> {
-        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
-        let operation_id = Uuid::now_v7();
-        let command = build_block_device_command(
-            o3k_compute_agent::BlockDeviceCommand::Detach {
-                device: o3k_provider_contract::compute_proto::DetachDiskCommand {
-                    volume_id: device.volume_id.clone(),
-                    attachment_id: device.attachment_id.clone(),
-                    driver_volume_type: device.driver_volume_type.clone(),
-                    target_iqn: device.target_iqn.clone().unwrap_or_default(),
-                    target_portal: device.target_portal.clone().unwrap_or_default(),
-                    target_lun: device.target_lun.unwrap_or(0),
-                    device_path: device.local_path.clone().unwrap_or_default(),
-                    multipath: device.multipath,
-                    initiator: device.initiator.clone().unwrap_or_default(),
-                },
-            },
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            &binding_resource,
-        )
-        .map_err(map_agent_error)?;
-        let observation = self
-            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
-            .await?;
-        Ok(observation)
-    }
-
-    async fn observe_block_device(
-        &self,
-        resource_id: Uuid,
-        volume_id: &str,
-    ) -> Result<Option<BlockDeviceObservation>, ProviderError> {
-        let (agent, binding_resource) = self.agent_for_server(resource_id).await?;
-        let operation_id = Uuid::now_v7();
-        let command = build_block_device_command(
-            o3k_compute_agent::BlockDeviceCommand::Observe {
-                volume_id: volume_id.to_owned(),
-                attachment_id: String::new(),
-            },
-            &agent.agent_id,
-            &agent.agent_epoch,
-            &operation_id.to_string(),
-            &binding_resource,
-        )
-        .map_err(map_agent_error)?;
-        let observation = self
-            .dispatch_block_device_and_wait(command, operation_id, self.command_timeout)
-            .await?;
-        if !observation.found {
-            return Ok(None);
-        }
-        Ok(Some(observation))
     }
 }
 
@@ -2010,49 +384,6 @@ impl ComputeService {
         self.attachments.clone()
     }
 
-    pub async fn persist_pending_command(
-        &self,
-        command: &o3k_provider_contract::compute_proto::Command,
-        operation_id: Uuid,
-    ) -> Result<Option<AgentCommandRecord>, ComputeError> {
-        let record = AgentCommandRecord {
-            command_id: command.command_id.clone(),
-            idempotency_key: command.idempotency_key.clone(),
-            operation_id,
-            resource_id: Uuid::parse_str(&command.resource_id)
-                .map_err(|_| ComputeError::InvalidRequest)?,
-            agent_id: command.agent_id.clone(),
-            agent_epoch: command.agent_epoch.clone(),
-            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
-            payload: command.encode_to_vec(),
-            state: AgentCommandState::Pending,
-            accepted_sequence: 0,
-            last_sequence: 0,
-            provider_operation_id: Some(operation_id.to_string()),
-            provider_resource_id: None,
-        };
-        if self.store.get_operation(operation_id).await.is_err() {
-            let _ = self
-                .store
-                .insert_operation(&o3k_store::OperationRecord {
-                    id: operation_id,
-                    resource_id: record.resource_id,
-                    kind: "command".to_owned(),
-                    state: o3k_store::OperationState::Running,
-                    provider_operation_id: Some(operation_id.to_string()),
-                    error_category: None,
-                    error_message: None,
-                })
-                .await;
-        }
-        let existing = self
-            .store
-            .insert_agent_command(&record)
-            .await
-            .map_err(|_| ComputeError::Conflict)?;
-        Ok(Some(existing))
-    }
-
     #[must_use]
     pub fn with_scheduler(mut self, scheduler: Scheduler) -> Self {
         self.scheduler = Some(scheduler);
@@ -2063,7 +394,7 @@ impl ComputeService {
     /// alive, and administratively enabled. The registry is intentionally
     /// optional so direct fake-provider operation keeps its existing behavior.
     #[must_use]
-    pub fn with_agent_registry(mut self, registry: NodeRegistry) -> Self {
+    pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
         self.agent_registry = Some(registry);
         self
     }
@@ -2243,7 +574,7 @@ impl ComputeService {
     /// updates received from an authenticated agent connection.
     pub fn spawn_agent_event_consumer(
         &self,
-        registry: NodeRegistry,
+        registry: Arc<dyn AgentNodeRegistry>,
     ) -> tokio::task::JoinHandle<()> {
         let mut events = registry.subscribe_events();
         let service = self.clone();
@@ -2675,10 +1006,8 @@ impl ComputeService {
                     .await
                     .into_iter()
                     .filter(|node| {
-                        node.availability == Availability::Available
-                            && node.desired_state
-                                == o3k_provider_contract::compute_proto::AdministrativeState::Enabled
-                                    as i32
+                        node.availability == AgentAvailability::Available
+                            && node.administrative_state == AgentAdministrativeState::Enabled
                     })
                     .map(|node| node.agent_id)
                     .collect::<BTreeSet<_>>();
@@ -3593,11 +1922,82 @@ fn keypair_from_record(record: o3k_store::KeypairRecord) -> Keypair {
 mod tests {
     use super::*;
     use o3k_provider::{
-        AgentArtifactStatus, AgentErrorCategory, AgentObservation, AgentOperationState,
-        AgentOperationUpdate,
+        AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentErrorCategory,
+        AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,
     };
-    use o3k_provider_contract::compute_proto as proto;
     use std::path::PathBuf;
+
+    /// Stateful in-memory agent registry used to test application scheduling
+    /// and inventory behavior without wire types. The snapshots are
+    /// application-level values, so the tests exercise exactly what the
+    /// transport adapter would publish after its boundary conversion.
+    #[derive(Clone, Default)]
+    struct FakeAgentRegistry {
+        nodes: Arc<tokio::sync::RwLock<BTreeMap<String, AgentNodeSnapshot>>>,
+    }
+
+    #[async_trait]
+    impl AgentNodeRegistry for FakeAgentRegistry {
+        async fn all(&self) -> Vec<AgentNodeSnapshot> {
+            self.nodes.read().await.values().cloned().collect()
+        }
+
+        async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot> {
+            self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
+            let (_, receiver) = tokio::sync::broadcast::channel(1);
+            receiver
+        }
+    }
+
+    impl FakeAgentRegistry {
+        async fn upsert(&self, node: AgentNodeSnapshot) {
+            self.nodes.write().await.insert(node.agent_id.clone(), node);
+        }
+
+        async fn set_unavailable(&self, agent_id: &str) {
+            if let Some(node) = self.nodes.write().await.get_mut(agent_id) {
+                node.availability = AgentAvailability::Unavailable;
+            }
+        }
+    }
+
+    fn agent_node(agent_id: &str, vcpus: u64, memory_mib: u64, disk_gib: u64) -> AgentNodeSnapshot {
+        agent_node_with_state(
+            agent_id,
+            AgentAdministrativeState::Enabled,
+            vcpus,
+            memory_mib,
+            disk_gib,
+        )
+    }
+
+    fn agent_node_with_state(
+        agent_id: &str,
+        administrative_state: AgentAdministrativeState,
+        vcpus: u64,
+        memory_mib: u64,
+        disk_gib: u64,
+    ) -> AgentNodeSnapshot {
+        AgentNodeSnapshot {
+            agent_id: agent_id.to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            availability: AgentAvailability::Available,
+            administrative_state,
+            capabilities: AgentCapabilities {
+                agent_provider_name: "o3k-compute".to_owned(),
+                agent_provider_version: "test".to_owned(),
+                max_vcpus: vcpus,
+                max_memory_mib: memory_mib,
+                max_disk_gb: disk_gib,
+                lifecycle_actions: vec!["start".to_owned(), "stop".to_owned()],
+                console_log: true,
+                flags: Vec::new(),
+            },
+        }
+    }
 
     #[derive(Debug, PartialEq, Eq, Clone)]
     enum ProjectorCall {
@@ -3749,42 +2149,6 @@ mod tests {
             "garbage-state"
         );
         Ok(())
-    }
-
-    #[test]
-    fn durable_server_states_project_to_the_provider_vocabulary() {
-        use o3k_provider::InstanceState as ProviderState;
-        let expected = [
-            ("REQUESTED", ProviderState::Creating),
-            ("BUILD", ProviderState::Creating),
-            ("ACTIVE", ProviderState::Running),
-            ("STOPPING", ProviderState::Creating),
-            ("SHUTOFF", ProviderState::Stopped),
-            ("STARTING", ProviderState::Creating),
-            ("REBOOTING", ProviderState::Creating),
-            ("DELETING", ProviderState::Deleting),
-            ("DELETED", ProviderState::Deleted),
-            ("ERROR", ProviderState::Error),
-        ];
-        assert_eq!(expected.len(), 10);
-        for (stored, provider) in expected {
-            assert_eq!(
-                instance_state_from_observed(stored),
-                Some(provider),
-                "{stored} must project to {provider:?}"
-            );
-        }
-        // Legacy lowercase spellings and corrupt values: legacy spellings
-        // decode, corrupt values fail closed.
-        assert_eq!(
-            instance_state_from_observed("active"),
-            Some(ProviderState::Running)
-        );
-        assert_eq!(
-            instance_state_from_observed("requested"),
-            Some(ProviderState::Creating)
-        );
-        assert_eq!(instance_state_from_observed("garbage-state"), None);
     }
 
     #[tokio::test]
@@ -3969,11 +2333,15 @@ mod tests {
 
     #[test]
     fn agent_inventory_requires_explicit_disk_capacity() {
-        let capabilities = proto::Capabilities {
+        let capabilities = AgentCapabilities {
+            agent_provider_name: "o3k-compute".to_owned(),
+            agent_provider_version: "test".to_owned(),
             max_vcpus: 4,
             max_memory_mib: 4096,
-            disk_formats: vec!["qcow2".to_owned()],
-            ..Default::default()
+            max_disk_gb: 0,
+            lifecycle_actions: Vec::new(),
+            console_log: false,
+            flags: Vec::new(),
         };
         let inventory = agent_inventory(&capabilities);
         assert_eq!(inventory[o3k_placement::VCPU].total, 4);
@@ -3982,7 +2350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_agent_inventory_is_published_and_state_fenced()
+    async fn agent_inventory_is_published_and_state_fenced()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = PathBuf::from(format!(
             "/tmp/o3k-placement-agent-inventory-{}",
@@ -3992,22 +2360,8 @@ mod tests {
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
             Arc::new(placement_store);
         let placement = o3k_placement::PlacementLedger::open(&root, placement_repository).await?;
-        let registry = NodeRegistry::default();
-        registry
-            .register(&proto::RegisterRequest {
-                agent_id: "agent-a".to_owned(),
-                agent_epoch: "epoch-1".to_owned(),
-                software_version: "test".to_owned(),
-                host_label: "host-a".to_owned(),
-                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
-                capabilities: Some(proto::Capabilities {
-                    max_vcpus: 4,
-                    max_memory_mib: 4096,
-                    max_disk_gb: 20,
-                    ..Default::default()
-                }),
-            })
-            .await?;
+        let registry = FakeAgentRegistry::default();
+        registry.upsert(agent_node("agent-a", 4, 4096, 20)).await;
 
         sync_agent_inventory(&registry, &placement).await?;
         let provider = placement.provider("agent-a").await?;
@@ -4030,8 +2384,14 @@ mod tests {
             )
             .await?;
         registry
-            .set_desired_state("agent-a", proto::AdministrativeState::Draining)
-            .await?;
+            .upsert(agent_node_with_state(
+                "agent-a",
+                AgentAdministrativeState::Draining,
+                4,
+                4096,
+                20,
+            ))
+            .await;
         sync_agent_inventory(&registry, &placement).await?;
         let refreshed = placement.provider("agent-a").await?;
         assert_eq!(refreshed.state, o3k_placement::ProviderState::Draining);
@@ -5455,45 +3815,49 @@ mod tests {
                 .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
         }
 
-        let registry = NodeRegistry::default();
-        for agent in ["unavailable", "draining", "disabled"] {
-            registry
-                .register(&proto::RegisterRequest {
-                    agent_id: agent.to_owned(),
-                    agent_epoch: "epoch".to_owned(),
-                    software_version: "test".to_owned(),
-                    host_label: agent.to_owned(),
-                    supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
-                    capabilities: Some(proto::Capabilities::default()),
-                })
-                .await
-                .map_err(|_| ComputeError::Conflict)?;
-        }
-        registry.mark_unavailable(std::time::Duration::ZERO).await;
+        let registry = FakeAgentRegistry::default();
         registry
-            .register(&proto::RegisterRequest {
-                agent_id: "enabled".to_owned(),
-                agent_epoch: "epoch".to_owned(),
-                software_version: "test".to_owned(),
-                host_label: "enabled".to_owned(),
-                supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
-                capabilities: Some(proto::Capabilities::default()),
-            })
-            .await
-            .map_err(|_| ComputeError::Conflict)?;
+            .upsert(agent_node_with_state(
+                "unavailable",
+                AgentAdministrativeState::Enabled,
+                8,
+                8192,
+                100,
+            ))
+            .await;
+        registry.set_unavailable("unavailable").await;
         registry
-            .set_desired_state("draining", proto::AdministrativeState::Draining)
-            .await
-            .map_err(|_| ComputeError::Conflict)?;
+            .upsert(agent_node_with_state(
+                "draining",
+                AgentAdministrativeState::Draining,
+                8,
+                8192,
+                100,
+            ))
+            .await;
         registry
-            .set_desired_state("disabled", proto::AdministrativeState::Disabled)
-            .await
-            .map_err(|_| ComputeError::Conflict)?;
+            .upsert(agent_node_with_state(
+                "disabled",
+                AgentAdministrativeState::Disabled,
+                8,
+                8192,
+                100,
+            ))
+            .await;
+        registry
+            .upsert(agent_node_with_state(
+                "enabled",
+                AgentAdministrativeState::Enabled,
+                8,
+                8192,
+                100,
+            ))
+            .await;
 
         let service = service("registry-gate")
             .await?
             .with_scheduler(Scheduler::new(placement.clone()))
-            .with_agent_registry(registry);
+            .with_agent_registry(Arc::new(registry));
         let server = service
             .create_server(
                 "project-a",
@@ -5510,585 +3874,6 @@ mod tests {
         assert_eq!(request.placement_provider_id.as_deref(), Some("enabled"));
 
         let _ = std::fs::remove_dir_all(placement_root);
-        Ok(())
-    }
-
-    #[derive(Debug, Default)]
-    struct TestResolvedCreateResolver;
-
-    #[async_trait]
-    impl ResolvedCreateResolver for TestResolvedCreateResolver {
-        async fn resolve(
-            &self,
-            _request: &CreateInstanceRequest,
-            _agent: &NodeSnapshot,
-        ) -> Result<ResolvedCreateInputs, ProviderError> {
-            Ok(ResolvedCreateInputs {
-                flavor_id: "flavor.test".to_owned(),
-                image_artifact_id: "artifact.test".to_owned(),
-                image_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                    .to_owned(),
-                image_format: "qcow2".to_owned(),
-                disk_gib: 10,
-                config_drive_artifact_id: "config-drive.test".to_owned(),
-                config_drive_sha256:
-                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
-                network_attachments: vec![NetworkAttachmentSpec {
-                    port_id: "port.test".to_owned(),
-                    mac: "52:54:00:12:34:56".to_owned(),
-                    fixed_ipv4: "192.0.2.10".to_owned(),
-                    subnet_cidr: "192.0.2.0/24".to_owned(),
-                    gateway_ipv4: "192.0.2.1".to_owned(),
-                }],
-            })
-        }
-    }
-
-    fn registered_agent(id: &str) -> proto::RegisterRequest {
-        proto::RegisterRequest {
-            agent_id: id.to_owned(),
-            agent_epoch: "epoch-1".to_owned(),
-            software_version: "test".to_owned(),
-            host_label: id.to_owned(),
-            supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
-            capabilities: Some(proto::Capabilities {
-                agent_provider_name: "o3k-compute".to_owned(),
-                agent_provider_version: "test".to_owned(),
-                max_vcpus: 8,
-                max_memory_mib: 16_384,
-                max_disk_gb: 100,
-                lifecycle_actions: vec!["start".to_owned(), "stop".to_owned()],
-                ..Default::default()
-            }),
-        }
-    }
-
-    #[tokio::test]
-    async fn agent_provider_reads_capabilities_from_selected_registered_agent()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let provider =
-            AgentComputeProvider::new(registry, Arc::new(UnconfiguredResolvedCreateResolver));
-        let capabilities = provider.capabilities().await?;
-        assert_eq!(capabilities.provider_name, "o3k-compute");
-        assert!(
-            capabilities
-                .capabilities
-                .iter()
-                .any(|value| value == "start")
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_provider_rehydrates_instance_binding_from_durable_store()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
-        let server_id = Uuid::now_v7();
-        let operation_id = Uuid::now_v7();
-        let request = CreateInstanceRequest {
-            operation_id,
-            o3k_server_id: server_id,
-            project_id: "project-a".to_owned(),
-            name: "server-a".to_owned(),
-            vcpus: 1,
-            memory_mib: 512,
-            flavor_id: "flavor-1".to_owned(),
-            disk_gib: 10,
-            image_id: Some("image-a".to_owned()),
-            key_name: None,
-            keypair_id: None,
-            network_ids: vec!["port-a".to_owned()],
-            placement_provider_id: Some("node-a".to_owned()),
-            placement_allocation_id: Some("allocation-a".to_owned()),
-            config_drive: None,
-            idempotency_key: "request-a".to_owned(),
-        };
-        store
-            .insert_resource(&o3k_store::ResourceRecord {
-                id: server_id,
-                kind: "compute_instance".to_owned(),
-                project_id: "project-a".to_owned(),
-                generation: 1,
-                observed_generation: 1,
-                desired_state: serde_json::to_string(&request)?,
-                observed_state: "ACTIVE".to_owned(),
-                provider_id: Some("domain-a".to_owned()),
-            })
-            .await?;
-        store
-            .attach_provider_reference(&o3k_store::ProviderReference {
-                resource_id: server_id,
-                provider_name: "agent".to_owned(),
-                provider_resource_id: "domain-a".to_owned(),
-            })
-            .await?;
-        let provider = AgentComputeProvider::new_with_store(
-            registry,
-            Arc::new(UnconfiguredResolvedCreateResolver),
-            Some(store),
-        );
-        let instance = provider.get_instance("domain-a").await?;
-        assert_eq!(instance.o3k_server_id, server_id);
-        assert_eq!(instance.state, o3k_provider::InstanceState::Running);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_lifecycle_commands_use_the_o3k_server_id_as_resource_identity()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
-        let server_id = Uuid::now_v7();
-        let request = CreateInstanceRequest {
-            operation_id: Uuid::now_v7(),
-            o3k_server_id: server_id,
-            project_id: "project-a".to_owned(),
-            name: "server-a".to_owned(),
-            vcpus: 1,
-            memory_mib: 512,
-            flavor_id: "flavor-1".to_owned(),
-            disk_gib: 10,
-            image_id: Some("image-a".to_owned()),
-            key_name: None,
-            keypair_id: None,
-            network_ids: vec!["port-a".to_owned()],
-            placement_provider_id: Some("node-a".to_owned()),
-            placement_allocation_id: Some("allocation-a".to_owned()),
-            config_drive: None,
-            idempotency_key: "request-a".to_owned(),
-        };
-        store
-            .insert_resource(&o3k_store::ResourceRecord {
-                id: server_id,
-                kind: "compute_instance".to_owned(),
-                project_id: "project-a".to_owned(),
-                generation: 1,
-                observed_generation: 1,
-                desired_state: serde_json::to_string(&request)?,
-                observed_state: "ACTIVE".to_owned(),
-                provider_id: Some("domain-a".to_owned()),
-            })
-            .await?;
-        store
-            .attach_provider_reference(&o3k_store::ProviderReference {
-                resource_id: server_id,
-                provider_name: "agent".to_owned(),
-                provider_resource_id: "domain-a".to_owned(),
-            })
-            .await?;
-        let provider = AgentComputeProvider::new_with_store(
-            registry,
-            Arc::new(UnconfiguredResolvedCreateResolver),
-            Some(store.clone()),
-        );
-        // Lifecycle commands must carry the O3K server id, not the provider
-        // (libvirt domain) name: the agent derives the domain name from the
-        // server id, and the durable command store requires a UUID. Dispatch
-        // fails without a live stream, but the durable record proves the
-        // command identity that would be sent.
-        let stop_operation_id = Uuid::now_v7();
-        store
-            .insert_operation(&o3k_store::OperationRecord {
-                id: stop_operation_id,
-                resource_id: server_id,
-                kind: "lifecycle:stop".to_owned(),
-                state: o3k_store::OperationState::Running,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
-            })
-            .await?;
-        let stop = provider
-            .action_instance(
-                "domain-a",
-                o3k_provider::InstanceAction::Stop,
-                stop_operation_id,
-                "stop-a",
-            )
-            .await;
-        let stop_error = match stop {
-            Err(error) => error,
-            Ok(_) => return Err("stop dispatch unexpectedly succeeded without a stream".into()),
-        };
-        assert!(
-            matches!(stop_error, ProviderError::Retryable),
-            "stop failed with {stop_error:?}"
-        );
-        let record = store
-            .get_agent_command_by_operation(stop_operation_id)
-            .await?;
-        let command = proto::Command::decode(record.payload.as_slice())?;
-        assert_eq!(command.resource_id, server_id.to_string());
-        assert!(matches!(
-            command.action,
-            Some(proto::command::Action::Stop(_))
-        ));
-        let delete_operation_id = Uuid::now_v7();
-        store
-            .insert_operation(&o3k_store::OperationRecord {
-                id: delete_operation_id,
-                resource_id: server_id,
-                kind: "lifecycle:delete".to_owned(),
-                state: o3k_store::OperationState::Running,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
-            })
-            .await?;
-        let delete = provider
-            .delete_instance(DeleteInstanceRequest {
-                operation_id: delete_operation_id,
-                provider_instance_id: "domain-a".to_owned(),
-                idempotency_key: "delete-a".to_owned(),
-            })
-            .await;
-        let delete_error = match delete {
-            Err(error) => error,
-            Ok(_) => {
-                return Err("delete dispatch unexpectedly succeeded without a stream".into());
-            }
-        };
-        assert!(
-            matches!(delete_error, ProviderError::Retryable),
-            "delete failed with {delete_error:?}"
-        );
-        let record = store
-            .get_agent_command_by_operation(delete_operation_id)
-            .await?;
-        let command = proto::Command::decode(record.payload.as_slice())?;
-        assert_eq!(command.resource_id, server_id.to_string());
-        assert!(matches!(
-            command.action,
-            Some(proto::command::Action::Delete(_))
-        ));
-        // A reconcile retry of the same operation must reuse the durable
-        // command payload. Rebuilding it would drift the embedded deadline
-        // and conflict with the durable record instead of replaying.
-        let retry = provider
-            .delete_instance(DeleteInstanceRequest {
-                operation_id: delete_operation_id,
-                provider_instance_id: "domain-a".to_owned(),
-                idempotency_key: "delete-a".to_owned(),
-            })
-            .await;
-        let retry_error = match retry {
-            Err(error) => error,
-            Ok(_) => return Err("delete retry unexpectedly succeeded without a stream".into()),
-        };
-        assert!(
-            matches!(retry_error, ProviderError::Retryable),
-            "delete retry failed with {retry_error:?}"
-        );
-        let replayed = store
-            .get_agent_command_by_operation(delete_operation_id)
-            .await?;
-        assert_eq!(replayed.payload, record.payload);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_provider_requires_placement_and_never_invents_resolved_inputs()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let provider =
-            AgentComputeProvider::new(registry, Arc::new(UnconfiguredResolvedCreateResolver));
-        let request = CreateInstanceRequest {
-            operation_id: Uuid::now_v7(),
-            o3k_server_id: Uuid::now_v7(),
-            project_id: "project-a".to_owned(),
-            name: "server-a".to_owned(),
-            vcpus: 1,
-            memory_mib: 512,
-            flavor_id: String::new(),
-            disk_gib: 0,
-            image_id: Some("image-a".to_owned()),
-            key_name: None,
-            keypair_id: None,
-            network_ids: vec!["port-a".to_owned()],
-            placement_provider_id: None,
-            placement_allocation_id: None,
-            config_drive: None,
-            idempotency_key: "request-a".to_owned(),
-        };
-        assert_eq!(
-            provider.create_instance(request).await,
-            Err(ProviderError::InvalidRequest)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_provider_rejects_create_without_verified_artifacts()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let provider = AgentComputeProvider::new(registry, Arc::new(TestResolvedCreateResolver));
-        let operation_id = Uuid::now_v7();
-        let request = CreateInstanceRequest {
-            operation_id,
-            o3k_server_id: Uuid::now_v7(),
-            project_id: "project-a".to_owned(),
-            name: "server-a".to_owned(),
-            vcpus: 1,
-            memory_mib: 512,
-            flavor_id: String::new(),
-            disk_gib: 0,
-            image_id: Some("image-a".to_owned()),
-            key_name: None,
-            keypair_id: None,
-            network_ids: vec!["port-a".to_owned()],
-            placement_provider_id: Some("node-a".to_owned()),
-            placement_allocation_id: Some("allocation-a".to_owned()),
-            config_drive: None,
-            idempotency_key: "request-a".to_owned(),
-        };
-        assert_eq!(
-            provider.create_instance(request).await,
-            Err(ProviderError::InvalidRequest)
-        );
-        assert_eq!(
-            provider.get_operation(operation_id).await,
-            Err(ProviderError::NotFound)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_provider_rejects_config_drive_without_backend_capability()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let registry = NodeRegistry::default();
-        registry.register(&registered_agent("node-a")).await?;
-        let provider = AgentComputeProvider::new(registry, Arc::new(TestResolvedCreateResolver));
-        let operation_id = Uuid::now_v7();
-        let request = CreateInstanceRequest {
-            operation_id,
-            o3k_server_id: Uuid::now_v7(),
-            project_id: "project-a".to_owned(),
-            name: "server-a".to_owned(),
-            vcpus: 1,
-            memory_mib: 512,
-            flavor_id: String::new(),
-            disk_gib: 0,
-            image_id: Some("image-a".to_owned()),
-            key_name: None,
-            keypair_id: None,
-            network_ids: vec!["port-a".to_owned()],
-            placement_provider_id: Some("node-a".to_owned()),
-            placement_allocation_id: Some("allocation-a".to_owned()),
-            config_drive: Some(ConfigDriveRequest {
-                user_data: b"#cloud-config\n".to_vec(),
-                vendor_data: None,
-                ssh_public_key: "ssh-ed25519 AAAA".to_owned(),
-            }),
-            idempotency_key: "request-a".to_owned(),
-        };
-        assert_eq!(
-            provider.create_instance(request).await,
-            Err(ProviderError::InvalidRequest)
-        );
-        assert_eq!(
-            provider.get_operation(operation_id).await,
-            Err(ProviderError::NotFound)
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn agent_provider_projects_observations_and_agent_errors()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let state = Arc::new(RwLock::new(AgentProviderState::default()));
-        let operation_id = Uuid::now_v7();
-        state.write().await.operations.insert(
-            operation_id,
-            Operation {
-                provider_operation_id: operation_id,
-                o3k_operation_id: operation_id,
-                state: o3k_provider::OperationState::Accepted,
-                error_category: None,
-                provider_resource_id: None,
-            },
-        );
-        let update = AgentOperationUpdate {
-            agent_id: "node-a".to_owned(),
-            agent_epoch: "epoch-1".to_owned(),
-            operation_sequence: 1,
-            operation_id,
-            resource_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111")
-                .map_err(|_| ComputeError::InvalidRequest)?,
-            state: AgentOperationState::Succeeded,
-            error_category: None,
-            redacted_message: None,
-            provider_resource_id: Some("domain-a".to_owned()),
-        };
-        apply_agent_provider_event(
-            &state,
-            None,
-            o3k_provider::AgentEvent::Operation(update.clone()),
-        )
-        .await;
-        apply_agent_provider_event(
-            &state,
-            None,
-            o3k_provider::AgentEvent::Observation(Box::new(AgentObservation {
-                agent_id: "node-a".to_owned(),
-                agent_epoch: "epoch-1".to_owned(),
-                resource_id: update.resource_id,
-                provider_resource_id: Some("domain-a".to_owned()),
-                state: o3k_provider::InstanceState::Running,
-                operation_id,
-                operation_state: AgentOperationState::Succeeded,
-                observation_sequence: 1,
-                observed_at_unix_ms: 1,
-                redacted_message: Some("running".to_owned()),
-                console_log_bytes: Vec::new(),
-                console_log_offset: 0,
-                console_log_complete: false,
-                console_log_truncated: false,
-                block_device: None,
-            })),
-        )
-        .await;
-        let provider = AgentComputeProvider {
-            registry: NodeRegistry::default(),
-            resolver: Arc::new(UnconfiguredResolvedCreateResolver),
-            state: state.clone(),
-            store: None,
-            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
-            command_timeout: Duration::from_secs(30),
-        };
-        assert_eq!(
-            provider.get_instance("domain-a").await?.state,
-            o3k_provider::InstanceState::Running
-        );
-        assert_eq!(
-            provider
-                .get_operation(operation_id)
-                .await?
-                .provider_resource_id
-                .as_deref(),
-            Some("domain-a")
-        );
-        apply_agent_provider_event(
-            &state,
-            None,
-            o3k_provider::AgentEvent::Error(o3k_provider::AgentProtocolError {
-                category: Some(AgentErrorCategory::Retryable),
-                code: "agent-retry".to_owned(),
-                redacted_message: Some("retry".to_owned()),
-                operation_id: Some(operation_id),
-                retryable: true,
-                command_id: None,
-            }),
-        )
-        .await;
-        assert_eq!(
-            provider.get_operation(operation_id).await?.state,
-            o3k_provider::OperationState::Retryable
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn artifact_status_rebinds_epoch_and_rejects_identity_conflicts()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
-        let operation_id = Uuid::now_v7();
-        let resource_id = Uuid::now_v7();
-        let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        store
-            .insert_resource(&o3k_store::ResourceRecord {
-                id: resource_id,
-                kind: "compute_instance".to_owned(),
-                project_id: "project-a".to_owned(),
-                generation: 1,
-                observed_generation: 1,
-                desired_state: "{}".to_owned(),
-                observed_state: "BUILD".to_owned(),
-                provider_id: None,
-            })
-            .await?;
-        store
-            .insert_operation(&o3k_store::OperationRecord {
-                id: operation_id,
-                resource_id,
-                kind: "compute_create".to_owned(),
-                state: o3k_store::OperationState::Running,
-                provider_operation_id: None,
-                error_category: None,
-                error_message: None,
-            })
-            .await?;
-        store
-            .insert_artifact_transfer(&ArtifactTransferRecord {
-                transfer_id: "transfer-1".to_owned(),
-                command_id: "command-1".to_owned(),
-                operation_id,
-                resource_id,
-                agent_id: "agent-1".to_owned(),
-                agent_epoch: "epoch-1".to_owned(),
-                artifact_id: "artifact-1".to_owned(),
-                artifact_kind: "image_base".to_owned(),
-                sha256: sha256.to_owned(),
-                size_bytes: 8,
-                expires_at_unix_ms: i64::MAX,
-                format: "raw".to_owned(),
-                chunk_size_bytes: 4,
-                chunk_count: 2,
-                state: ArtifactTransferState::Offered,
-                contiguous_bytes: 0,
-                next_chunk_index: 0,
-                retry_count: 0,
-                created_at: String::new(),
-                updated_at: String::new(),
-            })
-            .await?;
-        let state = Arc::new(RwLock::new(AgentProviderState::default()));
-        apply_agent_provider_event(
-            &state,
-            Some(store.as_ref()),
-            o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
-                transfer_id: "transfer-1".to_owned(),
-                command_id: "command-1".to_owned(),
-                operation_id,
-                resource_id,
-                agent_id: "agent-1".to_owned(),
-                agent_epoch: "epoch-2".to_owned(),
-                contiguous_bytes: 4,
-                next_chunk_index: 1,
-                state: o3k_provider::ArtifactTransferState::Receiving,
-            }),
-        )
-        .await;
-        let transfer = store.get_artifact_transfer("transfer-1").await?;
-        assert_eq!(transfer.agent_epoch, "epoch-2");
-        assert_eq!(transfer.state, ArtifactTransferState::Receiving);
-        assert_eq!(transfer.contiguous_bytes, 4);
-
-        apply_agent_provider_event(
-            &state,
-            Some(store.as_ref()),
-            o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
-                transfer_id: "transfer-1".to_owned(),
-                command_id: "different-command".to_owned(),
-                operation_id,
-                resource_id,
-                agent_id: "agent-1".to_owned(),
-                agent_epoch: "epoch-2".to_owned(),
-                contiguous_bytes: 8,
-                next_chunk_index: 2,
-                state: o3k_provider::ArtifactTransferState::Committed,
-            }),
-        )
-        .await;
-        let unchanged = store.get_artifact_transfer("transfer-1").await?;
-        assert_eq!(unchanged.state, ArtifactTransferState::Receiving);
-        assert_eq!(unchanged.contiguous_bytes, 4);
         Ok(())
     }
 

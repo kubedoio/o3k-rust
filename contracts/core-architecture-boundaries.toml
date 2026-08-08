@@ -90,14 +90,12 @@ concrete_store_symbol = "SqliteStore"
 concrete_store_debt_files = []
 
 [application.adapter_dependency_debt]
-# o3k-compute currently contains execution/external-service adapter logic that
-# should move behind bounded application ports. These are accepted as current
-# migration debt only; no additional dependency may be added silently.
+# o3k-compute still consumes the external Cinder client directly for the
+# durable volume-attachment lifecycle. A bounded VolumeAttachmentProvider port
+# removes this in the final step; no additional dependency may be added
+# silently.
 o3k-compute = [
   "o3k-cinder",
-  "o3k-compute-agent",
-  "o3k-provider-contract",
-  "prost",
 ]
 
 [ratchet]
