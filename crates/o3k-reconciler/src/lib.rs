@@ -837,15 +837,7 @@ where
                         operation.id,
                         OperationState::Failed,
                         None,
-                        Some(match error.category() {
-                            o3k_provider::ErrorCategory::InvalidRequest => "invalid_request",
-                            o3k_provider::ErrorCategory::NotFound => "not_found",
-                            o3k_provider::ErrorCategory::Conflict => "conflict",
-                            o3k_provider::ErrorCategory::Capacity => "capacity",
-                            o3k_provider::ErrorCategory::Retryable => "retryable",
-                            o3k_provider::ErrorCategory::UnknownOutcome => "unknown_outcome",
-                            o3k_provider::ErrorCategory::Terminal => "terminal",
-                        }),
+                        Some(provider_error_category_name(error.category())),
                         Some(&error.to_string()),
                     )
                     .await?;
@@ -2836,8 +2828,9 @@ mod tests {
             OperationState::UnknownOutcome
         );
         // The instance was never created and the accepted inspection was not
-        // duplicated.
+        // duplicated (no dispatch happened at all).
         assert_eq!(provider.instance_count(), 1);
+        assert_eq!(provider.inspect_dispatch_count(), 0);
         Ok(())
     }
 
