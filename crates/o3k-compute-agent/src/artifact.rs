@@ -117,6 +117,9 @@ impl ArtifactStore {
         &self,
         offer: &proto::ArtifactOffer,
     ) -> Result<ArtifactReceipt, ArtifactStoreError> {
+        // Expiry fences NEW transfer admission at begin; it must not prevent
+        // replay or cleanup of already committed artifacts, whose offers can
+        // expire seconds after the transfer completed (see artifact_statuses).
         validate_offer(offer, &self.agent_id)?;
         let manifest_path = self.manifest_path(&offer.transfer_id)?;
         if manifest_path.exists() || manifest_path.is_symlink() {
@@ -376,7 +379,6 @@ impl ArtifactStore {
                 return Err(ArtifactStoreError::UnownedPath);
             }
             let manifest = read_manifest(&path)?;
-            validate_offer(&manifest.offer, &self.agent_id)?;
             let state = proto::ArtifactTransferState::try_from(manifest.state)
                 .map_err(|_| ArtifactStoreError::CorruptManifest)?;
             if !matches!(
@@ -386,6 +388,23 @@ impl ArtifactStore {
                     | proto::ArtifactTransferState::Committed
             ) {
                 return Err(ArtifactStoreError::CorruptManifest);
+            }
+            // Identity and shape validation always apply, but the admission
+            // expiry fence is deliberately NOT applied to the reconnect
+            // replay: a committed transfer legitimately outlives its offer
+            // (offers expire seconds after creation), and an incomplete
+            // transfer whose offer expired can no longer be resumed. Both
+            // must replay or be skipped instead of aborting the whole status
+            // replay; otherwise a control-plane crash leaves the agent
+            // unable to reconnect ("artifact transfer failed closed"), the
+            // terminal observation journal replay never runs, and the create
+            // stays stuck forever (real-host failure at commit 40f438c:
+            // server stuck REQUESTED, placement allocation leaked).
+            validate_offer_identity(&manifest.offer, &self.agent_id)?;
+            if state != proto::ArtifactTransferState::Committed
+                && manifest.offer.expires_at_unix_ms <= crate::unix_ms()
+            {
+                continue;
             }
             if state == proto::ArtifactTransferState::Committed {
                 verify_file(&self.final_path(&manifest.offer)?, &manifest.offer)?;
@@ -863,6 +882,91 @@ mod tests {
             store.begin(&offer),
             Err(ArtifactStoreError::InvalidOffer)
         ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A committed transfer outlives its offer (the offer can expire seconds
+    /// after the transfer completed). The reconnect status replay must not
+    /// apply the admission expiry fence to committed manifests: doing so
+    /// aborts the agent's reconnection with "artifact transfer failed
+    /// closed", the terminal observation journal replay never runs, and a
+    /// control-plane crash leaves the create stuck forever (real-host
+    /// failure observed at commit 40f438c: server stuck REQUESTED, placement
+    /// allocation leaked, delete 409).
+    #[test]
+    fn committed_transfer_with_expired_offer_replays_on_reconnect() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-expired-committed-{}", Uuid::now_v7()));
+        let (store, mut offer, content) = fixture(&root);
+        // Admitted and completed while valid, expired by the time the
+        // reconnection replays statuses — exactly the real-host crash window.
+        offer.expires_at_unix_ms = crate::unix_ms() + 200;
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let statuses = store.artifact_statuses("epoch-new").unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].transfer_id, offer.transfer_id);
+        assert_eq!(
+            statuses[0].state,
+            proto::ArtifactTransferState::Committed as i32
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// An incomplete transfer whose offer expired cannot be resumed; the
+    /// reconnect replay skips it instead of failing the whole connection, so
+    /// a crash during a transfer does not brick reconnection either.
+    #[test]
+    fn expired_incomplete_transfer_is_skipped_on_reconnect() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-expired-receiving-{}", Uuid::now_v7()));
+        let (store, mut offer, content) = fixture(&root);
+        offer.expires_at_unix_ms = crate::unix_ms() + 200;
+        store.begin(&offer).unwrap();
+        store
+            .accept_chunk(
+                &offer,
+                &proto::ArtifactChunk {
+                    transfer_id: offer.transfer_id.clone(),
+                    chunk_index: 0,
+                    offset_bytes: 0,
+                    data: content[..4].to_vec(),
+                    chunk_sha256: digest(&content[..4]),
+                },
+            )
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let statuses = store.artifact_statuses("epoch-new").unwrap();
+        assert!(
+            statuses.is_empty(),
+            "expired incomplete transfer must be skipped, not fatal"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
