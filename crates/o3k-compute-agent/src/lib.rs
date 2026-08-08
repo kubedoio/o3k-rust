@@ -299,12 +299,6 @@ pub fn parse_authorized_agents(value: &str) -> Result<Vec<AuthorizedAgent>, Agen
     Ok(agents)
 }
 
-/// Application-level stream event published by an agent connection. The
-/// transport adapter converts wire messages into these values at publish
-/// time; consumers never see protobuf types. Kept as a re-export so existing
-/// import paths continue to work during the adapter-boundary migration.
-pub use o3k_provider::AgentEvent;
-
 #[derive(Clone)]
 struct AgentConnection {
     epoch: String,
@@ -754,6 +748,11 @@ impl NodeRegistry {
                     Ok(ProviderAgentEvent::Observation(observation))
                         if observation.agent_id == agent_id
                             && observation.agent_epoch == agent_epoch
+                            // The boundary converts identities to canonical
+                            // UUIDs; O3K-built commands always carry canonical
+                            // lowercase forms, so the round-trip comparison is
+                            // exact for every command this control plane
+                            // dispatches.
                             && observation.resource_id.to_string() == resource_id
                             && observation.operation_id.to_string() == operation_id =>
                     {
@@ -1008,6 +1007,8 @@ impl o3k_provider::AgentNodeRegistry for NodeRegistry {
 
 pub fn agent_snapshot(node: &NodeSnapshot) -> o3k_provider::AgentNodeSnapshot {
     use o3k_provider::{AgentAdministrativeState, AgentAvailability};
+    // Unknown administrative-state values fail closed as Disabled: a protocol
+    // anomaly must make the node unschedulable, never silently enabled.
     let administrative_state = match node.desired_state {
         value if value == proto::AdministrativeState::Enabled as i32 => {
             AgentAdministrativeState::Enabled

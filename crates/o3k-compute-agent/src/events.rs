@@ -13,7 +13,10 @@
 //! lenient in the absence direction: the agent legitimately sends
 //! `Unspecified` on non-failed updates, and application consumers historically
 //! treated that as "no category" (`None`), so the conversion preserves it as
-//! `None` instead of dropping the event.
+//! `None` instead of dropping the event. `ProtocolError` conversion is lenient
+//! in both directions (category and operation identity), because the
+//! historical projection treated both as absence and still projected the
+//! error state.
 
 use std::fmt;
 
@@ -164,9 +167,13 @@ pub fn operation_update(
 ) -> Result<AgentOperationUpdate, AgentEventConversionError> {
     let state = proto::OperationState::try_from(value.state)
         .map_err(|_| AgentEventConversionError::UnknownEnumValue("operation_update.state"))?;
+    // The category is only classified evidence for terminal failures; an
+    // unclassified or unknown value is preserved as absence (None) exactly
+    // as the durable journal historically treated it, so a non-failed
+    // update with an unclassified category still applies.
     let error_category = proto::ErrorCategory::try_from(value.error_category)
-        .map_err(|_| AgentEventConversionError::UnknownEnumValue("operation_update.error_category"))
-        .map(error_category)?;
+        .ok()
+        .and_then(error_category);
     Ok(AgentOperationUpdate {
         operation_id: uuid(&value.operation_id, "operation_update.operation_id")?,
         resource_id: uuid(&value.resource_id, "operation_update.resource_id")?,
@@ -209,20 +216,17 @@ pub fn observation(
 pub fn protocol_error(
     value: proto::ProtocolError,
 ) -> Result<AgentProtocolError, AgentEventConversionError> {
+    // Lenient in both directions, matching the historical projection: an
+    // unclassified or unknown category and an unparseable operation identity
+    // were both treated as absence (None) and the error was still projected
+    // against any matching operation.
     let category = proto::ErrorCategory::try_from(value.category)
-        .map_err(|_| AgentEventConversionError::UnknownEnumValue("protocol_error.category"))
-        .map(error_category)?;
+        .ok()
+        .and_then(error_category);
     let operation_id = if value.operation_id.is_empty() {
         None
     } else {
-        match Uuid::parse_str(&value.operation_id) {
-            Ok(operation_id) => Some(operation_id),
-            Err(_) => {
-                return Err(AgentEventConversionError::InvalidIdentity(
-                    "protocol_error.operation_id",
-                ));
-            }
-        }
+        Uuid::parse_str(&value.operation_id).ok()
     };
     Ok(AgentProtocolError {
         category,
@@ -407,10 +411,11 @@ mod tests {
         assert_eq!(converted.command_id.as_deref(), Some("command-1"));
 
         bound.operation_id = "not-a-uuid".to_owned();
-        assert!(matches!(
-            protocol_error(bound),
-            Err(AgentEventConversionError::InvalidIdentity(_))
-        ));
+        // Lenient identity handling matches the historical projection: an
+        // unparseable operation identity is preserved as absence instead of
+        // dropping the error event.
+        let converted = protocol_error(bound)?;
+        assert_eq!(converted.operation_id, None);
         Ok(())
     }
 
