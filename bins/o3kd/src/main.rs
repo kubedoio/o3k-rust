@@ -1,11 +1,9 @@
 use async_trait::async_trait;
-use o3k_compute::{
-    CreateArtifactResolver, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
-};
-use o3k_compute_agent::NodeSnapshot;
 use o3k_domain::ServerId;
 use o3k_provider::{
-    ComputeProvider, ConfigDriveRequest, CreateInstanceRequest, OperationState, ProviderError,
+    AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
+    CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
+    ResolvedCreateInputs, ResolvedCreateResolver,
 };
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
@@ -212,7 +210,7 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
     async fn resolve(
         &self,
         request: &CreateInstanceRequest,
-        agent: &NodeSnapshot,
+        agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         let image = self.resolve_image(request).await?;
         let (network_attachments, network_data) =
@@ -251,7 +249,7 @@ impl CreateArtifactResolver for DaemonCreateResolver {
     async fn resolve_artifacts(
         &self,
         request: &CreateInstanceRequest,
-        agent: &NodeSnapshot,
+        agent: &AgentNodeSnapshot,
         inputs: &ResolvedCreateInputs,
     ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
         let image = self.resolve_image(request).await?;
@@ -266,14 +264,14 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         Ok(vec![
             ResolvedCreateArtifact {
                 artifact_id: inputs.image_artifact_id.clone(),
-                kind: o3k_provider_contract::compute_proto::ArtifactKind::ImageBase,
+                kind: ArtifactKind::ImageBase,
                 sha256: image.checksum,
                 format: image.format,
                 bytes: image.content,
             },
             ResolvedCreateArtifact {
                 artifact_id: inputs.config_drive_artifact_id.clone(),
-                kind: o3k_provider_contract::compute_proto::ArtifactKind::ConfigDriveIso,
+                kind: ArtifactKind::ConfigDriveIso,
                 sha256: iso.fingerprint_sha256,
                 format: "iso".to_owned(),
                 bytes: iso_bytes,
@@ -309,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
-    let registry = o3k_compute_agent::NodeRegistry::default();
+    let registry = o3k_compute_agent::NodeRegistry::default().with_store(store.clone());
     let placement_repository: Arc<dyn o3k_store::PlacementRepository> = store.clone();
     let placement = o3k_placement::PlacementLedger::open(
         config.data_dir.join("placement"),
@@ -330,7 +328,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_compute::ComputeService::new(
             store.clone(),
             Arc::new(
-                o3k_compute::AgentComputeProvider::new_with_store(
+                o3k_compute_agent::AgentComputeProvider::new_with_store(
                     registry.clone(),
                     resolver.clone(),
                     Some(store.clone()),
@@ -373,7 +371,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)
-            .with_agent_registry(registry.clone());
+            .with_agent_registry(Arc::new(registry.clone()));
     }
     if let (Some(cinder_password), Ok(cinder_endpoint)) = (
         config.cinder_password(),
@@ -392,8 +390,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         compute_service = compute_service.with_cinder_client(cinder_client);
         info!("external Cinder attachment client enabled");
     }
-    let inventory_task = agent_control_enabled
-        .then(|| o3k_compute::spawn_agent_inventory_publisher(registry.clone(), placement.clone()));
+    let inventory_task = agent_control_enabled.then(|| {
+        o3k_compute::spawn_agent_inventory_publisher(Arc::new(registry.clone()), placement.clone())
+    });
     let compute_ready = if config.provider == o3k_config::Provider::Agent && agent_control_enabled {
         // The authenticated agent is deliberately started after o3kd's health
         // endpoint.  A capability probe before registration would permanently
@@ -425,7 +424,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-    let event_task = compute_service.spawn_agent_event_consumer(registry.clone());
+    let event_task = compute_service.spawn_agent_event_consumer(Arc::new(registry.clone()));
     let console_event_task =
         spawn_console_event_consumer(registry.clone(), console_service.clone());
     let attachment_reconciler = compute_service.spawn_attachment_reconciler(5);
