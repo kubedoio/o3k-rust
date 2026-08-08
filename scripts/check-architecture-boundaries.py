@@ -205,6 +205,10 @@ def check(root: Path) -> list[str]:
     application = contract.get("application", {})
     hard_forbidden = set(application.get("hard_forbidden_dependencies", []))
     ratcheted_dependencies = set(application.get("ratcheted_adapter_dependencies", []))
+    # The adapter_dependency_debt section is optional: the current contract
+    # removed it entirely (SPEC-0025 step 6) and enforces the former adapters
+    # through hard_forbidden_dependencies. The machinery below is retained so
+    # a future reintroduction of the section is still validated.
     adapter_debt = application.get("adapter_dependency_debt", {})
     concrete_store_symbol = application.get("concrete_store_symbol")
     concrete_store_debt_files = set(application.get("concrete_store_debt_files", []))

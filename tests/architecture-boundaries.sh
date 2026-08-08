@@ -68,7 +68,10 @@ allow_new_debt = false
 allow_broader_debt = false
 EOF
 
-# The exact current debt fixture is valid (enforcement active: status accepted).
+# Synthetic debt fixture exercising the checker's adapter_debt machinery with
+# enforcement active (status accepted); the real contract no longer uses the
+# adapter_dependency_debt section (SPEC-0025 step 6), and the machinery is
+# retained so a future reintroduction is still validated.
 python3 scripts/check-architecture-boundaries.py --root "${temp_dir}" >/dev/null
 
 # Removing code debt without removing its exception must fail: dormant

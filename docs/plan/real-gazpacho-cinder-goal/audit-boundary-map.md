@@ -21,7 +21,7 @@ Repo: `kubedoio/o3k-rust` @ `main` = `1cec5cc` (after PR #453). Audit output for
 
 ## compute_agent_boundary
 - implementation: `crates/o3k-compute-agent/src/lib.rs` — `ControlPlaneServer` L2175, `register` L754, `heartbeat` L802, `BlockDeviceCommand` L1406-1415, `CommandJournal` L2334, `AgentClient` L2263, `run_with_executor` L3591 (mTLS client L3638); host `bins/o3k-compute/src/main.rs` — `LibvirtCommandExecutor` L28, `execute` L701 (CollectConnector L1093, AttachDisk L1111, DetachDisk L1162, ObserveDisk L1193), `collect_host_connector` L1309.
-- portable test: `crates/o3k-compute-agent/tests/registration_tls.rs`, `crates/o3k-compute/tests/agent_mtls.rs` (emits `O3K_AGENT_MTLS_EVIDENCE=`), unit tests L4179-5505.
+- portable test: `crates/o3k-compute-agent/tests/registration_tls.rs`, `crates/o3k-compute-agent/tests/agent_mtls.rs` (emits `O3K_AGENT_MTLS_EVIDENCE=`), unit tests L4179-5505.
 - real artifact: `compute-agent-mtls-result.json`, `compute-agent-process-mtls-result.json`, `disposable-testlab-bootstrap.json`. GAP: real Cinder runner never starts o3k-compute.
 
 ## libvirt_boundary

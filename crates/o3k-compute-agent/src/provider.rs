@@ -365,40 +365,11 @@ impl AgentComputeProvider {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let record = AgentCommandRecord {
-            command_id: command.command_id.clone(),
-            idempotency_key: command.idempotency_key.clone(),
-            operation_id,
-            resource_id: Uuid::parse_str(&command.resource_id)
-                .map_err(|_| ProviderError::InvalidRequest)?,
-            agent_id: command.agent_id.clone(),
-            agent_epoch: command.agent_epoch.clone(),
-            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
-            payload: command.encode_to_vec(),
-            state: AgentCommandState::Pending,
-            accepted_sequence: 0,
-            last_sequence: 0,
-            provider_operation_id: Some(operation_id.to_string()),
-            provider_resource_id: None,
-        };
-        if store.get_operation(operation_id).await.is_err() {
-            let _ = store
-                .insert_operation(&o3k_store::OperationRecord {
-                    id: operation_id,
-                    resource_id: record.resource_id,
-                    kind: "command".to_owned(),
-                    state: o3k_store::OperationState::Running,
-                    provider_operation_id: Some(operation_id.to_string()),
-                    error_category: None,
-                    error_message: None,
-                })
-                .await;
-        }
-        let existing = store
-            .insert_agent_command(&record)
+        let resource_id =
+            Uuid::parse_str(&command.resource_id).map_err(|_| ProviderError::InvalidRequest)?;
+        crate::persist_command_record(store.as_ref(), command, operation_id, resource_id)
             .await
-            .map_err(|_| ProviderError::Conflict)?;
-        Ok(Some(existing))
+            .map_err(|_| ProviderError::Conflict)
     }
 }
 
@@ -839,7 +810,6 @@ pub(crate) async fn apply_agent_provider_event(
 /// Projects one authenticated agent capability snapshot into the inventory
 /// shape required by the scheduler. Missing capacity is represented as zero
 
-#[async_trait]
 #[async_trait]
 impl ComputeProvider for AgentComputeProvider {
     async fn capabilities(&self) -> Result<Capabilities, ProviderError> {

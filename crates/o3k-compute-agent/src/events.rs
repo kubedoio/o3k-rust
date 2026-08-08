@@ -3,10 +3,13 @@
 //! The transport adapter (`o3k-compute-agent`) is the only place protobuf
 //! messages become application-level `o3k_provider` event types. Every
 //! conversion here is the transport boundary's validation: an unrepresentable
-//! wire value is rejected before it can reach application logic or durable
-//! state. Rejection is deliberately an event drop (with a warning), which is
-//! behaviorally equivalent to the application consumers rejecting the same
-//! value: no durable state changes.
+//! state or identity value is rejected before it can reach application logic
+//! or durable state, and the event is dropped with a warning. For the
+//! strict conversions this is stricter than the historical consumers, which
+//! durably projected some invalid inputs (for example an acceptance with an
+//! `Unspecified` state); rejecting protocol-violating input before any
+//! durable write is the intended fail-closed behavior and is unreachable from
+//! agents implementing the protocol.
 //!
 //! State and transfer-state conversions are strict (the wire `Unspecified`
 //! sentinel and unknown values are errors). Error-category conversions are

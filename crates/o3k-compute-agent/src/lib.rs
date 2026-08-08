@@ -1,8 +1,11 @@
-//! Secure registration and liveness runtime for the host-local compute agent.
+//! Secure registration and liveness runtime for the host-local compute agent,
+//! plus the control-plane dispatch adapter that drives agent commands and
+//! artifact offers over the authenticated control stream (`provider.rs`).
 //!
 //! This crate deliberately contains no hypervisor or VM lifecycle code.  It
-//! owns only the authenticated control stream, node state, and bounded
-//! reconnect behavior described by SPEC-0015.
+//! owns the authenticated control stream, node state, bounded reconnect
+//! behavior described by SPEC-0015, and the wire-to-application conversion
+//! for agent events and command dispatch.
 
 use std::{
     collections::HashMap,
@@ -368,41 +371,12 @@ impl NodeRegistry {
         let Some(store) = &self.store else {
             return Ok(None);
         };
-        let record = o3k_store::AgentCommandRecord {
-            command_id: command.command_id.clone(),
-            idempotency_key: command.idempotency_key.clone(),
-            operation_id,
-            resource_id: Uuid::parse_str(&command.resource_id).map_err(|_| {
-                AgentError::Protocol("command resource identity is not a UUID".to_owned())
-            })?,
-            agent_id: command.agent_id.clone(),
-            agent_epoch: command.agent_epoch.clone(),
-            payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
-            payload: command.encode_to_vec(),
-            state: o3k_store::AgentCommandState::Pending,
-            accepted_sequence: 0,
-            last_sequence: 0,
-            provider_operation_id: Some(operation_id.to_string()),
-            provider_resource_id: None,
-        };
-        if store.get_operation(operation_id).await.is_err() {
-            let _ = store
-                .insert_operation(&o3k_store::OperationRecord {
-                    id: operation_id,
-                    resource_id: record.resource_id,
-                    kind: "command".to_owned(),
-                    state: o3k_store::OperationState::Running,
-                    provider_operation_id: Some(operation_id.to_string()),
-                    error_category: None,
-                    error_message: None,
-                })
-                .await;
-        }
-        let existing = store
-            .insert_agent_command(&record)
+        let resource_id = Uuid::parse_str(&command.resource_id).map_err(|_| {
+            AgentError::Protocol("command resource identity is not a UUID".to_owned())
+        })?;
+        persist_command_record(store.as_ref(), command, operation_id, resource_id)
             .await
-            .map_err(|_| AgentError::Protocol("agent command record already exists".to_owned()))?;
-        Ok(Some(existing))
+            .map_err(|_| AgentError::Protocol("agent command record already exists".to_owned()))
     }
 
     async fn attach_connection(
@@ -1046,6 +1020,47 @@ pub fn agent_snapshot(node: &NodeSnapshot) -> o3k_provider::AgentNodeSnapshot {
                 .collect(),
         },
     }
+}
+
+/// Builds and persists the durable pending record for a dispatched wire
+/// command. The payload is the exact encoded wire command so replay rebuilds
+/// the same deadline and fingerprint; the operation record is created when
+/// missing. Callers map the store error to their own vocabulary.
+pub(crate) async fn persist_command_record(
+    store: &dyn o3k_store::ComputeRepository,
+    command: &proto::Command,
+    operation_id: Uuid,
+    resource_id: Uuid,
+) -> Result<Option<o3k_store::AgentCommandRecord>, o3k_store::StoreError> {
+    let record = o3k_store::AgentCommandRecord {
+        command_id: command.command_id.clone(),
+        idempotency_key: command.idempotency_key.clone(),
+        operation_id,
+        resource_id,
+        agent_id: command.agent_id.clone(),
+        agent_epoch: command.agent_epoch.clone(),
+        payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+        payload: command.encode_to_vec(),
+        state: o3k_store::AgentCommandState::Pending,
+        accepted_sequence: 0,
+        last_sequence: 0,
+        provider_operation_id: Some(operation_id.to_string()),
+        provider_resource_id: None,
+    };
+    if store.get_operation(operation_id).await.is_err() {
+        let _ = store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id: record.resource_id,
+                kind: "command".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: Some(operation_id.to_string()),
+                error_category: None,
+                error_message: None,
+            })
+            .await;
+    }
+    store.insert_agent_command(&record).await.map(Some)
 }
 
 fn valid_admin_state(state: i32) -> bool {
