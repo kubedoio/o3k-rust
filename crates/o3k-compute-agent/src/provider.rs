@@ -738,7 +738,19 @@ pub(crate) async fn apply_agent_provider_event(
         o3k_provider::AgentEvent::Observation(observation) => {
             let instance_state = observation.state;
             let provider_id = observation.provider_resource_id.clone();
-            if let Some(provider_id) = provider_id.as_deref() {
+            // Mirror the journal's `apply_agent_observation` gate: only a
+            // Succeeded observation may project a durable provider reference
+            // and a volatile instance/binding. A terminal failed presence
+            // inspection (domain provably absent) still carries the
+            // deterministic libvirt domain name in `provider_resource_id`;
+            // attaching a reference from that absence evidence would make
+            // the UnknownOutcome create sweep resolve a phantom resource
+            // identity and drive `finish_create` against a never-created
+            // domain forever instead of converging the absence
+            // (issue #87).
+            if observation.operation_state == o3k_provider::AgentOperationState::Succeeded
+                && let Some(provider_id) = provider_id.as_deref()
+            {
                 if let Some(store) = store {
                     let reference = o3k_store::ProviderReference {
                         resource_id: observation.resource_id,
@@ -1572,7 +1584,8 @@ impl ComputeProvider for AgentComputeProvider {
 mod tests {
     use super::*;
     use o3k_provider::{
-        AgentNodeSnapshot, NetworkAttachmentSpec, ResolvedCreateInputs, ResolvedCreateResolver,
+        AgentNodeSnapshot, AgentObservation, AgentOperationState, NetworkAttachmentSpec,
+        ResolvedCreateInputs, ResolvedCreateResolver, UnconfiguredResolvedCreateResolver,
     };
 
     fn register_request(id: &str, epoch: &str) -> agent_proto::RegisterRequest {
@@ -1745,6 +1758,217 @@ mod tests {
             binding.as_ref().map(|binding| binding.agent_epoch.as_str()),
             Some("epoch-1")
         );
+        Ok(())
+    }
+
+    /// Seeds the durable records of an UnknownOutcome create exactly as the
+    /// issue-87 crash-restart residue leaves them: a BUILD resource with no
+    /// provider identity, a create operation in `UnknownOutcome`, and the
+    /// agent command record whose resource identity is the O3K server id.
+    async fn seed_unknown_outcome_create(
+        store: &dyn ComputeRepository,
+        operation_id: Uuid,
+        resource_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "BUILD".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "compute_create".to_owned(),
+                state: o3k_store::OperationState::UnknownOutcome,
+                provider_operation_id: Some(operation_id.to_string()),
+                error_category: Some("unknown_outcome".to_owned()),
+                error_message: None,
+            })
+            .await?;
+        store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: "command-create".to_owned(),
+                idempotency_key: "create-request".to_owned(),
+                operation_id,
+                resource_id,
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: String::new(),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::UnknownOutcome,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Issue #87 crash-recovery defect: the agent settles the presence
+    /// inspection for an UnknownOutcome create as a terminal Failed/NotFound
+    /// when the domain provably was never created. That absence evidence
+    /// still carries the stable libvirt domain name in `provider_resource_id`
+    /// (the name is derived from the server identity, not from existence).
+    /// The observation handler must NOT project it: the journal's
+    /// `apply_agent_observation` rejects non-Succeeded observations by
+    /// design, and a durable provider reference attached from absence
+    /// evidence would make the create sweep resolve a phantom resource
+    /// identity (`get_operation` reads the "agent" reference) and drive
+    /// `finish_create` against a never-created domain forever — the
+    /// `server create convergence pass failed` loop — instead of reaching
+    /// `converge_absent_create`.
+    #[tokio::test]
+    async fn absence_observation_does_not_project_a_provider_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        // The agent derives the stable domain name from the server identity
+        // (o3k-libvirt `stable_domain_name`), so a provably absent domain
+        // still has a deterministic name.
+        let domain_name = "o3k-0123456789abcdef0123";
+        seed_unknown_outcome_create(store.as_ref(), operation_id, resource_id).await?;
+        let state = Arc::new(RwLock::new(AgentProviderState::default()));
+        apply_agent_provider_event(
+            &state,
+            Some(store.as_ref()),
+            o3k_provider::AgentEvent::Observation(Box::new(AgentObservation {
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                resource_id,
+                provider_resource_id: Some(domain_name.to_owned()),
+                state: o3k_provider::InstanceState::Error,
+                operation_id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("o3k:inspect-create:{operation_id}").as_bytes(),
+                ),
+                operation_state: AgentOperationState::Failed,
+                observation_sequence: 1,
+                observed_at_unix_ms: 1,
+                redacted_message: Some("requested domain was not found".to_owned()),
+                console_log_bytes: Vec::new(),
+                console_log_offset: 0,
+                console_log_complete: false,
+                console_log_truncated: false,
+                block_device: None,
+            })),
+        )
+        .await;
+        // Absence evidence must not become a durable provider reference...
+        assert!(
+            matches!(
+                store.get_provider_reference(resource_id, "agent").await,
+                Err(StoreError::ProviderReferenceNotFound)
+            ),
+            "a failed/not_found observation must not attach a provider reference"
+        );
+        // ...must not project a volatile instance or binding for a domain
+        // that was provably never created...
+        let provider = AgentComputeProvider {
+            registry: NodeRegistry::default(),
+            resolver: Arc::new(UnconfiguredResolvedCreateResolver),
+            state: state.clone(),
+            store: Some(store.clone()),
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
+            command_timeout: Duration::from_secs(30),
+        };
+        assert!(
+            provider.state.read().await.instances.is_empty(),
+            "failed observation must not project a volatile instance"
+        );
+        assert!(
+            provider.state.read().await.bindings.is_empty(),
+            "failed observation must not project a volatile binding"
+        );
+        // ...and the create's provider operation must keep no resource
+        // identity, so the reconciler sweep routes the UnknownOutcome create
+        // to `observe_create_presence` (whose durable Failed/not_found
+        // inspection converges the create as absent) instead of
+        // `finish_create` against the phantom domain name.
+        assert_eq!(
+            provider
+                .get_operation(operation_id)
+                .await?
+                .provider_resource_id,
+            None
+        );
+        Ok(())
+    }
+
+    /// Issue #87 invariant: a SUCCEEDED observation still projects the
+    /// durable provider reference, the volatile instance, and the binding —
+    /// the domain was verified to exist, and the presence inspection that
+    /// finds the instance converges the create to success through this
+    /// identity.
+    #[tokio::test]
+    async fn succeeded_observation_projects_the_provider_reference()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        let domain_name = "o3k-0123456789abcdef0123";
+        seed_unknown_outcome_create(store.as_ref(), operation_id, resource_id).await?;
+        let state = Arc::new(RwLock::new(AgentProviderState::default()));
+        apply_agent_provider_event(
+            &state,
+            Some(store.as_ref()),
+            o3k_provider::AgentEvent::Observation(Box::new(AgentObservation {
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                resource_id,
+                provider_resource_id: Some(domain_name.to_owned()),
+                state: o3k_provider::InstanceState::Running,
+                operation_id,
+                operation_state: AgentOperationState::Succeeded,
+                observation_sequence: 1,
+                observed_at_unix_ms: 1,
+                redacted_message: Some("running".to_owned()),
+                console_log_bytes: Vec::new(),
+                console_log_offset: 0,
+                console_log_complete: false,
+                console_log_truncated: false,
+                block_device: None,
+            })),
+        )
+        .await;
+        let reference = store.get_provider_reference(resource_id, "agent").await?;
+        assert_eq!(reference.provider_resource_id, domain_name);
+        let provider = AgentComputeProvider {
+            registry: NodeRegistry::default(),
+            resolver: Arc::new(UnconfiguredResolvedCreateResolver),
+            state: state.clone(),
+            store: Some(store.clone()),
+            artifact_resolver: Arc::new(UnconfiguredCreateArtifactResolver),
+            command_timeout: Duration::from_secs(30),
+        };
+        let instance = provider
+            .state
+            .read()
+            .await
+            .instances
+            .get(domain_name)
+            .cloned()
+            .ok_or("succeeded observation must project the volatile instance")?;
+        assert_eq!(instance.o3k_server_id, resource_id);
+        assert_eq!(instance.state, o3k_provider::InstanceState::Running);
+        let binding = provider
+            .state
+            .read()
+            .await
+            .bindings
+            .get(domain_name)
+            .cloned()
+            .ok_or("succeeded observation must project the binding")?;
+        assert_eq!(binding.resource_id, resource_id.to_string());
         Ok(())
     }
 }
