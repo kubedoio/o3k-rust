@@ -345,6 +345,54 @@ fn cleanup_instance_network(
         .map_err(|error| AgentError::Protocol(format!("owned bridge cleanup failed: {error}")))
 }
 
+/// Startup reconciliation for crash residue (issue #87 S3 rerun #5): a
+/// create prepares the host network (bridge, TAPs, DHCP bindings) before the
+/// domain is defined, so an agent death in that window leaves O3K-owned
+/// artifacts behind while the control-plane delete converges through local
+/// completion and never dispatches an agent delete. This reaps the recorded
+/// network state of every manifest instance whose domain provably does not
+/// exist; the durable ownership manifest is the only authority that binds a
+/// host interface to an instance.
+///
+/// An observation failure skips the instance (fail closed: a live or
+/// uninspectable domain must never lose its TAP). Reap errors are returned
+/// for logging only and are never fatal, so the residue is retried on the
+/// next restart. `cleanup_if_unused` keeps the shared bridge in place while
+/// any other recorded instance still uses it, and every deletion is bounded
+/// by the manifest and the kernel ownership checks.
+async fn reap_stale_instance_networks(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    adapter: &LibvirtAdapter,
+) -> Result<(), AgentError> {
+    let instance_ids = network
+        .owned_instance_ids()
+        .map_err(|error| AgentError::Protocol(format!("owned instance lookup failed: {error}")))?;
+    let mut first_error = None;
+    for instance_id in instance_ids {
+        match adapter.inspect(stable_domain_name(&instance_id)).await {
+            Err(error) if error.category == ErrorCategory::NotFound => {
+                tracing::info!(
+                    instance_id = %instance_id,
+                    "reaping network residue of absent instance"
+                );
+                if let Err(error) = cleanup_instance_network(network, dhcp, &instance_id) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    instance_id = %instance_id,
+                    "skipping network residue reap: domain presence is unknown"
+                );
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 fn cleanup_console_log(
     artifact_root: &std::path::Path,
     instance_id: &str,
@@ -1762,6 +1810,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
         bridge_name,
     )?));
+    // Reap network residue of instances whose domains provably do not exist
+    // (issue #87 S3 rerun #5) before restarting DHCP for persisted bindings,
+    // so stale bindings are removed first and dnsmasq is never started for
+    // them. Errors are logged and retried on the next restart; startup is
+    // never blocked by an unreachable or unknown libvirt.
+    if let Err(error) = reap_stale_instance_networks(&network, &dhcp, &libvirt).await {
+        tracing::warn!(
+            error = %error,
+            "stale instance network reap failed; retried on the next restart"
+        );
+    }
     dhcp.lock()
         .map_err(|_| "DHCP runtime lock is poisoned")?
         .start_after_restart(&network)
