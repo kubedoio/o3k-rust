@@ -1819,6 +1819,149 @@ mod tests {
         }
     }
 
+    /// Wraps the fake provider with a presence-inspection dispatch counter and
+    /// a record of the `provider_instance_id` each dispatch carried, so tests
+    /// can prove how many inspections were dispatched and what identity they
+    /// addressed (the fake itself resolves presence either way, which would
+    /// otherwise mask both properties).
+    #[derive(Clone)]
+    struct RecordingInspectProvider {
+        inner: Arc<FakeComputeProvider>,
+        inspect_dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        inspect_provider_instance_ids: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl RecordingInspectProvider {
+        fn new(inner: Arc<FakeComputeProvider>) -> Self {
+            Self {
+                inner,
+                inspect_dispatches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                inspect_provider_instance_ids: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        #[must_use]
+        fn inspect_dispatch_count(&self) -> usize {
+            self.inspect_dispatches
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        #[must_use]
+        fn last_inspect_provider_instance_id(&self) -> Option<String> {
+            self.inspect_provider_instance_ids
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .last()
+                .cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for RecordingInspectProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn inspect_instance(
+            &self,
+            provider_id: &str,
+            resource_id: &str,
+            provider_instance_id: &str,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inspect_dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inspect_provider_instance_ids
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(provider_instance_id.to_owned());
+            self.inner
+                .inspect_instance(
+                    provider_id,
+                    resource_id,
+                    provider_instance_id,
+                    operation_id,
+                    idempotency_key,
+                )
+                .await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// Builds a journal over the recording wrapper so tests can assert how
+    /// many presence inspections were dispatched and what provider identity
+    /// each dispatch addressed.
+    #[allow(clippy::type_complexity)]
+    async fn recording_journal(
+        label: &str,
+        max_attempts: u8,
+    ) -> Result<
+        (
+            OperationJournal<TestStore, RecordingInspectProvider>,
+            Arc<TestStore>,
+            Arc<FakeComputeProvider>,
+            Arc<RecordingInspectProvider>,
+        ),
+        ReconcileError,
+    > {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let fake = Arc::new(FakeComputeProvider::new());
+        let provider = Arc::new(RecordingInspectProvider::new(fake.clone()));
+        Ok((
+            OperationJournal::new(store.clone(), provider.clone(), max_attempts),
+            store,
+            fake,
+            provider,
+        ))
+    }
+
     #[tokio::test]
     async fn intent_and_provider_success_are_durable() -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("success", 2).await?;
@@ -2500,10 +2643,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_create_converges_from_terminal_agent_command_without_redispatch()
     -> Result<(), ReconcileError> {
-        let (journal, store, provider) = journal("unknown-presence-command", 2).await?;
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-command", 2).await?;
         let mut request = request();
         request.placement_provider_id = Some("node-a".to_owned());
-        provider.set_failure(FailureInjection::Timeout)?;
+        fake.set_failure(FailureInjection::Timeout)?;
         let operation_id = journal.begin_create("project", &request).await?;
         assert_eq!(
             journal.reconcile_once(operation_id).await?,
@@ -2516,12 +2660,12 @@ mod tests {
             .ok_or(ReconcileError::InvalidIntent)?
             .parse()
             .map_err(|_| ReconcileError::InvalidIntent)?;
-        let instance_id = provider
+        let instance_id = fake
             .get_operation(provider_operation_id)
             .await?
             .provider_resource_id
             .ok_or(ReconcileError::InvalidIntent)?;
-        provider.set_operation_provider_resource_id(provider_operation_id, None)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
 
         let inspect_operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -2574,13 +2718,165 @@ mod tests {
                 .observed_state,
             "ACTIVE"
         );
+        // The terminal agent command converged the create without dispatching
+        // a second inspection.
+        assert_eq!(provider.inspect_dispatch_count(), 0);
         Ok(())
     }
 
-    /// A crash between persist and dispatch (or a lost dispatch response)
-    /// leaves the inspection record `Pending` with no terminal agent
-    /// evidence: the next trigger must re-observe by re-dispatching the
-    /// read-only inspection instead of leaving the create unknown forever.
+    /// A stored terminal `Failed`/`not_found` inspection record (the crash
+    /// window between the inspection converging and the create converging)
+    /// must converge the create to absence without any dispatch.
+    #[tokio::test]
+    async fn unknown_create_converges_from_stored_failed_inspection_without_dispatch()
+    -> Result<(), ReconcileError> {
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-stored-failed", 2).await?;
+        let mut request = request();
+        request.placement_provider_id = Some("node-a".to_owned());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let instance_id = fake
+            .get_operation(provider_operation_id)
+            .await?
+            .provider_resource_id
+            .ok_or(ReconcileError::InvalidIntent)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The instance provably does not exist: the create never took effect.
+        fake.remove_instance(&instance_id)?;
+        fake.set_failure(FailureInjection::None)?;
+
+        let inspect_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect-create:{operation_id}").as_bytes(),
+        );
+        store
+            .insert_operation(&OperationRecord {
+                id: inspect_operation_id,
+                resource_id: request.o3k_server_id,
+                kind: "inspect".to_owned(),
+                state: OperationState::Failed,
+                provider_operation_id: Some(inspect_operation_id.to_string()),
+                error_category: Some("not_found".to_owned()),
+                error_message: Some("presence inspection: instance is absent".to_owned()),
+            })
+            .await?;
+
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        assert_eq!(provider.inspect_dispatch_count(), 0);
+        Ok(())
+    }
+
+    /// The race mirror of the succeeded-command test: a terminal `Failed`
+    /// agent command for the in-flight inspection proves absence (the agent
+    /// classifies only absent domains as terminal inspect failures) and must
+    /// converge the create without a second dispatch.
+    #[tokio::test]
+    async fn unknown_create_converges_to_absent_from_terminal_failed_agent_command()
+    -> Result<(), ReconcileError> {
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-command-failed", 2).await?;
+        let mut request = request();
+        request.placement_provider_id = Some("node-a".to_owned());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let instance_id = fake
+            .get_operation(provider_operation_id)
+            .await?
+            .provider_resource_id
+            .ok_or(ReconcileError::InvalidIntent)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The instance provably does not exist: the create never took effect.
+        fake.remove_instance(&instance_id)?;
+        fake.set_failure(FailureInjection::None)?;
+
+        let inspect_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect-create:{operation_id}").as_bytes(),
+        );
+        store
+            .insert_operation(&OperationRecord {
+                id: inspect_operation_id,
+                resource_id: request.o3k_server_id,
+                kind: "inspect".to_owned(),
+                state: OperationState::Running,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: "inspect-command-failed".to_owned(),
+                idempotency_key: format!("o3k-inspect-create-{operation_id}"),
+                operation_id: inspect_operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "f".repeat(64),
+                payload: Vec::new(),
+                state: AgentCommandState::Failed,
+                accepted_sequence: 1,
+                last_sequence: 2,
+                provider_operation_id: Some(inspect_operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Failed
+        );
+        assert_eq!(
+            store
+                .get_operation(operation_id)
+                .await?
+                .error_category
+                .as_deref(),
+            Some("not_found")
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ERROR"
+        );
+        assert_eq!(provider.inspect_dispatch_count(), 0);
+        Ok(())
+    }
     #[tokio::test]
     async fn unknown_create_redispatches_pending_inspection_record() -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("unknown-presence-pending", 2).await?;
@@ -2697,10 +2993,11 @@ mod tests {
     #[tokio::test]
     async fn unknown_create_uses_known_provider_reference_for_presence_inspection()
     -> Result<(), ReconcileError> {
-        let (journal, store, provider) = journal("unknown-presence-reference", 2).await?;
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-reference", 2).await?;
         let mut request = request();
         request.placement_provider_id = Some("node-a".to_owned());
-        provider.set_failure(FailureInjection::Timeout)?;
+        fake.set_failure(FailureInjection::Timeout)?;
         let operation_id = journal.begin_create("project", &request).await?;
         assert_eq!(
             journal.reconcile_once(operation_id).await?,
@@ -2713,18 +3010,18 @@ mod tests {
             .ok_or(ReconcileError::InvalidIntent)?
             .parse()
             .map_err(|_| ReconcileError::InvalidIntent)?;
-        let instance_id = provider
+        let instance_id = fake
             .get_operation(provider_operation_id)
             .await?
             .provider_resource_id
             .ok_or(ReconcileError::InvalidIntent)?;
-        provider.set_operation_provider_resource_id(provider_operation_id, None)?;
-        provider.set_failure(FailureInjection::None)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        fake.set_failure(FailureInjection::None)?;
         store
             .attach_provider_reference(&ProviderReference {
                 resource_id: request.o3k_server_id,
                 provider_name: "compute-agent".to_owned(),
-                provider_resource_id: instance_id,
+                provider_resource_id: instance_id.clone(),
             })
             .await?;
 
@@ -2739,7 +3036,107 @@ mod tests {
                 .observed_state,
             "ACTIVE"
         );
-        assert_eq!(provider.instance_count(), 1);
+        assert_eq!(fake.instance_count(), 1);
+        // The inspection was dispatched exactly once and carried the known
+        // provider identity recorded in the reference, not an empty id.
+        assert_eq!(provider.inspect_dispatch_count(), 1);
+        assert_eq!(
+            provider.last_inspect_provider_instance_id().as_deref(),
+            Some(instance_id.as_str())
+        );
+        Ok(())
+    }
+
+    /// A stored `UnknownOutcome` inspection record (the outcome of a previous
+    /// trigger whose dispatch was lost) stays re-observable: the next trigger
+    /// re-dispatches the read-only inspection and converges.
+    #[tokio::test]
+    async fn unknown_create_redispatches_stored_unknown_inspection() -> Result<(), ReconcileError> {
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-stored-unknown", 2).await?;
+        let mut request = request();
+        request.placement_provider_id = Some("node-a".to_owned());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The first presence observation is itself lost (Timeout still
+        // active), leaving a stored UnknownOutcome inspection record.
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(provider.inspect_dispatch_count(), 1);
+        let inspect_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect-create:{operation_id}").as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(inspect_operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
+        // The next trigger re-observes: the read-only inspection is
+        // re-dispatched and the instance is found.
+        fake.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        assert_eq!(provider.inspect_dispatch_count(), 2);
+        assert_eq!(fake.instance_count(), 1);
+        Ok(())
+    }
+
+    /// A create that never recorded an execution agent cannot be observed by
+    /// durable identity: the unknown outcome is preserved (never guessed).
+    #[tokio::test]
+    async fn unknown_create_without_agent_preserves_unknown_outcome() -> Result<(), ReconcileError>
+    {
+        let (journal, store, fake, provider) =
+            recording_journal("unknown-presence-no-agent", 2).await?;
+        let request = request();
+        assert!(request.placement_provider_id.is_none());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        fake.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(provider.inspect_dispatch_count(), 0);
         Ok(())
     }
 

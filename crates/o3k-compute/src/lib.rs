@@ -1374,6 +1374,36 @@ impl ComputeService {
                         "server create failure compensation failed"
                     );
                 }
+                // A terminal create failure must render ERROR on the poll
+                // surface, or `--wait` keeps showing BUILD forever. The
+                // reconciler projects ERROR internally only for presence
+                // absence; every other failure path (dispatch rejection,
+                // retry budget exhaustion, provider-reported failure) needs
+                // the drive to project it. The update is idempotent: the
+                // resource is only touched when it is not already ERROR.
+                let Ok(resource) = self.store.get_resource(resource.id).await else {
+                    return;
+                };
+                if resource.observed_state != server_state_to_storage(ServerState::Error)
+                    && let Err(error) = self
+                        .store
+                        .update_resource(
+                            resource.id,
+                            resource.generation,
+                            &resource.desired_state,
+                            server_state_to_storage(ServerState::Error),
+                            resource.generation,
+                            resource.provider_id.as_deref(),
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        operation_id = %request.operation_id,
+                        resource_id = %resource.id,
+                        error = %error,
+                        "server create failure projection to ERROR failed"
+                    );
+                }
             }
             o3k_store::OperationState::Succeeded => {
                 self.project_terminal_binding_outcome(
@@ -2983,6 +3013,92 @@ mod tests {
         }
     }
 
+    /// Wraps the fake provider with a terminal rejection on the second
+    /// create dispatch, so tests can model an in-flight create whose re-drive
+    /// hits a deterministic provider failure (e.g. a capability/config
+    /// rejection after acceptance) instead of an unknown outcome.
+    #[derive(Clone)]
+    struct TerminalOnRedriveProvider {
+        inner: Arc<FakeComputeProvider>,
+        create_calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl TerminalOnRedriveProvider {
+        fn new(inner: Arc<FakeComputeProvider>) -> Self {
+            Self {
+                inner,
+                create_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ComputeProvider for TerminalOnRedriveProvider {
+        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
+            self.inner.capabilities().await
+        }
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            if self
+                .create_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                > 0
+            {
+                return Err(ProviderError::Terminal);
+            }
+            self.inner.create_instance(request).await
+        }
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<Instance, ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+        async fn inspect_instance(
+            &self,
+            provider_id: &str,
+            resource_id: &str,
+            provider_instance_id: &str,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inner
+                .inspect_instance(
+                    provider_id,
+                    resource_id,
+                    provider_instance_id,
+                    operation_id,
+                    idempotency_key,
+                )
+                .await
+        }
+        async fn delete_instance(
+            &self,
+            request: DeleteInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
     /// Builds a service with a real scheduler/placement ledger and a server
     /// create intent whose operation is left in `UnknownOutcome`: the create
     /// dispatch timed out, so the provider operation carries no durable
@@ -3198,6 +3314,55 @@ mod tests {
             Some("presence-present-key".to_owned())
         );
         assert!(!placement.provider("node-a").await?.allocations.is_empty());
+        Ok(())
+    }
+
+    /// A create accepted by the provider whose later re-drive fails
+    /// deterministically (not an unknown outcome) converges to a terminal
+    /// ERROR on the show path: the drive projects the failure onto the
+    /// resource so the poll surface renders ERROR instead of BUILD forever,
+    /// and applies the same reverse-order compensation as the async
+    /// agent-failure path.
+    #[tokio::test]
+    async fn unknown_outcome_create_terminal_failure_projects_error_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let wrapper = Arc::new(TerminalOnRedriveProvider::new(fake.clone()));
+        let (service, store, placement, request, _keypair_id, provider_operation_id, _instance_id) =
+            unknown_outcome_create_fixture("presence-terminal", wrapper.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The provider accepted the create in an earlier pass; the re-drive
+        // below fails terminally instead of reporting an unknown outcome.
+        let operation = store.get_operation(request.operation_id).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Running,
+                operation.provider_operation_id.as_deref(),
+                None,
+                None,
+            )
+            .await?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Error);
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_eq!(operation.state, o3k_store::OperationState::Failed);
+        assert_eq!(operation.error_category.as_deref(), Some("terminal"));
+        // Reverse-order compensation: keypair detached, placement released.
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            None
+        );
+        assert!(placement.provider("node-a").await?.allocations.is_empty());
+        // A repeated show stays terminal.
+        let repeated = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(repeated.state, ServerState::Error);
         Ok(())
     }
 
