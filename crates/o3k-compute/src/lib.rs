@@ -389,8 +389,13 @@ impl ComputeService {
     /// Restricts scheduler candidates to agents that are currently registered,
     /// alive, and administratively enabled. The registry is intentionally
     /// optional so direct fake-provider operation keeps its existing behavior.
+    /// The same registry backs the journal's evidence fence: without it the
+    /// fence stays anchored to each operation's first evidence epoch (issue
+    /// #87 crash-restart replay needs the registry's current epoch to accept
+    /// a re-registered agent's replay while rejecting dead epochs).
     #[must_use]
     pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
+        self.journal = self.journal.clone().with_agent_registry(registry.clone());
         self.agent_registry = Some(registry);
         self
     }
