@@ -1,5 +1,5 @@
 schema_version = 1
-status = "proposed"
+status = "accepted"
 normative_adr = "docs/adr/ADR-0160-service-topology-and-execution-boundaries.md"
 normative_spec = "docs/specs/SPEC-0025-rust-rewrite-and-architecture-convergence.md"
 

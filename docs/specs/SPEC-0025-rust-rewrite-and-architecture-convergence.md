@@ -1,6 +1,6 @@
 # SPEC-0025 — Rust rewrite and architecture convergence
 
-Status: Proposed
+Status: Accepted
 
 Related decisions and specifications:
 

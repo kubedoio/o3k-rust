@@ -1,61 +1,203 @@
-schema_version: 1
-source_commit: ac99e7c3667f55a717edc2931094774b031d650d
-release: v0.2.0-alpha.1
-updated_at: 2026-08-07T15:00:00Z
+schema_version: 2
 status_kind: authoritative-current-state
+source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+updated_at: 2026-08-08T18:06:08Z
+release_context: >-
+  The first native alpha candidate is v0.2.0-alpha.1. docs/release-tracker.md
+  remains the authoritative release gate: issue #93 owns release-gate
+  execution and publication, issue #94 owns the closure chain, and the
+  tracker contract stays blocked until the required evidence and human
+  decisions exist.
 
-# Explicit evidence states: passed | failed | not-executed | not-proven.
-# No vague "done". Evidence claims must be source-bound.
+# How to read this file
+# ---------------------
+# One record per product profile (SPEC-0024 and
+# compatibility/product-profiles.yaml). Evidence is profile-scoped: an entry
+# proven under one profile is never evidence for another. In particular,
+# external-Cinder/Tempest success under `openstack-service-testbed` does NOT
+# satisfy the `native-rust-testlab` alpha gate.
+#
+# Evidence states: passed | failed | not-executed | not-proven.
+# "not-executed" = the gate exists but has not run for this revision;
+# "not-proven" = no evidence exists or evidence is deliberately not claimed.
+# No vague "done".
+#
+# scripts/validate-profile-state.py enforces: the profile set matches the
+# registry, the per-profile field contract, the evidence vocabulary, native
+# alpha isolation (no Cinder/Tempest evidence under native-rust-testlab),
+# source-commit resolvability in this repository's git history, and
+# consistency with docs/release-tracker.md (native full-profile evidence
+# cannot be `passed` and release relevance cannot claim readiness while the
+# tracker remains blocked).
 
-current_state:
-  identity: passed
-  real_cinder_volume: passed
-  nova_cinder_attachment: passed
-  chap_iscsi: passed
-  libvirt_hotplug: passed
-  detach: passed
-  cleanup: passed
-  foreign_state: passed
-  tempest_preflight: passed
-  tempest_execution: passed
-  guest_device_observation: not-proven
-
-evidence:
-  real_cinder_lifecycle: >-
-    Protected runs prove real Cinder 28.0.0 (Gazpacho) attachment create,
-    attachment update, os-complete, Cinder-reported attached state,
-    CHAP-authenticated iSCSI session, o3k-compute attach, libvirt hotplug,
-    detach returning the volume to available, cleanup, and unchanged foreign
-    state. Deterministic Cinder 28 compatibility closure (PR #501) added gates
-    A/B/C/E and the machine-readable interaction spec
-    (contracts/cinder/attachment-interaction-v28.yaml) and golden transcript
-    (tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml).
-  tempest_preflight: >-
-    Deterministic portable preflight (tests/tempest-preflight.sh) proves, in
-    ordinary CI without KVM/libvirt/real Cinder, a dedicated tempest 46.0.0 +
-    cinder-tempest-plugin 1.21.0 venv with exact versions, stestr/subunit
-    tooling, valid .stestr.conf + tempest.conf, stestr discovery of every
-    allowlisted test, and the subunit -> JUnit -> summary evidence pipeline.
-  tempest_execution: >-
-    The allowlisted volume subset (volume create/show/update/delete and
-    volume list-with-details) was executed against the live profile and
-    passes. The identity token test is explicitly excluded from the
-    allowlist: it issues an unscoped token, while the O3K profile requires
-    project-scoped tokens (exclusion commit on main, audit record in
-    tests/tempest-evidence/tempest-test-audit.yaml).
-  guest_device_observation: >-
-    The in-guest serial-console marker is unreliable on the test host; it is
-    diagnostic-only and never promoted to passed. Guest-level consumption proof
-    belongs to #435 / an explicit guest-consumption test.
-
-blockers:
-  - none for the accepted profile; the protected runner is now a verification
-    environment, not a requirements-discovery environment.
-
-next_protected_run:
-  intent: verification-run
-  proves:
-    - Gate B real-Cinder lifecycle still passes on the exact source commit
-    - Gate C Tempest subset executes the allowlisted volume tests against the
-      live profile and produces JUnit + summary evidence
-    - lifecycle and Tempest verdicts remain independent
+profiles:
+  native-rust-testlab:
+    implementation_state: >-
+      Architecture convergence is complete: SPEC-0025 steps 1-7 are merged,
+      ADR-0160 and SPEC-0025 are Accepted, and the architecture-boundary
+      ratchet (contracts/core-architecture-boundaries.toml) runs in
+      enforcement mode in normal CI. The declared native TestLab API
+      baseline is implemented behind canonical domain and repository-port
+      boundaries with strong portable evidence. The first native
+      ephemeral-root alpha (SPEC-0025 step 8) remains open and is blocked
+      only on source-bound real-host and release evidence.
+    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+    portable_evidence:
+      - name: cargo-workspace-all-features-tests
+        state: passed
+        note: cargo test --workspace --all-features runs in normal CI.
+      - name: clippy-d-warnings-clean
+        state: passed
+      - name: testlab-fake-provider-workflow
+        state: passed
+        note: tests/testlab.sh runs in normal CI.
+      - name: architecture-boundary-enforcement
+        state: passed
+        note: accepted contract; enforcement active in normal CI.
+      - name: canonical-server-domain-transition-matrix
+        state: passed
+      - name: repository-port-conformance
+        state: passed
+        note: conformance suites execute against the real SQLite adapter.
+      - name: multi-writer-sqlite-concurrency
+        state: passed
+      - name: durable-metadata-restart-reconstruction
+        state: passed
+        note: image, network, and Placement metadata reconstruct from the durable store.
+      - name: legacy-journal-import-once
+        state: passed
+    protected_component_evidence:
+      - name: real-libvirt-compute-component-gate
+        state: not-executed
+        note: host-gated; requires a trusted KVM/libvirt host and the protected workflow.
+    full_profile_evidence:
+      - name: native-alpha-vertical-slice
+        state: not-proven
+        note: >-
+          The complete CirrOS guest workflow (ACTIVE, config-drive, console,
+          stop/start/reboot, restart/reconcile, delete, no O3K-owned leak,
+          unchanged foreign state), clean Ubuntu/Debian installs, a measured
+          real-libvirt benchmark, and independent human review remain
+          outstanding (tracker issues #77-#94).
+    release_relevance: >-
+      Release-blocking for the first native alpha (v0.2.0-alpha.1). The
+      release gate is blocked until the full-profile evidence above exists;
+      docs/release-tracker.md stays the authoritative gate and remains
+      blocked and pending.
+    blockers:
+      - trusted KVM/libvirt real-host evidence for the complete native workflow
+      - clean Ubuntu and Debian installation evidence
+      - measured real-libvirt benchmark with raw artifacts (release-eligible)
+      - independent human architecture/security review (issue #92)
+      - release-gate execution and publication (issue #93) and program closure (issue #94)
+    next_evidence_action: >-
+      Run the protected real-host native TestLab workflow at the current
+      commit on a trusted KVM/libvirt host, then execute the release gate.
+    explicitly_unproven_claims:
+      - external-Cinder/Tempest success (see openstack-service-testbed) does not satisfy the native alpha gate
+      - production readiness
+      - PostgreSQL support
+      - HA / multi-controller behavior
+      - 50 MB footprint guarantee (target only)
+      - native persistent volumes / boot from volume
+      - edge multi-host behavior (see small-edge-cloud)
+  openstack-service-testbed:
+    implementation_state: >-
+      Real external Cinder 28.0.0 (Gazpacho) service-under-test profile
+      (SPEC-0023): O3K supplies the surrounding identity, Glance, Nova
+      attachment, and CHAP-secure compute surface while Cinder retains its
+      own database, message bus, service processes, and backend.
+    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+    evidence_bound: >-
+      The protected real-Cinder evidence is run-bound, not sha-bound inside
+      this repository: protected run local-1786012319 on branch "after
+      #493/#495/#496/#498" (redacted transcript in
+      tests/real-cinder-evidence/cinder-attachment-golden-transcript.yaml;
+      full redacted evidence lives in the protected runner evidence
+      directory). No resolvable in-repo commit sha exists for that run; it
+      must never be presented as current-commit evidence. The profile's
+      source_commit above binds the status record revision, not the run.
+    portable_evidence:
+      - name: tempest-preflight
+        state: passed
+        note: deterministic portable Gate A in normal CI (pinned tempest 46.0.0 + cinder-tempest-plugin 1.21.0).
+      - name: tempest-allowlisted-execution
+        state: passed
+        note: volume create/show/update/delete and list-with-details; identity token test excluded by audit record.
+      - name: cinder-attachment-deterministic-gates
+        state: passed
+        note: gates A/B/C/E and golden-transcript reproduction run in ordinary CI.
+    protected_component_evidence:
+      - name: real-cinder-28-lifecycle
+        state: passed
+        note: >-
+          Protected run (Gate B): attachment create and update, os-complete,
+          Cinder-reported attached, CHAP-authenticated iSCSI session,
+          o3k-compute attach, libvirt hotplug, detach to available, cleanup,
+          unchanged foreign state.
+    full_profile_evidence:
+      - name: service-testbed-live-profile
+        state: passed
+        note: >-
+          Allowlisted Tempest volume subset executed against the live
+          external-Cinder profile with JUnit and summary evidence; lifecycle
+          and Tempest verdicts remain independent.
+      - name: guest-device-observation
+        state: not-proven
+        note: >-
+          In-guest serial-console marker is unreliable on the test host;
+          diagnostic-only and never promoted; belongs to issue #435.
+    release_relevance: >-
+      Non-blocking for the native first alpha (SPEC-0023/SPEC-0024:
+      release_blocking_for_first_alpha: false). Evidence and release claims
+      are profile-scoped and must never be read as native alpha readiness.
+    blockers:
+      - guest-level consumption proof (issue #435)
+      - live-run inspection of foreign systemd Cinder scheduler/volume interactions (external-cinder-goal-reconciliation.md)
+      - next protected verification run at the exact current commit
+    next_evidence_action: >-
+      Next protected verification run: Gate B real-Cinder lifecycle plus
+      Gate C Tempest subset at the exact source commit, verdicts
+      independent.
+    explicitly_unproven_claims:
+      - O3K-implemented Cinder (external-hosted only in this profile)
+      - native alpha readiness (see native-rust-testlab)
+      - boot from volume
+      - production SLA or HA
+      - broad OpenStack compatibility
+  small-edge-cloud:
+    implementation_state: >-
+      Planned (SPEC-0024 Profile C). The architecture boundaries it will
+      use are accepted (ADR-0160), but no multi-host implementation,
+      inventory, scheduling, fencing, database, or evidence work exists.
+    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+    portable_evidence:
+      - name: multi-host-portable-suite
+        state: not-proven
+        note: no profile-specific multi-host portable suite exists.
+    protected_component_evidence:
+      - name: multi-host-component-gate
+        state: not-executed
+        note: no edge host execution exists.
+    full_profile_evidence:
+      - name: edge-full-profile
+        state: not-proven
+    release_relevance: >-
+      No release claim. Not release-blocking for the first native alpha;
+      any future edge release requires its own profile gate with the
+      evidence listed below.
+    blockers:
+      - multi-host inventory, scheduling, and Placement allocations across 10-20 hypervisors
+      - host enrollment, epoch fencing, heartbeat, reconnect, and resync
+      - upgrade, backup/restore, and failure matrix across the supported host count
+      - database profile appropriate to the claimed availability and concurrency
+      - policy, resource, and latency budgets
+    next_evidence_action: >-
+      None scheduled. Requires an accepted edge-specific issue and profile
+      gate before any evidence work starts.
+    explicitly_unproven_claims:
+      - production readiness
+      - HA / multi-controller behavior
+      - PostgreSQL support
+      - edge footprint
+      - generic cross-cloud connectivity

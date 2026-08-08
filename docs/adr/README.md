@@ -174,7 +174,7 @@ approval before `Accepted`.
 | [ADR-0153](ADR-0153-static-rust-and-openstack-release-policy.md) | Static Rust and OpenStack release policy | Accepted | governance |
 | [ADR-0154](ADR-0154-engineering-governance-lifecycle.md) | Engineering governance lifecycle | Proposed | governance |
 | [ADR-0155](ADR-0155-agent-local-image-materialization.md) | Agent-local verified image materialization | Proposed | compute, image, identity, governance |
-| [ADR-0160](ADR-0160-service-topology-and-execution-boundaries.md) | Service topology and execution boundaries | Proposed | compute, network, storage, image, placement, identity, governance |
+| [ADR-0160](ADR-0160-service-topology-and-execution-boundaries.md) | Service topology and execution boundaries | Accepted | compute, network, storage, image, placement, identity, governance |
 | [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md) | Keystone trust root and service identity | Proposed | identity, governance |
 | [ADR-0162](ADR-0162-contract-first-staged-runner-validation.md) | Contract-first development and staged runner validation | Proposed | compute, network, governance |
 | [ADR-0163](ADR-0163-product-profiles-and-deployment-posture.md) | Product profiles and deployment posture | Proposed | governance |
