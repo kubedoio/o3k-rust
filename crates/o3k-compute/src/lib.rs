@@ -651,6 +651,48 @@ impl ComputeService {
         })
     }
 
+    /// Periodically drives create convergence for servers left in a state
+    /// that nothing else will ever advance: `Pending`, `UnknownOutcome`, or
+    /// `Running` without a provider operation identity (issue-87 S1 residue —
+    /// a crash between persisting `Running` and dispatching the create).
+    /// After a control-plane restart the lazy show path alone would leave
+    /// such a server stuck in REQUESTED (and its placement allocation leaked)
+    /// until a client polls it; this bounded periodic task is the recovery
+    /// authority. Each pass is lazy and idempotent: terminal and accepted
+    /// operations are skipped by `drive_create_convergence`, and the
+    /// reconciler reuses in-flight and terminal provider work by the
+    /// deterministic operation identity.
+    pub fn spawn_create_convergence_reconciler(
+        &self,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = service.drive_all_create_convergence().await {
+                    tracing::warn!(%error, "create convergence reconcile pass failed");
+                }
+            }
+        })
+    }
+
+    /// Drives create convergence for every durable compute instance. The
+    /// per-resource drive is lazy and bounded, so healthy servers are skipped
+    /// and a stuck server converges regardless of which project owns it.
+    async fn drive_all_create_convergence(&self) -> Result<(), ComputeError> {
+        let resources = self
+            .store
+            .list_resources_by_kind("compute_instance")
+            .await?;
+        for resource in resources {
+            self.drive_create_convergence(&resource).await;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn flavors(&self) -> Vec<Flavor> {
         vec![
@@ -1315,24 +1357,32 @@ impl ComputeService {
 
     /// Drives durable create convergence for a server whose create operation
     /// is stuck in a state that nothing else will ever advance: `Pending` (a
-    /// crash between persisting the intent and the synchronous pass) or
-    /// `UnknownOutcome` (dispatch timeout, transport loss). Without this
-    /// driver the server would stay in BUILD forever after the synchronous
-    /// pass in `create_server`, and a genuine unknown outcome only converges
-    /// by observing instance presence at the execution boundary (issue #481
+    /// crash between persisting the intent and the synchronous pass),
+    /// `UnknownOutcome` (dispatch timeout, transport loss), or `Running`
+    /// without a provider operation identity (a crash between the
+    /// Pending→Running persist in `reconcile_once` and the dispatch reaching
+    /// the provider — issue-87 S1 residue). Without this driver the server
+    /// would stay in BUILD forever after the synchronous pass in
+    /// `create_server`, and a genuine unknown outcome only converges by
+    /// observing instance presence at the execution boundary (issue #481
     /// criterion 3).
     ///
-    /// A `Running` operation is deliberately NOT driven: the provider has
-    /// accepted the command and its terminal update arrives through the
-    /// agent event stream, and a concurrent re-drive from the poll path
-    /// would race the synchronous finisher on the same operation records
-    /// (duplicate reference attach / stale generation). The drive is lazy
-    /// (read-triggered), bounded (terminal and accepted operations are not
-    /// re-driven), and idempotent (the reconciler reuses in-flight and
-    /// terminal provider work by the deterministic operation identity).
-    /// Errors are surfaced as warnings so the read path stays available; a
-    /// converged failure applies the same reverse-order compensation as the
-    /// asynchronous agent-failure path.
+    /// A `Running` operation that carries a provider operation identity is
+    /// deliberately NOT driven: the provider has accepted the command (the
+    /// identity is attached only after a successful dispatch) and its
+    /// terminal update arrives through the agent event stream, and a
+    /// concurrent re-drive from the poll path would race the synchronous
+    /// finisher on the same operation records (duplicate reference attach /
+    /// stale generation). A `Running` operation WITHOUT the identity was
+    /// never accepted, so it is re-driven like `Pending`; re-dispatch is
+    /// safe because the agent journal dedups by command id/operation/
+    /// idempotency key + fingerprint and never re-executes an accepted
+    /// command. The drive is lazy (read-triggered), bounded (terminal and
+    /// accepted operations are not re-driven), and idempotent (the
+    /// reconciler reuses in-flight and terminal provider work by the
+    /// deterministic operation identity). Errors are surfaced as warnings so
+    /// the read path stays available; a converged failure applies the same
+    /// reverse-order compensation as the asynchronous agent-failure path.
     async fn drive_create_convergence(&self, resource: &o3k_store::ResourceRecord) {
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
@@ -1341,10 +1391,12 @@ impl ComputeService {
         let Ok(operation) = self.store.get_operation(request.operation_id).await else {
             return;
         };
-        if !matches!(
+        let re_drive = matches!(
             operation.state,
             o3k_store::OperationState::Pending | o3k_store::OperationState::UnknownOutcome
-        ) {
+        ) || (operation.state == o3k_store::OperationState::Running
+            && operation.provider_operation_id.is_none());
+        if !re_drive {
             return;
         }
         let state = match self.journal.reconcile_once(request.operation_id).await {
@@ -3254,6 +3306,225 @@ mod tests {
             .await?;
         assert_eq!(converged.state, ServerState::Active);
         assert_eq!(fake.inspect_dispatch_count(), 1);
+        Ok(())
+    }
+
+    /// Seeds the issue-87 S1 crash residue: the create intent is durable, the
+    /// operation is `Running` with no provider operation identity (the
+    /// Pending→Running transition in `reconcile_once` persisted, then o3kd
+    /// died before the dispatch reached the provider), and — unless a command
+    /// record is inserted by the caller — no agent command row exists.
+    #[allow(clippy::type_complexity)]
+    async fn crash_before_dispatch_fixture(
+        label: &str,
+        provider: Arc<FakeComputeProvider>,
+    ) -> Result<
+        (
+            ComputeService,
+            Arc<dyn ComputeRepository>,
+            CreateInstanceRequest,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let service = ComputeService::new(store.clone(), provider);
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: format!("{label}-server"),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: Vec::new(),
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: format!("{label}-request"),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        // The synchronous pass persisted `Running` and died before the
+        // provider returned anything: no provider operation identity, no
+        // agent command record (issue-87 S1 residue).
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Running,
+                None,
+                None,
+                None,
+            )
+            .await?;
+        Ok((service, store, request))
+    }
+
+    /// The issue-87 S1 residue: a create operation durably `Running` with no
+    /// provider operation identity and no agent command record (o3kd died
+    /// between the Pending→Running persist in `reconcile_once` and the
+    /// dispatch reaching the provider). The provider never accepted a
+    /// command, so nothing else can ever advance the operation; the show path
+    /// must re-drive it to convergence.
+    #[tokio::test]
+    async fn running_create_without_provider_operation_is_redriven_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("s1-residue", fake.clone()).await?;
+        assert_eq!(fake.instance_count(), 0);
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Active);
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_eq!(operation.state, o3k_store::OperationState::Succeeded);
+        assert!(
+            operation.provider_operation_id.is_some(),
+            "the re-drive must attach the provider operation identity"
+        );
+        assert_eq!(
+            fake.instance_count(),
+            1,
+            "the re-drive must actually reach the provider"
+        );
+        Ok(())
+    }
+
+    /// The issue-87 S1 residue with the agent command record persisted before
+    /// the crash (the insert-before-send window): the operation is `Running`,
+    /// no provider operation identity, and the command row is still
+    /// `pending`. Nothing else re-sends a pending row; the show path must
+    /// re-drive it exactly like the no-row residue. The agent journal dedups
+    /// by command id/operation/idempotency key + fingerprint, so a re-dispatch
+    /// of an already-accepted command is safe and never re-executes.
+    #[tokio::test]
+    async fn running_create_with_pending_agent_command_is_redriven_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("s1-pending-row", fake.clone()).await?;
+        store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Active);
+        assert_eq!(
+            store.get_operation(request.operation_id).await?.state,
+            o3k_store::OperationState::Succeeded
+        );
+        assert_eq!(
+            fake.instance_count(),
+            1,
+            "the re-drive must reach the provider even with a pending row"
+        );
+        Ok(())
+    }
+
+    /// The accepted-command invariant (#542): a `Running` create WITH a
+    /// provider operation identity was accepted by the provider, and its
+    /// terminal update arrives through the agent event stream. The show path
+    /// must NOT re-drive it — a re-dispatch would race the event stream on
+    /// the same operation records. The seeded durable shape is exactly the
+    /// accepted window, and a poll must leave it untouched: any re-dispatch
+    /// would have converged the create to Succeeded/ACTIVE on the fresh fake.
+    #[tokio::test]
+    async fn running_create_with_provider_operation_is_not_redriven_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("s1-accepted", fake.clone()).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Running,
+                Some(&request.operation_id.to_string()),
+                None,
+                None,
+            )
+            .await?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Requested);
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_eq!(operation.state, o3k_store::OperationState::Running);
+        assert_eq!(
+            operation.provider_operation_id,
+            Some(request.operation_id.to_string())
+        );
+        assert_eq!(
+            fake.instance_count(),
+            0,
+            "an accepted create must never be re-dispatched"
+        );
+        Ok(())
+    }
+
+    /// The periodic create-convergence sweep must recover the issue-87 S1
+    /// residue after a control-plane restart WITHOUT any API call: the lazy
+    /// show path alone would leave the server stuck in REQUESTED until a
+    /// client polls it.
+    #[tokio::test]
+    async fn create_convergence_sweep_recovers_crash_before_dispatch_without_api_call()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("s1-sweep", fake.clone()).await?;
+        let task = service.spawn_create_convergence_reconciler(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let operation = store.get_operation(request.operation_id).await?;
+            if operation.state == o3k_store::OperationState::Succeeded {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "create convergence sweep did not converge the S1 residue"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(fake.instance_count(), 1);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        task.abort();
+        let _ = task.await;
         Ok(())
     }
 
