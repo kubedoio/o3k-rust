@@ -21,14 +21,7 @@
     "useful-later": "would improve a client journey but no declared workflow requires it yet",
     "intentionally-omitted": "explicit non-goal of an accepted spec; implementation requires the named amendment first"
   },
-  "rust_status_vocabulary": {
-    "missing": "no Rust route or implementation",
-    "partial": "route/implementation exists with a concrete gap (fields, filters, microversion, or compatibility record)",
-    "implemented": "implemented and recorded in docs/compatibility/",
-    "unsupported": "explicitly outside the declared profile"
-  },
-  "failure_seen_rule": "Values are evidence-bound descriptions only when executable evidence exists; the literal value 'not-exercised' means the client was not run against O3K for this candidate and no failure was observed.",
-  "recommendation": "Improve next: openstack-cli (Nova volume attach/detach contract plus identity admin lists), then openstacksdk (identity admin CRUD via the SPEC-0023 gate flow), then operator (/readyz reason body plus identity admin CRUD). The Placement public API is useful-later pending a SPEC-0022 freeze decision (baseline classifies placement optional, issue #82). Defer terraform until the CLI/SDK slices land; defer horizon.",
+  "recommendation": "Improve next: openstack-cli, then openstacksdk, then operator; defer terraform and horizon.",
   "journeys": [
     {
       "id": "openstack-cli",
