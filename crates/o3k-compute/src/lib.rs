@@ -1821,9 +1821,16 @@ impl ComputeService {
             // an agent — e.g. the issue-87 empty-registry terminal — so no
             // provider side effect can exist, mirroring the reconciler's
             // "domain already absent" handling of provider NotFound on
-            // delete. An in-flight or accepted create still fails closed: the
-            // provider may hold side effects that only the provider delete
-            // can remove.
+            // delete. A create that WAS accepted (a provider operation
+            // identity exists) is equally absent-proven when the durable
+            // presence inspection recorded error_category "not_found":
+            // converge_absent_create's terminal evidence that the create
+            // never took effect, so no provider side effect can exist either
+            // (issue-87 S3 rerun #4). Every other shape — in-flight,
+            // accepted without absence proof, or terminally failed for a
+            // reason other than absence — still fails closed: the provider
+            // may hold side effects that only the provider delete can
+            // remove.
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
             let create = self
@@ -1835,7 +1842,8 @@ impl ComputeService {
                     other => ComputeError::Store(other),
                 })?;
             if !(matches!(create.state, o3k_store::OperationState::Failed)
-                && create.provider_operation_id.is_none())
+                && (create.provider_operation_id.is_none()
+                    || create.error_category.as_deref() == Some("not_found")))
             {
                 return Err(ComputeError::Conflict);
             }
@@ -4044,6 +4052,111 @@ mod tests {
             store.get_operation(delete_operation_id).await?.state,
             o3k_store::OperationState::Succeeded,
             "the local delete must record a terminal Succeeded delete operation"
+        );
+        Ok(())
+    }
+
+    /// The issue-87 S3 residue (#551-#554, rerun #4): the create was accepted
+    /// before the crash — the operation carries a provider operation identity
+    /// — but the durable presence inspection provably found no instance, and
+    /// `converge_absent_create` recorded a terminal Failed operation with
+    /// error_category "not_found" and the resource projected ERROR with no
+    /// provider reference. Absence is proven by inspection, so no provider
+    /// side effect can exist; the delete must complete locally exactly like
+    /// the never-dispatched #550 shape: no provider call, resource DELETED,
+    /// delete operation terminal Succeeded, and the reverse-order
+    /// compensation (placement allocation, keypair, ports) runs. Today the
+    /// provider_operation_id makes the local-completion gate 409 the delete
+    /// even though the durable not_found evidence proves absence.
+    #[tokio::test]
+    async fn delete_proven_absent_failed_create_with_provider_operation_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-proven-absent", provider.clone()).await?;
+        // Seed exactly what converge_absent_create leaves: terminal Failed,
+        // the pre-crash provider operation identity preserved, error_category
+        // "not_found" recording the absent presence inspection.
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Failed,
+                Some(&request.operation_id.to_string()),
+                Some("not_found"),
+                Some("presence inspection: create never took effect; instance is absent"),
+            )
+            .await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            None,
+            "the delete must run reverse-order compensation for the keypair"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "an absence-proven create must not dispatch a provider delete"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the local delete must record a terminal Succeeded delete operation"
+        );
+        Ok(())
+    }
+
+    /// Invariant pin (#550 rationale): a terminal Failed create that carries
+    /// a provider operation identity but whose durable error category is NOT
+    /// "not_found" has no absence proof — the provider may hold side effects
+    /// (a real dispatch failure, a created-then-errored instance) that only
+    /// the provider delete can remove. The delete must still fail closed with
+    /// a conflict; the proven-absence exception must not weaken the guard for
+    /// every Failed shape.
+    #[tokio::test]
+    async fn failed_create_with_provider_operation_and_terminal_category_still_conflicts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, _placement, request) =
+            stranded_failed_create_fixture("delete-terminal-guard", provider.clone()).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Failed,
+                Some(&request.operation_id.to_string()),
+                Some("terminal"),
+                Some("provider operation failed"),
+            )
+            .await?;
+
+        assert!(matches!(
+            service
+                .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+                .await,
+            Err(ComputeError::Conflict)
+        ));
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "the conflicted delete must not dispatch a provider delete"
         );
         Ok(())
     }
