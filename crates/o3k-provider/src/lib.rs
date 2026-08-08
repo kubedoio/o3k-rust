@@ -8,6 +8,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod agent;
+
+pub use agent::{
+    AgentArtifactAck, AgentArtifactStatus, AgentCommandAccepted, AgentErrorCategory, AgentEvent,
+    AgentObservation, AgentOperationState, AgentOperationUpdate, AgentProtocolError,
+    ArtifactTransferState,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub provider_name: String,
@@ -133,6 +141,8 @@ impl std::fmt::Debug for BlockDeviceAttachment {
 }
 
 /// Observation of a compute-side block device after attach/detach/observe.
+/// The optional connector fields are present on observations produced by the
+/// collect-connector command; they are never persisted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockDeviceObservation {
     pub volume_id: String,
@@ -144,6 +154,14 @@ pub struct BlockDeviceObservation {
     pub host_path: Option<String>,
     pub attached: bool,
     pub found: bool,
+    #[serde(default)]
+    pub initiator: Option<String>,
+    #[serde(default)]
+    pub host_name: Option<String>,
+    #[serde(default)]
+    pub ip_address: Option<String>,
+    #[serde(default)]
+    pub iscsi_logged_in: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -812,6 +830,10 @@ impl ComputeProvider for FakeComputeProvider {
             host_path,
             attached: true,
             found: true,
+            initiator: None,
+            host_name: None,
+            ip_address: None,
+            iscsi_logged_in: false,
         };
         state.block_devices.insert(key, observation.clone());
         Ok(observation)
@@ -839,6 +861,10 @@ impl ComputeProvider for FakeComputeProvider {
                 host_path: existing.host_path.clone(),
                 attached: false,
                 found: false,
+                initiator: None,
+                host_name: None,
+                ip_address: None,
+                iscsi_logged_in: false,
             },
             None => BlockDeviceObservation {
                 volume_id: device.volume_id.clone(),
@@ -848,6 +874,10 @@ impl ComputeProvider for FakeComputeProvider {
                 host_path: None,
                 attached: false,
                 found: false,
+                initiator: None,
+                host_name: None,
+                ip_address: None,
+                iscsi_logged_in: false,
             },
         };
         state.block_devices.remove(&key);

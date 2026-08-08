@@ -713,15 +713,11 @@ fn spawn_console_event_consumer(
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(o3k_compute_agent::AgentEvent::Observation(observation))
+                Ok(o3k_provider::AgentEvent::Observation(observation))
                     if !observation.console_log_bytes.is_empty() =>
                 {
-                    let Ok(instance_id) = observation.resource_id.parse::<uuid::Uuid>() else {
-                        tracing::warn!(resource_id = %observation.resource_id, "agent console observation has invalid resource id");
-                        continue;
-                    };
                     if let Err(error) = console.write_chunk(
-                        instance_id,
+                        observation.resource_id,
                         observation.console_log_offset,
                         &observation.console_log_bytes,
                     ) {
