@@ -25,8 +25,8 @@ pub enum ConnectionInfoPresence {
 
 /// Typed non-secret target data plus transient CHAP credentials needed to
 /// attach through the compute execution boundary. Callers must never persist
-/// or log the credential fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// or log the credential fields; `Debug` redacts the credential fields.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AttachmentTarget {
     pub driver_volume_type: String,
     pub target_iqn: Option<String>,
@@ -38,7 +38,7 @@ pub struct AttachmentTarget {
     pub auth_password: Option<String>,
 }
 
-impl std::fmt::Display for AttachmentTarget {
+impl std::fmt::Debug for AttachmentTarget {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AttachmentTarget")
@@ -58,7 +58,7 @@ impl std::fmt::Display for AttachmentTarget {
 /// The adapter computes the presence classification, the digest, the top-level
 /// key names, and the extractable target from its raw model; application logic
 /// only consumes these precomputed values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectionInfo {
     pub presence: ConnectionInfoPresence,
     /// SHA-256 digest of the canonical serialization, persisted instead of
@@ -68,6 +68,18 @@ pub struct ConnectionInfo {
     /// the values.
     pub top_level_keys: Vec<String>,
     pub target: Option<AttachmentTarget>,
+}
+
+impl std::fmt::Debug for ConnectionInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConnectionInfo")
+            .field("presence", &self.presence)
+            .field("digest", &self.digest)
+            .field("top_level_keys", &self.top_level_keys)
+            .field("target", &self.target)
+            .finish()
+    }
 }
 
 impl ConnectionInfo {
@@ -111,13 +123,26 @@ impl ConnectionInfo {
 /// is present only after the connector update flow has completed; the
 /// `presence` classification covers every response shape, including missing,
 /// null, and malformed values.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AttachmentObservation {
     pub id: String,
     pub status: String,
     pub volume_id: String,
     pub presence: ConnectionInfoPresence,
     pub connection_info: Option<ConnectionInfo>,
+}
+
+impl std::fmt::Debug for AttachmentObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AttachmentObservation")
+            .field("id", &self.id)
+            .field("status", &self.status)
+            .field("volume_id", &self.volume_id)
+            .field("presence", &self.presence)
+            .field("connection_info", &self.connection_info)
+            .finish()
+    }
 }
 
 impl AttachmentObservation {

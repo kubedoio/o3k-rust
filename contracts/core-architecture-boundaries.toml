@@ -54,7 +54,9 @@ forbidden_source_markers = [
 
 [application]
 # These dependencies are adapter/framework concerns and are not valid
-# application dependencies at all.
+# application dependencies at all. The agent/Cinder adapter crates were
+# removed from application crates behind bounded ports (SPEC-0025 step 6) and
+# are now hard-forbidden so the debt cannot silently reappear.
 hard_forbidden_dependencies = [
   "o3k-api",
   "axum",
@@ -64,6 +66,10 @@ hard_forbidden_dependencies = [
   "rustls",
   "o3k-libvirt",
   "o3k-cellhv",
+  "o3k-cinder",
+  "o3k-compute-agent",
+  "o3k-provider-contract",
+  "prost",
 ]
 
 # These dependencies currently appear in a small number of application crates.
