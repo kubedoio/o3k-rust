@@ -1030,6 +1030,22 @@ where
             Err(error @ ProviderError::Retryable) | Err(error @ ProviderError::StaleState) => {
                 self.retry_or_fail(operation_id, resource.id, error).await
             }
+            Err(ProviderError::NotFound) => {
+                // No agent was registered to receive the create (an empty
+                // registry while a preserved agent is still in reconnect
+                // backoff after a control-plane restart). `selected_agent`
+                // fails before anything is dispatched, so the command was
+                // provably never delivered and no provider side effect can
+                // exist. This is therefore not a terminal failure: the
+                // operation stays `Running` without a provider operation
+                // identity — the exact residue shape the create-convergence
+                // sweep re-drives — until an agent registers and the create
+                // dispatches (issue #87). The empty-registry condition must
+                // not consume the retry budget: the sweep ticks every few
+                // seconds while reconnect backoff can be 8s/16s/32s, so any
+                // small budget would exhaust before the agent returns.
+                Ok(OperationState::Running)
+            }
             Err(error) => {
                 self.store
                     .update_operation(
@@ -3126,6 +3142,143 @@ mod tests {
             store.get_resource(resource.id).await?.observed_state,
             "SHUTOFF"
         );
+        Ok(())
+    }
+
+    /// Wraps the stateful fake provider with the agent-registry lifecycle of
+    /// the issue-87 empty-registry defect: while the agent is in reconnect
+    /// backoff no node is registered, so `create_instance` reports NotFound —
+    /// the command can provably never be delivered — and after `register()`
+    /// (the agent re-registering on a later sweep tick) the fake behaves
+    /// normally.
+    struct NotFoundUntilRegisteredProvider {
+        inner: FakeComputeProvider,
+        registered: std::sync::atomic::AtomicBool,
+    }
+
+    impl NotFoundUntilRegisteredProvider {
+        fn new() -> Self {
+            Self {
+                inner: FakeComputeProvider::new(),
+                registered: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn register(&self) {
+            self.registered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn instance_count(&self) -> usize {
+            self.inner.instance_count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for NotFoundUntilRegisteredProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            if !self.registered.load(std::sync::atomic::Ordering::SeqCst) {
+                // No agent is registered: `selected_agent` fails before any
+                // dispatch, so the create command was never delivered.
+                return Err(o3k_provider::ProviderError::NotFound);
+            }
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// The empty-registry dispatch (issue #87): a create driven while no
+    /// agent is registered — a preserved agent still in reconnect backoff —
+    /// must NOT become terminal Failed. The command was provably never
+    /// delivered, so the operation stays `Running` without a provider
+    /// operation identity, the exact residue shape the create-convergence
+    /// sweep re-drives; once an agent registers on a later sweep tick the
+    /// create re-dispatches and converges to ACTIVE. The retry budget is
+    /// never consumed by the empty-registry condition (no `retry_or_fail`).
+    #[tokio::test]
+    async fn create_dispatch_against_empty_registry_is_redriven_not_terminal()
+    -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-empty-registry-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let provider = Arc::new(NotFoundUntilRegisteredProvider::new());
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+
+        // First sweep tick: the agent is not registered yet (reconnect
+        // backoff), so the create cannot be delivered to any agent.
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Running
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Running);
+        assert!(
+            operation.provider_operation_id.is_none(),
+            "an undelivered create must not carry a provider operation identity"
+        );
+
+        // A later sweep tick after the agent registered re-dispatches the
+        // create and converges: the empty-registry condition must never
+        // strand the server in a terminal error.
+        provider.register();
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        assert_eq!(provider.instance_count(), 1);
         Ok(())
     }
 }
