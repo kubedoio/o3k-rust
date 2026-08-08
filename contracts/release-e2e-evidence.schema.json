@@ -1,0 +1,58 @@
+{
+  "$id": "https://o3k.dev/contracts/release-e2e-evidence.schema.json",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenStack CLI E2E release evidence resource contract",
+  "description": "Normative machine-readable contract for the resource-ownership fields of the openstack-cli-e2e release evidence artifact. It governs only the resources and cleanup.resources objects and their exact key sets and value vocabulary; every other artifact field is out of scope and may change freely. Referenced by docs/release-evidence-schema.md, packaging/release-gate.sh, and tests/openstack-cli-libvirt.sh, and implemented by scripts/validate-release-e2e-evidence.py, which is the single shared validator the gate, the producer, and the tests consume.",
+  "type": "object",
+  "properties": {
+    "resources": {
+      "type": "object",
+      "required": [
+        "image_id",
+        "keypair_id",
+        "network_id",
+        "subnet_id",
+        "port_id",
+        "flavor_id",
+        "server_id"
+      ],
+      "properties": {
+        "image_id": { "type": "string", "minLength": 1 },
+        "keypair_id": { "type": "string", "minLength": 1 },
+        "network_id": { "type": "string", "minLength": 1 },
+        "subnet_id": { "type": "string", "minLength": 1 },
+        "port_id": { "type": "string", "minLength": 1 },
+        "flavor_id": { "type": "string", "minLength": 1 },
+        "server_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "cleanup": {
+      "type": "object",
+      "properties": {
+        "resources": {
+          "type": "object",
+          "required": [
+            "image",
+            "keypair",
+            "network",
+            "subnet",
+            "port",
+            "flavor",
+            "server"
+          ],
+          "properties": {
+            "image": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "keypair": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "network": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "subnet": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "port": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "flavor": { "enum": ["verified_absent", "not_verified", "pending"] },
+            "server": { "enum": ["verified_absent", "not_verified", "pending"] }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

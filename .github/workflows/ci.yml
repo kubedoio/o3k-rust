@@ -80,6 +80,8 @@ jobs:
         run: bash tests/real-host-capability-probe.sh
       - name: Test release evidence gate
         run: bash tests/release-gate.sh
+      - name: Test release E2E evidence contract
+        run: bash tests/release-e2e-evidence.sh
       - name: Test human review evidence package
         run: bash tests/human-review-package.sh
       - name: Test program tracker contract

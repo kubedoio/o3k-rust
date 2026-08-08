@@ -194,22 +194,55 @@ for name, (path, artifact_type) in required.items():
     elif status != "passed":
         errors.append(f"{name}: status must be passed, got {status!r}")
     if name == "real_libvirt_e2e":
+        # Resource membership is governed by the normative machine-readable
+        # contract, validated by the shared validator; the gate consumes the
+        # same validator as the producer and fails closed if it is missing.
+        validator_path = os.path.join(
+            os.environ["REPOSITORY_ROOT"],
+            "scripts",
+            "validate-release-e2e-evidence.py",
+        )
+        if not os.path.isfile(validator_path):
+            errors.append(
+                f"{name}: contract validator is missing: {validator_path}"
+            )
+        else:
+            try:
+                validation = subprocess.run(
+                    [sys.executable or "python3", validator_path, path],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+            except (OSError, subprocess.SubprocessError) as error:
+                errors.append(
+                    f"{name}: contract validator could not run ({error})"
+                )
+            else:
+                if validation.returncode != 0:
+                    errors.append(
+                        f"{name}: resources/cleanup.resources must satisfy "
+                        "contracts/release-e2e-evidence.schema.json"
+                    )
+                    for line in validation.stderr.strip().splitlines():
+                        if line:
+                            errors.append(f"{name}: {line}")
         cleanup_resources = cleanup.get("resources") if isinstance(cleanup, dict) else None
-        expected_cleanup_resources = {
-            "image_id": "image",
-            "keypair_id": "keypair",
-            "network_id": "network",
-            "subnet_id": "subnet",
-            "flavor_id": "flavor",
-            "server_id": "server",
-        }
-        created_resources = value.get("resources")
-        if not isinstance(created_resources, dict) or set(created_resources) != set(expected_cleanup_resources):
-            errors.append(f"{name}: resources must identify image/keypair/network/subnet/flavor/server")
-        elif not isinstance(cleanup_resources, dict) or set(cleanup_resources) != set(expected_cleanup_resources.values()):
-            errors.append(f"{name}: cleanup.resources must identify every created resource")
-        elif any(cleanup_resources[resource] != "verified_absent" for resource in expected_cleanup_resources.values()):
-            errors.append(f"{name}: cleanup.resources must prove every resource absent")
+        if status == "passed" and (
+            not isinstance(cleanup_resources, dict) or not cleanup_resources
+        ):
+            errors.append(
+                f"{name}: cleanup.resources must identify every created "
+                "resource when status is passed"
+            )
+        elif status == "passed" and any(
+            cleanup_resources[resource] != "verified_absent"
+            for resource in cleanup_resources
+        ):
+            errors.append(
+                f"{name}: cleanup.resources must prove every resource absent "
+                "when status is passed"
+            )
         lifecycle = value.get("lifecycle")
         expected = {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
         if not isinstance(lifecycle, dict) or set(lifecycle) != expected or not all(lifecycle.values()):
