@@ -30,7 +30,7 @@ with open(path, "w", encoding="utf-8") as stream:
 PY
 }
 
-if ! output=$(cargo test -p o3k-compute --test agent_mtls --all-features -- --nocapture 2>"${LOG_PATH}"); then
+if ! output=$(cargo test -p o3k-compute-agent --test agent_mtls --all-features -- --nocapture 2>"${LOG_PATH}"); then
     write_result failed "mTLS agent integration test failed"
     cat "${LOG_PATH}" >&2
     exit 1
