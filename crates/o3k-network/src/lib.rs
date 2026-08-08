@@ -436,6 +436,255 @@ mod host_network_tests {
     }
 
     #[test]
+    fn crash_residue_is_enumerated_and_reaped_across_restart() -> Result<(), HostNetworkError> {
+        // Issue-87 S3 rerun #5: the create prepared the host network (bridge,
+        // TAP, DHCP bindings) and the agent died before defining the domain.
+        // The control-plane delete converges through local completion and
+        // never dispatches an agent delete, so the residue survives until the
+        // agent restart reconciliation enumerates the durable manifest and
+        // reaps the recorded network state of the absent instance.
+        let root = std::env::temp_dir().join(format!("o3k-network-reap-{}", Uuid::now_v7()));
+        let spec = TapSpec {
+            instance_id: "server-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+        let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
+        let first = FakeNetworkCommand::new([
+            Response::output(false, ""), // bridge absent
+            Response::status(true),      // bridge add
+            Response::status(true),      // bridge up
+            Response::output(false, ""), // tap absent
+            Response::status(true),      // tuntap add
+            Response::status(true),      // set address
+            Response::status(true),      // set master
+            Response::status(true),      // set up
+            Response::output(
+                true,
+                &format!(
+                    "2: {tap}: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01"
+                ),
+            ),
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(first),
+            &root,
+        )?;
+        assert_eq!(manager.create_tap(&spec)?, tap);
+        // The agent process is killed here; the kernel and the ownership
+        // manifest keep the bridge and TAP with no delete command in flight.
+
+        // On restart the same ownership root is reopened and the kernel still
+        // reports the TAP attached to the managed bridge.
+        let reopened_command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                &format!("2: {tap}: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP"),
+            ),
+            Response::output(
+                true,
+                &format!(
+                    "2: {tap}: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01"
+                ),
+            ),
+            Response::status(true), // link del tap
+            Response::output(true, "2: o3k-br0: <BROADCAST,UP> mtu 1500 state UP"),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true), // link del bridge
+        ]);
+        let reopened = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(reopened_command.clone()),
+            &root,
+        )?;
+        // The restart reconciliation enumerates the residue through the
+        // durable manifest and tears down the recorded network state.
+        assert_eq!(reopened.owned_instance_ids()?, vec!["server-1".to_owned()]);
+        reopened.delete_taps_for_instance("server-1")?;
+        reopened.cleanup_if_unused()?;
+        let calls = reopened_command.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|args| args.as_slice() == ["link", "del", "dev", &tap])
+                .count(),
+            1,
+            "the TAP must be deleted exactly once"
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|args| args.as_slice() == ["link", "del", "dev", "o3k-br0"])
+                .count(),
+            1,
+            "the owned bridge must be deleted exactly once"
+        );
+        let manifest: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert!(manifest.bridge.is_none() && manifest.taps.is_empty());
+        // A repeat of the reap after the teardown is a no-op: the manifest is
+        // the authority, so no further host command may be issued.
+        let calls_before = reopened_command.calls().len();
+        reopened.delete_taps_for_instance("server-1")?;
+        reopened.cleanup_if_unused()?;
+        assert_eq!(reopened_command.calls().len(), calls_before);
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reaping_one_instance_keeps_the_shared_bridge_until_the_last_tap_is_gone()
+    -> Result<(), HostNetworkError> {
+        // Issue-87: the managed bridge is shared; reaping one absent instance
+        // must never remove it while another recorded instance still uses it.
+        let root = std::env::temp_dir().join(format!("o3k-network-shared-{}", Uuid::now_v7()));
+        let tap_a = HostNetworkManager::tap_name("port-a").expect("valid test tap name");
+        let tap_b = HostNetworkManager::tap_name("port-b").expect("valid test tap name");
+        fs::create_dir_all(&root).map_err(|_| HostNetworkError::CommandFailed)?;
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                gateway: None,
+            }),
+            taps: [
+                (
+                    tap_a.clone(),
+                    TapOwnership {
+                        interface: tap_a.clone(),
+                        instance_id: "server-1".to_owned(),
+                        port_id: "port-a".to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+                (
+                    tap_b.clone(),
+                    TapOwnership {
+                        interface: tap_b.clone(),
+                        instance_id: "server-2".to_owned(),
+                        port_id: "port-b".to_owned(),
+                        mac: "02:00:00:00:00:02".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        fs::write(
+            root.join("ownership.json"),
+            serde_json::to_vec_pretty(&manifest).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                &format!("2: {tap_a}: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP"),
+            ),
+            Response::output(
+                true,
+                &format!(
+                    "2: {tap_a}: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01"
+                ),
+            ),
+            Response::status(true), // link del tap-a
+            Response::output(
+                true,
+                &format!("2: {tap_b}: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP"),
+            ),
+            Response::output(
+                true,
+                &format!(
+                    "2: {tap_b}: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:02"
+                ),
+            ),
+            Response::status(true), // link del tap-b
+            Response::output(true, "2: o3k-br0: <BROADCAST,UP> mtu 1500 state UP"),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
+            Response::status(true), // link del bridge
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        manager.delete_taps_for_instance("server-1")?;
+        manager.cleanup_if_unused()?;
+        let mid: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert!(
+            mid.bridge.is_some(),
+            "the shared bridge must survive the first reap"
+        );
+        assert_eq!(mid.taps.len(), 1);
+        manager.delete_taps_for_instance("server-2")?;
+        manager.cleanup_if_unused()?;
+        let end: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert!(end.bridge.is_none() && end.taps.is_empty());
+        assert_eq!(
+            command
+                .calls()
+                .iter()
+                .filter(|args| args.as_slice() == ["link", "del", "dev", "o3k-br0"])
+                .count(),
+            1,
+            "the bridge must be deleted exactly once, after the last TAP"
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reaping_a_never_prepared_instance_is_a_noop() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-noop-{}", Uuid::now_v7()));
+        let command = FakeNetworkCommand::new([]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        assert!(manager.owned_instance_ids()?.is_empty());
+        manager.delete_taps_for_instance("never-prepared")?;
+        manager.cleanup_if_unused()?;
+        assert!(
+            command.calls().is_empty(),
+            "a never-prepared instance must not touch the host network"
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
     fn tap_address_is_reapplied_after_external_replacement() -> Result<(), HostNetworkError> {
         // A udev MAC policy write can land after the address was set during
         // TAP creation. The owner must observe the replacement, re-apply the
@@ -1160,6 +1409,24 @@ impl HostNetworkManager {
             .filter(|record| record.instance_id == instance_id)
             .map(|record| record.port_id.clone())
             .collect())
+    }
+
+    /// Returns the distinct instance identities recorded in the ownership
+    /// manifest. The agent's restart reconciliation enumerates these to find
+    /// host artifacts that may be stale after a crash.
+    pub fn owned_instance_ids(&self) -> Result<Vec<String>, HostNetworkError> {
+        self.ownership_snapshot(|manifest| {
+            let mut ids: Vec<String> = manifest
+                .taps
+                .values()
+                .filter(|record| record.created_by_o3k)
+                .map(|record| record.instance_id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        })
+        .map(|ids| ids.unwrap_or_default())
     }
 
     pub fn discover_managed(&self) -> Result<Vec<String>, HostNetworkError> {
