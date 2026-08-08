@@ -1,8 +1,10 @@
 //! O3K public API adapter crate root: the public surface (`AppState`,
 //! `router`, `router_with_state`), router composition, and version/health
 //! discovery. Protocol adapters live in the sibling modules (`identity`,
-//! `image`, `network`, `compute`, `placement`, `volume_attachment`);
-//! Axum routing/extractors and OpenStack JSON wire models stay in this crate.
+//! `image`, `network`, `compute`, `placement`, `volume_attachment`), shared
+//! helpers in `auth` (token validation) and `error` (error envelopes), and
+//! the router-wide microversion negotiation in `middleware`. Axum
+//! routing/extractors and OpenStack JSON wire models stay in this crate.
 
 use std::{
     sync::{
@@ -67,12 +69,17 @@ struct HealthResponse {
     status: &'static str,
 }
 
+/// Builds the default router: `AppState::new()` marked ready immediately and
+/// passed to [`router_with_state`]. Intended for tests and standalone runs.
 pub fn router() -> Router {
     let state = AppState::new();
     state.set_ready(true);
     router_with_state(state)
 }
 
+/// Composition-root state for the O3K API router: the optional service
+/// instances (identity, image, network, compute, console, agent registry)
+/// that the protocol adapters dispatch to, plus the readiness flag.
 #[derive(Clone, Default)]
 pub struct AppState {
     ready: Arc<AtomicBool>,
@@ -85,57 +92,72 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Creates an empty state with no services configured and readiness unset.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Marks the router ready (or not) for `/readyz` reporting.
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
     }
 
+    /// Configures the Keystone-compatible token service.
     #[must_use]
     pub fn with_identity(mut self, service: TokenService) -> Self {
         self.identity = Some(Arc::new(service));
         self
     }
 
+    /// Configures the Glance-compatible image service.
     #[must_use]
     pub fn with_image(mut self, service: ImageService) -> Self {
         self.image = Some(Arc::new(service));
         self
     }
 
+    /// Configures the Neutron-compatible network service.
     #[must_use]
     pub fn with_network(mut self, service: NetworkService) -> Self {
         self.network = Some(Arc::new(service));
         self
     }
 
+    /// Configures the Nova-compatible compute service.
     #[must_use]
     pub fn with_compute(mut self, service: ComputeService) -> Self {
         self.compute = Some(Arc::new(service));
         self
     }
 
+    /// Configures the console service used for serial-console output.
     #[must_use]
     pub fn with_console(mut self, service: ConsoleService) -> Self {
         self.console = Some(Arc::new(service));
         self
     }
 
+    /// Configures the compute-agent node registry used for agent dispatch.
     #[must_use]
     pub fn with_agent_registry(mut self, registry: NodeRegistry) -> Self {
         self.agent_registry = Some(registry);
         self
     }
 
+    /// Reports whether the router is ready (`/readyz` returns 200 when true).
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
     }
 }
 
+/// Builds the O3K API router from the given composition-root state.
+///
+/// Route registration is the single source of public API truth: paths,
+/// method bindings, and layer order (microversion negotiation middleware,
+/// then the image upload body-size limit) must not change without a
+/// compatibility record update.
 pub fn router_with_state(state: AppState) -> Router {
     Router::new()
         .route("/", get(keystone_root))

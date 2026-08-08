@@ -1,5 +1,4 @@
-//! Shared token and project-scope validation helpers used by the
-//! service protocol adapters.
+//! Shared token validation helpers used by the service protocol adapters.
 
 use std::time::SystemTime;
 
@@ -39,22 +38,4 @@ pub(crate) fn require_token(
             "The request has not been authenticated.",
         )
     })
-}
-// The 404 contract and message are shared with compute's resource lookup;
-// this helper is generic but intentionally keeps compute's public message.
-#[allow(clippy::result_large_err)]
-pub(crate) fn project_token(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-    project_id: &str,
-) -> Result<o3k_identity::VerifiedToken, axum::response::Response> {
-    let token = require_token(state, headers)?;
-    if token.project_id != project_id {
-        return Err(keystone_error(
-            StatusCode::NOT_FOUND,
-            "Not Found",
-            "compute resource was not found",
-        ));
-    }
-    Ok(token)
 }

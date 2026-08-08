@@ -17,7 +17,7 @@ use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
 use crate::{
-    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT, auth::project_token, error::keystone_error,
+    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT, auth::require_token, error::keystone_error,
     image::image_error, network::network_error,
 };
 
@@ -320,6 +320,23 @@ pub(crate) fn cached_console_response(
 
 pub(crate) fn should_query_live_console(offset: u64) -> bool {
     offset == 0
+}
+
+#[allow(clippy::result_large_err)]
+fn project_token(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    project_id: &str,
+) -> Result<o3k_identity::VerifiedToken, axum::response::Response> {
+    let token = require_token(state, headers)?;
+    if token.project_id != project_id {
+        return Err(keystone_error(
+            StatusCode::NOT_FOUND,
+            "Not Found",
+            "compute resource was not found",
+        ));
+    }
+    Ok(token)
 }
 
 #[allow(clippy::result_large_err)]
