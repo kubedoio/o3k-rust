@@ -28,7 +28,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - name: Install coverage prerequisites
-        run: sudo apt-get update && sudo apt-get install -y libvirt-dev pkg-config python3
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config python3
       - name: Initialize source-bound metadata
         run: |
           set -eu
