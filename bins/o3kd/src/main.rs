@@ -387,7 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 domain_name: "Default".to_owned(),
             },
         ));
-        compute_service = compute_service.with_cinder_client(cinder_client);
+        compute_service = compute_service.with_attachment_provider(cinder_client);
         info!("external Cinder attachment client enabled");
     }
     let inventory_task = agent_control_enabled.then(|| {

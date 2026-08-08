@@ -25,8 +25,11 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use o3k_cinder::{AttachTarget, CinderClient, CinderError, ComputeConnector};
-use o3k_provider::{BlockDeviceAttachment, ComputeProvider, ProviderError};
+use o3k_provider::{
+    AttachmentError, AttachmentObservation, AttachmentTarget, BlockDeviceAttachment,
+    ComputeConnector, ComputeProvider, ConnectionInfo, ConnectionInfoPresence, ProviderError,
+    VolumeAttachmentProvider,
+};
 use o3k_store::{ComputeRepository, VolumeAttachmentRecord};
 use uuid::Uuid;
 
@@ -80,7 +83,7 @@ impl Drop for FlightGuard<'_> {
 pub struct AttachmentOrchestrator {
     store: Arc<dyn ComputeRepository>,
     provider: Arc<ProviderBackend>,
-    cinder: Option<Arc<CinderClient>>,
+    cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     /// Durable attachment ids currently being processed by attach/detach.
     /// Reconciliation skips these so it never races a live operation.
     in_flight: Arc<Mutex<HashSet<Uuid>>>,
@@ -90,7 +93,7 @@ impl AttachmentOrchestrator {
     pub fn new(
         store: Arc<dyn ComputeRepository>,
         provider: Arc<ProviderBackend>,
-        cinder: Option<Arc<CinderClient>>,
+        cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     ) -> Self {
         Self {
             store,
@@ -252,7 +255,7 @@ impl AttachmentOrchestrator {
                             // Unknown outcome: never compensate without observing.
                             self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
                                 .await?;
-                            return Err(map_cinder_error(error));
+                            return Err(map_attachment_error(error));
                         }
                         self.observe_before_compensate(
                             project_id,
@@ -262,7 +265,7 @@ impl AttachmentOrchestrator {
                             &format!("{error}"),
                         )
                         .await?;
-                        return Err(map_cinder_error(error));
+                        return Err(map_attachment_error(error));
                     }
                 }
             }
@@ -344,7 +347,7 @@ impl AttachmentOrchestrator {
                         // observation.
                         self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
                             .await?;
-                        return Err(map_cinder_error(error));
+                        return Err(map_attachment_error(error));
                     }
                     self.observe_before_compensate(
                         project_id,
@@ -354,7 +357,7 @@ impl AttachmentOrchestrator {
                         &format!("{error}"),
                     )
                     .await?;
-                    return Err(map_cinder_error(error));
+                    return Err(map_attachment_error(error));
                 }
             };
             self.trace_attachment(record, "cinder_attachment_update", &updated, None);
@@ -378,7 +381,7 @@ impl AttachmentOrchestrator {
                 target.target_iqn.as_deref(),
                 target.target_portal.as_deref(),
                 target.target_lun.map(|value| value as u32),
-                Some(&connection_info.digest()),
+                Some(connection_info.digest()),
                 None,
             )
             .await?;
@@ -410,14 +413,8 @@ impl AttachmentOrchestrator {
                 multipath: false,
                 initiator,
                 auth_method: target.auth_method.clone(),
-                auth_username: target
-                    .auth_username
-                    .as_ref()
-                    .map(|value| value.expose().to_owned()),
-                auth_password: target
-                    .auth_password
-                    .as_ref()
-                    .map(|value| value.expose().to_owned()),
+                auth_username: target.auth_username.clone(),
+                auth_password: target.auth_password.clone(),
             };
             let observation = match self
                 .provider
@@ -505,7 +502,7 @@ impl AttachmentOrchestrator {
                         // drives it to attached.
                         self.set_phase(record.id, STATUS_UNKNOWN, Some(&format!("{error}")))
                             .await?;
-                        return Err(map_cinder_error(error));
+                        return Err(map_attachment_error(error));
                     }
                     let device = self.block_device_from_record(&record).await;
                     self.compensate_after_attach(
@@ -517,7 +514,7 @@ impl AttachmentOrchestrator {
                         &format!("{error}"),
                     )
                     .await?;
-                    return Err(map_cinder_error(error));
+                    return Err(map_attachment_error(error));
                 }
             }
         }
@@ -536,8 +533,8 @@ impl AttachmentOrchestrator {
     async fn connection_target(
         &self,
         record: &VolumeAttachmentRecord,
-        updated: &o3k_cinder::CinderAttachment,
-    ) -> Result<(o3k_cinder::ConnectionInfo, AttachTarget), ComputeError> {
+        updated: &AttachmentObservation,
+    ) -> Result<(ConnectionInfo, AttachmentTarget), ComputeError> {
         let presence = updated.connection_info_presence();
         let Some(connection_info) = updated.connection_info.clone() else {
             self.trace_malformed(record, "connection_information_missing_or_null");
@@ -563,11 +560,12 @@ impl AttachmentOrchestrator {
             .await?;
             return Err(ComputeError::InvalidRequest);
         };
-        validate_target(&target)?;
+        validate_target(target)?;
         tracing::debug!(
             presence = format!("{presence:?}").to_lowercase(),
             "connection_information_classified"
         );
+        let target = target.clone();
         Ok((connection_info, target))
     }
 
@@ -578,7 +576,7 @@ impl AttachmentOrchestrator {
         project_id: &str,
         cinder_attachment_id: &str,
         record: &VolumeAttachmentRecord,
-    ) -> Result<(o3k_cinder::ConnectionInfo, AttachTarget), ComputeError> {
+    ) -> Result<(ConnectionInfo, AttachmentTarget), ComputeError> {
         let cinder = self.cinder.clone().ok_or(ComputeError::Unavailable)?;
         let attachment = cinder
             .show_attachment(project_id, cinder_attachment_id)
@@ -615,7 +613,8 @@ impl AttachmentOrchestrator {
             .await?;
             return Err(ComputeError::InvalidRequest);
         };
-        validate_target(&target)?;
+        validate_target(target)?;
+        let target = target.clone();
         Ok((connection_info, target))
     }
 
@@ -746,8 +745,7 @@ impl AttachmentOrchestrator {
                 Err(error) => {
                     self.trace_error(record, "cinder_attachment_terminate", &error);
                     match &error {
-                        o3k_cinder::CinderError::NotFound(_)
-                        | o3k_cinder::CinderError::Conflict(_) => {}
+                        AttachmentError::NotFound(_) | AttachmentError::Conflict(_) => {}
                         other => {
                             // Unknown-outcome termination must not flip the
                             // record to detached without observation; keep it
@@ -896,8 +894,7 @@ impl AttachmentOrchestrator {
                     let phase = if attachment
                         .connection_info
                         .as_ref()
-                        .map(|info| info.has_usable_target())
-                        .unwrap_or(false)
+                        .is_some_and(|info| info.has_usable_target())
                     {
                         STATUS_CONNECTION_PREPARED
                     } else {
@@ -919,7 +916,7 @@ impl AttachmentOrchestrator {
             },
             Err(error) => {
                 self.trace_error(record, "cinder_attachment_observe", &error);
-                if matches!(error, CinderError::NotFound(_)) {
+                if matches!(error, AttachmentError::NotFound(_)) {
                     // The attachment no longer exists; mark the durable record
                     // error so it is not retried blindly, and clean up any
                     // compute device without touching foreign state.
@@ -1178,21 +1175,20 @@ impl AttachmentOrchestrator {
         &self,
         record: &VolumeAttachmentRecord,
         step: &str,
-        attachment: &o3k_cinder::CinderAttachment,
+        attachment: &AttachmentObservation,
         _error: Option<&str>,
     ) {
         let presence = match attachment.connection_info_presence() {
-            o3k_cinder::ConnectionInfoPresence::Present => "present",
-            o3k_cinder::ConnectionInfoPresence::Missing => "missing",
-            o3k_cinder::ConnectionInfoPresence::Null => "null",
-            o3k_cinder::ConnectionInfoPresence::Malformed => "malformed",
+            ConnectionInfoPresence::Present => "present",
+            ConnectionInfoPresence::Missing => "missing",
+            ConnectionInfoPresence::Null => "null",
+            ConnectionInfoPresence::Malformed => "malformed",
         };
         let top_level_keys = attachment
             .connection_info
             .as_ref()
-            .map(|info| info.top_level_keys())
-            .unwrap_or_default()
-            .join(",");
+            .map(|info| info.top_level_keys().join(","))
+            .unwrap_or_default();
         let target_present = attachment
             .connection_info
             .as_ref()
@@ -1245,7 +1241,7 @@ impl AttachmentOrchestrator {
     }
 }
 
-fn validate_target(target: &AttachTarget) -> Result<(), ComputeError> {
+fn validate_target(target: &AttachmentTarget) -> Result<(), ComputeError> {
     match target.driver_volume_type.as_str() {
         "iscsi" => {
             if target.target_iqn.is_none() || target.target_portal.is_none() {
@@ -1279,16 +1275,15 @@ fn validate_target(target: &AttachTarget) -> Result<(), ComputeError> {
     Ok(())
 }
 
-fn map_cinder_error(error: CinderError) -> ComputeError {
+fn map_attachment_error(error: AttachmentError) -> ComputeError {
     match error {
-        CinderError::NotFound(_) => ComputeError::NotFound,
-        CinderError::Conflict(_) => ComputeError::Conflict,
-        CinderError::InvalidRequest(_) => ComputeError::InvalidRequest,
-        CinderError::Unauthorized | CinderError::Auth(_) => ComputeError::Unavailable,
-        CinderError::ServiceUnavailable | CinderError::UnknownOutcome(_) => {
-            ComputeError::Unavailable
-        }
-        CinderError::Protocol(_) => ComputeError::Unavailable,
+        AttachmentError::NotFound(_) => ComputeError::NotFound,
+        AttachmentError::Conflict(_) => ComputeError::Conflict,
+        AttachmentError::InvalidRequest(_) => ComputeError::InvalidRequest,
+        AttachmentError::Unauthorized
+        | AttachmentError::Unavailable
+        | AttachmentError::UnknownOutcome(_)
+        | AttachmentError::Protocol(_) => ComputeError::Unavailable,
     }
 }
 
@@ -1347,22 +1342,21 @@ fn civil_date(days_since_epoch: u64) -> (i64, u64, u64) {
 mod tests {
     use super::*;
     use crate::FakeComputeProvider;
-    use o3k_cinder::CinderSecret;
     use o3k_cinder::testkit::{FaultConfig, faults, start_testbed};
-    use o3k_provider::FailureInjection;
+    use o3k_provider::{AttachmentTarget, FailureInjection, VolumeAttachmentProvider};
     use std::sync::Arc;
 
     #[test]
     fn validate_target_accepts_chap_and_rejects_inconsistent_auth() {
-        let base = AttachTarget {
+        let base = AttachmentTarget {
             driver_volume_type: "iscsi".to_owned(),
             target_iqn: Some("iqn.2026-01.example.com:volume-1".to_owned()),
             target_portal: Some("10.0.0.10:3260".to_owned()),
             target_lun: Some(1),
             local_path: None,
             auth_method: Some("CHAP".to_owned()),
-            auth_username: Some(CinderSecret::new("user".to_owned())),
-            auth_password: Some(CinderSecret::new("password".to_owned())),
+            auth_username: Some("user".to_owned()),
+            auth_password: Some("password".to_owned()),
         };
         assert!(validate_target(&base).is_ok());
 
@@ -1384,7 +1378,7 @@ mod tests {
         wrong_method.auth_method = Some("NONE".to_owned());
         assert!(validate_target(&wrong_method).is_err());
 
-        let local = AttachTarget {
+        let local = AttachmentTarget {
             driver_volume_type: "local".to_owned(),
             target_iqn: None,
             target_portal: None,
@@ -1396,7 +1390,7 @@ mod tests {
         };
         assert!(validate_target(&local).is_ok());
 
-        let unknown_driver = AttachTarget {
+        let unknown_driver = AttachmentTarget {
             driver_volume_type: "nvmeof".to_owned(),
             ..base
         };
@@ -1411,7 +1405,7 @@ mod tests {
         fake_provider: Arc<FakeComputeProvider>,
         orchestrator: AttachmentOrchestrator,
         cinder_fake: o3k_cinder::testkit::FakeCinderState,
-        cinder: Arc<CinderClient>,
+        cinder: Arc<o3k_cinder::CinderClient>,
     }
 
     async fn harness() -> Result<TestHarness, Box<dyn std::error::Error>> {
@@ -1421,8 +1415,11 @@ mod tests {
         let (client, cinder_fake, _addr) =
             start_testbed().await.map_err(|error| error.to_string())?;
         let client = Arc::new(client);
-        let orchestrator =
-            AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
+        let orchestrator = AttachmentOrchestrator::new(
+            store.clone(),
+            provider.clone(),
+            Some(client.clone() as Arc<dyn VolumeAttachmentProvider>),
+        );
         Ok(TestHarness {
             store,
             fake_provider,
@@ -1793,6 +1790,7 @@ mod replay_tests {
     use super::*;
     use crate::FakeComputeProvider;
     use o3k_cinder::testkit::{faults, start_testbed};
+    use o3k_provider::VolumeAttachmentProvider;
     use std::time::Duration;
 
     const PROJECT: &str = "eba29e2d-53de-461d-ae91-ede7402713cb";
@@ -1814,8 +1812,11 @@ mod replay_tests {
         let provider = Arc::new(ProviderBackend::from(fake_provider.clone()));
         let (client, fake, _addr) = start_testbed().await.map_err(|error| error.to_string())?;
         let client = Arc::new(client.with_timeout(timeout));
-        let orchestrator =
-            AttachmentOrchestrator::new(store.clone(), provider.clone(), Some(client.clone()));
+        let orchestrator = AttachmentOrchestrator::new(
+            store.clone(),
+            provider.clone(),
+            Some(client.clone() as Arc<dyn VolumeAttachmentProvider>),
+        );
         Ok((store, fake_provider, orchestrator, fake, client))
     }
 

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use o3k_cinder::CinderClient;
 pub use o3k_domain::{Server, ServerId, ServerState};
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
@@ -10,6 +9,7 @@ use o3k_provider::{
     AgentNodeSnapshot, BlockDeviceAttachment, BlockDeviceObservation, Capabilities,
     ComputeProvider, ConfigDriveRequest, ConnectorInfo, CreateInstanceRequest,
     DeleteInstanceRequest, Instance, InstanceAction, Operation, ProviderError,
+    VolumeAttachmentProvider,
 };
 use o3k_reconciler::{LifecycleAction, OperationJournal, ReconcileError};
 use o3k_scheduler::{Flavor as SchedulerFlavor, Scheduler, SchedulerError};
@@ -91,7 +91,7 @@ pub struct ComputeService {
     journal: OperationJournal<dyn ComputeRepository, ProviderBackend>,
     scheduler: Option<Scheduler>,
     agent_registry: Option<Arc<dyn AgentNodeRegistry>>,
-    cinder: Option<Arc<CinderClient>>,
+    cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
 }
@@ -364,19 +364,15 @@ impl ComputeService {
         self
     }
 
-    /// Configures the outbound Cinder client used for the durable attachment
-    /// lifecycle. External-hosted volume attachment requires it.
+    /// Configures the external volume-attachment provider used for the
+    /// durable attachment lifecycle. External-hosted volume attachment
+    /// requires it; the concrete adapter is selected at the composition root.
     #[must_use]
-    pub fn with_cinder_client(mut self, cinder: Arc<CinderClient>) -> Self {
-        self.cinder = Some(cinder.clone());
+    pub fn with_attachment_provider(mut self, provider: Arc<dyn VolumeAttachmentProvider>) -> Self {
+        self.cinder = Some(provider.clone());
         self.attachments =
-            AttachmentOrchestrator::new(self.store.clone(), self.provider.clone(), Some(cinder));
+            AttachmentOrchestrator::new(self.store.clone(), self.provider.clone(), Some(provider));
         self
-    }
-
-    #[must_use]
-    pub fn cinder_client(&self) -> Option<Arc<CinderClient>> {
-        self.cinder.clone()
     }
 
     #[must_use]
