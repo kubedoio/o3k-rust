@@ -40,68 +40,59 @@ expected_ids = [f"OP-{i:03d}" for i in range(1, 11)]
 assert [o["id"] for o in outcomes] == expected_ids, (
     "outcomes must be exactly OP-001..OP-010 in order"
 )
-assert len({o["id"] for o in outcomes}) == 10, "duplicate outcome id"
+
+
+def require_str(oid, field, value):
+    assert isinstance(value, str) and value, f"{oid} {field}"
+
+
+def require_strs(oid, field, values):
+    assert values and all(isinstance(v, str) and v for v in values), f"{oid} {field}"
+
 
 for outcome in outcomes:
     oid = outcome["id"]
     for field in required_fields:
         assert field in outcome, f"{oid} missing field {field}"
-    assert isinstance(outcome["name"], str) and outcome["name"], f"{oid} name"
-    assert isinstance(outcome["requirement"], str) and outcome["requirement"], f"{oid} requirement"
-    assert isinstance(outcome["go_behavior"], str) and outcome["go_behavior"], f"{oid} go_behavior"
-    assert outcome["go_paths_consulted"] and all(
-        isinstance(p, str) and p for p in outcome["go_paths_consulted"]
-    ), f"{oid} go_paths_consulted"
+    for field in ("name", "requirement", "go_behavior", "rust_owner", "gap"):
+        require_str(oid, field, outcome[field])
+    for field in ("go_paths_consulted", "evidence", "requires_before_implementation"):
+        require_strs(oid, field, outcome[field])
     assert outcome["rust_status"] in valid_status, f"{oid} rust_status {outcome['rust_status']!r}"
-    assert isinstance(outcome["rust_owner"], str) and outcome["rust_owner"], f"{oid} rust_owner"
     assert outcome["profile"] == valid_profile, f"{oid} profile"
-    assert outcome["evidence"] and all(
-        isinstance(p, str) and p for p in outcome["evidence"]
-    ), f"{oid} evidence"
-    assert isinstance(outcome["gap"], str) and outcome["gap"], f"{oid} gap"
     assert outcome["priority"] in valid_priority, f"{oid} priority {outcome['priority']!r}"
-    assert outcome["requires_before_implementation"] and all(
-        isinstance(r, str) and r for r in outcome["requires_before_implementation"]
-    ), f"{oid} requires_before_implementation"
 
 assert isinstance(doc.get("notes"), list) and doc["notes"], "notes must be a non-empty list"
 print(f"validated operational-outcomes inventory: {len(outcomes)} outcomes, commit {pinned_go_commit}")
 PY
 
-# 2. Static source-bound checks. Every cited evidence path must exist.
-python3 - "${artifact}" <<'PY' | while IFS= read -r path; do
+# 2. Static source-bound checks: every cited path must exist (Go provenance
+#    paths when the pinned reference checkout is present; CI does not clone it).
+python3 - "${artifact}" "${repo_root}" <<'PY'
 import json
+import os
 import sys
 
 doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
-for outcome in doc["outcomes"]:
-    for path in outcome["evidence"]:
-        print(path)
+root = sys.argv[2]
+missing = [
+    f"evidence {p}"
+    for o in doc["outcomes"]
+    for p in o["evidence"]
+    if not os.path.exists(os.path.join(root, p))
+]
+go_root = os.path.join(root, "target/go-o3k-reference")
+if os.path.isdir(go_root):
+    missing += [
+        f"go_paths_consulted {p}"
+        for o in doc["outcomes"]
+        for p in o["go_paths_consulted"]
+        if not os.path.exists(os.path.join(go_root, p))
+    ]
+if missing:
+    print("operational outcomes: missing paths:\n" + "\n".join(missing), file=sys.stderr)
+    sys.exit(1)
 PY
-  if [[ ! -e "${repo_root}/${path}" ]]; then
-    echo "operational outcomes: evidence path missing: ${path}" >&2
-    exit 1
-  fi
-done
-
-# Go reference paths are provenance records; verify them when the pinned
-# checkout is available locally (CI does not clone the Go repository).
-if [[ -d "${repo_root}/target/go-o3k-reference" ]]; then
-  python3 - "${artifact}" <<'PY' | while IFS= read -r path; do
-import json
-import sys
-
-doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
-for outcome in doc["outcomes"]:
-    for path in outcome["go_paths_consulted"]:
-        print(path)
-PY
-    if [[ ! -e "${repo_root}/target/go-o3k-reference/${path}" ]]; then
-      echo "operational outcomes: go_paths_consulted missing in reference checkout: ${path}" >&2
-      exit 1
-    fi
-  done
-fi
 
 check_unit() {
   local unit="$1"
