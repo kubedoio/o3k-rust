@@ -92,10 +92,14 @@ jobs:
         run: bash tests/compatibility-harness.sh
       - name: Test OpenStack CLI failure cleanup
         run: bash tests/openstack-cli-cleanup.sh
+      - name: Test operational outcomes inventory
+        run: bash tests/operational-outcomes.sh
       - name: Test real-libvirt harness contract
         run: bash tests/real-libvirt-harness.sh
       - name: Test packaging safety
         run: bash tests/packaging-safety.sh
+      - name: Test packaging SBOM
+        run: bash tests/packaging-sbom.sh
       - name: Test release bundle installer
         run: bash tests/packaging-bundle.sh
       - name: Test release bundle integrity
