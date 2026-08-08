@@ -70,6 +70,8 @@ jobs:
         run: bash tests/compatibility-target.sh
       - name: Test requirements-to-evidence traceability
         run: bash tests/traceability.sh
+      - name: Test compatibility backlog inventory
+        run: bash tests/compatibility-backlog.sh
       - name: Test ADR governance metadata
         run: bash tests/adr-governance.sh
       - name: Test reproducible toolchain evidence

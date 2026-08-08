@@ -1,0 +1,2229 @@
+{
+  "schema_version": 1,
+  "format": "json-compatible-yaml-1.2",
+  "inventory_version": "0.1.0",
+  "title": "O3K Rust compatibility backlog inventory by user journey",
+  "purpose": "Machine-readable candidate-behavior inventory for future OpenStack-compatible work, grouped by client/user journey (SPEC-0025 'Compatibility expansion after the first vertical slice'). Inventory only: a candidate is not implemented, advertised, or supported because it appears here, and route counts in this file are never progress or release percentages (ADR-0004).",
+  "profile": "native-rust-testlab",
+  "source_accessed": "2026-08-08",
+  "go_reference": {
+    "repository": "https://github.com/kubedoio/o3k",
+    "commit": "53fd2cb36ee79f42da49c8181d6ceed12b41b3aa",
+    "license": "Apache-2.0",
+    "policy": "Non-normative secondary reference under ADR-0151: route/field inventory, failure scenarios, and operational lessons only. No Go architecture, package layout, or database layout is proposed for reuse."
+  },
+  "rust_reference": {
+    "repository": "https://github.com/kubedoio/o3k-rust",
+    "commit": "5e03d2e4cc8c895ee6eacbd87fda1eb4ceaf2020"
+  },
+  "priorities": {
+    "blocks-declared-journey": "needed by a declared profile workflow: the native TestLab alpha (SPEC-0022/0025), the external-Cinder testbed satellite operations (SPEC-0023), or the SPEC-0025 operational-replacement list",
+    "useful-later": "would improve a client journey but no declared workflow requires it yet",
+    "intentionally-omitted": "explicit non-goal of an accepted spec; implementation requires the named amendment first"
+  },
+  "rust_status_vocabulary": {
+    "missing": "no Rust route or implementation",
+    "partial": "route/implementation exists with a concrete gap (fields, filters, microversion, or compatibility record)",
+    "implemented": "implemented and recorded in docs/compatibility/",
+    "unsupported": "explicitly outside the declared profile"
+  },
+  "failure_seen_rule": "Values are evidence-bound descriptions only when executable evidence exists; the literal value 'not-exercised' means the client was not run against O3K for this candidate and no failure was observed.",
+  "recommendation": "Improve next: openstack-cli (Nova volume attach/detach contract plus identity admin lists), then openstacksdk (identity admin CRUD via the SPEC-0023 gate flow), then operator (/readyz reason body plus identity admin CRUD). The Placement public API is useful-later pending a SPEC-0022 freeze decision (baseline classifies placement optional, issue #82). Defer terraform until the CLI/SDK slices land; defer horizon.",
+  "journeys": [
+    {
+      "id": "openstack-cli",
+      "name": "OpenStack CLI (python-openstackclient) portable workflow",
+      "client": "python-openstackclient 10.2.1 (openstacksdk 4.17.0)",
+      "recommendation": "Improve next (SPEC-0025 expansion order #1). First bounded slice: declare the Nova volume attach/detach contract for the SPEC-0023 testbed, then identity admin list operations and server list filters. The Placement public API is useful-later until a SPEC-0022 freeze decision moves it (baseline classifies placement optional, issue #82).",
+      "candidates": [
+        {
+          "id": "openstack-cli-001",
+          "user_outcome": "A user lists the Placement resource providers registered by the control plane.",
+          "client_command": "openstack resource provider list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/placement/#resource-providers"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 placement public-API freeze (testlab-api-baseline.json classifies placement optional, issue #82; becomes blocks-declared-journey after the freeze)",
+            "compatibility record for GET /resource_providers",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-002",
+          "user_outcome": "A user creates and inspects a Placement allocation for a consumer (server) exactly at microversion 1.28.",
+          "client_command": "openstack resource provider allocation set",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/placement/#set-allocations-for-a-consumer"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 placement allocation public-API freeze (testlab-api-baseline.json classifies placement optional, issue #82 tracks the allocation-candidate state; becomes blocks-declared-journey after the freeze)",
+            "compatibility record for PUT /allocations/{consumer_uuid} at exact microversion 1.28",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-003",
+          "user_outcome": "A user inspects the VCPU/MEMORY_MB/DISK_GB inventory of a resource provider.",
+          "client_command": "openstack resource provider inventory list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/placement/#resource-provider-inventories"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-004",
+          "user_outcome": "A user queries Placement allocation candidates for a resource request.",
+          "client_command": "openstack resource provider allocation candidate list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/placement/#allocation-candidates"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-005",
+          "user_outcome": "A user lists projects and their domains to understand the identity universe.",
+          "client_command": "openstack project list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/domains.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-006",
+          "user_outcome": "A user lists users, including the seeded service user used by the external Cinder profile.",
+          "client_command": "openstack user list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-users"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-007",
+          "user_outcome": "A user lists roles and role assignments to verify service-user authorization.",
+          "client_command": "openstack role list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-roles"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/policy_handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-008",
+          "user_outcome": "A user lists catalog services and confirms the volumev3 service is registered as external-hosted.",
+          "client_command": "openstack service list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-services"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-009",
+          "user_outcome": "A user lists catalog endpoints and inspects the external Cinder endpoint advertisement.",
+          "client_command": "openstack endpoint list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-endpoints"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-010",
+          "user_outcome": "An image owner shares an image with another project.",
+          "client_command": "openstack image member add",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/image/v2/index.html#create-an-image-member"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-011",
+          "user_outcome": "An image owner lists the members an image is shared with.",
+          "client_command": "openstack image member list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/image/v2/index.html#list-image-members"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-012",
+          "user_outcome": "A user shows hypervisor/guest diagnostic counters for a running server.",
+          "client_command": "openstack server show --diagnostics",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#show-server-diagnostics"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go",
+            "internal/nova/diagnostics.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-013",
+          "user_outcome": "A user filters the server list by status or caps the page size; today the query parameters are ignored and every server is returned.",
+          "client_command": "openstack server list --status ACTIVE --limit 10",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#list-servers"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-014",
+          "user_outcome": "A user lists networks with provider attributes (provider network type, physical network, segmentation ID, MTU); these fields are absent from the response so the columns are blank.",
+          "client_command": "openstack network list --long",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-networks"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/router.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-015",
+          "user_outcome": "A user lists security groups for the project.",
+          "client_command": "openstack security group list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-security-groups"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (security groups are an explicit first-alpha network non-include)"
+          ]
+        },
+        {
+          "id": "openstack-cli-016",
+          "user_outcome": "A user lists L3 routers for the project.",
+          "client_command": "openstack router list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-routers"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/router.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (routers are an explicit first-alpha network non-include)"
+          ]
+        },
+        {
+          "id": "openstack-cli-017",
+          "user_outcome": "A user creates, shows, and deletes volumes through the catalog-advertised volumev3 endpoint; in the external-Cinder testbed this endpoint is external-hosted and O3K never implements it.",
+          "client_command": "openstack volume create/show/delete",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#create-volume"
+          ],
+          "go_paths_consulted": [
+            "internal/cinder/volumes.go"
+          ],
+          "rust_status": "unsupported",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0023 external-hosted volumev3 endpoint evidence for the testbed CLI journey",
+            "SPEC-0022/SPEC-0025 amendment before any O3K-owned native volume profile is frozen"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstack-cli-018",
+          "user_outcome": "A user creates a keypair without supplying a public key and receives a generated private key; the baseline supports public-key import only.",
+          "client_command": "openstack keypair create mykey",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#create-or-import-keypair",
+            "https://docs.openstack.org/python-openstackclient/latest/cli/command-objects/keypair.html"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go",
+            "internal/nova/keypairs.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstack-cli-019",
+          "user_outcome": "A user attaches a volume to a server through the Nova API; handlers and the outbound Cinder orchestrator exist but no compatibility record, contract test, or CLI evidence covers the POST success path.",
+          "client_command": "openstack server volume attach",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#attach-a-volume-to-an-instance"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go",
+            "internal/nova/volume_attachment.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 amendment freezing the Nova 2.1 POST attach contract (only the 2.89 GET profile is declared today)",
+            "compatibility matrix record for attach",
+            "black-box gate test (extension of gate_c_nova_callback.rs)"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstack-cli-020",
+          "user_outcome": "A user detaches a volume from a server through the Nova API; the DELETE handler exists but has no compatibility record, contract test, or CLI evidence.",
+          "client_command": "openstack server volume detach",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#detach-a-volume-from-an-instance"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go",
+            "internal/nova/volume_attachment.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 amendment freezing the Nova 2.1 DELETE detach contract",
+            "compatibility matrix record for detach",
+            "black-box gate test covering detach and repeated detach (SPEC-0023 failure matrix)"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstack-cli-021",
+          "user_outcome": "A user updates server metadata or name after creation.",
+          "client_command": "openstack server set --name --property",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#update-server"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go",
+            "internal/nova/server_update.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "openstack-cli-022",
+          "user_outcome": "A user creates a subnet with DNS nameservers or DHCP flags and shows them later; the request/response omit dns_nameservers, enable_dhcp, and ip_version.",
+          "client_command": "openstack subnet create --dns-nameserver 1.1.1.1 --enable-dhcp",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "openstacksdk",
+      "name": "openstacksdk programmatic workflows",
+      "client": "openstacksdk 4.17.0",
+      "recommendation": "Improve second (SPEC-0025 expansion order #2). First bounded slice: the SPEC-0022 external-service gate flow over public APIs - project/user/role CRUD plus service/endpoint registration - verified with conn.identity.* against a service user. The Placement HTTP surface follows a SPEC-0022 freeze decision (baseline classifies placement optional, issue #82).",
+      "candidates": [
+        {
+          "id": "openstacksdk-001",
+          "user_outcome": "A script imports an image into Glance by URL or staged bytes without transferring them through the script",
+          "client_command": "conn.image.import_image(image, method='web-download', uri=...) or conn.image.stage_image(image, data)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/image.html",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#import-an-image"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/import.go",
+            "internal/glance/images.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (image baseline: import outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-002",
+          "user_outcome": "An image is shared with another project by adding and updating an image member",
+          "client_command": "conn.image.add_member(image, member_id, status='pending'), conn.image.members(image), conn.image.update_member(member, status='accepted')",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/image.html",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#create-image-member"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go",
+            "internal/glance/sharing_test.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (image baseline: members outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-003",
+          "user_outcome": "A script submits and waits on an asynchronous Glance task (e.g. import) and reads task status",
+          "client_command": "conn.image.create_task(type='import', input={...}), conn.image.tasks(), conn.image.wait_for_task(task)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/image.html",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#create-task"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/tasks.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (image baseline: tasks outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-004",
+          "user_outcome": "An operator deactivates an image so it cannot be used for new servers, then reactivates it",
+          "client_command": "conn.image.deactivate_image(image), conn.image.reactivate_image(image)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/image.html",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#deactivate-image"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (image baseline: deactivate outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-005",
+          "user_outcome": "A script rebuilds a server onto a new image (reimage) preserving the server identity",
+          "client_command": "conn.compute.rebuild_server(server, image, name=...)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/compute.html",
+            "https://docs.openstack.org/api-ref/compute/#rebuild-server-rebuild-action"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/advanced_actions.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 compute 'Not included' list (resize, rebuild, rescue, live migration, evacuation) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-006",
+          "user_outcome": "An operator rescues, evacuates, or migrates a server between hosts",
+          "client_command": "conn.compute.rescue_server(server, admin_pass=...), conn.compute.unrescue_server(server), conn.compute.evacuate_server(server, host=...), conn.compute.migrate_server(server, host=...), conn.compute.live_migrate_server(server, host=...)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/compute.html",
+            "https://docs.openstack.org/api-ref/compute/#rescue-server-rescue-action",
+            "https://docs.openstack.org/api-ref/compute/#evacuate-server-evacuate-action",
+            "https://docs.openstack.org/api-ref/compute/#migrate-server-migrate-action"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/advanced_actions.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 compute 'Not included' list (resize, rebuild, rescue, live migration, evacuation) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-007",
+          "user_outcome": "A script reads and writes flavor extra-specs (e.g. scheduler hints) after creating a flavor",
+          "client_command": "conn.compute.create_flavor_extra_specs(flavor, specs={'hw:cpu_policy': 'dedicated'}), conn.compute.get_flavor_extra_specs_property(flavor, 'hw:cpu_policy')",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/compute.html",
+            "https://docs.openstack.org/api-ref/compute/#create-extra-specs-for-a-flavor"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/flavors.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: flavor extra-specs outside alpha per matrix deviation)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-008",
+          "user_outcome": "An operator groups hosts into an aggregate and assigns an availability zone to it",
+          "client_command": "conn.compute.create_aggregate(name='az1', availability_zone='az1'), conn.compute.aggregates()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/compute.html",
+            "https://docs.openstack.org/api-ref/compute/#create-aggregate"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/aggregates.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: aggregates outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-009",
+          "user_outcome": "A script creates an anti-affinity server group and launches servers into it",
+          "client_command": "conn.compute.create_server_group(name='grp', policies=['anti-affinity']), conn.compute.server_groups()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/compute.html",
+            "https://docs.openstack.org/api-ref/compute/#create-server-group"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/servergroups.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 compute 'Not included' list (server groups, NUMA, PCI passthrough) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-010",
+          "user_outcome": "A script creates a router, connects a subnet, and sets a gateway",
+          "client_command": "conn.network.create_router(name=...), conn.network.add_interface_to_router(router, subnet_id=...), conn.network.add_gateway_to_router(router, external_network_id=...)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/network.html",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-router"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/router.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 network 'Not included' list (routers, floating IPs, security groups, VLAN/VXLAN, OVS/OVN) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-011",
+          "user_outcome": "A script allocates a floating IP from a pool and associates it with a server port",
+          "client_command": "conn.network.create_floating_ip(network=...), conn.network.floating_ips()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/network.html",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-floating-ip"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/floatingip.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 network 'Not included' list (routers, floating IPs, security groups, VLAN/VXLAN, OVS/OVN) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-012",
+          "user_outcome": "A script creates a security group with allow rules and applies it to a port or server",
+          "client_command": "conn.network.create_security_group(name=...), conn.network.create_security_group_rule(secgroup, direction='ingress', ...), conn.network.security_groups()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/network.html",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-security-group"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/ports.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 network 'Not included' list (routers, floating IPs, security groups, VLAN/VXLAN, OVS/OVN) — needs spec amendment before implementation",
+            "compatibility contract record"
+          ]
+        },
+        {
+          "id": "openstacksdk-013",
+          "user_outcome": "An admin shares a network with another project through an RBAC policy",
+          "client_command": "conn.network.create_rbac_policy(object_type='network', object_id=..., target_tenant=...), conn.network.rbac_policies()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/network.html",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-rbac-policy"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/rbac.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (network baseline: RBAC outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-014",
+          "user_outcome": "An operator defines a subnet pool so subnets can be allocated from a shared prefix space",
+          "client_command": "conn.network.create_subnet_pool(name=..., prefixes=['10.0.0.0/8']), conn.network.subnet_pools()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/network.html",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet-pool"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/subnet_pools.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (network baseline: subnet pools outside alpha)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-015",
+          "user_outcome": "A scripted testbed creates, lists, and deletes identity users for service or tenant administration",
+          "client_command": "conn.identity.create_user(name=..., password=...), conn.identity.users(), conn.identity.delete_user(user)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-user"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/auth.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 route/field manifest record (durable user identities + service users)",
+            "SPEC-0022 external-service gate flow ('create service project/user/roles' via public APIs; full-profile workflows must use public APIs and standard clients)",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstacksdk-016",
+          "user_outcome": "A scripted testbed creates, lists, and deletes projects for the external-Cinder satellite workflow",
+          "client_command": "conn.identity.create_project(name=...), conn.identity.projects(), conn.identity.delete_project(project)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-project"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 route/field manifest record (durable project identities + service project)",
+            "SPEC-0022 external-service gate flow",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstacksdk-017",
+          "user_outcome": "A scripted testbed creates roles and grants them on a project to a user (role assignments)",
+          "client_command": "conn.identity.create_role(name=...), conn.identity.assign_project_role_to_user(project, user, role), conn.identity.role_assignments()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-role",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-role-assignments"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 route/field manifest record (durable role and role-assignment identities)",
+            "SPEC-0022 external-service gate flow",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstacksdk-018",
+          "user_outcome": "An admin creates and lists identity domains beyond the seeded default domain",
+          "client_command": "conn.identity.create_domain(name=...), conn.identity.domains()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-domain"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/domains.go",
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0023 amendment (default domain suffices for the current satellite)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-019",
+          "user_outcome": "An admin registers a service and its endpoints so the catalog can advertise an external-hosted service (e.g. volumev3)",
+          "client_command": "conn.identity.create_service(type='volumev3', name='cinder'), conn.identity.create_endpoint(service=..., url=..., interface='public', region='RegionOne'), conn.identity.services(), conn.identity.endpoints()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-service",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-endpoint"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/services.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 route/field manifest record (services, regions, endpoints, catalog ownership)",
+            "SPEC-0022 external-service gate flow ('register external-hosted endpoint' via public APIs)",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstacksdk-020",
+          "user_outcome": "An admin manages identity groups and their user membership",
+          "client_command": "conn.identity.create_group(name=...), conn.identity.add_user_to_group(user, group), conn.identity.groups()",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/identity.html",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-group"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/groups.go",
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022/0023 amendment (groups not required by declared satellite ops)",
+            "compatibility contract record",
+            "black-box contract test"
+          ]
+        },
+        {
+          "id": "openstacksdk-021",
+          "user_outcome": "A script creates, shows, and deletes a Cinder volume through the SDK",
+          "client_command": "conn.block_storage.create_volume(size=1, name=...), conn.block_storage.get_volume(volume), conn.block_storage.delete_volume(volume)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/block_storage.html",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#create-a-volume",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#delete-a-volume"
+          ],
+          "go_paths_consulted": [
+            "internal/cinder/volumes.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 native-volume non-goal ('The first ephemeral-root profile does not require or advertise native Cinder') and SPEC-0025 non-goals (native Cinder before the ephemeral-root guest) — needs a separate native persistent-volume spec",
+            "SPEC-0023 keeps volumev3 external-hosted (Cinder owns its API)"
+          ]
+        },
+        {
+          "id": "openstacksdk-022",
+          "user_outcome": "A script attaches a volume to a server and detaches it via the SDK attachment API",
+          "client_command": "conn.compute.create_volume_attachment(server, volume, ...), conn.compute.delete_volume_attachment(attachment) (legacy: conn.block_storage.attach_volume/detach_volume)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/guides/block_storage.html",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#attach-volume-to-a-server",
+            "https://docs.openstack.org/api-ref/compute/#list-volume-attachments-for-an-instance"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/volume_attachment.go",
+            "internal/cinder/volumes.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "Nova os-volume_attachments POST/DELETE/GET routes exist (crates/o3k-api/src/lib.rs:222-228; 2.89 GETs implemented+verified per matrix.yaml) but end-to-end SDK attach requires a volumev3 catalog entry and an external/native volume — contract record for the full flow",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "openstacksdk-023",
+          "user_outcome": "A script lists and shows placement resource providers and their aggregates",
+          "client_command": "conn.placement.resource_providers(), conn.placement.get_resource_provider(uuid), conn.placement.get_resource_provider_aggregates(rp)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/proxies/placement.html",
+            "https://docs.openstack.org/api-ref/placement/#resource-providers"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 placement public-API freeze (testlab-api-baseline.json classifies placement optional, issue #82; becomes blocks-declared-journey after the freeze)",
+            "compatibility contract record",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstacksdk-024",
+          "user_outcome": "A script reads and updates per-provider inventories (VCPU/MEMORY_MB/DISK_GB) with generation protection",
+          "client_command": "conn.placement.resource_provider_inventories(rp), conn.placement.create_resource_provider_inventory(rp, resource_class='VCPU', total=...), conn.placement.get_resource_provider_inventory(rp, 'VCPU')",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/proxies/placement.html",
+            "https://docs.openstack.org/api-ref/placement/#list-resource-provider-inventories"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 placement public-API freeze (testlab-api-baseline.json classifies placement optional, issue #82; becomes blocks-declared-journey after the freeze)",
+            "compatibility contract record",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "openstacksdk-025",
+          "user_outcome": "An operator inspects resource-provider usage and consumer allocations through the public Placement API",
+          "client_command": "GET /resource_providers/{uuid}/usages and GET /allocations/{consumer_uuid} (no openstacksdk proxy methods for usage/allocations; raw API requests)",
+          "official_sources": [
+            "https://docs.openstack.org/openstacksdk/latest/user/proxies/placement.html",
+            "https://docs.openstack.org/api-ref/placement/#resource-provider-usages",
+            "https://docs.openstack.org/api-ref/placement/#allocations"
+          ],
+          "go_paths_consulted": [
+            "internal/placement/placement.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 placement public-API freeze (testlab-api-baseline.json classifies placement optional, issue #82; becomes blocks-declared-journey after the freeze)",
+            "compatibility contract record",
+            "black-box contract test"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "terraform",
+      "name": "Terraform OpenStack provider workflows",
+      "client": "terraform-provider-openstack v3.4.0 with Terraform CLI",
+      "recommendation": "Defer until the CLI/SDK slices land. First bounded slice when started: plain terraform apply/plan/destroy with keypair/flavor/image/network/subnet/port/instance resources (no router/FIP/security group), surfacing the field and filter gaps recorded below.",
+      "candidates": [
+        {
+          "id": "terraform-001",
+          "user_outcome": "A terraform apply/plan cycle creates a compute instance on a flat keyed network, polls it to ACTIVE, reads it back, and destroys it cleanly; the core path works, but create still diverges on config_drive-without-keypair and read-back misses created/updated timestamps.",
+          "client_command": "POST /v2.1/{project_id}/servers (body: name, imageRef, flavorRef, networks[{uuid|port}], key_name, config_drive, user_data base64, security_groups[{name}], metadata), then poll GET /v2.1/{project_id}/servers/{id} until status=ACTIVE, DELETE /v2.1/{project_id}/servers/{id} on destroy and wait for 404",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/compute_instance_v2",
+            "https://docs.openstack.org/api-ref/compute/#create-server",
+            "https://docs.openstack.org/api-ref/compute/#show-server-details",
+            "https://docs.openstack.org/api-ref/compute/#delete-server"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for Terraform instance lifecycle",
+            "black-box test: terraform apply/plan converges on instance create-read-delete"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-002",
+          "user_outcome": "Instance create/read fields the provider depends on — security_groups (names), metadata, tags, admin_pass, availability_zone — are accepted and echoed back so a config with them converges; today they are silently dropped by serde and the server response always returns an empty metadata object.",
+          "client_command": "POST /v2.1/{project_id}/servers with security_groups:[{name}], metadata:{...}, tags:[...]; PUT /v2.1/{project_id}/servers/{id}/metadata when metadata changes; GET /v2.1/{project_id}/servers/{id} must return security_groups, metadata, created, updated, tags",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/compute_instance_v2",
+            "https://docs.openstack.org/api-ref/compute/#create-server",
+            "https://docs.openstack.org/api-ref/compute/#update-server-metadata"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for server metadata and security-groups wire fields",
+            "black-box test: server create with metadata/security_groups round-trips and updates"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-003",
+          "user_outcome": "A keypair created without public_key (provider default) works: the API generates the pair and returns private_key; O3K instead answers 400 'public_key is required' because private-key generation is intentionally unsupported, so only the explicit public_key import mode can be used.",
+          "client_command": "POST /v2.1/{project_id}/os-keypairs with body {keypair:{name, type:ssh}} and no public_key; provider expects 200 with keypair.private_key returned",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/compute_keypair_v2",
+            "https://docs.openstack.org/api-ref/compute/#create-keypair"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment or explicit deviation record for server-side keypair generation",
+            "black-box test: keypair create without public_key (or documented 400)"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-004",
+          "user_outcome": "Flavor resource converges: is_public, ephemeral, swap, rx_tx_factor, flavor_id are stored and extra_specs round-trip; O3K flavor create only accepts name/vcpus/ram/disk and has no /os-extra_specs routes, so extra_specs configs never converge.",
+          "client_command": "POST /v2.1/{project_id}/flavors (body: name, ram, vcpus, disk, is_public, ephemeral, swap, rx_tx_factor, flavor_id) then POST/PUT/GET/DELETE /v2.1/{project_id}/flavors/{id}/os-extra_specs for extra_specs",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/compute_flavor_v2",
+            "https://docs.openstack.org/api-ref/compute/#create-flavor",
+            "https://docs.openstack.org/api-ref/compute/#flavor-extra-specs"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/flavors.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for flavor extra fields and os-extra_specs",
+            "black-box test: flavor create with extra_specs"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-005",
+          "user_outcome": "Image resource converges: min_disk_gb, min_ram_mb, protected, hidden, tags, properties are persisted and readable, and local-file upload plus checksum verification work; O3K image create/read lacks all of those fields, has no PATCH /v2/images/{id} update, and the web_download path needs the explicitly-excluded Glance import API.",
+          "client_command": "POST /v2/images (name, container_format, disk_format, visibility, min_disk, min_ram, protected, hidden, tags, properties), PUT /v2/images/{id}/file, poll GET /v2/images/{id} to active, PATCH /v2/images/{id} on update; web_download=true uses POST /v2/images/{id}/import with web-download method",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/images_image_v2",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#create-image",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#upload-binary-image-data",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#update-image"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go",
+            "internal/glance/import.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for Glance field surface (min_disk/min_ram/protected/tags/properties) and PATCH",
+            "black-box test: image create with properties/tags and update"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-006",
+          "user_outcome": "Network resource converges for a testbed: external (router:external), port_security_enabled, mtu, shared, segments, tags are stored and returned, and name/admin_state_up updates work; O3K network create accepts only name and the response lacks every one of those attributes, so such configs never converge.",
+          "client_command": "POST /v2.0/networks (name, admin_state_up, router:external, port_security_enabled, mtu, shared, segments, tags), PUT /v2.0/networks/{id} on update, GET /v2.0/networks/{id} must echo router:external and port_security_enabled",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_network_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-network",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#update-network"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for network attribute surface and PUT update",
+            "black-box test: network create with external/port_security_enabled round-trip"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-007",
+          "user_outcome": "Subnet resource converges: ip_version, enable_dhcp, dns_nameservers, no_gateway, tags are stored and returned and gateway_ip/dns updates work; O3K subnet create/read supports only name/network_id/cidr/gateway_ip/allocation_pools and has no PUT /v2.0/subnets/{id}.",
+          "client_command": "POST /v2.0/subnets (network_id, cidr, ip_version, gateway_ip, no_gateway, enable_dhcp, dns_nameservers, allocation_pools, tags), PUT /v2.0/subnets/{id} on update; GET /v2.0/subnets/{id} must return ip_version, enable_dhcp, dns_nameservers",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_subnet_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-subnet",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#update-subnet"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for subnet attribute surface and PUT update",
+            "black-box test: subnet create with enable_dhcp/dns_nameservers round-trip"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-008",
+          "user_outcome": "Port resource converges: fixed_ip{subnet_id,ip_address} requests, security_group_ids, mac_address, device_id/device_owner, no_security_groups, port_security_enabled, allowed_address_pairs, tags are honored and echoed; O3K port create accepts only name+network_id (requested fixed IPs and security groups are dropped) and there is no PUT /v2.0/ports/{id} update.",
+          "client_command": "POST /v2.0/ports (network_id, name, fixed_ips[{subnet_id,ip_address}], security_groups, mac_address, device_id, device_owner, admin_state_up, allowed_address_pairs, tags), PUT /v2.0/ports/{id} on update; GET /v2.0/ports/{id} must return fixed_ips, security_groups, mac_address",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_port_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-port",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#update-port"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/ports.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for port attribute surface and PUT update",
+            "black-box test: port create with fixed_ip{ip_address} and security_group_ids"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "terraform-009",
+          "user_outcome": "Router resource creates with an external gateway (external_gateway_info), updates, and deletes; routers are an explicit SPEC-0022 native-TestLab non-include, so no /v2.0/routers routes exist at all in O3K.",
+          "client_command": "POST /v2.0/routers (name, admin_state_up, external_gateway_info:{network_id, enable_snat}), PUT /v2.0/routers/{id} (gateway change), PUT /v2.0/routers/{id}/add_router_interface and /remove_router_interface, DELETE /v2.0/routers/{id}",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_router_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-router",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#update-router",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#add-router-interface"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (routers are in the native TestLab 'not included' list)",
+            "contract record and black-box test for router lifecycle"
+          ]
+        },
+        {
+          "id": "terraform-010",
+          "user_outcome": "Security group resource (and its companion rule resource) creates, reads, updates, and deletes groups; security groups are an explicit SPEC-0022 native-TestLab non-include, so /v2.0/security-groups and /v2.0/security-group-rules routes do not exist in O3K, and instance/port security_groups fields are consequently inert.",
+          "client_command": "POST /v2.0/security-groups (name, description, stateful), GET/PUT/DELETE /v2.0/security-groups/{id}, POST /v2.0/security-group-rules (direction, ethertype, protocol, port_range_min/max, remote_ip_prefix, security_group_id)",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_secgroup_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-security-group",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-security-group-rule"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (security groups are in the native TestLab 'not included' list)",
+            "contract record and black-box test for security group lifecycle"
+          ]
+        },
+        {
+          "id": "terraform-011",
+          "user_outcome": "Floating IP resource allocates from a pool (name resolved to network), polls for an address, associates to a port, and disassociates on destroy; floating IPs are an explicit SPEC-0022 native-TestLab non-include, so /v2.0/floatingips routes do not exist in O3K.",
+          "client_command": "GET /v2.0/networks?name=<pool> to resolve the pool, POST /v2.0/floatingips (floating_network_id, port_id, fixed_ip_address, subnet_id), poll GET /v2.0/floatingips/{id} for address, PUT /v2.0/floatingips/{id} to associate/disassociate, DELETE /v2.0/floatingips/{id}",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/networking_floatingip_v2",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#create-floating-ip",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#update-floating-ip"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/floatingip.go",
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (floating IPs are in the native TestLab 'not included' list)",
+            "contract record and black-box test for floating IP lifecycle"
+          ]
+        },
+        {
+          "id": "terraform-012",
+          "user_outcome": "Identity user resource creates a user with password, default_project_id, enabled, and extra fields, then reads, updates, and deletes it; O3K Keystone-compatible identity implements only token issuance/validation, so the /v3/users admin routes are missing.",
+          "client_command": "POST /v3/users (name, password, default_project_id, domain_id, enabled, description, options), GET/PATCH/DELETE /v3/users/{id}, GET /v3/users?name=<name> for read-back",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/identity_user_v3",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-user",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#update-user"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for Keystone user admin API",
+            "black-box test: user create/read/update/delete with scoped token"
+          ]
+        },
+        {
+          "id": "terraform-013",
+          "user_outcome": "Identity project resource creates, reads, updates, and deletes projects with description, enabled, parent_id, and tags; O3K identity only supports the fixed bootstrap project used by the native TestLab workflow, so /v3/projects admin routes are missing.",
+          "client_command": "POST /v3/projects (name, description, domain_id, enabled, parent_id, tags), GET/PATCH/DELETE /v3/projects/{id}, GET /v3/projects?name=<name> for read-back",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/identity_project_v3",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-project",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#update-project"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for Keystone project admin API",
+            "black-box test: project create/read/update/delete and token scoping"
+          ]
+        },
+        {
+          "id": "terraform-014",
+          "user_outcome": "Role assignment resource assigns a role to a user on a project and removes it; this requires role CRUD plus the assignment routes (/v3/projects/{p}/users/{u}/roles/{r}) and role_assignments listing, none of which exist in O3K identity.",
+          "client_command": "POST /v3/roles (name) and GET/DELETE /v3/roles/{id}; PUT /v3/projects/{project_id}/users/{user_id}/roles/{role_id} to assign, DELETE to unassign, GET /v3/role_assignments?user.id=&project.id=&role.id= for read-back",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/identity_role_assignment_v3",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-role",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#assign-role-to-user-on-project",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-role-assignments"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for Keystone role and role-assignment API",
+            "black-box test: role create/assign/read/unassign/delete"
+          ]
+        },
+        {
+          "id": "terraform-015",
+          "user_outcome": "Block storage volume resource creates a volume, polls it to available, attaches via the compute attach resource, and deletes it; native Cinder is an explicit non-goal of the native TestLab profile, and the current provider (v3.4.0) ships only openstack_blockstorage_volume_v3 over volumev3, so no volumev2/volumev3 CRUD is planned.",
+          "client_command": "POST /v2/{project_id}/volumes (or volumev3) with size/name/imageRef, poll GET /v2/{project_id}/volumes/{id} until status=available, GET /v2/{project_id}/volumes?name=<name> for read-back, DELETE /v2/{project_id}/volumes/{id}",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/resources/blockstorage_volume_v3",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#create-volume",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#show-volume-details"
+          ],
+          "go_paths_consulted": [
+            "internal/cinder/volumes.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 native persistent-volume profile (ephemeral-root alpha does not require or advertise native Cinder)",
+            "SPEC-0025 non-goals list native Cinder before the ephemeral-root guest",
+            "external-Cinder route (SPEC-0023) instead catalogs the real volumev3 endpoint for a service-testbed slice"
+          ]
+        },
+        {
+          "id": "terraform-016",
+          "user_outcome": "Name-based and attribute-based lookups the provider relies on (image_name, flavor_name, network{name}, floating IP pool name, port device_id data sources) return filtered results; all O3K list handlers (images, networks, subnets, ports, flavors, servers) ignore query parameters, so unfiltered collections leak into name resolution and multi-match errors.",
+          "client_command": "GET /v2/images?name=<name>, GET /v2.0/networks?name=<name>, GET /v2.0/ports?device_id=<id>&network_id=<id>, GET /v2.1/{project_id}/flavors?name=<name> — each must return only matching resources",
+          "official_sources": [
+            "https://registry.terraform.io/providers/terraform-provider-openstack/openstack/latest/docs/data-sources/images_image_v2",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#list-images",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-networks",
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-ports"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go",
+            "internal/neutron/floatingip.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record for list query-filter surface",
+            "black-box test: filtered list queries return only matches"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "horizon",
+      "name": "Horizon web UI workflows",
+      "client": "OpenStack Horizon dashboard 2026.1 (Gazpacho series)",
+      "recommendation": "Not now. Horizon is not in a declared journey; the login-to-landing path is mostly implemented and would need only read-only additions (auth/projects, tenant-usage, quota-sets); VNC console requires a novncproxy deployment decision and a Nova microversion-window amendment.",
+      "candidates": [
+        {
+          "id": "horizon-001",
+          "user_outcome": "Horizon 'Orchestration > Stacks' panel renders the stack list, which requires an 'orchestration' service entry in the token catalog and a Heat stacks endpoint that O3K does not advertise today.",
+          "client_command": "GET /v3/auth/tokens (catalog) then heatclient GET /v1/{project_id}/stacks (Horizon Orchestration > Stacks panel)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/orchestration/v1/index.html#list-stacks",
+            "https://docs.openstack.org/horizon/latest/"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/auth.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record (orchestration service entry and ownership mode)",
+            "SPEC-0022 amendment or accepted heat endpoint decision",
+            "black-box test id: health.rs::keystone_catalog_contains_all_testlab_services_and_consistent_urls (amendment)"
+          ]
+        },
+        {
+          "id": "horizon-002",
+          "user_outcome": "Horizon 'Volumes' panel lists volumes via cinderclient GET /v3/{project_id}/volumes; the native profile has no volume API, and the volumev3 catalog entry appears only when an external Cinder endpoint is configured under the SPEC-0023 testbed profile.",
+          "client_command": "cinderclient GET /v3/{project_id}/volumes (Horizon Project > Volumes panel)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#list-accessible-volumes",
+            "https://docs.openstack.org/api-ref/block-storage/v3/index.html#volumes-volumes"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/auth.go",
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 native persistent-volume profile amendment (first ephemeral-root baseline does not require or advertise native Cinder)",
+            "SPEC-0023 external-hosted catalog configuration for the testbed profile",
+            "contract record"
+          ]
+        },
+        {
+          "id": "horizon-003",
+          "user_outcome": "Glance image list/show work, but the response omits protected, tags, created_at, and updated_at that the Horizon image table and detail view read, so those columns render empty for a basic image-list session.",
+          "client_command": "openstack image list / image show (GET /v2/images, GET /v2/images/{id})",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/image/v2/index.html#list-images",
+            "https://docs.openstack.org/api-ref/image/v2/index.html#show-image-details"
+          ],
+          "go_paths_consulted": [
+            "internal/glance/images.go"
+          ],
+          "rust_status": "implemented",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record (image response field expansion)",
+            "black-box test id: health.rs::glance_image_lifecycle_is_project_scoped_and_immutable_after_upload (field assertions)"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "horizon-004",
+          "user_outcome": "Nova server list/detail/show succeed, but the response omits created_at, updated_at, task_state, power_state, and user_id that the Horizon Instances table (Age, Task, Power State columns) and instance detail page read, so those cells render empty.",
+          "client_command": "openstack server list --long / server show (GET /v2.1/{project_id}/servers/detail, GET /v2.1/{project_id}/servers/{id})",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#list-servers-detailed",
+            "https://docs.openstack.org/api-ref/compute/#show-server-details"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "implemented",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record (server detail response field expansion)",
+            "black-box test id: health.rs::nova_server_lifecycle_uses_project_scoped_envelopes (field assertions)"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "horizon-005",
+          "user_outcome": "Horizon's project switcher dropdown lists the projects a user can access via GET /v3/auth/projects, a route the Rust identity router does not register, so a basic session can only ever see its current project.",
+          "client_command": "keystoneclient GET /v3/auth/projects (Horizon project switcher; keystoneclient projects.list for non-admin)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects-for-user"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (identity baseline: auth-projects list)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-006",
+          "user_outcome": "The Launch Instance dialog's Availability Zone dropdown populates from GET /v2.1/{project_id}/os-availability-zone, which is not routed in Rust, so the dialog renders without availability-zone choices.",
+          "client_command": "openstack availability zone list (GET /v2.1/{project_id}/os-availability-zone)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#os-availability-zone"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: availability-zone list)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-007",
+          "user_outcome": "The Horizon instance console tab calls the os-getVNCConsole server action (novaclient get_vnc_console) to open noVNC; Rust's server action handler only implements os-getConsoleOutput, os-start, os-stop, and reboot, so the console tab cannot return a VNC URL.",
+          "client_command": "POST /v2.1/{project_id}/servers/{id}/action {\"os-getVNCConsole\":{\"type\":\"novnc\"}} (novaclient servers.get_vnc_console)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#get-vnc-console-os-getvncconsole-action-deprecated"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/console.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: VNC console action and novncproxy deployment)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-008",
+          "user_outcome": "The non-deprecated console path POST /servers/{id}/remote-consoles (microversion 2.6+) is missing, and the Rust Nova discovery document stays at min/version 2.1, so any future console slice must either stay on the deprecated action or widen the advertised microversion window.",
+          "client_command": "POST /v2.1/{project_id}/servers/{id}/remote-consoles {\"remote_console\":{\"protocol\":\"vnc\",\"type\":\"novnc\"}} (microversion >= 2.6)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#create-console",
+            "https://docs.openstack.org/nova/latest/reference/api-microversion-history.html"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/console.go",
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (Nova microversion window above 2.1)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-009",
+          "user_outcome": "An end-to-end noVNC session needs the novncproxy to authorize the console token through GET /v2.1/{project_id}/os-console-auth-tokens/{console_token}, an endpoint Rust does not expose, so a VNC URL alone cannot be used even after horizon-007 is implemented.",
+          "client_command": "GET /v2.1/{project_id}/os-console-auth-tokens/{console_token} (novncproxy console-token validation)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#show-console-connection-information"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/console.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record (console auth token validation)",
+            "novncproxy deployment decision (o3k-implemented vs external process)",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-010",
+          "user_outcome": "Neutron network list succeeds, but the response omits router:external, shared, admin_state_up, and subnets, which the Horizon Networks table (External/Shared/Admin State columns) and the Launch Instance networking tab read, so those cells render empty.",
+          "client_command": "openstack network list (GET /v2.0/networks)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-networks"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "implemented",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "contract record (network response field expansion)",
+            "black-box test id: health.rs::neutron_network_subnet_port_lifecycle_is_deterministic (field assertions)"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "horizon-011",
+          "user_outcome": "The Launch Instance dialog's Security Groups tab lists security groups via GET /v2.0/security-groups, which is an explicit SPEC-0022 non-include, so the tab errors and instance launch cannot proceed as Horizon renders it.",
+          "client_command": "neutronclient GET /v2.0/security-groups (Horizon Launch Instance Security Groups tab)",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-security-groups",
+            "https://docs.openstack.org/api-ref/compute/#list-security-groups"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (security groups are an explicit network non-include in the native TestLab baseline)",
+            "contract record"
+          ]
+        },
+        {
+          "id": "horizon-012",
+          "user_outcome": "Horizon 'Identity' project/user/role management panels need keystone admin CRUD (POST/PATCH/DELETE /v3/users, /v3/projects, /v3/roles, role assignments) and the related read routes, none of which the Rust identity router registers; complete Keystone is an explicit out-of-scope item.",
+          "client_command": "openstack project create / user create / role add (POST /v3/projects, POST /v3/users, PUT /v3/projects/{id}/users/{user_id}/roles/{role_id}) — Horizon Identity panels",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-project",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-user",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-role",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-role-assignments"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "internal/keystone/auth.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (identity baseline is bounded to discovery, password auth, token validation, and catalog; complete Keystone is out of scope per SPEC-0001)",
+            "contract record"
+          ]
+        },
+        {
+          "id": "horizon-013",
+          "user_outcome": "Guest metadata HTTP (http://169.254.169.254/openstack/latest/meta_data.json and EC2 metadata) is unsupported and unadvertised; SPEC-0022 mandates config-drive/cloud-init only until a separate security/networking profile and guest-isolation evidence exist.",
+          "client_command": "GET http://169.254.169.254/openstack/latest/meta_data.json (guest metadata service; used with cloud-init inside the instance)",
+          "official_sources": [
+            "https://docs.openstack.org/nova/latest/user/metadata.html"
+          ],
+          "go_paths_consulted": [
+            "internal/metadata/service.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "intentionally-omitted",
+          "requires_before_implementation": [
+            "SPEC-0022 guest-metadata section (metadata HTTP gated on a separate security/networking profile with real guest-isolation evidence)",
+            "contract record"
+          ]
+        },
+        {
+          "id": "horizon-014",
+          "user_outcome": "Horizon's landing page (Project > Overview) shows instance usage from GET /v2.1/{project_id}/os-simple-tenant-usage/{project_id}, which Rust does not route, so the overview usage section fails on the first page of a basic session.",
+          "client_command": "openstack usage show (GET /v2.1/{project_id}/os-simple-tenant-usage/{project_id}) — Horizon Project > Overview",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#usage-reports-os-simple-tenant-usage"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: tenant-usage read API)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-015",
+          "user_outcome": "Horizon's Project > Overview quota section reads compute quotas from GET /v2.1/{project_id}/os-quota-sets/{project_id}, which Rust does not route, so quota usage on the overview page cannot render.",
+          "client_command": "openstack quota show (GET /v2.1/{project_id}/os-quota-sets/{project_id}) — Horizon Project > Overview",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#os-quota-sets"
+          ],
+          "go_paths_consulted": [
+            "internal/nova/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (compute baseline: quota-set read API)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "horizon-016",
+          "user_outcome": "Horizon's Project > Overview quota section also reads network quotas from GET /v2.0/quotas/{project_id}, which Rust does not route, so network quota usage on the overview page cannot render.",
+          "client_command": "neutronclient GET /v2.0/quotas/{project_id} (quotas_get) — Horizon Project > Overview",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/network/v2/index.html#list-quotas-for-a-project"
+          ],
+          "go_paths_consulted": [
+            "internal/neutron/network.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment (network baseline: quota read API)",
+            "contract record",
+            "black-box test id"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "operator",
+      "name": "Operator - install/backup/diagnostic/admin workflow",
+      "client": "python-openstackclient, curl, bash packaging scripts",
+      "recommendation": "Declared by the SPEC-0025 operational-replacement list; first bounded slice: identity admin CRUD for the seeded universe plus the /readyz reason body. Defer metrics/tracing, backup/restore, and artifact signing to their own evidence decisions.",
+      "candidates": [
+        {
+          "id": "operator-001",
+          "user_outcome": "Operator creates a tenant project via the public Identity API and it appears in the catalog-scoped project space.",
+          "client_command": "openstack project create demo",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-project"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022/SPEC-0025 amendment freezing the identity admin CRUD slice",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-002",
+          "user_outcome": "Operator creates a non-admin user with a password via the public Identity API.",
+          "client_command": "openstack user create --password <secret> demo-user",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-user"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022/SPEC-0025 amendment freezing the identity admin CRUD slice",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-003",
+          "user_outcome": "Operator grants a role on a project to a user and the new scope authenticates.",
+          "client_command": "openstack role add --project demo --user demo-user member",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#assign-role-to-user-on-project"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022/SPEC-0025 amendment freezing the identity admin CRUD slice",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-004",
+          "user_outcome": "Operator registers a new service type in the catalog for a hosted service.",
+          "client_command": "openstack service create --type volumev3 --name cinder-extra cinder-extra",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-service"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 amendment (dynamic catalog registration for additional hosted services)",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-005",
+          "user_outcome": "Operator registers a service endpoint so the catalog advertises an external-hosted service URL.",
+          "client_command": "openstack endpoint create --region RegionOne volumev3 public http://cinder:8776/v3/%\\(project_id\\)s",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-endpoint"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0023 amendment (dynamic catalog registration for additional hosted services)",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-006",
+          "user_outcome": "Operator lists and shows seeded and created identity resources to verify bootstrap state.",
+          "client_command": "openstack project list; openstack user list; openstack role list; openstack service list; openstack endpoint list",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-projects",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-services",
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#list-endpoints"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/keystone/handlers.go",
+            "internal/server/seed.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022/SPEC-0025 amendment freezing the identity admin CRUD slice",
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "openstack-service-testbed"
+          ]
+        },
+        {
+          "id": "operator-007",
+          "user_outcome": "Readiness probe reports 200 only when dependencies (database/provider) respond, and explains a 503 with a reason.",
+          "client_command": "curl -i http://127.0.0.1:8080/readyz",
+          "official_sources": [
+            "https://docs.openstack.org/operations-guide/ops-monitoring.html"
+          ],
+          "go_paths_consulted": [
+            "internal/middleware/health.go",
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "contract record for /readyz semantics",
+            "black-box test id"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-008",
+          "user_outcome": "Operator scrapes Prometheus request/latency metrics from o3kd for control-plane monitoring.",
+          "client_command": "curl -s http://127.0.0.1:8080/metrics (Prometheus text exposition; route absent on o3kd)",
+          "official_sources": [
+            "https://prometheus.io/docs/concepts/metric_types/"
+          ],
+          "go_paths_consulted": [
+            "internal/middleware/metrics.go",
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "contract record for the /metrics surface",
+            "black-box test id"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-009",
+          "user_outcome": "Operator exports control-plane traces to an OTLP collector or stdout for correlation.",
+          "client_command": "o3kd --listen-addr 127.0.0.1:8080 --data-dir /var/lib/o3k with O3K_LOG_FILTER (structured logs to stdout via tracing-subscriber only; no OTLP/OpenTelemetry trace exporter exists)",
+          "official_sources": [
+            "https://opentelemetry.io/docs/concepts/signals/traces/"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "contract record for trace/metrics export",
+            "SPEC-0025 'metrics and tracing' operational-replacement item"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-010",
+          "user_outcome": "Operator takes a consistent backup (SQLite metadata + image/config-drive artifacts + credentials) and restores it to a fresh data directory.",
+          "client_command": "o3kd backup <target-dir> / o3kd restore <backup> (no command exists; SPEC-0025 declared)",
+          "official_sources": [
+            "https://docs.openstack.org/operations-guide/ops-backup-recovery.html"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "migrations/sqlite/README.md"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "contract record",
+            "black-box test id",
+            "SPEC-0025 required test: metadata/blob separation survives backup/restore and restart"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-011",
+          "user_outcome": "Operator follows a versioned upgrade path with schema migration and rollback boundaries instead of re-seeding.",
+          "client_command": "o3kd migrate-datastore (absent; SQLite schema is store-managed at connect, no versioned migration command)",
+          "official_sources": [
+            "https://docs.openstack.org/operations-guide/ops-upgrades.html"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "cmd/o3k/migrate_datastore.go",
+            "migrations/sqlite/README.md"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "contract record",
+            "black-box test id"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-012",
+          "user_outcome": "Operator verifies release artifacts are signed by the project identity before deployment.",
+          "client_command": "cosign verify-blob --bundle o3kd.sigstore.json bin/o3kd --certificate-identity-regexp 'https://github.com/kubedoio/o3k-rust/.github/workflows/.*' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'",
+          "official_sources": [
+            "https://docs.sigstore.dev/cosign/overview/"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "protected GitHub Actions release workflow and maintainer approval (docs/RELEASE.md:27-39); signing must not be claimed from checksums alone"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-013",
+          "user_outcome": "Operator audits the SBOM for file hashes and concluded licenses rather than NOASSERTION placeholders.",
+          "client_command": "python3 -m json.tool sbom.spdx.json; jq '.packages[].licenseConcluded' sbom.spdx.json",
+          "official_sources": [
+            "https://spdx.dev/specifications/"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-014",
+          "user_outcome": "A fresh o3kd starts with a working admin identity instead of silently running without authentication.",
+          "client_command": "O3K_BOOTSTRAP_PASSWORD=<gen> O3K_TOKEN_SIGNING_KEY=<gen> o3kd --listen-addr 127.0.0.1:8080 --data-dir /var/lib/o3k",
+          "official_sources": [
+            "https://docs.openstack.org/install-guide/"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/server/bootstrap.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0025/security decision on first-run secret generation versus fail-closed identity disable"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-015",
+          "user_outcome": "Operator installs via a distribution package instead of a script, with declared dependency handling.",
+          "client_command": "apt install o3k (absent; only packaging/install.sh exists)",
+          "official_sources": [
+            "https://docs.openstack.org/install-guide/"
+          ],
+          "go_paths_consulted": [
+            "cmd/o3k/main.go",
+            "internal/server/bootstrap.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "none"
+          ]
+        },
+        {
+          "id": "operator-016",
+          "user_outcome": "Operator runs one diagnostics command that reports profile, dirs, systemd state, owned resources, and the exact source commit.",
+          "client_command": "bash packaging/diagnose.sh --profile libvirt",
+          "official_sources": [
+            "https://docs.openstack.org/operations-guide/"
+          ],
+          "go_paths_consulted": [
+            "internal/middleware/health.go",
+            "cmd/o3k/main.go"
+          ],
+          "rust_status": "partial",
+          "in_product_profile": true,
+          "failure_seen": "not-exercised",
+          "priority": "blocks-declared-journey",
+          "requires_before_implementation": [
+            "SPEC-0022 diagnostic-mode record (exact source SHA, bounded redacted owned-resource evidence, ownership-checked cleanup)"
+          ],
+          "profiles": [
+            "native-rust-testlab"
+          ]
+        },
+        {
+          "id": "operator-017",
+          "user_outcome": "Operator lists hypervisors and service state through the public Nova API for capacity checks.",
+          "client_command": "openstack hypervisor list; openstack service list --service nova",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/compute/#list-hypervisors"
+          ],
+          "go_paths_consulted": [
+            "internal/middleware/audit.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0022 amendment if os-hypervisors/os-services enter the profile",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "operator-018",
+          "user_outcome": "Operator rotates the admin password through the public Identity API without re-seeding.",
+          "client_command": "openstack user password set --password <new-secret> admin",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#update-password-for-user"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0025 amendment (credential rotation slice)",
+            "contract record",
+            "black-box test id"
+          ]
+        },
+        {
+          "id": "operator-019",
+          "user_outcome": "Operator creates additional domains beyond the single Default domain for multi-tenant isolation.",
+          "client_command": "openstack domain create example",
+          "official_sources": [
+            "https://docs.openstack.org/api-ref/identity/v3/index.html#create-domain"
+          ],
+          "go_paths_consulted": [
+            "internal/keystone/handlers.go",
+            "migrations/sqlite/008_add_domains.up.sql"
+          ],
+          "rust_status": "missing",
+          "in_product_profile": false,
+          "failure_seen": "not-exercised",
+          "priority": "useful-later",
+          "requires_before_implementation": [
+            "SPEC-0020 amendment if multi-domain support enters the profile",
+            "contract record",
+            "black-box test id"
+          ]
+        }
+      ]
+    }
+  ]
+}

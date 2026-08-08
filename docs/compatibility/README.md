@@ -92,6 +92,24 @@ bash tests/capability-inventory.sh
 Do not promote a route from `implemented` to a verified evidence state without
 the corresponding executable contract, CLI, or protected-runner artifact.
 
+## Backlog inventory
+
+[`backlog-inventory.yaml`](backlog-inventory.yaml) is a machine-readable
+candidate-behavior inventory grouped by client/user journey (OpenStack CLI,
+openstacksdk, Terraform, Horizon, operator/install/backup/diagnostic). It is
+inventory only: a candidate is not implemented, advertised, or supported
+because it appears here, and route counts in the file are never progress or
+release percentages (ADR-0004). Every candidate records the user outcome and
+client command, official OpenStack sources, the pinned public Go O3K paths
+consulted (non-normative under ADR-0151), the Rust current status, product
+profile membership, evidence-bound `failure_seen` (or honestly
+`not-exercised`), priority, and the spec/contract/test required before
+implementation. The file is JSON-compatible YAML; validate it with:
+
+```bash
+bash tests/compatibility-backlog.sh
+```
+
 ## Contract harness
 
 The normative TestLab release contract is frozen in
