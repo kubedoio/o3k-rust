@@ -1,5 +1,9 @@
 # Issue #94 — Split `o3k-api` internally by protocol/service concern
 
+GitHub: #535 (SPEC-0025 step 7 tracking issue). Local record number 94 is the
+internal docs/issues tracker id; the GitHub issue is the authoritative
+tracking issue for this work.
+
 ## Scope
 
 SPEC-0025 step 7: split `crates/o3k-api/src/lib.rs` (currently one ~3055-line
@@ -13,23 +17,28 @@ additions and no "cleanup" behavior changes.
 
 ## Target shape
 
+Implemented as single-file modules in `crates/o3k-api/src/`:
+
 - `lib.rs`: crate public surface (`AppState`, `router()`,
   `router_with_state()`, `CONSOLE_AGENT_DISPATCH_TIMEOUT`), router
   composition, module declarations, and the cross-cutting
   health/version/discovery handlers;
 - `error.rs`: shared error-envelope helpers;
-- `auth.rs` (or `auth/`): shared token/policy adapter helpers
-  (`require_token`, `project_token`);
-- `identity/`: Keystone-compatible token issue/validate/check handlers and
+- `auth.rs`: shared token validation helper (`require_token`);
+- `identity.rs`: Keystone-compatible token issue/validate/check handlers and
   error mapping;
-- `image/`: Glance-compatible image handlers, wire models, error mapping;
-- `network/`: Neutron-compatible network/subnet/port handlers, wire models,
-  error mapping;
-- `compute/`: Nova-compatible flavor/keypair/server/action handlers, wire
-  models, microversion helpers, error mapping;
-- `placement/`: Placement discovery handler and microversion helpers;
-- `volume_attachment/`: volume attachment handlers and wire models, limited
-  to already-declared behavior.
+- `image.rs`: Glance-compatible image handlers, wire models, error mapping;
+- `network.rs`: Neutron-compatible network/subnet/port handlers, wire
+  models, error mapping;
+- `compute.rs`: Nova-compatible flavor/keypair/server/action handlers, wire
+  models, microversion helpers (`requested_compute_289`), the
+  compute-scoped project-token check (`project_token`), error mapping, and
+  the relocated unit tests;
+- `placement.rs`: Placement discovery handler and microversion parsing;
+- `volume_attachment.rs`: volume attachment handlers and wire models,
+  limited to already-declared behavior;
+- `middleware.rs`: the router-wide Nova + Placement microversion negotiation
+  middleware.
 
 Do not create one workspace crate per OpenStack service. `o3k-api` remains a
 single non-application (adapter) crate; `contracts/core-architecture-
