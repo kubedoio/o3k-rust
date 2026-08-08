@@ -517,15 +517,13 @@ impl ComputeService {
     }
 
     /// Applies the same reverse-order compensation as the synchronous create
-    /// path when an agent reports a terminal create failure after the API
-    /// request already returned. Compensation is idempotent: keypair detach
-    /// is a delete-if-present and the placement allocation is released only
-    /// when it is still held, so replayed agent updates are safe.
-    async fn compensate_failed_agent_create(
-        &self,
-        update: &o3k_provider::AgentOperationUpdate,
-    ) -> Result<(), ComputeError> {
-        let operation = self.store.get_operation(update.operation_id).await?;
+    /// path when a create operation is terminal Failed after the API request
+    /// already returned. Compensation is idempotent: keypair detach is a
+    /// delete-if-present and the placement allocation is released only when
+    /// it is still held, so replayed deliveries and repeated convergence
+    /// triggers are safe.
+    async fn compensate_failed_create(&self, operation_id: Uuid) -> Result<(), ComputeError> {
+        let operation = self.store.get_operation(operation_id).await?;
         if operation.kind != "create" {
             return Ok(());
         }
@@ -546,6 +544,13 @@ impl ComputeService {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn compensate_failed_agent_create(
+        &self,
+        update: &o3k_provider::AgentOperationUpdate,
+    ) -> Result<(), ComputeError> {
+        self.compensate_failed_create(update.operation_id).await
     }
 
     pub async fn apply_agent_acceptance(
@@ -1279,6 +1284,22 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
+        // The show path is the poll surface for `openstack server create
+        // --wait`: a create operation left non-terminal after the synchronous
+        // pass must be re-driven here or the server stays in BUILD forever.
+        // The drive is lazy, bounded, and idempotent; ownership was validated
+        // above, so no provider dispatch can happen for a foreign project.
+        self.drive_create_convergence(&resource).await;
+        // Re-read the durable state: the convergence drive may have projected
+        // a terminal outcome onto the resource.
+        let resource =
+            self.store
+                .get_resource(id.as_uuid())
+                .await
+                .map_err(|error| match error {
+                    StoreError::ResourceNotFound => ComputeError::NotFound,
+                    other => ComputeError::Store(other),
+                })?;
         let flavors = self.flavors_for_project(project_id).await?;
         let mut server = match server_from_resource(resource, &flavors) {
             Ok(server) => server,
@@ -1297,6 +1318,72 @@ impl ComputeService {
             .get_server_keypair_name(server.id.as_uuid())
             .await?;
         Ok(server)
+    }
+
+    /// Drives durable create convergence for a server whose create operation
+    /// is still non-terminal (`Running` or `UnknownOutcome`). Without this
+    /// driver the server would stay in BUILD forever after the synchronous
+    /// pass in `create_server`: nothing else re-runs `reconcile_once`, and a
+    /// genuine unknown outcome only converges by observing instance presence
+    /// at the execution boundary (issue #481 criterion 3).
+    ///
+    /// The drive is lazy (read-triggered), bounded (terminal operations are
+    /// not re-driven), and idempotent (the reconciler reuses in-flight and
+    /// terminal provider work by the deterministic operation identity).
+    /// Errors are surfaced as warnings so the read path stays available; a
+    /// converged failure applies the same reverse-order compensation as the
+    /// asynchronous agent-failure path.
+    async fn drive_create_convergence(&self, resource: &o3k_store::ResourceRecord) {
+        let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+        else {
+            return;
+        };
+        let Ok(operation) = self.store.get_operation(request.operation_id).await else {
+            return;
+        };
+        if matches!(
+            operation.state,
+            o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+        ) {
+            return;
+        }
+        let state = match self.journal.reconcile_once(request.operation_id).await {
+            Ok(state) => state,
+            Err(error) => {
+                tracing::warn!(
+                    operation_id = %request.operation_id,
+                    resource_id = %resource.id,
+                    error = %error,
+                    "server create convergence pass failed; server state is unchanged"
+                );
+                return;
+            }
+        };
+        match state {
+            o3k_store::OperationState::Failed => {
+                self.project_terminal_binding_outcome(
+                    request.operation_id.to_string().as_str(),
+                    state,
+                )
+                .await;
+                if let Err(error) = self.compensate_failed_create(request.operation_id).await {
+                    tracing::warn!(
+                        operation_id = %request.operation_id,
+                        resource_id = %resource.id,
+                        error = %error,
+                        "server create failure compensation failed"
+                    );
+                }
+            }
+            o3k_store::OperationState::Succeeded => {
+                self.project_terminal_binding_outcome(
+                    request.operation_id.to_string().as_str(),
+                    state,
+                )
+                .await;
+            }
+            _ => {}
+        }
     }
 
     pub async fn attach_volume(
@@ -1920,6 +2007,7 @@ mod tests {
     use o3k_provider::{
         AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentErrorCategory,
         AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,
+        FailureInjection,
     };
     use std::path::PathBuf;
 
@@ -2790,6 +2878,441 @@ mod tests {
         );
         std::fs::remove_file(database_path)?;
         std::fs::remove_dir_all(placement_path)?;
+        Ok(())
+    }
+
+    /// Wraps the fake provider with a presence-inspection dispatch counter
+    /// and an in-flight mode so tests can prove the show path drives create
+    /// convergence without duplicating in-flight inspections.
+    #[derive(Clone)]
+    struct CountingInspectProvider {
+        inner: Arc<FakeComputeProvider>,
+        inspect_dispatches: Arc<std::sync::atomic::AtomicUsize>,
+        in_flight: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CountingInspectProvider {
+        fn new(inner: Arc<FakeComputeProvider>) -> Self {
+            Self {
+                inner,
+                inspect_dispatches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn set_in_flight(&self, value: bool) {
+            self.in_flight
+                .store(value, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        #[must_use]
+        fn inspect_dispatch_count(&self) -> usize {
+            self.inspect_dispatches
+                .load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ComputeProvider for CountingInspectProvider {
+        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
+            self.inner.capabilities().await
+        }
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.create_instance(request).await
+        }
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<Instance, ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+        async fn inspect_instance(
+            &self,
+            provider_id: &str,
+            resource_id: &str,
+            provider_instance_id: &str,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inspect_dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.in_flight.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(Operation {
+                    provider_operation_id: operation_id,
+                    o3k_operation_id: operation_id,
+                    state: o3k_provider::OperationState::Accepted,
+                    error_category: None,
+                    provider_resource_id: None,
+                });
+            }
+            self.inner
+                .inspect_instance(
+                    provider_id,
+                    resource_id,
+                    provider_instance_id,
+                    operation_id,
+                    idempotency_key,
+                )
+                .await
+        }
+        async fn delete_instance(
+            &self,
+            request: DeleteInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// Builds a service with a real scheduler/placement ledger and a server
+    /// create intent whose operation is left in `UnknownOutcome`: the create
+    /// dispatch timed out, so the provider operation carries no durable
+    /// resource identity and only presence observation can converge it
+    /// (issue #481 criterion 3).
+    #[allow(clippy::type_complexity)]
+    async fn unknown_outcome_create_fixture<P>(
+        label: &str,
+        provider: Arc<P>,
+    ) -> Result<
+        (
+            ComputeService,
+            Arc<dyn ComputeRepository>,
+            o3k_placement::PlacementLedger,
+            CreateInstanceRequest,
+            Uuid,
+            Uuid,
+            String,
+        ),
+        Box<dyn std::error::Error>,
+    >
+    where
+        P: ComputeProvider + 'static,
+    {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4096,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await?;
+        let service = ComputeService::new(store.clone(), provider.clone())
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let keypair = service
+            .create_keypair(
+                "user-a",
+                "project-a",
+                format!("{label}-key"),
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test".to_owned(),
+            )
+            .await?;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: format!("{label}-server"),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: Some(format!("{label}-key")),
+            keypair_id: Some(keypair.id),
+            network_ids: vec!["port-1".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: format!("{label}-request"),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .attach_server_keypair(request.o3k_server_id, keypair.id)
+            .await?;
+        let generation = placement.provider("node-a").await?.generation;
+        placement
+            .allocate(
+                "node-a",
+                "alloc-1",
+                &request.o3k_server_id.to_string(),
+                std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
+                generation,
+            )
+            .await?;
+        // The caller keeps the injected timeout active, so the synchronous
+        // pass leaves the create operation unknown with no resource identity.
+        let reconcile_state = service
+            .journal
+            .reconcile_once(request.operation_id)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        assert_eq!(reconcile_state, o3k_store::OperationState::UnknownOutcome);
+        let operation = service.store.get_operation(request.operation_id).await?;
+        let provider_operation_id = operation
+            .provider_operation_id
+            .ok_or("create provider operation id is missing")?
+            .parse::<Uuid>()?;
+        let provider_operation = provider.get_operation(provider_operation_id).await?;
+        let instance_id = provider_operation
+            .provider_resource_id
+            .ok_or("create provider resource id is missing")?;
+        Ok((
+            service,
+            store,
+            placement,
+            request,
+            keypair.id,
+            provider_operation_id,
+            instance_id,
+        ))
+    }
+
+    /// A create left in UnknownOutcome whose presence inspection provably
+    /// finds no instance converges to ERROR on the show path with the same
+    /// reverse-order compensation as the async agent-failure path.
+    #[tokio::test]
+    async fn unknown_outcome_create_converges_to_error_and_compensates_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let (service, store, placement, request, _keypair_id, provider_operation_id, instance_id) =
+            unknown_outcome_create_fixture("presence-absent", fake.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The instance provably does not exist: the create never took effect.
+        fake.remove_instance(&instance_id)?;
+        fake.set_failure(FailureInjection::None)?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Error);
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_eq!(operation.state, o3k_store::OperationState::Failed);
+        assert_eq!(operation.error_category.as_deref(), Some("not_found"));
+        // Reverse-order compensation: keypair detached, placement released.
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            None
+        );
+        assert!(placement.provider("node-a").await?.allocations.is_empty());
+        // A repeated show stays terminal without re-driving the failure.
+        let repeated = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(repeated.state, ServerState::Error);
+        Ok(())
+    }
+
+    /// A create left in UnknownOutcome whose presence inspection finds the
+    /// instance converges to ACTIVE on the show path with the provider
+    /// resource identity recorded and dependencies retained.
+    #[tokio::test]
+    async fn unknown_outcome_create_converges_to_active_on_show()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let (service, store, placement, request, _keypair_id, provider_operation_id, _instance_id) =
+            unknown_outcome_create_fixture("presence-present", fake.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        fake.set_failure(FailureInjection::None)?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Active);
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert!(resource.provider_id.is_some());
+        assert_eq!(
+            store.get_operation(request.operation_id).await?.state,
+            o3k_store::OperationState::Succeeded
+        );
+        // The converged create keeps its keypair and placement allocation.
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            Some("presence-present-key".to_owned())
+        );
+        assert!(!placement.provider("node-a").await?.allocations.is_empty());
+        Ok(())
+    }
+
+    /// The show path drives convergence lazily: repeated polls reuse the
+    /// in-flight presence inspection (same deterministic operation identity)
+    /// instead of dispatching duplicates, and the terminal agent evidence
+    /// converges the next poll without another dispatch.
+    #[tokio::test]
+    async fn repeated_show_polls_do_not_duplicate_presence_inspection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let wrapper = Arc::new(CountingInspectProvider::new(fake.clone()));
+        wrapper.set_in_flight(true);
+        let (service, _store, _placement, request, _keypair_id, provider_operation_id, instance_id) =
+            unknown_outcome_create_fixture("presence-inflight", wrapper.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+
+        // The first poll drives the presence inspection; it stays in-flight.
+        let first = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(first.state, ServerState::Requested);
+        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        // A repeated poll must reuse the in-flight inspection, not re-dispatch.
+        let second = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(second.state, ServerState::Requested);
+        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+
+        // The agent completes the inspection: terminal update + observation.
+        let inspect_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect-create:{}", request.operation_id).as_bytes(),
+        );
+        let update = AgentOperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: inspect_operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: Some(instance_id.clone()),
+        };
+        assert_eq!(
+            service.apply_agent_update(&update).await?,
+            o3k_store::OperationState::Succeeded
+        );
+        let observation = AgentObservation {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            resource_id: request.o3k_server_id,
+            provider_resource_id: Some(instance_id),
+            state: o3k_provider::InstanceState::Running,
+            operation_id: inspect_operation_id,
+            operation_state: AgentOperationState::Succeeded,
+            observation_sequence: 2,
+            observed_at_unix_ms: 0,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        };
+        service.apply_agent_observation(&observation).await?;
+        // The next poll converges to ACTIVE without another dispatch.
+        let converged = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(converged.state, ServerState::Active);
+        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        Ok(())
+    }
+
+    /// Project isolation is preserved on the lazy convergence path: a foreign
+    /// project cannot trigger the presence inspection dispatch.
+    #[tokio::test]
+    async fn foreign_project_show_cannot_trigger_presence_dispatch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let wrapper = Arc::new(CountingInspectProvider::new(fake.clone()));
+        let (
+            service,
+            _store,
+            _placement,
+            request,
+            _keypair_id,
+            provider_operation_id,
+            _instance_id,
+        ) = unknown_outcome_create_fixture("presence-isolation", wrapper.clone()).await?;
+        fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        fake.set_failure(FailureInjection::None)?;
+
+        assert!(matches!(
+            service
+                .show_server("project-b", ServerId::from_uuid(request.o3k_server_id))
+                .await,
+            Err(ComputeError::NotFound)
+        ));
+        assert_eq!(
+            wrapper.inspect_dispatch_count(),
+            0,
+            "foreign project show must not dispatch a provider mutation"
+        );
+        // The owning project still converges normally.
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Active);
+        assert_eq!(wrapper.inspect_dispatch_count(), 1);
         Ok(())
     }
 
