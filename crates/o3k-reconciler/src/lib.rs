@@ -5,8 +5,8 @@ use std::{
 
 use o3k_domain::ServerState;
 use o3k_provider::{
-    AgentCommandAccepted, AgentErrorCategory, AgentObservation, AgentOperationState,
-    AgentOperationUpdate, ComputeProvider, CreateInstanceRequest,
+    AgentCommandAccepted, AgentErrorCategory, AgentNodeRegistry, AgentObservation,
+    AgentOperationState, AgentOperationUpdate, ComputeProvider, CreateInstanceRequest,
     OperationState as ProviderOperationState, ProviderError,
 };
 use o3k_store::{
@@ -122,6 +122,14 @@ pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     max_attempts: u8,
     events: Arc<Mutex<Vec<JournalEvent>>>,
     agent_evidence: Arc<Mutex<HashMap<Uuid, AgentEvidenceFence>>>,
+    /// Optional node registry used to resolve the agent's *current* registered
+    /// epoch. When present it is authoritative for evidence fencing: the
+    /// fence rejects evidence minted under any other epoch (a dead/stale
+    /// stream, including the pre-restart connection) and re-anchors the
+    /// operation when the same agent legitimately re-registered under a fresh
+    /// epoch. Without a registry the fence keeps the strict first-evidence
+    /// anchor of the original behavior.
+    agent_registry: Option<Arc<dyn AgentNodeRegistry>>,
 }
 
 impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
@@ -132,6 +140,7 @@ impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
             max_attempts: self.max_attempts,
             events: self.events.clone(),
             agent_evidence: self.agent_evidence.clone(),
+            agent_registry: self.agent_registry.clone(),
         }
     }
 }
@@ -148,10 +157,22 @@ where
             max_attempts: max_attempts.max(1),
             events: Arc::new(Mutex::new(Vec::new())),
             agent_evidence: Arc::new(Mutex::new(HashMap::new())),
+            agent_registry: None,
         }
     }
 
-    fn fence_agent_evidence(
+    /// Attaches the agent node registry so evidence fencing can distinguish
+    /// the agent's current registered epoch from dead epochs of replaced
+    /// connections (issue #87 crash-restart replay). Wired by the composition
+    /// root; the registry is intentionally optional so direct fake-provider
+    /// operation keeps the strict anchored fence.
+    #[must_use]
+    pub fn with_agent_registry(mut self, registry: Arc<dyn AgentNodeRegistry>) -> Self {
+        self.agent_registry = Some(registry);
+        self
+    }
+
+    async fn fence_agent_evidence(
         &self,
         operation_id: Uuid,
         agent_id: &str,
@@ -167,6 +188,23 @@ where
             || !valid_agent_reference(agent_epoch)
         {
             return Err(ReconcileError::InvalidIntent);
+        }
+        // The registry is authoritative for the agent's current epoch: every
+        // registration replaces the stored epoch (minted per connection), so
+        // evidence minted under any other epoch is a dead/stale stream and
+        // must not mutate current state. This is what lets a legitimate
+        // post-restart replay (the same agent re-registered with a fresh
+        // epoch) re-anchor the operation while still rejecting evidence from
+        // replaced connections. Fail closed when the agent is not registered:
+        // an unregistered agent has no current epoch at all.
+        if let Some(registry) = &self.agent_registry {
+            match registry.snapshot(agent_id).await {
+                Some(node) if node.agent_epoch != agent_epoch => {
+                    return Err(ReconcileError::StaleAgentEvidence);
+                }
+                None => return Err(ReconcileError::StaleAgentEvidence),
+                Some(_) => {}
+            }
         }
         let mut evidence = self
             .agent_evidence
@@ -184,8 +222,13 @@ where
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
             }
+            // A different agent cannot claim the operation. An epoch change of
+            // the SAME agent is legitimate only when the registry resolved it
+            // as current above; without a registry the operation stays
+            // anchored to the first evidence epoch.
+            Some(previous) if previous.agent_id != agent_id => Err(ReconcileError::InvalidIntent),
             Some(previous)
-                if previous.agent_id != agent_id || previous.agent_epoch != agent_epoch =>
+                if previous.agent_epoch != agent_epoch && self.agent_registry.is_none() =>
             {
                 Err(ReconcileError::InvalidIntent)
             }
@@ -283,14 +326,16 @@ where
         if operation.resource_id != update.resource_id {
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self.fence_agent_evidence(
-            update.operation_id,
-            &update.agent_id,
-            &update.agent_epoch,
-            update.operation_sequence,
-            update.state,
-            update.provider_resource_id.as_deref().unwrap_or(""),
-        )?;
+        let disposition = self
+            .fence_agent_evidence(
+                update.operation_id,
+                &update.agent_id,
+                &update.agent_epoch,
+                update.operation_sequence,
+                update.state,
+                update.provider_resource_id.as_deref().unwrap_or(""),
+            )
+            .await?;
         if disposition != EvidenceDisposition::New {
             return Ok(operation.state);
         }
@@ -410,14 +455,16 @@ where
         accepted: &AgentCommandAccepted,
     ) -> Result<OperationState, ReconcileError> {
         let operation = self.store.get_operation(accepted.operation_id).await?;
-        let disposition = self.fence_agent_evidence(
-            accepted.operation_id,
-            &accepted.agent_id,
-            &accepted.agent_epoch,
-            accepted.operation_sequence,
-            accepted.state,
-            "",
-        )?;
+        let disposition = self
+            .fence_agent_evidence(
+                accepted.operation_id,
+                &accepted.agent_id,
+                &accepted.agent_epoch,
+                accepted.operation_sequence,
+                accepted.state,
+                "",
+            )
+            .await?;
         if disposition != EvidenceDisposition::New {
             return Ok(operation.state);
         }
@@ -1791,6 +1838,55 @@ mod tests {
         ))
     }
 
+    /// Minimal in-memory node registry used to simulate agent registration and
+    /// re-registration. A re-registration replaces the stored epoch, mirroring
+    /// `NodeRegistry::register` in o3k-compute-agent.
+    #[derive(Clone, Default)]
+    struct TestAgentRegistry {
+        nodes: Arc<tokio::sync::RwLock<HashMap<String, o3k_provider::AgentNodeSnapshot>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::AgentNodeRegistry for TestAgentRegistry {
+        async fn all(&self) -> Vec<o3k_provider::AgentNodeSnapshot> {
+            self.nodes.read().await.values().cloned().collect()
+        }
+
+        async fn snapshot(&self, agent_id: &str) -> Option<o3k_provider::AgentNodeSnapshot> {
+            self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
+            let (_, receiver) = tokio::sync::broadcast::channel(1);
+            receiver
+        }
+    }
+
+    impl TestAgentRegistry {
+        /// Registers (or re-registers) the agent, replacing the stored epoch.
+        async fn register(&self, agent_id: &str, agent_epoch: &str) {
+            self.nodes.write().await.insert(
+                agent_id.to_owned(),
+                o3k_provider::AgentNodeSnapshot {
+                    agent_id: agent_id.to_owned(),
+                    agent_epoch: agent_epoch.to_owned(),
+                    availability: o3k_provider::AgentAvailability::Available,
+                    administrative_state: o3k_provider::AgentAdministrativeState::Enabled,
+                    capabilities: o3k_provider::AgentCapabilities {
+                        agent_provider_name: "o3k-compute".to_owned(),
+                        agent_provider_version: "test".to_owned(),
+                        max_vcpus: 1,
+                        max_memory_mib: 128,
+                        max_disk_gb: 1,
+                        lifecycle_actions: Vec::new(),
+                        console_log: false,
+                        flags: Vec::new(),
+                    },
+                },
+            );
+        }
+    }
+
     struct ForeignOperationProvider {
         inner: FakeComputeProvider,
     }
@@ -2116,6 +2212,177 @@ mod tests {
         assert_eq!(
             store.get_operation(operation_id).await?.state,
             OperationState::Succeeded
+        );
+        Ok(())
+    }
+
+    /// Without a registry the fence keeps the strict first-evidence anchor: a
+    /// same-agent epoch change is indistinguishable from a dead stream and
+    /// must stay rejected. This pins the no-registry fallback so the
+    /// registry-aware fence (issue #87) cannot weaken it.
+    #[tokio::test]
+    async fn agent_evidence_epoch_change_is_rejected_without_registry() -> Result<(), ReconcileError>
+    {
+        let (journal, store, _) = journal("agent-fence-no-registry", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let accepted = AgentCommandAccepted {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            command_id: "command-1".to_owned(),
+            operation_id,
+            state: AgentOperationState::Accepted,
+            operation_sequence: 1,
+        };
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+        let replayed_under_other_epoch = AgentCommandAccepted {
+            agent_epoch: "epoch-b".to_owned(),
+            ..accepted.clone()
+        };
+        assert!(matches!(
+            journal
+                .apply_agent_acceptance(&replayed_under_other_epoch)
+                .await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+        Ok(())
+    }
+
+    /// Issue #87 regression: after a compute-agent crash and restart the agent
+    /// re-registers with a fresh per-connection epoch and replays its durable
+    /// journal for the in-flight operation. The replay is evidence from the
+    /// agent's *current* registered epoch and must be applied — not rejected
+    /// because the pre-crash acceptance was anchored to the old epoch.
+    #[tokio::test]
+    async fn agent_replay_after_reregistration_applies_unknown_outcome()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-reregister-replay", 2).await?;
+        let registry = TestAgentRegistry::default();
+        registry.register("agent-a", "epoch-a").await;
+        let journal = journal.with_agent_registry(Arc::new(registry.clone()));
+
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let accepted = AgentCommandAccepted {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            command_id: "command-1".to_owned(),
+            operation_id,
+            state: AgentOperationState::Accepted,
+            operation_sequence: 1,
+        };
+        // Pre-crash: the control plane records the acceptance under epoch-a.
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+
+        // The agent crashes and re-registers; the registry now stores epoch-b.
+        registry.register("agent-a", "epoch-b").await;
+
+        // Post-restart replay of the same acceptance under the new epoch must
+        // stay idempotent, not be fenced as a foreign stream.
+        let replayed_accepted = AgentCommandAccepted {
+            agent_epoch: "epoch-b".to_owned(),
+            ..accepted.clone()
+        };
+        assert_eq!(
+            journal.apply_agent_acceptance(&replayed_accepted).await?,
+            OperationState::Running
+        );
+
+        // The journal replay then delivers the crashed create's UnknownOutcome
+        // and the operation must converge out of Running.
+        let update = AgentOperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-b".to_owned(),
+            operation_sequence: 2,
+            operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::UnknownOutcome,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: None,
+        };
+        assert_eq!(
+            journal.apply_agent_update(&update).await?,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
+        Ok(())
+    }
+
+    /// Issue #87 invariant: evidence minted under an epoch that is no longer
+    /// the agent's current registered epoch is a dead/stale stream and must be
+    /// rejected, even though the same agent legitimately re-registered under a
+    /// newer epoch.
+    #[tokio::test]
+    async fn agent_evidence_from_dead_epoch_is_rejected_after_reregistration()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-fence-dead-epoch", 2).await?;
+        let registry = TestAgentRegistry::default();
+        registry.register("agent-a", "epoch-b").await;
+        let journal = journal.with_agent_registry(Arc::new(registry.clone()));
+
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let accepted = AgentCommandAccepted {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-b".to_owned(),
+            command_id: "command-1".to_owned(),
+            operation_id,
+            state: AgentOperationState::Accepted,
+            operation_sequence: 1,
+        };
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+
+        // A stale in-flight update from the agent's previous (dead) epoch must
+        // not mutate current state.
+        let stale_update = AgentOperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 2,
+            operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Failed,
+            error_category: Some(AgentErrorCategory::Terminal),
+            redacted_message: None,
+            provider_resource_id: None,
+        };
+        assert!(matches!(
+            journal.apply_agent_update(&stale_update).await,
+            Err(ReconcileError::StaleAgentEvidence)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
+        );
+
+        // An epoch that was never registered is equally stale.
+        let unknown_epoch_update = AgentOperationUpdate {
+            agent_epoch: "epoch-c".to_owned(),
+            ..stale_update
+        };
+        assert!(matches!(
+            journal.apply_agent_update(&unknown_epoch_update).await,
+            Err(ReconcileError::StaleAgentEvidence)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running
         );
         Ok(())
     }
