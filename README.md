@@ -13,6 +13,23 @@ another O3K implementation.
 > **Status:** pre-alpha. No production-readiness, full OpenStack parity,
 > PostgreSQL support, HA, or fixed footprint claim is made yet.
 
+## Quickstart (from source)
+
+Prerequisites: the Rust toolchain pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+
+```bash
+cargo build
+cargo run --bin o3kd
+```
+
+`o3kd` starts with safe defaults: the fake provider, the API on
+`127.0.0.1:8080`, and data in `./data`. Token authentication stays disabled
+until `O3K_BOOTSTRAP_PASSWORD` and `O3K_TOKEN_SIGNING_KEY` are set (the daemon
+warns about this at startup); generate protected values with
+[`scripts/generate-passwords.sh`](scripts/generate-passwords.sh). See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for all settings and
+[`docs/TESTLAB.md`](docs/TESTLAB.md) for the TestLab workflow.
+
 ## Product scope
 
 O3K has three related product profiles.

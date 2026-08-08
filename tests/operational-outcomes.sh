@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+script_path="${repo_root}/tests/$(basename "${BASH_SOURCE[0]}")"
+artifact="${repo_root}/docs/operations/operational-outcomes-inventory.yaml"
+pinned_go_commit="53fd2cb36ee79f42da49c8181d6ceed12b41b3aa"
+if [[ "${1:-}" == "--artifact" ]]; then
+  artifact="${2:?missing artifact path}"
+fi
+
+# 1. Inventory schema validation (JSON-compatible YAML; fail closed on drift).
+python3 - "${artifact}" "${pinned_go_commit}" <<'PY'
+import json
+import sys
+
+artifact_path, pinned_go_commit = sys.argv[1:]
+
+required_fields = [
+    "id", "name", "requirement", "go_behavior", "go_paths_consulted",
+    "rust_status", "rust_owner", "profile", "evidence", "gap",
+    "priority", "requires_before_implementation",
+]
+valid_status = {"implemented", "partial", "missing"}
+valid_priority = {"blocks-declared-journey", "useful-later", "intentionally-omitted"}
+valid_profile = "native-rust-testlab"
+
+doc = json.loads(open(artifact_path, encoding="utf-8").read())
+
+assert doc["schema_version"] == 1, "schema_version must be 1"
+assert doc["profile"] == valid_profile, "top-level profile must be native-rust-testlab"
+assert doc["go_reference"]["repo"] == "https://github.com/kubedoio/o3k", "go_reference.repo"
+assert doc["go_reference"]["commit"] == pinned_go_commit, (
+    f"go_reference.commit drifted: expected {pinned_go_commit}, "
+    f"got {doc['go_reference']['commit']}"
+)
+
+outcomes = doc["outcomes"]
+expected_ids = [f"OP-{i:03d}" for i in range(1, 11)]
+assert [o["id"] for o in outcomes] == expected_ids, (
+    "outcomes must be exactly OP-001..OP-010 in order"
+)
+assert len({o["id"] for o in outcomes}) == 10, "duplicate outcome id"
+
+for outcome in outcomes:
+    oid = outcome["id"]
+    for field in required_fields:
+        assert field in outcome, f"{oid} missing field {field}"
+    assert isinstance(outcome["name"], str) and outcome["name"], f"{oid} name"
+    assert isinstance(outcome["requirement"], str) and outcome["requirement"], f"{oid} requirement"
+    assert isinstance(outcome["go_behavior"], str) and outcome["go_behavior"], f"{oid} go_behavior"
+    assert outcome["go_paths_consulted"] and all(
+        isinstance(p, str) and p for p in outcome["go_paths_consulted"]
+    ), f"{oid} go_paths_consulted"
+    assert outcome["rust_status"] in valid_status, f"{oid} rust_status {outcome['rust_status']!r}"
+    assert isinstance(outcome["rust_owner"], str) and outcome["rust_owner"], f"{oid} rust_owner"
+    assert outcome["profile"] == valid_profile, f"{oid} profile"
+    assert outcome["evidence"] and all(
+        isinstance(p, str) and p for p in outcome["evidence"]
+    ), f"{oid} evidence"
+    assert isinstance(outcome["gap"], str) and outcome["gap"], f"{oid} gap"
+    assert outcome["priority"] in valid_priority, f"{oid} priority {outcome['priority']!r}"
+    assert outcome["requires_before_implementation"] and all(
+        isinstance(r, str) and r for r in outcome["requires_before_implementation"]
+    ), f"{oid} requires_before_implementation"
+
+assert isinstance(doc.get("notes"), list) and doc["notes"], "notes must be a non-empty list"
+print(f"validated operational-outcomes inventory: {len(outcomes)} outcomes, commit {pinned_go_commit}")
+PY
+
+# 2. Static source-bound checks. Every cited evidence path must exist.
+python3 - "${artifact}" <<'PY' | while IFS= read -r path; do
+import json
+import sys
+
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
+for outcome in doc["outcomes"]:
+    for path in outcome["evidence"]:
+        print(path)
+PY
+  if [[ ! -e "${repo_root}/${path}" ]]; then
+    echo "operational outcomes: evidence path missing: ${path}" >&2
+    exit 1
+  fi
+done
+
+# Go reference paths are provenance records; verify them when the pinned
+# checkout is available locally (CI does not clone the Go repository).
+if [[ -d "${repo_root}/target/go-o3k-reference" ]]; then
+  python3 - "${artifact}" <<'PY' | while IFS= read -r path; do
+import json
+import sys
+
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
+for outcome in doc["outcomes"]:
+    for path in outcome["go_paths_consulted"]:
+        print(path)
+PY
+    if [[ ! -e "${repo_root}/target/go-o3k-reference/${path}" ]]; then
+      echo "operational outcomes: go_paths_consulted missing in reference checkout: ${path}" >&2
+      exit 1
+    fi
+  done
+fi
+
+check_unit() {
+  local unit="$1"
+  if ! grep -q '^EnvironmentFile=' "${repo_root}/${unit}"; then
+    echo "operational outcomes: ${unit} lost its EnvironmentFile= line" >&2
+    exit 1
+  fi
+  if grep -q '^Environment=' "${repo_root}/${unit}"; then
+    echo "operational outcomes: ${unit} gained a secret-bearing Environment= line" >&2
+    exit 1
+  fi
+}
+check_unit packaging/o3kd.service
+check_unit packaging/o3k-compute.service
+
+grep -q '\.o3k-owned' "${repo_root}/packaging/install.sh" || {
+  echo "operational outcomes: install.sh no longer writes .o3k-owned markers" >&2; exit 1; }
+grep -q '\.o3k-installed' "${repo_root}/packaging/install.sh" || {
+  echo "operational outcomes: install.sh no longer writes the .o3k-installed manifest" >&2; exit 1; }
+grep -q 'systemctl enable' "${repo_root}/packaging/install.sh" || {
+  echo "operational outcomes: install.sh no longer enables the service units" >&2; exit 1; }
+grep -q -- '--yes' "${repo_root}/packaging/reset.sh" || {
+  echo "operational outcomes: reset.sh no longer requires --yes" >&2; exit 1; }
+grep -q 'unowned' "${repo_root}/packaging/reset.sh" || {
+  echo "operational outcomes: reset.sh no longer refuses unowned directories" >&2; exit 1; }
+grep -q '\.o3k-installed' "${repo_root}/packaging/uninstall.sh" || {
+  echo "operational outcomes: uninstall.sh no longer refuses without the install manifest" >&2; exit 1; }
+grep -q 'umask 077' "${repo_root}/scripts/generate-passwords.sh" || {
+  echo "operational outcomes: generate-passwords.sh no longer sets umask 077" >&2; exit 1; }
+grep -q '0600' "${repo_root}/scripts/generate-passwords.sh" || {
+  echo "operational outcomes: generate-passwords.sh no longer writes mode 0600" >&2; exit 1; }
+grep -q 'flock' "${repo_root}/scripts/generate-passwords.sh" || {
+  echo "operational outcomes: generate-passwords.sh no longer uses flock" >&2; exit 1; }
+grep -q 'identity is not configured' "${repo_root}/bins/o3kd/src/main.rs" || {
+  echo "operational outcomes: o3kd no longer emits the identity warning marker" >&2; exit 1; }
+grep -q 'tests/operational-outcomes.sh' "${repo_root}/.github/workflows/ci.yml" || {
+  echo "operational outcomes: ci.yml no longer runs tests/operational-outcomes.sh" >&2; exit 1; }
+grep -q 'tests/packaging-sbom.sh' "${repo_root}/.github/workflows/ci.yml" || {
+  echo "operational outcomes: ci.yml no longer runs tests/packaging-sbom.sh" >&2; exit 1; }
+grep -q 'must not be described as' "${repo_root}/docs/RELEASE.md" || {
+  echo "operational outcomes: docs/RELEASE.md no longer contains the no-signing claim" >&2; exit 1; }
+grep -q 'signed merely because it contains checksums' "${repo_root}/docs/RELEASE.md" || {
+  echo "operational outcomes: docs/RELEASE.md no longer explains checksums are not signatures" >&2; exit 1; }
+
+# Mutation check: the validator must reject an invalid rust_status.
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-operational.XXXXXX")"
+cp -- "${artifact}" "${temp_dir}/mutated.yaml"
+python3 - "${temp_dir}/mutated.yaml" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+data = json.loads(open(path, encoding="utf-8").read())
+data["outcomes"][0]["rust_status"] = "invented-status"
+open(path, "w", encoding="utf-8").write(json.dumps(data, indent=2) + "\n")
+PY
+if bash "${script_path}" --artifact "${temp_dir}/mutated.yaml" >/dev/null 2>&1; then
+  echo "operational outcomes: validator accepted an invalid rust_status" >&2
+  exit 1
+fi
+echo "mutation rejected"
+
+# 3. Runtime check: o3kd must boot without identity environment variables,
+#    warn that identity is not configured, and answer /healthz and /readyz.
+if [[ ! -x "${repo_root}/target/debug/o3kd" ]]; then
+  echo "operational outcomes: target/debug/o3kd is missing; run 'cargo build --bin o3kd' first" >&2
+  exit 2
+fi
+
+data_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-operational-data.XXXXXX")"
+log_file="$(mktemp "${TMPDIR:-/tmp}/o3k-operational-log.XXXXXX")"
+o3kd_pid=""
+cleanup() {
+  set +e
+  if [[ -n "${o3kd_pid}" ]]; then kill -TERM "${o3kd_pid}" 2>/dev/null; wait "${o3kd_pid}" 2>/dev/null; fi
+  rm -rf -- "${temp_dir}" "${data_dir}"
+  rm -f -- "${log_file}"
+}
+trap cleanup EXIT
+
+# Derive a high port from the shell pid; fail closed if something listens there.
+port=$((19000 + ($$ % 5000)))
+if bash -c "exec 3<>/dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+  echo "operational outcomes: port ${port} is already occupied; refusing to run" >&2
+  exit 2
+fi
+
+env -u O3K_BOOTSTRAP_PASSWORD -u O3K_TOKEN_SIGNING_KEY -u O3K_BOOTSTRAP_SECRET \
+  "${repo_root}/target/debug/o3kd" --listen-addr "127.0.0.1:${port}" \
+  --data-dir "${data_dir}" --log-filter warn >"${log_file}" 2>&1 &
+o3kd_pid=$!
+
+ready=0
+for _ in $(seq 1 300); do
+  if curl -fsS "http://127.0.0.1:${port}/healthz" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  kill -0 "${o3kd_pid}" 2>/dev/null || break
+  sleep 0.1
+done
+if [[ "${ready}" != 1 ]]; then
+  echo "operational outcomes: o3kd did not answer GET /healthz within 30s" >&2
+  sed -n '1,50p' "${log_file}" >&2 || true
+  exit 1
+fi
+grep -q 'identity is not configured' "${log_file}" || {
+  echo "operational outcomes: identity warning marker missing from o3kd startup logs" >&2
+  sed -n '1,50p' "${log_file}" >&2 || true
+  exit 1
+}
+curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null || {
+  echo "operational outcomes: GET /readyz did not return 200" >&2
+  exit 1
+}
+echo "operational outcomes: o3kd booted without identity env; warning emitted; /healthz and /readyz answered 200"

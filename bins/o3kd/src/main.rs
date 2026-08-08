@@ -458,7 +458,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_catalog_endpoint(catalog_endpoint),
             )
         }
-        _ => None,
+        _ => {
+            tracing::warn!(
+                "identity is not configured: token authentication is disabled until O3K_BOOTSTRAP_PASSWORD and O3K_TOKEN_SIGNING_KEY are set (see scripts/generate-passwords.sh)"
+            );
+            None
+        }
     };
 
     let listener = TcpListener::bind(config.listen_addr).await?;

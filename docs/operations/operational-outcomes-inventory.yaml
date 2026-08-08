@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "profile": "native-rust-testlab",
+  "go_reference": {
+    "repo": "https://github.com/kubedoio/o3k",
+    "commit": "53fd2cb36ee79f42da49c8181d6ceed12b41b3aa"
+  },
+  "outcomes": [
+    {
+      "id": "OP-001",
+      "name": "zero-config first start",
+      "requirement": "An operator starts o3kd with no arguments and gets a usable control plane: safe loopback defaults, a data directory, and no silently unauthenticated state. On first start the daemon must either provision identity credentials itself or clearly tell the operator that token authentication is disabled and how to enable it. Credentials, once present, must be reused across restarts.",
+      "go_behavior": "Running ./o3k with no arguments boots everything: it creates the data directory, auto-generates jwt-secret, initial-password, and agent-token files with mode 0600, creates the SQLite database, seeds the admin user, and prints a banner. O3K_DATA_DIR overrides the data location and the generated secrets are reused across restarts.",
+      "go_paths_consulted": [
+        "cmd/o3k/main.go",
+        "internal/server/bootstrap.go",
+        "config/o3k.yaml",
+        "README.md"
+      ],
+      "rust_status": "partial",
+      "rust_owner": "bins/o3kd, crates/o3k-config",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "crates/o3k-config/src/lib.rs",
+        "bins/o3kd/src/main.rs",
+        "docs/CONFIGURATION.md"
+      ],
+      "gap": "Safe defaults exist (127.0.0.1:8080, ./data, fake provider) and o3kd now warns that identity is not configured, but credentials are not auto-generated: the operator must run scripts/generate-passwords.sh or set O3K_BOOTSTRAP_PASSWORD/O3K_TOKEN_SIGNING_KEY.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "decision/spec on first-run credential generation vs documented script step"
+      ]
+    },
+    {
+      "id": "OP-002",
+      "name": "one-line/package installation",
+      "requirement": "An operator installs the control plane with one command or a distribution package, with fail-closed preflight checks (KVM, ports, disk) and checksum-verified artifacts. The installation must place configuration and credentials with restrictive ownership and register the service with the init system.",
+      "go_behavior": "The Go installer is a curl|sh script with preflight checks, downloads a checksum-verified binary, writes /etc/o3k/config.yaml with mode 600, installs a systemd unit, the OpenStack CLI, and optionally Horizon. A package-based install is also documented.",
+      "go_paths_consulted": [
+        "scripts/install.sh",
+        "scripts/bootstrap.sh",
+        "docs/INSTALLATION.md"
+      ],
+      "rust_status": "partial",
+      "rust_owner": "packaging/ (install.sh, preflight.sh), docs/PACKAGING.md",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "packaging/install.sh",
+        "packaging/preflight.sh",
+        "docs/PACKAGING.md"
+      ],
+      "gap": "packaging/install.sh (path fences, .o3k-owned markers, system user, systemd enable) and packaging/preflight.sh (fail-closed) exist, but there is no deb/rpm package and clean-install real-host evidence is still pending (issues #89/#90).",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "distro packaging spec (deb/rpm)",
+        "clean-install evidence plan (issues #89/#90)"
+      ]
+    },
+    {
+      "id": "OP-003",
+      "name": "systemd service lifecycle",
+      "requirement": "The daemon runs as a dedicated non-root system user under systemd with automatic restart, secrets supplied through a protected environment file rather than the unit, and hardening that keeps the data and log directories writable while protecting the rest of the system.",
+      "go_behavior": "The Go o3k.service uses Type=simple and Restart=on-failure, but embeds O3K_ADMIN_PASSWORD in Environment= lines of the unit (a world-readable leak) and hard-couples to libvirtd with Requires=libvirtd.service. The reference lightstack unit shows the intended hardening pattern (EnvironmentFile, ProtectSystem=strict, ReadWritePaths).",
+      "go_paths_consulted": [
+        "scripts/install.sh",
+        "deployments/systemd/lightstack.service"
+      ],
+      "rust_status": "implemented",
+      "rust_owner": "packaging/ (o3kd.service, o3k-compute.service, install.sh)",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "packaging/o3kd.service",
+        "packaging/o3k-compute.service",
+        "packaging/install.sh"
+      ],
+      "gap": "none: the Rust units use EnvironmentFile=-/etc/o3k/o3kd.env (0600, no secret in the unit), User/Group=o3k, Restart=on-failure, and hardening (NoNewPrivileges, ProtectSystem=strict, ReadWritePaths); the Go reference leaks the admin password in Environment=.",
+      "priority": "intentionally-omitted",
+      "requires_before_implementation": [
+        "none: outcome fully implemented; no further change is planned"
+      ]
+    },
+    {
+      "id": "OP-004",
+      "name": "generated admin credential handling",
+      "requirement": "Generated credentials must be written with restrictive permissions, reused and preserved across restarts and reset, never printed to logs or terminals, and never embedded in units or world-readable files. Secret-bearing types must have redacted representations.",
+      "go_behavior": "Go loadOrGenerate writes initial-password with mode 0600, but the installer also writes an openrc file with mode 600 and injects the admin password into the unit Environment (four distinct leak surfaces for the same credential).",
+      "go_paths_consulted": [
+        "internal/server/bootstrap.go",
+        "scripts/install.sh"
+      ],
+      "rust_status": "implemented",
+      "rust_owner": "scripts/generate-passwords.sh, crates/o3k-config",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "scripts/generate-passwords.sh",
+        "packaging/install.sh",
+        "crates/o3k-config/src/lib.rs"
+      ],
+      "gap": "scripts/generate-passwords.sh (umask 077, mode 0600, flock, atomic tmp+mv, idempotent, never prints secrets) is invoked by install.sh, reset preserves credentials, and Secret has redacted Debug/Display; runtime password rotation does not exist yet.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "identity rotation spec"
+      ]
+    },
+    {
+      "id": "OP-005",
+      "name": "health/readiness",
+      "requirement": "The control plane exposes a liveness endpoint that always answers 200 while the process is alive and a readiness endpoint that answers 200 only when startup completed and dependencies (database/provider) respond, with a 503 and a reason otherwise. Probe behavior must be contract-recorded and black-box tested.",
+      "go_behavior": "Each Go service exposes GET /healthz (200 ok) and GET /readyz (database ping; 200 ok or 503 with a reason). The probes are shallow: they do not check backend execution health.",
+      "go_paths_consulted": [
+        "internal/middleware/health.go"
+      ],
+      "rust_status": "implemented",
+      "rust_owner": "crates/o3k-api, bins/o3kd, bins/o3k-compute",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "crates/o3k-api/src/lib.rs",
+        "bins/o3kd/src/main.rs",
+        "bins/o3k-compute/src/main.rs",
+        "docs/CONFIGURATION.md"
+      ],
+      "gap": "o3kd exposes /healthz and /readyz (readiness flag set by the provider probe) and o3k-compute exposes /healthz, /readyz with a reason, and /metrics; declared semantics live in docs/CONFIGURATION.md, but there is no compatibility/contract record for /readyz (backlog operator-007 demands one) and o3kd's /readyz 503 has no reason body.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "contract record for /readyz semantics",
+        "black-box readiness test"
+      ]
+    },
+    {
+      "id": "OP-006",
+      "name": "metrics and tracing",
+      "requirement": "The control plane produces structured logs with secret redaction and exposes operational metrics for monitoring. Any metrics endpoint must be a declared, contract-recorded surface, not an opportunistic route addition.",
+      "go_behavior": "Each Go service exposes /metrics in Prometheus text format (unauthenticated), logs JSON via zerolog with redaction, and can export traces to stdout or an OTLP collector.",
+      "go_paths_consulted": [
+        "internal/middleware/metrics.go",
+        "internal/middleware/logging.go"
+      ],
+      "rust_status": "partial",
+      "rust_owner": "bins/o3kd, bins/o3k-compute, workspace tracing dependencies",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "Cargo.toml",
+        "bins/o3kd/src/main.rs",
+        "bins/o3k-compute/src/main.rs"
+      ],
+      "gap": "tracing + tracing-subscriber JSON logging exist and o3k-compute exposes a /metrics gauge, but o3kd has no /metrics route (an endpoint addition that is explicitly out of scope for the operational-outcomes PR) and there is no OTLP trace exporter.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "separate accepted issue for a metrics endpoint",
+        "SPEC decision for the metrics/tracing scope (endpoint addition)"
+      ]
+    },
+    {
+      "id": "OP-007",
+      "name": "backup/restore/upgrade",
+      "requirement": "The operator can take a consistent backup (SQLite metadata plus credentials and artifacts), restore it to a fresh data directory with checksum verification and refusal while the service is live, and follow a versioned upgrade path with schema-migration and rollback boundaries. Backup/restore instructions are a documented condition of the supported-SQLite claim.",
+      "go_behavior": "Go ships scripts/o3k-backup.sh (SQLite VACUUM INTO for an online-consistent copy, credentials bundled, manifest.json plus a .sha256 checksum), o3k-restore.sh (refuses while live, verifies the checksum), and upgrade-o3k.sh (git-based), documented in docs/backup-restore-upgrade.md.",
+      "go_paths_consulted": [
+        "scripts/o3k-backup.sh",
+        "scripts/o3k-restore.sh",
+        "scripts/upgrade-o3k.sh",
+        "docs/backup-restore-upgrade.md"
+      ],
+      "rust_status": "missing",
+      "rust_owner": "docs only; no backup/restore tooling exists",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "docs/PACKAGING.md",
+        "README.md"
+      ],
+      "gap": "Only the documented package-level procedure exists (docs/PACKAGING.md upgrade and rollback boundaries); README.md makes backup/restore instructions a condition of the supported-SQLite claim. No backup/restore tooling or tests exist.",
+      "priority": "blocks-declared-journey",
+      "requires_before_implementation": [
+        "backup/restore/upgrade procedure spec",
+        "backup/restore tests (SQLite snapshot via VACUUM INTO is a Go lesson to consider, not a mandate)"
+      ]
+    },
+    {
+      "id": "OP-008",
+      "name": "signed release/checksums/SBOM/provenance",
+      "requirement": "Release bundles ship with checksums, an SBOM, and a manifest recording version, profile, source commit, and workflow, verified by a strict self-verification step. Signing must be claimed only when a protected workflow actually signs artifacts; checksums alone are not a signature.",
+      "go_behavior": "Go release.yml builds artifacts, writes checksums.txt, generates a syft SPDX SBOM, and cosign keyless-signs checksums and SBOM with self-verification and attestation, documented in docs/release-verification.md.",
+      "go_paths_consulted": [
+        ".github/workflows/release.yml",
+        "docs/release-verification.md"
+      ],
+      "rust_status": "partial",
+      "rust_owner": "packaging/ (make-release.sh, make-sbom.sh, verify-release-bundle.sh), docs/RELEASE.md",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "packaging/make-release.sh",
+        "packaging/make-sbom.sh",
+        "packaging/verify-release-bundle.sh",
+        "docs/RELEASE.md",
+        "tests/packaging-sbom.sh"
+      ],
+      "gap": "make-release.sh (clean-tree gate, manifest with version/profile/source_commit/workflow, SHA256SUMS, strict self-verify via verify-release-bundle.sh) and make-sbom.sh (SPDX 2.3 from cargo metadata --locked with SOURCE_DATE_EPOCH) exist, and docs/RELEASE.md honestly does not claim signatures; cosign remains a proposal and tests/packaging-sbom.sh was not wired into CI before this change.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "protected release workflow decision",
+        "cosign/Sigstore signing spec"
+      ]
+    },
+    {
+      "id": "OP-009",
+      "name": "reset/uninstall/purge safety",
+      "requirement": "Reset and uninstall must fail closed: they require explicit confirmation, validate paths, refuse to touch directories the installer does not own, preserve credentials on reset, and remove only owned files. Purging must never modify foreign state.",
+      "go_behavior": "Go does not implement uninstall/reset/purge: o3k-migrate reset is migration rollback only (drop all tables and re-run migrations), and the installer strands the host without an ownership manifest or cleanup path.",
+      "go_paths_consulted": [
+        "scripts/install.sh",
+        "docs/specs/006-sqlite-oneliner/README.md"
+      ],
+      "rust_status": "implemented",
+      "rust_owner": "packaging/ (install.sh, reset.sh, uninstall.sh), tests/packaging-safety.sh",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "packaging/install.sh",
+        "packaging/reset.sh",
+        "packaging/uninstall.sh",
+        "tests/packaging-safety.sh"
+      ],
+      "gap": "install.sh writes .o3k-owned markers and a .o3k-installed manifest; reset.sh requires --yes and refuses unowned dirs; uninstall.sh refuses without the manifest and removes only owned files; tests/packaging-safety.sh asserts all fences. Purge does not remove the o3k system user (only safe if the installer created it, which needs a manifest record).",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "installation-manifest extension recording the o3k system user",
+        "extended packaging safety test"
+      ]
+    },
+    {
+      "id": "OP-010",
+      "name": "operator diagnostics",
+      "requirement": "The operator can determine the deployment profile, data and config locations, service state, owned resources, and the exact source commit through a bounded diagnostics path, with unstructured output or a future structured status command explicitly declared.",
+      "go_behavior": "Go has no status/diagnose subcommand: diagnostics rely on journalctl, curl, metrics, and the docs/OPERATIONS.md and docs/TROUBLESHOOTING.md runbooks; o3k-migrate status prints migration state only.",
+      "go_paths_consulted": [
+        "docs/OPERATIONS.md",
+        "docs/TROUBLESHOOTING.md",
+        "cmd/o3k-migrate/main.go"
+      ],
+      "rust_status": "partial",
+      "rust_owner": "packaging/ (diagnose.sh, preflight.sh, release-gate.sh), docs/status/current-state.yaml",
+      "profile": "native-rust-testlab",
+      "evidence": [
+        "packaging/diagnose.sh",
+        "packaging/preflight.sh",
+        "packaging/release-gate.sh",
+        "docs/status/current-state.yaml"
+      ],
+      "gap": "packaging/diagnose.sh (preflight, profile, dirs, systemctl heads, virsh list), packaging/preflight.sh, the authoritative machine-readable docs/status/current-state.yaml, and packaging/release-gate.sh with its validators exist; there is no aggregated status command and diagnose.sh output is unstructured.",
+      "priority": "useful-later",
+      "requires_before_implementation": [
+        "CLI operator-command spec decision"
+      ]
+    }
+  ],
+  "notes": [
+    "Route count and outcome count are inventory only and are never progress, release, or coverage percentages (ADR-0004).",
+    "This inventory records rust_status from source-bound evidence only; it creates no evidence and promotes no evidence tier.",
+    "Go reference is pinned at commit 53fd2cb36ee79f42da49c8181d6ceed12b41b3aa and consulted under ADR-0151 as a non-normative secondary reference."
+  ]
+}
