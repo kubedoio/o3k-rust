@@ -307,6 +307,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_drive_root = config.data_dir.join("config-drive");
     let config_drive_store = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
     let console_service = o3k_console::ConsoleService::open(config.data_dir.join("console"))?;
+    // The registry's durable store is load-bearing for the console-log path:
+    // o3k-api persists dispatched console commands through
+    // `registry.persist_pending_command`, which requires this store to be
+    // wired before the registry is shared.
     let registry = o3k_compute_agent::NodeRegistry::default().with_store(store.clone());
     let placement_repository: Arc<dyn o3k_store::PlacementRepository> = store.clone();
     let placement = o3k_placement::PlacementLedger::open(

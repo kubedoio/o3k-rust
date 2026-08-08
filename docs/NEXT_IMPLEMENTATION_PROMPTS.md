@@ -321,6 +321,13 @@ Acceptance:
 
 ---
 
+> Completed by issue #528 / PRs #529-#533: application-level ports in
+> `o3k-provider` (`AgentEvent`/`AgentNodeRegistry`/`VolumeAttachmentProvider`
+> and the resolver ports), wire conversion moved into `o3k-compute-agent`
+> (`events.rs`, `provider.rs`) and `o3k-cinder`; `adapter_dependency_debt` is
+> empty and the four adapter crates are hard-forbidden for application
+> crates. The prompt below is retained for historical reference.
+
 ## Prompt 6 — remove agent/protobuf/Cinder adapter leakage from application code
 
 ```text

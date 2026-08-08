@@ -6,9 +6,11 @@
 //! transport adapter (`o3k-compute-agent`) converts wire messages into these
 //! values at publish time. No protobuf type appears here.
 //!
-//! The state and category enums mirror the wire vocabulary minus its
-//! `Unspecified` sentinel: an unrepresentable or unknown wire value is
-//! rejected at the transport boundary instead of reaching application logic.
+//! The state enums mirror the wire vocabulary minus its `Unspecified`
+//! sentinel: unknown state values are rejected at the transport boundary
+//! instead of reaching application logic, while optional categories and
+//! identities are normalized to absence (matching the historical journal
+//! treatment).
 
 use uuid::Uuid;
 
@@ -28,9 +30,9 @@ pub enum AgentOperationState {
 }
 
 /// Error-category vocabulary carried by authenticated agent evidence. This
-/// includes the two authentication categories the agent may report; they are
-/// rejected by the transport boundary before reaching application logic when
-/// no application category exists.
+/// includes the two authentication categories the agent may report; the
+/// transport boundary preserves them and the durable journal persists them
+/// for terminal failures, matching the historical contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentErrorCategory {
     InvalidRequest,

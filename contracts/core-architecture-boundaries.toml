@@ -17,6 +17,10 @@ application_crates = [
 # crate and is deliberately NOT an application crate. This list must be
 # exhaustive with application_crates: the checker fails when a workspace crate
 # is unclassified, so a new crate cannot silently escape the boundary checks.
+# `o3k-provider` and `o3k-store` are classified non-application because they
+# host the narrow ports application crates depend on (provider/agent/attachment
+# ports, repository ports) plus their concrete adapters; the classification
+# follows the dependency direction, not the fact that ports live there.
 non_application_crates = [
   "o3k-api",
   "o3k-cellhv",
@@ -72,17 +76,21 @@ hard_forbidden_dependencies = [
   "prost",
 ]
 
-# These dependencies currently appear in a small number of application crates.
-# They are migration debt and may occur only where listed under
-# adapter_dependency_debt. The allowed set must shrink rather than spread.
-# `o3k-store` is intentionally not listed here: application code may depend on
-# narrow repository/store ports from that crate while concrete SqliteStore use
-# is separately ratcheted below. A later accepted design may split ports and
-# adapters into separate crates, but this contract does not force that choice.
-# The agent/Cinder adapter dependencies previously listed here were fully
-# removed behind bounded application ports (SPEC-0025 step 6); the allowed set
-# is intentionally empty so no new application dependency on these adapters
-# can be introduced without an explicit architecture review.
+# The agent/Cinder adapter dependencies previously listed here (o3k-cinder,
+# o3k-compute-agent, o3k-provider-contract, prost) were fully removed behind
+# bounded application ports (SPEC-0025 step 6) and are enforced by
+# hard_forbidden_dependencies above; the ratcheted set is intentionally empty
+# so no new application dependency on these adapters can be introduced without
+# an explicit architecture review. `o3k-store` is intentionally not listed:
+# application code may depend on narrow repository/store ports from that crate
+# while concrete SqliteStore use is separately ratcheted below. A later
+# accepted design may split ports and adapters into separate crates, but this
+# contract does not force that choice.
+#
+# Note: the boundary checker inspects production dependencies only.
+# Test-only dev-dependencies on adapter crates (for example o3k-compute's
+# dev-dependency on o3k-cinder for the fake-Cinder conformance testkit) are
+# permitted and are not application coupling.
 ratcheted_adapter_dependencies = []
 
 concrete_store_symbol = "SqliteStore"

@@ -108,17 +108,9 @@ pub struct CinderClientConfig {
 pub use o3k_provider::ComputeConnector;
 
 /// Classification of the `connection_info` field of a Cinder attachment
-/// response. The orchestrator must distinguish these cases: missing and null
-/// are deterministic Cinder-side outcomes, while a non-object value or an
-/// object without an extractable target is malformed. In every non-present case
-/// the caller observes the attachment before deciding to retry or compensate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionInfoPresence {
-    Missing,
-    Null,
-    Malformed,
-    Present,
-}
+/// response. The application-level vocabulary is reused so the adapter and
+/// the orchestrator cannot drift apart.
+pub use o3k_provider::ConnectionInfoPresence;
 
 /// A Cinder attachment as returned by the API. `connection_info` is present
 /// only after the connector update flow has completed.
@@ -1031,26 +1023,10 @@ fn attachment_observation(attachment: &CinderAttachment) -> o3k_provider::Attach
         id: attachment.id.clone(),
         status: attachment.status.clone(),
         volume_id: attachment.volume_id.clone(),
-        presence: match attachment.connection_info_presence() {
-            ConnectionInfoPresence::Present => o3k_provider::ConnectionInfoPresence::Present,
-            ConnectionInfoPresence::Missing => o3k_provider::ConnectionInfoPresence::Missing,
-            ConnectionInfoPresence::Null => o3k_provider::ConnectionInfoPresence::Null,
-            ConnectionInfoPresence::Malformed => o3k_provider::ConnectionInfoPresence::Malformed,
-        },
+        presence: attachment.connection_info_presence(),
         connection_info: attachment.connection_info.as_ref().map(|info| {
             o3k_provider::ConnectionInfo {
-                presence: match attachment.connection_info_presence() {
-                    ConnectionInfoPresence::Present => {
-                        o3k_provider::ConnectionInfoPresence::Present
-                    }
-                    ConnectionInfoPresence::Missing => {
-                        o3k_provider::ConnectionInfoPresence::Missing
-                    }
-                    ConnectionInfoPresence::Null => o3k_provider::ConnectionInfoPresence::Null,
-                    ConnectionInfoPresence::Malformed => {
-                        o3k_provider::ConnectionInfoPresence::Malformed
-                    }
-                },
+                presence: attachment.connection_info_presence(),
                 digest: info.digest(),
                 top_level_keys: info.top_level_keys(),
                 target: info
