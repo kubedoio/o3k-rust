@@ -389,6 +389,13 @@ pub enum FailureInjection {
     Timeout,
     StaleState,
     PartialCompletion,
+    /// The presence inspection dispatches but stays accepted (in-flight),
+    /// so the poll path can be driven without a provider wrapper.
+    InspectAccepted,
+    /// The first create dispatch behaves normally; every later create
+    /// dispatch fails terminally (a re-drive rejection), so the drive's
+    /// terminal-failure projection can be tested without a provider wrapper.
+    TerminalOnRedrive,
 }
 
 #[derive(Clone)]
@@ -404,6 +411,9 @@ struct FakeState {
     idempotency: HashMap<String, (Uuid, String)>,
     block_devices: HashMap<(String, String), BlockDeviceObservation>,
     last_attached_device: Option<BlockDeviceAttachment>,
+    create_calls: usize,
+    inspect_dispatches: usize,
+    last_inspect_provider_instance_id: Option<String>,
 }
 
 impl Default for FakeComputeProvider {
@@ -432,6 +442,9 @@ impl FakeComputeProvider {
                 idempotency: HashMap::new(),
                 block_devices: HashMap::new(),
                 last_attached_device: None,
+                create_calls: 0,
+                inspect_dispatches: 0,
+                last_inspect_provider_instance_id: None,
             })),
         }
     }
@@ -515,6 +528,27 @@ impl FakeComputeProvider {
             .unwrap_or_default()
     }
 
+    /// The number of presence inspections dispatched to the fake (used by
+    /// tests to prove the poll path converges without duplicate dispatch).
+    #[must_use]
+    pub fn inspect_dispatch_count(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|state| state.inspect_dispatches)
+            .unwrap_or_default()
+    }
+
+    /// The provider instance identity the last presence inspection carried
+    /// (used by tests to prove a known provider reference is passed through
+    /// instead of an empty id).
+    #[must_use]
+    pub fn last_inspect_provider_instance_id(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|state| state.last_inspect_provider_instance_id.clone())
+    }
+
     #[must_use]
     pub fn attached_volume_count(&self, resource_id: Uuid) -> usize {
         self.inner
@@ -591,6 +625,10 @@ impl ComputeProvider for FakeComputeProvider {
         request: CreateInstanceRequest,
     ) -> Result<Operation, ProviderError> {
         let mut state = self.lock()?;
+        state.create_calls += 1;
+        if matches!(state.failure, FailureInjection::TerminalOnRedrive) && state.create_calls > 1 {
+            return Err(ProviderError::Terminal);
+        }
         let fingerprint = Self::create_fingerprint(&request);
         if let Some((operation_id, original)) = state.idempotency.get(&request.idempotency_key) {
             if original != &fingerprint {
@@ -681,7 +719,18 @@ impl ComputeProvider for FakeComputeProvider {
         if idempotency_key.trim().is_empty() {
             return Err(ProviderError::InvalidRequest);
         }
-        let state = self.lock()?;
+        let mut state = self.lock()?;
+        state.inspect_dispatches += 1;
+        state.last_inspect_provider_instance_id = Some(provider_instance_id.to_owned());
+        if state.failure == FailureInjection::InspectAccepted {
+            return Ok(Operation {
+                provider_operation_id: operation_id,
+                o3k_operation_id: operation_id,
+                state: OperationState::Accepted,
+                error_category: None,
+                provider_resource_id: None,
+            });
+        }
         if state.failure == FailureInjection::Timeout {
             // Dispatch transport loss: the inspection outcome itself is
             // unknown and must not be projected as absence.

@@ -415,7 +415,7 @@ impl ComputeService {
                 .await;
         }
         if state == o3k_store::OperationState::Failed {
-            self.compensate_failed_agent_create(update).await?;
+            self.compensate_failed_create(update.operation_id).await?;
         }
         Ok(state)
     }
@@ -544,13 +544,6 @@ impl ComputeService {
                 .await?;
         }
         Ok(())
-    }
-
-    async fn compensate_failed_agent_create(
-        &self,
-        update: &o3k_provider::AgentOperationUpdate,
-    ) -> Result<(), ComputeError> {
-        self.compensate_failed_create(update.operation_id).await
     }
 
     pub async fn apply_agent_acceptance(
@@ -2918,194 +2911,6 @@ mod tests {
         Ok(())
     }
 
-    /// Wraps the fake provider with a presence-inspection dispatch counter
-    /// and an in-flight mode so tests can prove the show path drives create
-    /// convergence without duplicating in-flight inspections.
-    #[derive(Clone)]
-    struct CountingInspectProvider {
-        inner: Arc<FakeComputeProvider>,
-        inspect_dispatches: Arc<std::sync::atomic::AtomicUsize>,
-        in_flight: Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl CountingInspectProvider {
-        fn new(inner: Arc<FakeComputeProvider>) -> Self {
-            Self {
-                inner,
-                inspect_dispatches: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }
-        }
-
-        fn set_in_flight(&self, value: bool) {
-            self.in_flight
-                .store(value, std::sync::atomic::Ordering::SeqCst);
-        }
-
-        #[must_use]
-        fn inspect_dispatch_count(&self) -> usize {
-            self.inspect_dispatches
-                .load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    #[async_trait]
-    impl ComputeProvider for CountingInspectProvider {
-        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
-            self.inner.capabilities().await
-        }
-        async fn create_instance(
-            &self,
-            request: CreateInstanceRequest,
-        ) -> Result<Operation, ProviderError> {
-            self.inner.create_instance(request).await
-        }
-        async fn get_instance(
-            &self,
-            provider_instance_id: &str,
-        ) -> Result<Instance, ProviderError> {
-            self.inner.get_instance(provider_instance_id).await
-        }
-        async fn inspect_instance(
-            &self,
-            provider_id: &str,
-            resource_id: &str,
-            provider_instance_id: &str,
-            operation_id: Uuid,
-            idempotency_key: &str,
-        ) -> Result<Operation, ProviderError> {
-            self.inspect_dispatches
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.in_flight.load(std::sync::atomic::Ordering::SeqCst) {
-                return Ok(Operation {
-                    provider_operation_id: operation_id,
-                    o3k_operation_id: operation_id,
-                    state: o3k_provider::OperationState::Accepted,
-                    error_category: None,
-                    provider_resource_id: None,
-                });
-            }
-            self.inner
-                .inspect_instance(
-                    provider_id,
-                    resource_id,
-                    provider_instance_id,
-                    operation_id,
-                    idempotency_key,
-                )
-                .await
-        }
-        async fn delete_instance(
-            &self,
-            request: DeleteInstanceRequest,
-        ) -> Result<Operation, ProviderError> {
-            self.inner.delete_instance(request).await
-        }
-        async fn action_instance(
-            &self,
-            provider_instance_id: &str,
-            action: InstanceAction,
-            operation_id: Uuid,
-            idempotency_key: &str,
-        ) -> Result<Operation, ProviderError> {
-            self.inner
-                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
-                .await
-        }
-        async fn get_operation(
-            &self,
-            provider_operation_id: Uuid,
-        ) -> Result<Operation, ProviderError> {
-            self.inner.get_operation(provider_operation_id).await
-        }
-    }
-
-    /// Wraps the fake provider with a terminal rejection on the second
-    /// create dispatch, so tests can model an in-flight create whose re-drive
-    /// hits a deterministic provider failure (e.g. a capability/config
-    /// rejection after acceptance) instead of an unknown outcome.
-    #[derive(Clone)]
-    struct TerminalOnRedriveProvider {
-        inner: Arc<FakeComputeProvider>,
-        create_calls: Arc<std::sync::atomic::AtomicUsize>,
-    }
-
-    impl TerminalOnRedriveProvider {
-        fn new(inner: Arc<FakeComputeProvider>) -> Self {
-            Self {
-                inner,
-                create_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl ComputeProvider for TerminalOnRedriveProvider {
-        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
-            self.inner.capabilities().await
-        }
-        async fn create_instance(
-            &self,
-            request: CreateInstanceRequest,
-        ) -> Result<Operation, ProviderError> {
-            if self
-                .create_calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                > 0
-            {
-                return Err(ProviderError::Terminal);
-            }
-            self.inner.create_instance(request).await
-        }
-        async fn get_instance(
-            &self,
-            provider_instance_id: &str,
-        ) -> Result<Instance, ProviderError> {
-            self.inner.get_instance(provider_instance_id).await
-        }
-        async fn inspect_instance(
-            &self,
-            provider_id: &str,
-            resource_id: &str,
-            provider_instance_id: &str,
-            operation_id: Uuid,
-            idempotency_key: &str,
-        ) -> Result<Operation, ProviderError> {
-            self.inner
-                .inspect_instance(
-                    provider_id,
-                    resource_id,
-                    provider_instance_id,
-                    operation_id,
-                    idempotency_key,
-                )
-                .await
-        }
-        async fn delete_instance(
-            &self,
-            request: DeleteInstanceRequest,
-        ) -> Result<Operation, ProviderError> {
-            self.inner.delete_instance(request).await
-        }
-        async fn action_instance(
-            &self,
-            provider_instance_id: &str,
-            action: InstanceAction,
-            operation_id: Uuid,
-            idempotency_key: &str,
-        ) -> Result<Operation, ProviderError> {
-            self.inner
-                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
-                .await
-        }
-        async fn get_operation(
-            &self,
-            provider_operation_id: Uuid,
-        ) -> Result<Operation, ProviderError> {
-            self.inner.get_operation(provider_operation_id).await
-        }
-    }
-
     /// Builds a service with a real scheduler/placement ledger and a server
     /// create intent whose operation is left in `UnknownOutcome`: the create
     /// dispatch timed out, so the provider operation carries no durable
@@ -3121,7 +2926,6 @@ mod tests {
             Arc<dyn ComputeRepository>,
             o3k_placement::PlacementLedger,
             CreateInstanceRequest,
-            Uuid,
             Uuid,
             String,
         ),
@@ -3250,7 +3054,6 @@ mod tests {
             store,
             placement,
             request,
-            keypair.id,
             provider_operation_id,
             instance_id,
         ))
@@ -3264,7 +3067,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fake = Arc::new(FakeComputeProvider::new());
         fake.set_failure(FailureInjection::Timeout)?;
-        let (service, store, placement, request, _keypair_id, provider_operation_id, instance_id) =
+        let (service, store, placement, request, provider_operation_id, instance_id) =
             unknown_outcome_create_fixture("presence-absent", fake.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
         // The instance provably does not exist: the create never took effect.
@@ -3300,7 +3103,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fake = Arc::new(FakeComputeProvider::new());
         fake.set_failure(FailureInjection::Timeout)?;
-        let (service, store, placement, request, _keypair_id, provider_operation_id, _instance_id) =
+        let (service, store, placement, request, provider_operation_id, _instance_id) =
             unknown_outcome_create_fixture("presence-present", fake.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
         fake.set_failure(FailureInjection::None)?;
@@ -3338,10 +3141,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fake = Arc::new(FakeComputeProvider::new());
         fake.set_failure(FailureInjection::Timeout)?;
-        let wrapper = Arc::new(TerminalOnRedriveProvider::new(fake.clone()));
-        let (service, store, placement, request, _keypair_id, provider_operation_id, _instance_id) =
-            unknown_outcome_create_fixture("presence-terminal", wrapper.clone()).await?;
+        let (service, store, placement, request, provider_operation_id, _instance_id) =
+            unknown_outcome_create_fixture("presence-terminal", fake.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // Every re-drive after the accepted create fails terminally (a
+        // deterministic rejection), so the drive's terminal-failure
+        // projection and compensation are exercised.
+        fake.set_failure(FailureInjection::TerminalOnRedrive)?;
         // The synchronous pass never ran to completion (crash window): the
         // operation is stuck in Pending and the re-drive below fails
         // terminally instead of reporting an unknown outcome.
@@ -3385,24 +3191,24 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fake = Arc::new(FakeComputeProvider::new());
         fake.set_failure(FailureInjection::Timeout)?;
-        let wrapper = Arc::new(CountingInspectProvider::new(fake.clone()));
-        wrapper.set_in_flight(true);
-        let (service, _store, _placement, request, _keypair_id, provider_operation_id, instance_id) =
-            unknown_outcome_create_fixture("presence-inflight", wrapper.clone()).await?;
+        let (service, _store, _placement, request, provider_operation_id, instance_id) =
+            unknown_outcome_create_fixture("presence-inflight", fake.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The presence inspection dispatches but stays accepted (in-flight).
+        fake.set_failure(FailureInjection::InspectAccepted)?;
 
         // The first poll drives the presence inspection; it stays in-flight.
         let first = service
             .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
             .await?;
         assert_eq!(first.state, ServerState::Requested);
-        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        assert_eq!(fake.inspect_dispatch_count(), 1);
         // A repeated poll must reuse the in-flight inspection, not re-dispatch.
         let second = service
             .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
             .await?;
         assert_eq!(second.state, ServerState::Requested);
-        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        assert_eq!(fake.inspect_dispatch_count(), 1);
 
         // The agent completes the inspection: terminal update + observation.
         let inspect_operation_id = Uuid::new_v5(
@@ -3447,7 +3253,7 @@ mod tests {
             .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
             .await?;
         assert_eq!(converged.state, ServerState::Active);
-        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        assert_eq!(fake.inspect_dispatch_count(), 1);
         Ok(())
     }
 
@@ -3458,16 +3264,8 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let fake = Arc::new(FakeComputeProvider::new());
         fake.set_failure(FailureInjection::Timeout)?;
-        let wrapper = Arc::new(CountingInspectProvider::new(fake.clone()));
-        let (
-            service,
-            _store,
-            _placement,
-            request,
-            _keypair_id,
-            provider_operation_id,
-            _instance_id,
-        ) = unknown_outcome_create_fixture("presence-isolation", wrapper.clone()).await?;
+        let (service, _store, _placement, request, provider_operation_id, _instance_id) =
+            unknown_outcome_create_fixture("presence-isolation", fake.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
         fake.set_failure(FailureInjection::None)?;
 
@@ -3478,7 +3276,7 @@ mod tests {
             Err(ComputeError::NotFound)
         ));
         assert_eq!(
-            wrapper.inspect_dispatch_count(),
+            fake.inspect_dispatch_count(),
             0,
             "foreign project show must not dispatch a provider mutation"
         );
@@ -3487,7 +3285,7 @@ mod tests {
             .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
             .await?;
         assert_eq!(server.state, ServerState::Active);
-        assert_eq!(wrapper.inspect_dispatch_count(), 1);
+        assert_eq!(fake.inspect_dispatch_count(), 1);
         Ok(())
     }
 
