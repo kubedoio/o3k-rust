@@ -389,6 +389,13 @@ pub enum FailureInjection {
     Timeout,
     StaleState,
     PartialCompletion,
+    /// The presence inspection dispatches but stays accepted (in-flight),
+    /// so the poll path can be driven without a provider wrapper.
+    InspectAccepted,
+    /// The first create dispatch behaves normally; every later create
+    /// dispatch fails terminally (a re-drive rejection), so the drive's
+    /// terminal-failure projection can be tested without a provider wrapper.
+    TerminalOnRedrive,
 }
 
 #[derive(Clone)]
@@ -404,6 +411,9 @@ struct FakeState {
     idempotency: HashMap<String, (Uuid, String)>,
     block_devices: HashMap<(String, String), BlockDeviceObservation>,
     last_attached_device: Option<BlockDeviceAttachment>,
+    create_calls: usize,
+    inspect_dispatches: usize,
+    last_inspect_provider_instance_id: Option<String>,
 }
 
 impl Default for FakeComputeProvider {
@@ -432,6 +442,9 @@ impl FakeComputeProvider {
                 idempotency: HashMap::new(),
                 block_devices: HashMap::new(),
                 last_attached_device: None,
+                create_calls: 0,
+                inspect_dispatches: 0,
+                last_inspect_provider_instance_id: None,
             })),
         }
     }
@@ -466,6 +479,36 @@ impl FakeComputeProvider {
             .ok_or(ProviderError::NotFound)
     }
 
+    /// Clears the provider resource identity of a recorded operation so tests
+    /// can model a create whose provider side effect may not exist: the
+    /// durable record then carries `UnknownOutcome` without a resource id,
+    /// which is exactly the state presence observation must converge.
+    pub fn set_operation_provider_resource_id(
+        &self,
+        operation_id: Uuid,
+        provider_resource_id: Option<String>,
+    ) -> Result<(), ProviderError> {
+        self.inner
+            .lock()
+            .map_err(|_| ProviderError::Storage)?
+            .operations
+            .get_mut(&operation_id)
+            .map(|operation| operation.provider_resource_id = provider_resource_id)
+            .ok_or(ProviderError::NotFound)
+    }
+
+    /// Removes a recorded instance so tests can model a create that provably
+    /// never took effect (no provider side effect exists to inspect).
+    pub fn remove_instance(&self, provider_instance_id: &str) -> Result<(), ProviderError> {
+        self.inner
+            .lock()
+            .map_err(|_| ProviderError::Storage)?
+            .instances
+            .remove(provider_instance_id)
+            .map(|_| ())
+            .ok_or(ProviderError::NotFound)
+    }
+
     #[must_use]
     pub fn instance_count(&self) -> usize {
         self.inner
@@ -483,6 +526,27 @@ impl FakeComputeProvider {
             .lock()
             .map(|state| state.last_attached_device.clone())
             .unwrap_or_default()
+    }
+
+    /// The number of presence inspections dispatched to the fake (used by
+    /// tests to prove the poll path converges without duplicate dispatch).
+    #[must_use]
+    pub fn inspect_dispatch_count(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|state| state.inspect_dispatches)
+            .unwrap_or_default()
+    }
+
+    /// The provider instance identity the last presence inspection carried
+    /// (used by tests to prove a known provider reference is passed through
+    /// instead of an empty id).
+    #[must_use]
+    pub fn last_inspect_provider_instance_id(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|state| state.last_inspect_provider_instance_id.clone())
     }
 
     #[must_use]
@@ -561,6 +625,10 @@ impl ComputeProvider for FakeComputeProvider {
         request: CreateInstanceRequest,
     ) -> Result<Operation, ProviderError> {
         let mut state = self.lock()?;
+        state.create_calls += 1;
+        if matches!(state.failure, FailureInjection::TerminalOnRedrive) && state.create_calls > 1 {
+            return Err(ProviderError::Terminal);
+        }
         let fingerprint = Self::create_fingerprint(&request);
         if let Some((operation_id, original)) = state.idempotency.get(&request.idempotency_key) {
             if original != &fingerprint {
@@ -638,6 +706,67 @@ impl ComputeProvider for FakeComputeProvider {
             .get(provider_instance_id)
             .cloned()
             .ok_or(ProviderError::NotFound)
+    }
+
+    async fn inspect_instance(
+        &self,
+        _provider_id: &str,
+        resource_id: &str,
+        provider_instance_id: &str,
+        operation_id: Uuid,
+        idempotency_key: &str,
+    ) -> Result<Operation, ProviderError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(ProviderError::InvalidRequest);
+        }
+        let mut state = self.lock()?;
+        state.inspect_dispatches += 1;
+        state.last_inspect_provider_instance_id = Some(provider_instance_id.to_owned());
+        if state.failure == FailureInjection::InspectAccepted {
+            return Ok(Operation {
+                provider_operation_id: operation_id,
+                o3k_operation_id: operation_id,
+                state: OperationState::Accepted,
+                error_category: None,
+                provider_resource_id: None,
+            });
+        }
+        if state.failure == FailureInjection::Timeout {
+            // Dispatch transport loss: the inspection outcome itself is
+            // unknown and must not be projected as absence.
+            return Err(ProviderError::UnknownOutcome { operation_id });
+        }
+        // Presence by durable identity when the provider resource id is not
+        // yet known (a create in UnknownOutcome with no recorded instance),
+        // mirroring the agent's Inspect command keyed on the O3K server id.
+        let instance = if provider_instance_id.is_empty() {
+            state
+                .instances
+                .values()
+                .find(|instance| instance.o3k_server_id.to_string() == resource_id)
+                .cloned()
+        } else {
+            state.instances.get(provider_instance_id).cloned()
+        };
+        match instance {
+            Some(instance) => Ok(Operation {
+                provider_operation_id: operation_id,
+                o3k_operation_id: operation_id,
+                state: OperationState::Succeeded,
+                error_category: None,
+                provider_resource_id: Some(instance.provider_instance_id),
+            }),
+            // An absent owned instance is a terminal classified result (the
+            // real executor reports Failed/NotFound the same way), never a
+            // transport error.
+            None => Ok(Operation {
+                provider_operation_id: operation_id,
+                o3k_operation_id: operation_id,
+                state: OperationState::Failed,
+                error_category: Some(ErrorCategory::NotFound),
+                provider_resource_id: None,
+            }),
+        }
     }
 
     async fn delete_instance(
