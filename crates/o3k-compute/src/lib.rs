@@ -1808,7 +1808,77 @@ impl ComputeService {
             return Ok(());
         }
         if resource.provider_id.is_none() {
-            return Err(ComputeError::Conflict);
+            // A server that never reached a provider cannot be deleted through
+            // the provider path: there is no provider identity to address.
+            // That is safe to complete locally only when the create is
+            // terminally failed WITHOUT any provider acceptance (no provider
+            // operation identity): the create dispatch provably never reached
+            // an agent — e.g. the issue-87 empty-registry terminal — so no
+            // provider side effect can exist, mirroring the reconciler's
+            // "domain already absent" handling of provider NotFound on
+            // delete. An in-flight or accepted create still fails closed: the
+            // provider may hold side effects that only the provider delete
+            // can remove.
+            let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ComputeError::Conflict)?;
+            let create = self
+                .store
+                .get_operation(intent.operation_id)
+                .await
+                .map_err(|error| match error {
+                    StoreError::OperationNotFound => ComputeError::Conflict,
+                    other => ComputeError::Store(other),
+                })?;
+            if !(matches!(create.state, o3k_store::OperationState::Failed)
+                && create.provider_operation_id.is_none())
+            {
+                return Err(ComputeError::Conflict);
+            }
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:delete:{project_id}:{id}:{}", resource.generation).as_bytes(),
+            );
+            match self
+                .journal
+                .begin_lifecycle(id.as_uuid(), operation_id, LifecycleAction::Delete)
+                .await
+            {
+                Ok(_) | Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {}
+                Err(error) => return Err(ComputeError::Reconcile(error)),
+            }
+            // The create never reached a provider, so the delete completes
+            // without a provider call. The durable delete operation and the
+            // DELETED resource projection make the outcome terminal and
+            // idempotent; the reverse-order compensation releases the
+            // placement allocation, detaches the keypair, and unbinds ports.
+            self.store
+                .update_operation(
+                    operation_id,
+                    o3k_store::OperationState::Succeeded,
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
+            self.store
+                .update_resource(
+                    id.as_uuid(),
+                    resource.generation,
+                    &resource.desired_state,
+                    server_state_to_storage(ServerState::Deleted),
+                    resource.generation,
+                    None,
+                )
+                .await?;
+            self.release_placement_allocation(id.as_uuid(), &intent)
+                .await?;
+            self.store.detach_server_keypair(id.as_uuid()).await?;
+            self.project_terminal_binding_outcome(
+                operation_id.to_string().as_str(),
+                o3k_store::OperationState::Succeeded,
+            )
+            .await;
+            return Ok(());
         }
         let operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -2092,6 +2162,7 @@ mod tests {
         FailureInjection,
     };
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Stateful in-memory agent registry used to test application scheduling
     /// and inventory behavior without wire types. The snapshots are
@@ -3525,6 +3596,490 @@ mod tests {
         );
         task.abort();
         let _ = task.await;
+        Ok(())
+    }
+
+    /// Wraps the stateful fake provider with the agent-registry lifecycle of
+    /// the issue-87 empty-registry defect: while the agent is in reconnect
+    /// backoff no node is registered, so the create dispatch reports NotFound
+    /// (the command can provably never be delivered); `register()` simulates
+    /// the agent re-registering on a later sweep tick.
+    struct EmptyRegistryUntilRegisteredProvider {
+        inner: FakeComputeProvider,
+        registered: AtomicBool,
+        create_attempts: AtomicUsize,
+    }
+
+    impl EmptyRegistryUntilRegisteredProvider {
+        fn new() -> Self {
+            Self {
+                inner: FakeComputeProvider::new(),
+                registered: AtomicBool::new(false),
+                create_attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn register(&self) {
+            self.registered.store(true, Ordering::SeqCst);
+        }
+
+        fn create_attempts(&self) -> usize {
+            self.create_attempts.load(Ordering::SeqCst)
+        }
+
+        fn instance_count(&self) -> usize {
+            self.inner.instance_count()
+        }
+    }
+
+    #[async_trait]
+    impl ComputeProvider for EmptyRegistryUntilRegisteredProvider {
+        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.create_attempts.fetch_add(1, Ordering::SeqCst);
+            if !self.registered.load(Ordering::SeqCst) {
+                // No agent is registered: `selected_agent` fails before any
+                // dispatch, so the create command was never delivered.
+                return Err(ProviderError::NotFound);
+            }
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<Instance, ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: DeleteInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// The issue-87 rerun timeline with the real periodic sweep: the crash
+    /// residue is re-driven at +5s while the preserved agent is still in
+    /// reconnect backoff (registry empty), and the agent registers only at
+    /// +13.6s. The empty-registry drive must NOT mark the create terminal
+    /// Failed — the command was never delivered — and once the agent
+    /// registers, a later sweep tick must re-dispatch the create and converge
+    /// to ACTIVE.
+    #[tokio::test]
+    async fn create_convergence_sweep_survives_empty_registry_until_agent_registers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-compute-empty-registry-sweep-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let provider = Arc::new(EmptyRegistryUntilRegisteredProvider::new());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "empty-registry-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: Vec::new(),
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: "empty-registry-request".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        // The crash-before-dispatch residue: `Running` with no provider
+        // operation identity — the exact shape the sweep re-drives.
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Running,
+                None,
+                None,
+                None,
+            )
+            .await?;
+
+        let task = service.spawn_create_convergence_reconciler(1);
+        // The first drive(s) hit the empty registry; the operation must stay
+        // re-drivable and never become terminal Failed.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while provider.create_attempts() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "create convergence sweep never attempted the create dispatch"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_ne!(
+            store.get_operation(request.operation_id).await?.state,
+            o3k_store::OperationState::Failed,
+            "an undelivered create must not become terminal while the registry is empty"
+        );
+        // The agent re-registers (reconnect backoff completed); a later sweep
+        // tick re-dispatches the create and converges to ACTIVE.
+        provider.register();
+        loop {
+            let operation = store.get_operation(request.operation_id).await?;
+            if operation.state == o3k_store::OperationState::Succeeded {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "create convergence sweep did not converge after the agent registered"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(provider.instance_count(), 1);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        task.abort();
+        let _ = task.await;
+        Ok(())
+    }
+
+    /// Counts provider delete dispatches so tests can prove a local delete
+    /// completion never reaches the provider boundary.
+    struct RecordingDeleteProvider {
+        inner: FakeComputeProvider,
+        delete_calls: AtomicUsize,
+    }
+
+    impl RecordingDeleteProvider {
+        fn new() -> Self {
+            Self {
+                inner: FakeComputeProvider::new(),
+                delete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn delete_calls(&self) -> usize {
+            self.delete_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ComputeProvider for RecordingDeleteProvider {
+        async fn capabilities(&self) -> Result<Capabilities, ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<Instance, ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: DeleteInstanceRequest,
+        ) -> Result<Operation, ProviderError> {
+            self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<Operation, ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<Operation, ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// Seeds a stranded terminal create failure (issue #87): the create
+    /// operation is durably Failed with no provider operation identity (the
+    /// dispatch never reached an agent — the empty-registry terminal catch),
+    /// the resource projects ERROR, no provider reference exists, and the
+    /// keypair and placement allocation are still held.
+    #[allow(clippy::type_complexity)]
+    async fn stranded_failed_create_fixture(
+        label: &str,
+        provider: Arc<RecordingDeleteProvider>,
+    ) -> Result<
+        (
+            ComputeService,
+            Arc<dyn ComputeRepository>,
+            o3k_placement::PlacementLedger,
+            CreateInstanceRequest,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-a",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 4096,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 100,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await?;
+        let service = ComputeService::new(store.clone(), provider.clone())
+            .with_scheduler(Scheduler::new(placement.clone()));
+        let keypair = service
+            .create_keypair(
+                "user-a",
+                "project-a",
+                format!("{label}-key"),
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test".to_owned(),
+            )
+            .await?;
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: format!("{label}-server"),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: Some(format!("{label}-key")),
+            keypair_id: Some(keypair.id),
+            network_ids: vec!["port-1".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: format!("{label}-request"),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .attach_server_keypair(request.o3k_server_id, keypair.id)
+            .await?;
+        let generation = placement.provider("node-a").await?.generation;
+        placement
+            .allocate(
+                "node-a",
+                "alloc-1",
+                &request.o3k_server_id.to_string(),
+                std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
+                generation,
+            )
+            .await?;
+        // The stranded terminal shape: Failed create with no provider
+        // operation identity (the dispatch never reached an agent), resource
+        // projected ERROR, no provider reference attached.
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Failed,
+                None,
+                Some("terminal"),
+                Some("no agent was registered to receive the create dispatch"),
+            )
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        store
+            .update_resource(
+                resource.id,
+                resource.generation,
+                &resource.desired_state,
+                server_state_to_storage(ServerState::Error),
+                resource.generation,
+                None,
+            )
+            .await?;
+        Ok((service, store, placement, request))
+    }
+
+    /// A stranded create failure with no provider operation identity — the
+    /// create never reached any agent, so no provider side effect can exist —
+    /// must be deletable: the delete completes without a provider call, the
+    /// delete operation is terminal Succeeded, the resource ends DELETED, and
+    /// the reverse-order compensation (placement allocation, keypair, ports)
+    /// runs. Today the missing provider reference 409s the delete and leaves
+    /// the server stranded in ERROR.
+    #[tokio::test]
+    async fn delete_stranded_failed_create_without_provider_reference_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-no-ref", provider.clone()).await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            None,
+            "the delete must run reverse-order compensation for the keypair"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "a create that never reached a provider must not dispatch a provider delete"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the local delete must record a terminal Succeeded delete operation"
+        );
+        Ok(())
+    }
+
+    /// The accepted-command invariant (#542/#549): a create with a provider
+    /// operation identity was accepted and must never be re-driven by the
+    /// convergence path, and its delete must still fail closed on the missing
+    /// provider reference — the provider may hold side effects that only the
+    /// provider delete can remove. Pins that the empty-registry and
+    /// never-created delete fixes do not weaken either invariant.
+    #[tokio::test]
+    async fn accepted_create_is_never_redriven_and_delete_guard_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("accepted-guard", fake.clone()).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Running,
+                Some(&request.operation_id.to_string()),
+                None,
+                None,
+            )
+            .await?;
+
+        let server = service
+            .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+        assert_eq!(server.state, ServerState::Requested);
+        assert_eq!(
+            fake.instance_count(),
+            0,
+            "an accepted create must never be re-dispatched"
+        );
+        assert!(matches!(
+            service
+                .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+                .await,
+            Err(ComputeError::Conflict)
+        ));
         Ok(())
     }
 

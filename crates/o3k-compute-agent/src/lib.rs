@@ -5883,6 +5883,42 @@ mod tests {
         Ok(())
     }
 
+    /// The provider contract behind the issue-87 empty-registry defect: with
+    /// no agent registered (a preserved agent still in reconnect backoff),
+    /// `create_instance` must report NotFound — `selected_agent` fails before
+    /// any dispatch, so the command can provably never be delivered — which
+    /// lets the reconciler keep the operation re-drivable instead of treating
+    /// the dispatch as a terminal failure.
+    #[tokio::test]
+    async fn agent_provider_create_with_empty_registry_reports_not_found()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        let provider = AgentComputeProvider::new(registry, Arc::new(TestResolvedCreateResolver));
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("allocation-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "request-a".to_owned(),
+        };
+        assert!(matches!(
+            provider.create_instance(request).await,
+            Err(ProviderError::NotFound)
+        ));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn agent_provider_rejects_create_without_verified_artifacts()
     -> Result<(), Box<dyn std::error::Error>> {
