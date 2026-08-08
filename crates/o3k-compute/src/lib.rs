@@ -1321,14 +1321,21 @@ impl ComputeService {
     }
 
     /// Drives durable create convergence for a server whose create operation
-    /// is still non-terminal (`Running` or `UnknownOutcome`). Without this
+    /// is stuck in a state that nothing else will ever advance: `Pending` (a
+    /// crash between persisting the intent and the synchronous pass) or
+    /// `UnknownOutcome` (dispatch timeout, transport loss). Without this
     /// driver the server would stay in BUILD forever after the synchronous
-    /// pass in `create_server`: nothing else re-runs `reconcile_once`, and a
-    /// genuine unknown outcome only converges by observing instance presence
-    /// at the execution boundary (issue #481 criterion 3).
+    /// pass in `create_server`, and a genuine unknown outcome only converges
+    /// by observing instance presence at the execution boundary (issue #481
+    /// criterion 3).
     ///
-    /// The drive is lazy (read-triggered), bounded (terminal operations are
-    /// not re-driven), and idempotent (the reconciler reuses in-flight and
+    /// A `Running` operation is deliberately NOT driven: the provider has
+    /// accepted the command and its terminal update arrives through the
+    /// agent event stream, and a concurrent re-drive from the poll path
+    /// would race the synchronous finisher on the same operation records
+    /// (duplicate reference attach / stale generation). The drive is lazy
+    /// (read-triggered), bounded (terminal and accepted operations are not
+    /// re-driven), and idempotent (the reconciler reuses in-flight and
     /// terminal provider work by the deterministic operation identity).
     /// Errors are surfaced as warnings so the read path stays available; a
     /// converged failure applies the same reverse-order compensation as the
@@ -1341,9 +1348,9 @@ impl ComputeService {
         let Ok(operation) = self.store.get_operation(request.operation_id).await else {
             return;
         };
-        if matches!(
+        if !matches!(
             operation.state,
-            o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            o3k_store::OperationState::Pending | o3k_store::OperationState::UnknownOutcome
         ) {
             return;
         }
@@ -3317,12 +3324,15 @@ mod tests {
         Ok(())
     }
 
-    /// A create accepted by the provider whose later re-drive fails
-    /// deterministically (not an unknown outcome) converges to a terminal
-    /// ERROR on the show path: the drive projects the failure onto the
-    /// resource so the poll surface renders ERROR instead of BUILD forever,
-    /// and applies the same reverse-order compensation as the async
-    /// agent-failure path.
+    /// A create whose re-drive fails deterministically (not an unknown
+    /// outcome) converges to a terminal ERROR on the show path: the drive
+    /// projects the failure onto the resource so the poll surface renders
+    /// ERROR instead of BUILD forever, and applies the same reverse-order
+    /// compensation as the async agent-failure path. The operation is seeded
+    /// `Pending` (the crash window between persisting the intent and the
+    /// synchronous pass), which is the only stuck state the drive re-drives
+    /// besides `UnknownOutcome` — a `Running` operation converges through
+    /// the agent event stream and is never re-driven from the poll path.
     #[tokio::test]
     async fn unknown_outcome_create_terminal_failure_projects_error_on_show()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3332,14 +3342,14 @@ mod tests {
         let (service, store, placement, request, _keypair_id, provider_operation_id, _instance_id) =
             unknown_outcome_create_fixture("presence-terminal", wrapper.clone()).await?;
         fake.set_operation_provider_resource_id(provider_operation_id, None)?;
-        // The provider accepted the create in an earlier pass; the re-drive
-        // below fails terminally instead of reporting an unknown outcome.
-        let operation = store.get_operation(request.operation_id).await?;
+        // The synchronous pass never ran to completion (crash window): the
+        // operation is stuck in Pending and the re-drive below fails
+        // terminally instead of reporting an unknown outcome.
         store
             .update_operation(
                 request.operation_id,
-                o3k_store::OperationState::Running,
-                operation.provider_operation_id.as_deref(),
+                o3k_store::OperationState::Pending,
+                None,
                 None,
                 None,
             )
