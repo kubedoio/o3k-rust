@@ -1275,10 +1275,35 @@ impl ComputeProvider for AgentComputeProvider {
             return Err(ProviderError::Conflict);
         }
         let agent = self.selected_agent(provider_id).await?;
-        if let Some(binding) = binding.as_ref()
-            && (binding.agent_id != provider_id || binding.agent_epoch != agent.agent_epoch)
-        {
-            return Err(ProviderError::StaleState);
+        if let Some(binding) = binding.as_ref() {
+            if binding.agent_id != provider_id {
+                return Err(ProviderError::StaleState);
+            }
+            if binding.agent_epoch != agent.agent_epoch {
+                // The registry is authoritative for the agent's current
+                // epoch: every registration replaces the stored epoch (minted
+                // per connection), so a binding carrying the pre-restart
+                // epoch is a legitimate same-agent restart, not a dead
+                // stream — the #552 journal-evidence rationale. Re-anchor the
+                // in-memory binding so the presence inspection dispatches
+                // against the current agent instead of failing as
+                // StaleState forever. A binding owned by a DIFFERENT agent is
+                // still rejected above; the wire dispatch additionally fences
+                // the command by the current registered epoch.
+                let mut state = self.state.write().await;
+                match state.bindings.get_mut(resource_id) {
+                    Some(current) => current.agent_epoch = agent.agent_epoch.clone(),
+                    None => {
+                        if let Some(current) = state
+                            .bindings
+                            .values_mut()
+                            .find(|binding| binding.resource_id == resource_id)
+                        {
+                            current.agent_epoch = agent.agent_epoch.clone();
+                        }
+                    }
+                }
+            }
         }
         let mut command = build_lifecycle_command(
             LifecycleCommand::Inspect,
@@ -1540,5 +1565,186 @@ impl ComputeProvider for AgentComputeProvider {
             return Ok(None);
         }
         Ok(Some(observation))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use o3k_provider::{
+        AgentNodeSnapshot, NetworkAttachmentSpec, ResolvedCreateInputs, ResolvedCreateResolver,
+    };
+
+    fn register_request(id: &str, epoch: &str) -> agent_proto::RegisterRequest {
+        agent_proto::RegisterRequest {
+            agent_id: id.to_owned(),
+            agent_epoch: epoch.to_owned(),
+            software_version: "test".to_owned(),
+            host_label: id.to_owned(),
+            supported_versions: vec![crate::PROTOCOL_VERSION],
+            capabilities: Some(agent_proto::Capabilities {
+                architecture: "x86_64".to_owned(),
+                agent_provider_name: "o3k-compute".to_owned(),
+                agent_provider_version: "test".to_owned(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct TestResolvedCreateResolver;
+
+    #[async_trait]
+    impl ResolvedCreateResolver for TestResolvedCreateResolver {
+        async fn resolve(
+            &self,
+            _request: &CreateInstanceRequest,
+            _agent: &AgentNodeSnapshot,
+        ) -> Result<ResolvedCreateInputs, ProviderError> {
+            Ok(ResolvedCreateInputs {
+                flavor_id: "flavor.test".to_owned(),
+                image_artifact_id: "artifact.test".to_owned(),
+                image_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_owned(),
+                image_format: "qcow2".to_owned(),
+                disk_gib: 10,
+                config_drive_artifact_id: "config-drive.test".to_owned(),
+                config_drive_sha256:
+                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+                network_attachments: vec![NetworkAttachmentSpec {
+                    port_id: "port.test".to_owned(),
+                    mac: "52:54:00:12:34:56".to_owned(),
+                    fixed_ipv4: "192.0.2.10".to_owned(),
+                    subnet_cidr: "192.0.2.0/24".to_owned(),
+                    gateway_ipv4: "192.0.2.1".to_owned(),
+                }],
+            })
+        }
+    }
+
+    /// Seeds the in-memory binding exactly as the create dispatch leaves it
+    /// (see `create_instance`): keyed by the O3K server id, carrying the
+    /// create-time agent epoch, with no provider resource identity yet.
+    async fn seed_create_binding(
+        provider: &AgentComputeProvider,
+        server_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) {
+        provider.state.write().await.bindings.insert(
+            server_id.to_string(),
+            AgentBinding {
+                resource_id: server_id.to_string(),
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+                provider_resource_id: None,
+            },
+        );
+    }
+
+    /// Issue #87 crash-restart defect: the agent crashes and re-registers
+    /// under a fresh per-connection epoch while the in-memory `AgentBinding`
+    /// still carries the pre-crash epoch. `inspect_instance` must not reject
+    /// the presence inspection as `StaleState` before dispatching anything:
+    /// the registry is authoritative for the current epoch (the #552
+    /// rationale), so the same agent's operation resolves against the current
+    /// registration. The dispatch itself cannot complete in-process without a
+    /// live control stream, so the observable contract is that the failure is
+    /// a dispatch attempt (`Retryable`), never a stale-binding rejection.
+    #[tokio::test]
+    async fn inspect_after_agent_reregistration_dispatches_against_current_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let provider =
+            AgentComputeProvider::new(registry.clone(), Arc::new(TestResolvedCreateResolver));
+        let server_id = Uuid::now_v7();
+        seed_create_binding(&provider, server_id, "node-a", "epoch-1").await;
+        // The agent crashed and re-registered; the registry now stores the
+        // fresh per-connection epoch, mirroring NodeRegistry::register.
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let result = provider
+            .inspect_instance(
+                "node-a",
+                &server_id.to_string(),
+                "",
+                Uuid::now_v7(),
+                "inspect-create-test",
+            )
+            .await;
+        match result {
+            Err(ProviderError::Retryable) => {}
+            other => {
+                return Err(format!(
+                    "inspect must dispatch against the current agent, got {other:?}"
+                )
+                .into());
+            }
+        }
+        // The binding was re-anchored to the current registered epoch.
+        let binding = provider
+            .state
+            .read()
+            .await
+            .bindings
+            .get(&server_id.to_string())
+            .cloned();
+        assert_eq!(
+            binding.as_ref().map(|binding| binding.agent_epoch.as_str()),
+            Some("epoch-2")
+        );
+        Ok(())
+    }
+
+    /// Issue #87 invariant: an inspection requested for a DIFFERENT agent
+    /// than the one the binding belongs to must still be rejected as
+    /// `StaleState`; the re-anchor is limited to the agent the operation
+    /// actually belongs to and must not mutate the binding on rejection.
+    #[tokio::test]
+    async fn inspect_for_a_different_agent_is_still_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        registry
+            .register(&register_request("node-b", "epoch-9"))
+            .await?;
+        let provider =
+            AgentComputeProvider::new(registry.clone(), Arc::new(TestResolvedCreateResolver));
+        let server_id = Uuid::now_v7();
+        seed_create_binding(&provider, server_id, "node-a", "epoch-1").await;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        assert_eq!(
+            provider
+                .inspect_instance(
+                    "node-b",
+                    &server_id.to_string(),
+                    "",
+                    Uuid::now_v7(),
+                    "inspect-create-test",
+                )
+                .await,
+            Err(ProviderError::StaleState)
+        );
+        // The rejected inspection must not have re-anchored the binding.
+        let binding = provider
+            .state
+            .read()
+            .await
+            .bindings
+            .get(&server_id.to_string())
+            .cloned();
+        assert_eq!(
+            binding.as_ref().map(|binding| binding.agent_epoch.as_str()),
+            Some("epoch-1")
+        );
+        Ok(())
     }
 }
