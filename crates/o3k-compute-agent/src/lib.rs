@@ -1073,12 +1073,13 @@ fn valid_admin_state(state: i32) -> bool {
 }
 
 fn validate_command(command: &proto::Command) -> Result<(), AgentError> {
-    validate_command_with_deadline(command, true)
+    validate_command_with_deadline(command, true, true)
 }
 
 fn validate_command_with_deadline(
     command: &proto::Command,
     require_live_deadline: bool,
+    require_live_transfers: bool,
 ) -> Result<(), AgentError> {
     if !valid_reference(&command.command_id)
         || !valid_reference(&command.operation_id)
@@ -1107,7 +1108,7 @@ fn validate_command_with_deadline(
             "command deadline has expired".to_owned(),
         ));
     }
-    validate_command_action(command)?;
+    validate_command_action(command, require_live_transfers)?;
     let expected = command_payload_fingerprint(command)?;
     if command.payload_fingerprint_sha256 != expected {
         return Err(AgentError::Protocol(
@@ -1117,9 +1118,18 @@ fn validate_command_with_deadline(
     Ok(())
 }
 
-fn validate_command_action(command: &proto::Command) -> Result<(), AgentError> {
+fn validate_command_action(
+    command: &proto::Command,
+    require_live_transfers: bool,
+) -> Result<(), AgentError> {
     match command.action.as_ref() {
-        Some(proto::command::Action::Create(create)) => validate_proto_create(create),
+        Some(proto::command::Action::Create(create)) => {
+            if require_live_transfers {
+                validate_proto_create(create)
+            } else {
+                validate_proto_create_identity(create)
+            }
+        }
         Some(proto::command::Action::ConsoleLog(console))
             if console.max_bytes > 0 && console.max_bytes as usize <= o3k_console_limit() =>
         {
@@ -1752,7 +1762,18 @@ fn has_duplicate_network_ports(attachments: &[NetworkAttachmentSpec]) -> bool {
     })
 }
 
-fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError> {
+/// Validates resolved create identity and shape without the admission expiry
+/// fence.
+///
+/// Expiry fences new transfer admission; it must not prevent replay of an
+/// already admitted command: a journaled create was admitted when accepted,
+/// and its embedded transfer references expire with the command deadline
+/// (seconds after build), so decoding the journal must accept it regardless
+/// of age. Rejecting it bricks every later agent restart on the first
+/// journaled create (real-host failure at commit 4421013, issue #87: every
+/// restart exits "create command resolved inputs are invalid" before any
+/// network connect).
+fn validate_proto_create_identity(create: &proto::CreateCommand) -> Result<(), AgentError> {
     let Some(resolved) = create.resolved.as_ref() else {
         return Err(AgentError::Protocol(
             "create command resolved inputs are required".to_owned(),
@@ -1769,16 +1790,13 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
         || !valid_reference(&resolved.config_drive_artifact_id)
         || !valid_sha256(&resolved.config_drive_sha256)
         || resolved.image_transfer.as_ref().is_none_or(|reference| {
-            !valid_reference(&reference.transfer_id)
-                || reference.expires_at_unix_ms <= unix_ms()
-                || reference.size_bytes > MAX_ARTIFACT_BYTES
+            !valid_reference(&reference.transfer_id) || reference.size_bytes > MAX_ARTIFACT_BYTES
         })
         || resolved
             .config_drive_transfer
             .as_ref()
             .is_none_or(|reference| {
                 !valid_reference(&reference.transfer_id)
-                    || reference.expires_at_unix_ms <= unix_ms()
                     || reference.size_bytes > MAX_ARTIFACT_BYTES
             })
         || resolved.network_attachments.iter().any(|attachment| {
@@ -1810,6 +1828,34 @@ fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError
             .iter()
             .zip(&resolved.network_attachments)
             .any(|(port_id, attachment)| port_id != &attachment.port_id)
+    {
+        return Err(AgentError::Protocol(
+            "create command resolved inputs are invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Admission-time validation of a create: identity and shape plus the
+/// transfer admission expiry fence. The fence must never run on the journal
+/// decode/replay path — use `validate_proto_create_identity` there.
+fn validate_proto_create(create: &proto::CreateCommand) -> Result<(), AgentError> {
+    validate_proto_create_identity(create)?;
+    if let Some(reference) = create
+        .resolved
+        .as_ref()
+        .and_then(|resolved| resolved.image_transfer.as_ref())
+        && reference.expires_at_unix_ms <= unix_ms()
+    {
+        return Err(AgentError::Protocol(
+            "create command resolved inputs are invalid".to_owned(),
+        ));
+    }
+    if let Some(reference) = create
+        .resolved
+        .as_ref()
+        .and_then(|resolved| resolved.config_drive_transfer.as_ref())
+        && reference.expires_at_unix_ms <= unix_ms()
     {
         return Err(AgentError::Protocol(
             "create command resolved inputs are invalid".to_owned(),
@@ -2565,7 +2611,9 @@ impl CommandJournal {
     }
 
     fn accept(&mut self, command: &proto::Command) -> Result<JournalDecision, AgentError> {
-        validate_command_with_deadline(command, false)?;
+        // Admission keeps the transfer expiry fence: a command whose embedded
+        // transfer offers already expired must not be admitted.
+        validate_command_with_deadline(command, false, true)?;
         let key = journal_key(&command.agent_id, &command.operation_id);
         for entry in self.entries.values() {
             let same_command_id = entry.command.command_id == command.command_id;
@@ -2928,7 +2976,13 @@ fn decode_journal(
         let command = proto::Command::decode(command_bytes.as_slice()).map_err(|_| {
             AgentError::Protocol("command journal contains an invalid command".to_owned())
         })?;
-        validate_command_with_deadline(&command, false)?;
+        // Decode/replay validates identity and integrity without the
+        // admission expiry fence: a journaled command was already admitted
+        // when accepted, and its embedded transfer offers expire with the
+        // command deadline, so rejecting them here would brick every later
+        // agent restart on the first journaled create (issue #87, mirror of
+        // the #542 artifact-statuses replay fix).
+        validate_command_with_deadline(&command, false, false)?;
         if command.agent_id != agent_id
             || accepted_sequence == 0
             || last_sequence < accepted_sequence
@@ -5207,6 +5261,151 @@ mod tests {
             reopened.entries.values().next().map(|entry| entry.state),
             Some(JournalState::Unknown)
         ));
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    fn expire_create_transfers(command: &mut proto::Command) -> Result<(), AgentError> {
+        let Some(proto::command::Action::Create(create)) = command.action.as_mut() else {
+            return Err(AgentError::Protocol("expected create action".to_owned()));
+        };
+        let Some(resolved) = create.resolved.as_mut() else {
+            return Err(AgentError::Protocol("expected resolved inputs".to_owned()));
+        };
+        let expired = unix_ms().saturating_sub(1);
+        if let Some(reference) = resolved.image_transfer.as_mut() {
+            reference.expires_at_unix_ms = expired;
+        }
+        if let Some(reference) = resolved.config_drive_transfer.as_mut() {
+            reference.expires_at_unix_ms = expired;
+        }
+        // The command deadline and the embedded transfer expiry are the same
+        // value at build time; a restart after the deadline sees both in the
+        // past. The transfer fields are part of the canonical payload, so
+        // recompute the fingerprint that admission would have recorded.
+        command.deadline_unix_ms = expired;
+        command.payload_fingerprint_sha256 = command_payload_fingerprint(command)?;
+        Ok(())
+    }
+
+    #[test]
+    fn journal_decode_ignores_transfer_expiry_for_admitted_create() -> Result<(), AgentError> {
+        // A journaled create was already admitted when accepted, so decoding
+        // the journal on a later restart must accept it regardless of age:
+        // the embedded transfer references expire with the command deadline
+        // (seconds after build), and rejecting them bricks every subsequent
+        // agent restart on the first journaled create (issue #87: SIGKILL
+        // 0.11s after accept, then every restart exits
+        // "create command resolved inputs are invalid" before any network
+        // connect). This mirrors the artifact-statuses replay fix (#78/#542):
+        // expiry fences new transfer admission, not replay of admitted work.
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-journal-expired-create-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let command = fake_create_command()?;
+        let mut expired_command = command.clone();
+        expire_create_transfers(&mut expired_command)?;
+
+        // Admission still rejects the expired command; only decode/replay is
+        // exempt from the fence.
+        let mut probe = CommandJournal::open(&identity, "node")?;
+        assert!(probe.accept(&expired_command).is_err());
+        drop(probe);
+
+        let key = journal_key("node", &command.operation_id);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        assert!(matches!(
+            journal.accept(&command)?,
+            JournalDecision::New { .. }
+        ));
+        journal
+            .entries
+            .get_mut(&key)
+            .ok_or_else(|| AgentError::Protocol("command journal entry is missing".to_owned()))?
+            .command = expired_command;
+        let expired_fingerprint = journal
+            .entries
+            .get(&key)
+            .ok_or_else(|| AgentError::Protocol("journaled command is missing".to_owned()))?
+            .command
+            .payload_fingerprint_sha256
+            .clone();
+        journal.persist()?;
+        drop(journal);
+
+        // Restart after the command deadline: decode must succeed and the
+        // journaled command must survive for replay.
+        let reopened = CommandJournal::open(&identity, "node")?;
+        let entry = reopened
+            .entries
+            .get(&key)
+            .ok_or_else(|| AgentError::Protocol("journaled command is missing".to_owned()))?;
+        assert_eq!(entry.command.command_id, command.command_id);
+        assert_eq!(entry.command.operation_id, command.operation_id);
+        assert_eq!(
+            entry.command.payload_fingerprint_sha256,
+            expired_fingerprint
+        );
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    #[test]
+    fn journal_decode_keeps_committed_create_past_its_deadline() -> Result<(), AgentError> {
+        // The real-host case: the restart bricked on an earlier COMPLETED
+        // create whose deadline (and embedded transfer expiry) had passed six
+        // minutes before the agent restart; a terminal record must decode and
+        // keep its committed result.
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-journal-expired-terminal-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let command = fake_create_command()?;
+        let key = journal_key("node", &command.operation_id);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        let decision = journal.accept(&command)?;
+        let accepted_key = match decision {
+            JournalDecision::New { key, .. } => key,
+            JournalDecision::Existing(_) => {
+                return Err(AgentError::Protocol(
+                    "journal unexpectedly deduplicated".to_owned(),
+                ));
+            }
+        };
+        assert_eq!(accepted_key, key);
+        journal.complete(
+            &key,
+            fake_success(
+                "fake-provider-1".to_owned(),
+                proto::ResourceState::Running as i32,
+            ),
+        )?;
+        expire_create_transfers(
+            &mut journal
+                .entries
+                .get_mut(&key)
+                .ok_or_else(|| AgentError::Protocol("command journal entry is missing".to_owned()))?
+                .command,
+        )?;
+        journal.persist()?;
+        drop(journal);
+
+        let reopened = CommandJournal::open(&identity, "node")?;
+        let entry = reopened
+            .entries
+            .get(&key)
+            .ok_or_else(|| AgentError::Protocol("journaled command is missing".to_owned()))?;
+        assert!(matches!(entry.state, JournalState::Terminal));
+        let result = entry
+            .result
+            .as_ref()
+            .ok_or_else(|| AgentError::Protocol("terminal result is missing".to_owned()))?;
+        assert_eq!(result.provider_resource_id, "fake-provider-1");
         fs::remove_file(path).map_err(AgentError::IdentityStore)?;
         Ok(())
     }
