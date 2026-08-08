@@ -18,6 +18,30 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+/// Test-only fault pause (issue #87): sleeps the configured duration when the
+/// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
+/// production configuration never sets these variables.
+fn test_fault_pause_ms(name: &str, env_var: &str) {
+    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+        return;
+    };
+    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
+/// conditions can be unit-tested without sleeping.
+fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
+    let raw = raw?;
+    let Ok(ms) = raw.parse::<u64>() else {
+        return None;
+    };
+    if ms == 0 {
+        return None;
+    }
+    Some(ms)
+}
+
 #[derive(Clone)]
 struct HealthState {
     agent: AgentClient,
@@ -1028,6 +1052,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         agent_error(error),
                     ));
                 }
+                test_fault_pause_ms("after-define", "O3K_TEST_FAULT_PAUSE_AFTER_DEFINE_MS");
                 if let Err(error) = self.adapter.start(definition_name.clone()).await {
                     let undefine_result = self.adapter.undefine(definition_name.clone()).await;
                     let error = match undefine_result {
@@ -1048,6 +1073,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         error,
                     ));
                 }
+                test_fault_pause_ms("after-start", "O3K_TEST_FAULT_PAUSE_AFTER_START_MS");
                 let inspection = match self.adapter.inspect(definition_name).await {
                     Ok(value) => value,
                     Err(error) => {
@@ -1867,6 +1893,15 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_fault_pause_guard_accepts_only_positive_numeric_durations() {
+        assert_eq!(test_fault_pause_ms_value(None), None);
+        assert_eq!(test_fault_pause_ms_value(Some(String::new())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("0".to_owned())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("abc".to_owned())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("250".to_owned())), Some(250));
+    }
 
     fn network_attachment(
         port_id: &str,

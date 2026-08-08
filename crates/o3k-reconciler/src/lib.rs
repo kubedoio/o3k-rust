@@ -16,6 +16,30 @@ use o3k_store::{
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Test-only fault pause (issue #87): sleeps the configured duration when the
+/// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
+/// production configuration never sets these variables.
+fn test_fault_pause_ms(name: &str, env_var: &str) {
+    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+        return;
+    };
+    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
+/// conditions can be unit-tested without sleeping.
+fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
+    let raw = raw?;
+    let Ok(ms) = raw.parse::<u64>() else {
+        return None;
+    };
+    if ms == 0 {
+        return None;
+    }
+    Some(ms)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalEventKind {
     IntentPersisted,
@@ -918,6 +942,7 @@ where
             )
             .await?;
         self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
+        test_fault_pause_ms("before-dispatch", "O3K_TEST_FAULT_PAUSE_BEFORE_DISPATCH_MS");
         match self.provider.create_instance(request).await {
             Ok(provider_operation) => {
                 validate_provider_operation_owner(operation_id, &provider_operation)?;
@@ -1694,6 +1719,15 @@ mod tests {
     use o3k_store::testkit::TestStore;
     use o3k_store::{AgentCommandRecord, AgentCommandState};
     use std::path::PathBuf;
+
+    #[test]
+    fn test_fault_pause_guard_accepts_only_positive_numeric_durations() {
+        assert_eq!(test_fault_pause_ms_value(None), None);
+        assert_eq!(test_fault_pause_ms_value(Some(String::new())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("0".to_owned())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("abc".to_owned())), None);
+        assert_eq!(test_fault_pause_ms_value(Some("250".to_owned())), Some(250));
+    }
 
     fn request() -> CreateInstanceRequest {
         CreateInstanceRequest {
