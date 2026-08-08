@@ -1,7 +1,7 @@
 schema_version: 2
 status_kind: authoritative-current-state
-source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
-updated_at: 2026-08-08T18:06:08Z
+source_commit: f66e40847fc3d5161e544c6072345f8ec59c5afe
+updated_at: 2026-08-08T19:50:41Z
 release_context: >-
   The first native alpha candidate is v0.2.0-alpha.1. docs/release-tracker.md
   remains the authoritative release gate: issue #93 owns release-gate
@@ -39,9 +39,12 @@ profiles:
       enforcement mode in normal CI. The declared native TestLab API
       baseline is implemented behind canonical domain and repository-port
       boundaries with strong portable evidence. The first native
-      ephemeral-root alpha (SPEC-0025 step 8) remains open and is blocked
-      only on source-bound real-host and release evidence.
-    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+      ephemeral-root alpha (SPEC-0025 step 8) remains open: real-host
+      crash-recovery evidence is source-bound at a70df68 (PR #542), but the
+      full vertical-slice profile evidence at the current commit, clean
+      Ubuntu/Debian installs, a measured real-libvirt benchmark, independent
+      human review, and release-gate execution are still outstanding.
+    source_commit: f66e40847fc3d5161e544c6072345f8ec59c5afe
     portable_evidence:
       - name: cargo-workspace-all-features-tests
         state: passed
@@ -70,6 +73,23 @@ profiles:
       - name: real-libvirt-compute-component-gate
         state: not-executed
         note: host-gated; requires a trusted KVM/libvirt host and the protected workflow.
+      - name: native-e2e-vertical-slice-at-40f438c
+        state: passed
+        note: >-
+          Full CirrOS lifecycle E2E (ACTIVE, console marker, config-drive,
+          compute-agent mTLS, clean owned inventory) passed on the trusted
+          test host at commit 40f438c; run-bound local evidence under
+          target/real-host-workflow-artifacts/ (openstack-cli-result.json,
+          console-result.json, compute-agent-mtls-result.json,
+          real-host-owned-inventory-after.json). Not the protected workflow.
+      - name: control-plane-crash-recovery-post-merge
+        state: passed
+        note: >-
+          Post-merge regression at a70df68 (PR #542): o3kd SIGKILL
+          mid-create converges to ACTIVE with no reconnect churn, fixed IP
+          and config-drive intact, delete verified, Placement allocations
+          zero, no O3K leaks, foreign state unchanged
+          (target/real-host-workflow-artifacts/failure-p20/post-merge-regression.json).
     full_profile_evidence:
       - name: native-alpha-vertical-slice
         state: not-proven
@@ -85,14 +105,16 @@ profiles:
       docs/release-tracker.md stays the authoritative gate and remains
       blocked and pending.
     blockers:
-      - trusted KVM/libvirt real-host evidence for the complete native workflow
+      - full native vertical-slice evidence at the current commit (protected workflow or accepted run-bound equivalent)
       - clean Ubuntu and Debian installation evidence
       - measured real-libvirt benchmark with raw artifacts (release-eligible)
       - independent human architecture/security review (issue #92)
       - release-gate execution and publication (issue #93) and program closure (issue #94)
     next_evidence_action: >-
-      Run the protected real-host native TestLab workflow at the current
-      commit on a trusted KVM/libvirt host, then execute the release gate.
+      Re-run the complete native TestLab vertical slice at the current
+      commit on the trusted KVM/libvirt host (protected workflow or accepted
+      run-bound equivalent), then execute the clean-install, benchmark,
+      human-review, and release-gate phases.
     explicitly_unproven_claims:
       - external-Cinder/Tempest success (see openstack-service-testbed) does not satisfy the native alpha gate
       - production readiness
@@ -107,7 +129,7 @@ profiles:
       (SPEC-0023): O3K supplies the surrounding identity, Glance, Nova
       attachment, and CHAP-secure compute surface while Cinder retains its
       own database, message bus, service processes, and backend.
-    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+    source_commit: f66e40847fc3d5161e544c6072345f8ec59c5afe
     evidence_bound: >-
       The protected real-Cinder evidence is run-bound, not sha-bound inside
       this repository: protected run local-1786012319 on branch "after
@@ -170,7 +192,7 @@ profiles:
       Planned (SPEC-0024 Profile C). The architecture boundaries it will
       use are accepted (ADR-0160), but no multi-host implementation,
       inventory, scheduling, fencing, database, or evidence work exists.
-    source_commit: 40f438c57268faeb593dfd6cf8ceeb15c9ff9c5a
+    source_commit: f66e40847fc3d5161e544c6072345f8ec59c5afe
     portable_evidence:
       - name: multi-host-portable-suite
         state: not-proven
