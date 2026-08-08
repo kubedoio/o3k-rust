@@ -900,7 +900,7 @@ mod tests {
         let (store, mut offer, content) = fixture(&root);
         // Admitted and completed while valid, expired by the time the
         // reconnection replays statuses — exactly the real-host crash window.
-        offer.expires_at_unix_ms = crate::unix_ms() + 200;
+        offer.expires_at_unix_ms = crate::unix_ms() + 1000;
         store.begin(&offer).unwrap();
         for (index, data) in content.chunks(4).enumerate() {
             store
@@ -926,7 +926,12 @@ mod tests {
                 },
             )
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Wait until the offer is definitely expired. Poll the clock instead
+        // of sleeping a fixed duration: unix_ms() is wall-clock, so a
+        // backwards clock jump would otherwise leave the offer unexpired.
+        while crate::unix_ms() <= offer.expires_at_unix_ms {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let statuses = store.artifact_statuses("epoch-new").unwrap();
         assert_eq!(statuses.len(), 1);
@@ -946,7 +951,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("o3k-artifact-expired-receiving-{}", Uuid::now_v7()));
         let (store, mut offer, content) = fixture(&root);
-        offer.expires_at_unix_ms = crate::unix_ms() + 200;
+        offer.expires_at_unix_ms = crate::unix_ms() + 1000;
         store.begin(&offer).unwrap();
         store
             .accept_chunk(
@@ -960,7 +965,12 @@ mod tests {
                 },
             )
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Wait until the offer is definitely expired. Poll the clock instead
+        // of sleeping a fixed duration: unix_ms() is wall-clock, so a
+        // backwards clock jump would otherwise leave the offer unexpired.
+        while crate::unix_ms() <= offer.expires_at_unix_ms {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         let statuses = store.artifact_statuses("epoch-new").unwrap();
         assert!(
