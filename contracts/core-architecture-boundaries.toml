@@ -73,12 +73,11 @@ hard_forbidden_dependencies = [
 # narrow repository/store ports from that crate while concrete SqliteStore use
 # is separately ratcheted below. A later accepted design may split ports and
 # adapters into separate crates, but this contract does not force that choice.
-ratcheted_adapter_dependencies = [
-  "o3k-cinder",
-  "o3k-compute-agent",
-  "o3k-provider-contract",
-  "prost",
-]
+# The agent/Cinder adapter dependencies previously listed here were fully
+# removed behind bounded application ports (SPEC-0025 step 6); the allowed set
+# is intentionally empty so no new application dependency on these adapters
+# can be introduced without an explicit architecture review.
+ratcheted_adapter_dependencies = []
 
 concrete_store_symbol = "SqliteStore"
 # No application crate names the concrete adapter anymore: o3k-compute and
@@ -88,15 +87,6 @@ concrete_store_symbol = "SqliteStore"
 # (o3kd) selects the SQLite adapter. The symbol check below still fails when
 # any application source re-introduces the concrete store.
 concrete_store_debt_files = []
-
-[application.adapter_dependency_debt]
-# o3k-compute still consumes the external Cinder client directly for the
-# durable volume-attachment lifecycle. A bounded VolumeAttachmentProvider port
-# removes this in the final step; no additional dependency may be added
-# silently.
-o3k-compute = [
-  "o3k-cinder",
-]
 
 [ratchet]
 allow_debt_reduction = true

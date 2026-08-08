@@ -11,7 +11,6 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
-o3k-cinder = { path = "../o3k-cinder" }
 o3k-domain = { path = "../o3k-domain" }
 o3k-provider = { path = "../o3k-provider" }
 o3k-placement = { path = "../o3k-placement" }
@@ -26,4 +25,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+o3k-cinder = { path = "../o3k-cinder" }
 tokio.workspace = true

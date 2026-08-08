@@ -35,7 +35,7 @@ use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest as Sha2Digest, Sha256};
 use thiserror::Error;
 
@@ -102,16 +102,10 @@ pub struct CinderClientConfig {
     pub domain_name: String,
 }
 
-/// Bounded connector description matching the os-brick connector shape.
-#[derive(Debug, Clone, Serialize)]
-pub struct ComputeConnector {
-    pub host: String,
-    pub ip: String,
-    pub platform: String,
-    pub os_type: String,
-    pub multipath: bool,
-    pub initiator: Option<String>,
-}
+/// Bounded connector description matching the os-brick connector shape. The
+/// application-level port type is reused so the outbound client speaks the
+/// same bounded vocabulary as the orchestrator.
+pub use o3k_provider::ComputeConnector;
 
 /// Classification of the `connection_info` field of a Cinder attachment
 /// response. The orchestrator must distinguish these cases: missing and null
@@ -1027,4 +1021,145 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let day_of_year = (153 * month_prime + 2) / 5 + i64::from(day) - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+/// Adapter projection of one Cinder attachment into the application-level
+/// observation vocabulary. The classification, digest, and target extraction
+/// stay in this crate; application logic consumes only bounded values.
+fn attachment_observation(attachment: &CinderAttachment) -> o3k_provider::AttachmentObservation {
+    o3k_provider::AttachmentObservation {
+        id: attachment.id.clone(),
+        status: attachment.status.clone(),
+        volume_id: attachment.volume_id.clone(),
+        presence: match attachment.connection_info_presence() {
+            ConnectionInfoPresence::Present => o3k_provider::ConnectionInfoPresence::Present,
+            ConnectionInfoPresence::Missing => o3k_provider::ConnectionInfoPresence::Missing,
+            ConnectionInfoPresence::Null => o3k_provider::ConnectionInfoPresence::Null,
+            ConnectionInfoPresence::Malformed => o3k_provider::ConnectionInfoPresence::Malformed,
+        },
+        connection_info: attachment.connection_info.as_ref().map(|info| {
+            o3k_provider::ConnectionInfo {
+                presence: match attachment.connection_info_presence() {
+                    ConnectionInfoPresence::Present => {
+                        o3k_provider::ConnectionInfoPresence::Present
+                    }
+                    ConnectionInfoPresence::Missing => {
+                        o3k_provider::ConnectionInfoPresence::Missing
+                    }
+                    ConnectionInfoPresence::Null => o3k_provider::ConnectionInfoPresence::Null,
+                    ConnectionInfoPresence::Malformed => {
+                        o3k_provider::ConnectionInfoPresence::Malformed
+                    }
+                },
+                digest: info.digest(),
+                top_level_keys: info.top_level_keys(),
+                target: info
+                    .attach_target()
+                    .map(|target| o3k_provider::AttachmentTarget {
+                        driver_volume_type: target.driver_volume_type,
+                        target_iqn: target.target_iqn,
+                        target_portal: target.target_portal,
+                        target_lun: target.target_lun,
+                        local_path: target.local_path,
+                        auth_method: target.auth_method,
+                        auth_username: target
+                            .auth_username
+                            .map(|secret| secret.expose().to_owned()),
+                        auth_password: target
+                            .auth_password
+                            .map(|secret| secret.expose().to_owned()),
+                    }),
+            }
+        }),
+    }
+}
+
+fn attachment_error(error: CinderError) -> o3k_provider::AttachmentError {
+    match error {
+        CinderError::InvalidRequest(message) => {
+            o3k_provider::AttachmentError::InvalidRequest(message)
+        }
+        CinderError::Unauthorized => o3k_provider::AttachmentError::Unauthorized,
+        CinderError::NotFound(message) => o3k_provider::AttachmentError::NotFound(message),
+        CinderError::Conflict(message) => o3k_provider::AttachmentError::Conflict(message),
+        CinderError::ServiceUnavailable => o3k_provider::AttachmentError::Unavailable,
+        CinderError::Protocol(message) => o3k_provider::AttachmentError::Protocol(message),
+        CinderError::UnknownOutcome(message) => {
+            o3k_provider::AttachmentError::UnknownOutcome(message)
+        }
+        CinderError::Auth(_) => o3k_provider::AttachmentError::Unauthorized,
+    }
+}
+
+#[async_trait::async_trait]
+impl o3k_provider::VolumeAttachmentProvider for CinderClient {
+    async fn create_attachment(
+        &self,
+        project_id: &str,
+        volume_id: &str,
+        server_id: Option<&str>,
+    ) -> Result<o3k_provider::AttachmentObservation, o3k_provider::AttachmentError> {
+        self.create_attachment(project_id, volume_id, server_id)
+            .await
+            .map(|attachment| attachment_observation(&attachment))
+            .map_err(attachment_error)
+    }
+
+    async fn update_attachment_connector(
+        &self,
+        project_id: &str,
+        attachment_id: &str,
+        connector: &o3k_provider::ComputeConnector,
+    ) -> Result<o3k_provider::AttachmentObservation, o3k_provider::AttachmentError> {
+        self.update_attachment_connector(project_id, attachment_id, connector)
+            .await
+            .map(|attachment| attachment_observation(&attachment))
+            .map_err(attachment_error)
+    }
+
+    async fn complete_attachment(
+        &self,
+        project_id: &str,
+        attachment_id: &str,
+    ) -> Result<(), o3k_provider::AttachmentError> {
+        self.complete_attachment(project_id, attachment_id)
+            .await
+            .map_err(attachment_error)
+    }
+
+    async fn terminate_attachment(
+        &self,
+        project_id: &str,
+        attachment_id: &str,
+    ) -> Result<(), o3k_provider::AttachmentError> {
+        self.terminate_attachment(project_id, attachment_id)
+            .await
+            .map_err(attachment_error)
+    }
+
+    async fn show_attachment(
+        &self,
+        project_id: &str,
+        attachment_id: &str,
+    ) -> Result<o3k_provider::AttachmentObservation, o3k_provider::AttachmentError> {
+        self.show_attachment(project_id, attachment_id)
+            .await
+            .map(|attachment| attachment_observation(&attachment))
+            .map_err(attachment_error)
+    }
+
+    async fn list_attachments(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_provider::AttachmentObservation>, o3k_provider::AttachmentError> {
+        self.list_attachments(project_id)
+            .await
+            .map(|attachments| {
+                attachments
+                    .iter()
+                    .map(attachment_observation)
+                    .collect::<Vec<_>>()
+            })
+            .map_err(attachment_error)
+    }
 }

@@ -994,6 +994,7 @@ dependencies = [
 name = "o3k-cinder"
 version = "0.1.0-alpha.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bytes",
@@ -1002,6 +1003,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "o3k-identity",
+ "o3k-provider",
  "serde",
  "serde_json",
  "sha2",

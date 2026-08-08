@@ -14,7 +14,7 @@ async-trait.workspace = true
 o3k-domain = { path = "../o3k-domain" }
 serde.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 
 [dev-dependencies]
