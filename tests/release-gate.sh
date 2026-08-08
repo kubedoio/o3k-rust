@@ -19,16 +19,6 @@ common = {
     "finished_at": finished_at,
 }
 artifacts = {
-    "e2e.json": {
-        **common,
-        "artifact_type": "openstack-cli-e2e",
-        "status": "passed",
-        "public_api_only": True,
-        "resources": {name: f"{name}-id" for name in ("image_id", "keypair_id", "network_id", "subnet_id", "flavor_id", "server_id")},
-        "cleanup": {**common["cleanup"], "resources": {name: "verified_absent" for name in ("image", "keypair", "network", "subnet", "flavor", "server")}},
-        "lifecycle": {name: True for name in ("create", "show", "list", "stop", "start", "reboot", "console", "delete")},
-        "acceptance": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}},
-    },
     "ubuntu.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "ubuntu", "install": {"status": "passed"}},
     "debian.json": {**common, "artifact_type": "clean-install", "status": "passed", "distro": "debian", "install": {"status": "passed"}},
     "recovery.json": {
@@ -94,6 +84,13 @@ for name, value in artifacts.items():
     (root / name).write_text(json.dumps(value), encoding="utf-8")
 PY
 
+# The e2e fixture comes from the shared contract generator so the gate test
+# never hand-duplicates the resource key sets; a pristine copy is kept for the
+# contract-negative cases below.
+python3 "${ROOT_DIR}/scripts/validate-release-e2e-evidence.py" --example \
+    >"${ARTIFACT_DIR}/e2e.json"
+cp "${ARTIFACT_DIR}/e2e.json" "${ARTIFACT_DIR}/e2e.pristine.json"
+
 HUMAN_REVIEW="${ARTIFACT_DIR}/human-review.json"
 OUTPUT="${ARTIFACT_DIR}/valid-release.json"
 bash "${ROOT_DIR}/packaging/release-gate.sh" \
@@ -146,6 +143,70 @@ GATE_ARGS=(
     --human-review "${HUMAN_REVIEW}"
     --source-commit "${SOURCE_COMMIT}"
 )
+
+# Contract negatives for the e2e artifact. Each mutation must block the gate;
+# membership/vocabulary errors come from the shared validator, and the
+# passed => all-verified_absent policy stays a gate check.
+run_e2e_gate_expect_failure() {
+    local output="$1" expected_error="$2"
+    if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+        "${GATE_ARGS[@]}" --output "${output}"; then
+        echo "release gate accepted a contract-violating e2e artifact" >&2
+        exit 1
+    fi
+    grep -q "${expected_error}" "${output}"
+    cp "${ARTIFACT_DIR}/e2e.pristine.json" "${ARTIFACT_DIR}/e2e.json"
+}
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["resources"]["port_id"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+run_e2e_gate_expect_failure "${ARTIFACT_DIR}/missing-port-id.json" \
+    'resources: missing required keys: port_id'
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["cleanup"]["resources"]["port"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+run_e2e_gate_expect_failure "${ARTIFACT_DIR}/missing-port-cleanup.json" \
+    'cleanup.resources: missing required keys: port'
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["cleanup"]["resources"]["port"] = "not_verified"
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+run_e2e_gate_expect_failure "${ARTIFACT_DIR}/unverified-port.json" \
+    'cleanup.resources must prove every resource absent'
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+del value["cleanup"]["resources"]["server"]
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+run_e2e_gate_expect_failure "${ARTIFACT_DIR}/missing-server-cleanup.json" \
+    'cleanup.resources: missing required keys: server'
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["resources"]["volume_id"] = "00000000-0000-0000-0000-0000000000ff"
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+run_e2e_gate_expect_failure "${ARTIFACT_DIR}/extra-resource-key.json" \
+    'resources: unexpected keys: volume_id'
 
 if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     "${GATE_ARGS[@]}" --source-commit "fedcba9876543210fedcba9876543210fedcba98" \

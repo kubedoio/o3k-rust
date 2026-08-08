@@ -20,7 +20,7 @@ The required artifact types are:
 
 | Gate input | `artifact_type` | Additional proof |
 |---|---|---|
-| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; `acceptance` must prove initial `ACTIVE`, a non-empty fixed IP, config-drive attachment, a console boot marker, and post-reboot `restart` evidence proving `ACTIVE`, fixed IP, and config-drive attachment; redacted `resources` IDs may be included |
+| `--e2e` | `openstack-cli-e2e` | `public_api_only: true`; all create/show/list/stop/start/reboot/console/delete lifecycle fields true; `acceptance` must prove initial `ACTIVE`, a non-empty fixed IP, config-drive attachment, a console boot marker, and post-reboot `restart` evidence proving `ACTIVE`, fixed IP, and config-drive attachment; redacted `resources` IDs per the normative resource contract `contracts/release-e2e-evidence.schema.json` |
 | `--install-ubuntu` | `clean-install` | `distro: ubuntu` and clean-host install result |
 | `--install-debian` | `clean-install` | `distro: debian` and clean-host install result |
 | `--recovery` | `failure-recovery` | `scenarios` object contains every required scenario key, each with `status: passed` |
@@ -55,11 +55,15 @@ non-skipped lifecycle error and records the cleanup result; this is diagnostic
 evidence only and remains ineligible for the release gate.
 
 For `openstack-cli-e2e` artifacts, every created resource must be
-`verified_absent` when `cleanup.status` is `passed`. The CLI workflow includes
-the created keypair and records its verified absence alongside image, network,
-subnet, flavor, and server cleanup. A failed cleanup retains
+`verified_absent` when `cleanup.status` is `passed`. The CLI workflow creates
+and proves verified-absent cleanup of the image, network, subnet, port,
+flavor, keypair, and server. A failed cleanup retains
 the owned resource's `not_verified` or `pending` disposition instead of
-implying that an unsuccessful delete command established absence.
+implying that an unsuccessful delete command established absence. The
+machine-readable normative contract for the exact resource membership and
+cleanup vocabulary is `contracts/release-e2e-evidence.schema.json`, validated
+by `scripts/validate-release-e2e-evidence.py`; this document summarizes that
+contract rather than duplicating its key lists.
 
 The protected `resource-leak-result` artifact may expose owned
 `leaks.network_links`, containing only validated `o3k-*` interface names. A

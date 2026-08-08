@@ -356,6 +356,11 @@ write_result() {
         "${SERVER_RESTART_ACTIVE}" "${SERVER_RESTART_CONFIG_DRIVE}" \
         "${SERVER_RESTART_FIXED_IP}" <<'PY'
 import json, sys, time
+# Normative resource membership for the openstack-cli-e2e artifact; must stay
+# in sync with contracts/release-e2e-evidence.schema.json (enforced by
+# tests/release-e2e-evidence.sh). Values pair positionally with these tuples.
+RESOURCE_KEYS = ("image_id", "keypair_id", "network_id", "subnet_id", "port_id", "flavor_id", "server_id")
+CLEANUP_KEYS = ("image", "keypair", "network", "subnet", "port", "flavor", "server")
 (
     path, status, reason, cleanup_status, image_id, network_id, subnet_id,
     port_id, keypair_id, flavor_id, server_id, image_status, keypair_status, network_status, subnet_status,
@@ -363,6 +368,8 @@ import json, sys, time
     server_fixed_ip, console_boot_marker, restart_active, restart_config_drive,
     restart_fixed_ip,
 ) = sys.argv[1:]
+resource_values = (image_id, keypair_id, network_id, subnet_id, port_id, flavor_id, server_id)
+cleanup_values = (image_status, keypair_status, network_status, subnet_status, port_status, flavor_status, server_status)
 result = {
     "artifact_type": "openstack-cli-e2e",
     "status": status,
@@ -374,28 +381,12 @@ result = {
     "finished_at": int(time.time()),
 }
 cleanup_resources = {
-    name: value for name, value in {
-        "image": image_status,
-        "keypair": keypair_status,
-        "network": network_status,
-        "subnet": subnet_status,
-        "flavor": flavor_status,
-        "port": port_status,
-        "server": server_status,
-    }.items() if value
+    name: value for name, value in zip(CLEANUP_KEYS, cleanup_values) if value
 }
 if cleanup_resources:
     result["cleanup"]["resources"] = cleanup_resources
 resources = {
-    name: value for name, value in {
-        "image_id": image_id,
-        "keypair_id": keypair_id,
-        "network_id": network_id,
-        "subnet_id": subnet_id,
-        "port_id": port_id,
-        "flavor_id": flavor_id,
-        "server_id": server_id,
-    }.items() if value
+    name: value for name, value in zip(RESOURCE_KEYS, resource_values) if value
 }
 if resources:
     result["resources"] = resources
@@ -692,3 +683,15 @@ delete_resource_and_verify_absent image "${IMAGE_ID}"
 CLEANUP_IMAGE_STATUS=verified_absent
 IMAGE_ID=
 write_result passed "CLI lifecycle completed" passed
+
+# Self-check the passed artifact against the normative release-evidence
+# contract so a passed run never claims evidence the gate would reject.
+# Guarded: the validator is only a check, never required to emit evidence.
+if command -v python3 >/dev/null 2>&1 \
+    && [[ -f "${ROOT_DIR}/scripts/validate-release-e2e-evidence.py" ]]; then
+    if ! python3 "${ROOT_DIR}/scripts/validate-release-e2e-evidence.py" \
+        "${ARTIFACT_DIR}/openstack-cli-result.json"; then
+        echo "passed E2E artifact violates contracts/release-e2e-evidence.schema.json" >&2
+        exit 1
+    fi
+fi
