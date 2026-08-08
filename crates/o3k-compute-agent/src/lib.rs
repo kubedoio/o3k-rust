@@ -17,6 +17,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hyper_util::rt::TokioIo;
+use o3k_provider::AgentEvent as ProviderAgentEvent;
 use o3k_provider_contract::compute_proto as proto;
 use prost::Message;
 use rustls::{
@@ -48,6 +49,7 @@ use uuid::Uuid;
 
 mod artifact;
 mod config_drive;
+mod events;
 mod image;
 pub use artifact::{
     ArtifactCleanup, ArtifactReceipt, ArtifactStore, ArtifactStoreError, CommittedArtifactQuery,
@@ -290,15 +292,11 @@ pub fn parse_authorized_agents(value: &str) -> Result<Vec<AuthorizedAgent>, Agen
     Ok(agents)
 }
 
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    CommandAccepted(proto::CommandAccepted),
-    Operation(proto::OperationUpdate),
-    Observation(Box<proto::Observation>),
-    ArtifactAck(proto::ArtifactAck),
-    ArtifactStatus(proto::ArtifactStatus),
-    Error(proto::ProtocolError),
-}
+/// Application-level stream event published by an agent connection. The
+/// transport adapter converts wire messages into these values at publish
+/// time; consumers never see protobuf types. Kept as a re-export so existing
+/// import paths continue to work during the adapter-boundary migration.
+pub use o3k_provider::AgentEvent;
 
 #[derive(Clone)]
 struct AgentConnection {
@@ -312,7 +310,7 @@ pub struct NodeRegistry {
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
-    events: broadcast::Sender<AgentEvent>,
+    events: broadcast::Sender<ProviderAgentEvent>,
 }
 
 impl Default for NodeRegistry {
@@ -337,7 +335,7 @@ impl NodeRegistry {
         self.nodes.read().await.values().cloned().collect()
     }
 
-    pub fn subscribe_events(&self) -> broadcast::Receiver<AgentEvent> {
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ProviderAgentEvent> {
         self.events.subscribe()
     }
 
@@ -578,7 +576,7 @@ impl NodeRegistry {
         offer: proto::ArtifactOffer,
         bytes: impl AsRef<[u8]>,
         timeout: Duration,
-    ) -> Result<proto::ArtifactAck, AgentError> {
+    ) -> Result<o3k_provider::AgentArtifactAck, AgentError> {
         self.dispatch_artifact_and_wait_from(offer, bytes, 0, timeout)
             .await
     }
@@ -591,7 +589,7 @@ impl NodeRegistry {
         bytes: impl AsRef<[u8]>,
         start_chunk_index: u32,
         timeout: Duration,
-    ) -> Result<proto::ArtifactAck, AgentError> {
+    ) -> Result<o3k_provider::AgentArtifactAck, AgentError> {
         let mut events = self.subscribe_events();
         let transfer_id = offer.transfer_id.clone();
         let command_id = offer.command_id.clone();
@@ -620,11 +618,11 @@ impl NodeRegistry {
                     }
                 })?;
                 let ack = match event {
-                    AgentEvent::ArtifactAck(ack)
+                    ProviderAgentEvent::ArtifactAck(ack)
                         if ack.transfer_id == transfer_id
                             && ack.command_id == command_id
-                            && ack.operation_id == operation_id
-                            && ack.resource_id == resource_id
+                            && ack.operation_id.to_string() == operation_id
+                            && ack.resource_id.to_string() == resource_id
                             && ack.agent_id == agent_id
                             && ack.agent_epoch == agent_epoch =>
                     {
@@ -632,15 +630,17 @@ impl NodeRegistry {
                     }
                     _ => continue,
                 };
-                match proto::ArtifactTransferState::try_from(ack.state) {
-                    Ok(proto::ArtifactTransferState::Committed) => return Ok(ack),
-                    Ok(proto::ArtifactTransferState::Rejected)
-                    | Ok(proto::ArtifactTransferState::Expired) => {
-                        return Err(AgentError::Protocol(if ack.redacted_message.is_empty() {
-                            "agent rejected artifact transfer".to_owned()
-                        } else {
-                            ack.redacted_message
-                        }));
+                match ack.state {
+                    o3k_provider::ArtifactTransferState::Committed => return Ok(ack),
+                    o3k_provider::ArtifactTransferState::Rejected
+                    | o3k_provider::ArtifactTransferState::Expired => {
+                        return Err(AgentError::Protocol(
+                            if let Some(message) = ack.redacted_message {
+                                message
+                            } else {
+                                "agent rejected artifact transfer".to_owned()
+                            },
+                        ));
                     }
                     _ => {}
                 }
@@ -657,7 +657,7 @@ impl NodeRegistry {
         &self,
         command: proto::Command,
         timeout: Duration,
-    ) -> Result<proto::Observation, AgentError> {
+    ) -> Result<o3k_provider::AgentObservation, AgentError> {
         let mut events = self.subscribe_events();
         let agent_id = command.agent_id.clone();
         let agent_epoch = command.agent_epoch.clone();
@@ -679,11 +679,11 @@ impl NodeRegistry {
         match time::timeout(timeout, async move {
             loop {
                 match events.recv().await {
-                    Ok(AgentEvent::Observation(observation))
+                    Ok(ProviderAgentEvent::Observation(observation))
                         if observation.agent_id == agent_id
                             && observation.agent_epoch == agent_epoch
-                            && observation.resource_id == resource_id
-                            && observation.operation_id == operation_id =>
+                            && observation.resource_id.to_string() == resource_id
+                            && observation.operation_id.to_string() == operation_id =>
                     {
                         return Ok(*observation);
                     }
@@ -706,7 +706,7 @@ impl NodeRegistry {
             Ok(Ok(observation)) => {
                 info!(
                     operation_id = %observation.operation_id,
-                    operation_state = observation.operation_state,
+                    operation_state = ?observation.operation_state,
                     console_bytes = observation.console_log_bytes.len(),
                     "command observation received"
                 );
@@ -725,7 +725,7 @@ impl NodeRegistry {
         }
     }
 
-    fn publish_event(&self, event: AgentEvent) {
+    fn publish_event(&self, event: ProviderAgentEvent) {
         let _ = self.events.send(event);
     }
 
@@ -2043,7 +2043,15 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
-                        registry.publish_event(AgentEvent::Operation(operation));
+                        match events::operation_update(operation) {
+                            Ok(update) => {
+                                registry.publish_event(ProviderAgentEvent::Operation(update))
+                            }
+                            Err(error) => warn!(
+                                %error,
+                                "agent operation update rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::Observation(observation)) => {
                         if !matches_stream_identity(
@@ -2073,7 +2081,15 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                             console_bytes = observation.console_log_bytes.len(),
                             "agent observation forwarded"
                         );
-                        registry.publish_event(AgentEvent::Observation(Box::new(observation)));
+                        match events::observation(observation) {
+                            Ok(observation) => registry.publish_event(
+                                ProviderAgentEvent::Observation(Box::new(observation)),
+                            ),
+                            Err(error) => warn!(
+                                %error,
+                                "agent observation rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::CommandAccepted(accepted)) => {
                         if !matches_stream_identity(
@@ -2095,7 +2111,14 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
-                        registry.publish_event(AgentEvent::CommandAccepted(accepted));
+                        match events::command_accepted(accepted) {
+                            Ok(accepted) => registry
+                                .publish_event(ProviderAgentEvent::CommandAccepted(accepted)),
+                            Err(error) => warn!(
+                                %error,
+                                "agent command acceptance rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::ArtifactAck(ack)) => {
                         if !matches_stream_identity(
@@ -2117,7 +2140,13 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
-                        registry.publish_event(AgentEvent::ArtifactAck(ack));
+                        match events::artifact_ack(ack) {
+                            Ok(ack) => registry.publish_event(ProviderAgentEvent::ArtifactAck(ack)),
+                            Err(error) => warn!(
+                                %error,
+                                "agent artifact acknowledgement rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::ArtifactStatus(status)) => {
                         if !matches_stream_identity(
@@ -2139,7 +2168,15 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
-                        registry.publish_event(AgentEvent::ArtifactStatus(status));
+                        match events::artifact_status(status) {
+                            Ok(status) => {
+                                registry.publish_event(ProviderAgentEvent::ArtifactStatus(status))
+                            }
+                            Err(error) => warn!(
+                                %error,
+                                "agent artifact status rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::ResyncSnapshot(_)) | None => {}
                     Some(proto::control_request::Body::Error(error)) => {
@@ -2149,7 +2186,13 @@ impl proto::compute_agent_server::ComputeAgent for ComputeAgentService {
                         {
                             break;
                         }
-                        registry.publish_event(AgentEvent::Error(error));
+                        match events::protocol_error(error) {
+                            Ok(error) => registry.publish_event(ProviderAgentEvent::Error(error)),
+                            Err(conversion_error) => warn!(
+                                %conversion_error,
+                                "agent protocol error rejected at the transport boundary"
+                            ),
+                        }
                     }
                     Some(proto::control_request::Body::Register(_)) => {
                         let _ = tx
@@ -4302,12 +4345,14 @@ mod tests {
         registry.register(&register("node", "epoch")).await?;
         let (sender, mut receiver) = mpsc::channel(1);
         registry.attach_connection("node", "epoch", sender).await?;
+        let operation_id = "11111111-1111-1111-1111-111111111111";
+        let resource_id = "22222222-2222-2222-2222-222222222222";
         let command = build_lifecycle_command(
             LifecycleCommand::Inspect,
             "node",
             "epoch",
-            "operation-observe",
-            "resource-1",
+            operation_id,
+            resource_id,
         )?;
         let waiting = {
             let registry = registry.clone();
@@ -4320,15 +4365,27 @@ mod tests {
         // Receiving the dispatched command proves the waiter subscribed before
         // dispatching, so the observation published now cannot be missed.
         let _dispatched = receiver.recv().await.ok_or("dispatched command")??;
-        registry.publish_event(AgentEvent::Observation(Box::new(proto::Observation {
-            agent_id: "node".to_owned(),
-            agent_epoch: "epoch".to_owned(),
-            resource_id: "resource-1".to_owned(),
-            operation_id: "operation-observe".to_owned(),
-            ..Default::default()
-        })));
+        registry.publish_event(ProviderAgentEvent::Observation(Box::new(
+            o3k_provider::AgentObservation {
+                agent_id: "node".to_owned(),
+                agent_epoch: "epoch".to_owned(),
+                resource_id: Uuid::parse_str(resource_id)?,
+                provider_resource_id: None,
+                operation_id: Uuid::parse_str(operation_id)?,
+                state: o3k_provider::InstanceState::Creating,
+                operation_state: o3k_provider::AgentOperationState::Succeeded,
+                observation_sequence: 1,
+                observed_at_unix_ms: 0,
+                redacted_message: None,
+                console_log_bytes: Vec::new(),
+                console_log_offset: 0,
+                console_log_complete: false,
+                console_log_truncated: false,
+                block_device: None,
+            },
+        )));
         let observation = waiting.await??;
-        assert_eq!(observation.operation_id, "operation-observe");
+        assert_eq!(observation.operation_id, Uuid::parse_str(operation_id)?);
         Ok(())
     }
 
@@ -4507,24 +4564,32 @@ mod tests {
             for _ in 0..3 {
                 receiver.recv().await;
             }
-            publisher.publish_event(AgentEvent::ArtifactAck(proto::ArtifactAck {
-                transfer_id: expected.transfer_id,
-                command_id: expected.command_id,
-                operation_id: expected.operation_id,
-                resource_id: expected.resource_id,
-                agent_id: expected.agent_id,
-                agent_epoch: "epoch".to_owned(),
-                contiguous_bytes: expected.size_bytes,
-                next_chunk_index: expected.chunk_count,
-                state: proto::ArtifactTransferState::Committed as i32,
-                redacted_message: String::new(),
-            }));
+            let operation_id = expected.operation_id.parse::<uuid::Uuid>();
+            let resource_id = expected.resource_id.parse::<uuid::Uuid>();
+            let (operation_id, resource_id) = match (operation_id, resource_id) {
+                (Ok(operation_id), Ok(resource_id)) => (operation_id, resource_id),
+                _ => return,
+            };
+            publisher.publish_event(ProviderAgentEvent::ArtifactAck(
+                o3k_provider::AgentArtifactAck {
+                    transfer_id: expected.transfer_id,
+                    command_id: expected.command_id,
+                    operation_id,
+                    resource_id,
+                    agent_id: expected.agent_id,
+                    agent_epoch: "epoch".to_owned(),
+                    contiguous_bytes: expected.size_bytes,
+                    next_chunk_index: expected.chunk_count,
+                    state: o3k_provider::ArtifactTransferState::Committed,
+                    redacted_message: None,
+                },
+            ));
         });
 
         let ack = registry
             .dispatch_artifact_and_wait(offer, data, Duration::from_secs(1))
             .await?;
-        assert_eq!(ack.state, proto::ArtifactTransferState::Committed as i32);
+        assert_eq!(ack.state, o3k_provider::ArtifactTransferState::Committed);
         Ok(())
     }
 
@@ -5188,8 +5253,8 @@ mod tests {
             proto::ArtifactOffer {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "command-1".to_owned(),
-                operation_id: "operation-1".to_owned(),
-                resource_id: "resource-1".to_owned(),
+                operation_id: "11111111-1111-1111-1111-111111111111".to_owned(),
+                resource_id: "22222222-2222-2222-2222-222222222222".to_owned(),
                 agent_id: agent_id.to_owned(),
                 artifact_id: "artifact-1".to_owned(),
                 kind: proto::ArtifactKind::ImageBase as i32,

@@ -100,12 +100,6 @@ o3k-compute = [
   "prost",
 ]
 
-# o3k-reconciler currently reads agent wire events directly. This should
-# converge toward application/domain observations behind an adapter boundary.
-o3k-reconciler = [
-  "o3k-provider-contract",
-]
-
 [ratchet]
 allow_debt_reduction = true
 allow_new_debt = false
