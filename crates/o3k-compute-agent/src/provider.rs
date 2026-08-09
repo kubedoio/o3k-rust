@@ -276,11 +276,34 @@ impl AgentComputeProvider {
         Ok(snapshot)
     }
 
-    async fn dispatch(&self, command: agent_proto::Command) -> Result<(), ProviderError> {
+    async fn dispatch(
+        &self,
+        command: agent_proto::Command,
+        operation_id: Uuid,
+    ) -> Result<(), ProviderError> {
         self.registry
             .dispatch_command(command)
             .await
-            .map_err(map_agent_error)
+            .map_err(|error| match error {
+                AgentError::Protocol(message)
+                    if message
+                        .to_ascii_lowercase()
+                        .contains("deadline has expired") =>
+                {
+                    // A durably recorded command whose embedded deadline
+                    // expired during a re-dispatch may already have been
+                    // delivered and executed while the control stream was
+                    // stalled: the outcome is unknown, never a rejected
+                    // request (issue #87 B2 — the agent accepted and
+                    // executed the reboot while the acceptance and terminal
+                    // observation were dropped). The reconciler's
+                    // UnknownOutcome path observes the operation before
+                    // retrying and adopts the re-delivered terminal evidence
+                    // instead of terminalizing the operation.
+                    ProviderError::UnknownOutcome { operation_id }
+                }
+                other => map_agent_error(other),
+            })
     }
 
     async fn accepted_operation(&self, operation_id: Uuid) -> Result<Operation, ProviderError> {
@@ -350,7 +373,7 @@ impl AgentComputeProvider {
         operation_id: Uuid,
     ) -> Result<Operation, ProviderError> {
         let operation = self.accepted_operation(operation_id).await?;
-        if let Err(error) = self.dispatch(command).await {
+        if let Err(error) = self.dispatch(command, operation_id).await {
             self.state.write().await.operations.remove(&operation_id);
             return Err(error);
         }
@@ -1655,6 +1678,28 @@ mod tests {
         );
     }
 
+    /// Seeds the in-memory binding exactly as a create observation leaves it
+    /// for lifecycle dispatch (see `apply_agent_provider_event`): keyed by
+    /// the provider (libvirt domain) identity, carrying the create-time
+    /// agent epoch and the O3K server identity as the resource.
+    async fn seed_lifecycle_binding(
+        provider: &AgentComputeProvider,
+        provider_instance_id: &str,
+        resource_id: &str,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) {
+        provider.state.write().await.bindings.insert(
+            provider_instance_id.to_owned(),
+            AgentBinding {
+                resource_id: resource_id.to_owned(),
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+                provider_resource_id: Some(provider_instance_id.to_owned()),
+            },
+        );
+    }
+
     /// Issue #87 crash-restart defect: the agent crashes and re-registers
     /// under a fresh per-connection epoch while the in-memory `AgentBinding`
     /// still carries the pre-crash epoch. `inspect_instance` must not reject
@@ -1969,6 +2014,248 @@ mod tests {
             .cloned()
             .ok_or("succeeded observation must project the binding")?;
         assert_eq!(binding.resource_id, resource_id.to_string());
+        Ok(())
+    }
+
+    /// Seeds the durable records of an in-flight lifecycle operation exactly
+    /// as the reconcile loop leaves them during a transport stall: an ACTIVE
+    /// resource with a provider identity and a valid create intent (the
+    /// rehydrate projection decodes it), the attached "agent" provider
+    /// reference (the create observation attached it), the lifecycle
+    /// operation in `Running`, and (in the caller's step) the pending agent
+    /// command. The operation row is the FK target of
+    /// `agent_commands.operation_id`.
+    async fn seed_lifecycle_operation(
+        store: &dyn ComputeRepository,
+        operation_id: Uuid,
+        resource_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: resource_id,
+            project_id: "project-a".to_owned(),
+            name: "server-a".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: "flavor.test".to_owned(),
+            disk_gib: 10,
+            image_id: Some("image-a".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-a".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-a".to_owned()),
+            config_drive: None,
+            idempotency_key: "create-a".to_owned(),
+        };
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 3,
+                observed_generation: 3,
+                desired_state: serde_json::to_string(&request).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "request serialization")
+                })?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("domain-a".to_owned()),
+            })
+            .await?;
+        store
+            .attach_provider_reference(&o3k_store::ProviderReference {
+                resource_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-a".to_owned(),
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:reboot".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: Some(operation_id.to_string()),
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Issue #87 B2 regression (agent-control-plane-network-interruption):
+    /// a re-dispatch of a durably recorded lifecycle command whose embedded
+    /// deadline has expired — the residue of an accepted in-flight command
+    /// during a stalled control stream — must be classified as an unknown
+    /// outcome, never as a rejected request. The command may already have
+    /// been delivered and executed while the stream was down (in the
+    /// real-host failure the agent accepted and executed the reboot and
+    /// re-delivered the terminal observation after the restore); the
+    /// reconciler must observe the operation before retrying instead of
+    /// terminalizing it as failed/invalid_request.
+    #[tokio::test]
+    async fn lifecycle_redispatch_past_command_deadline_is_unknown_outcome()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(TestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let server_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        seed_lifecycle_binding(
+            &provider,
+            "domain-a",
+            &server_id.to_string(),
+            "node-a",
+            "epoch-1",
+        )
+        .await;
+        seed_lifecycle_operation(store.as_ref(), operation_id, server_id).await?;
+        // The stalled-stream residue: the command was durably recorded as
+        // Pending (its acceptance never reached the control plane) and the
+        // reconcile re-drive happens after the embedded 10s deadline
+        // expired. The deadline is not part of the canonical payload, so the
+        // recorded fingerprint stays valid and only the deadline fence fires.
+        let mut command = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "node-a",
+            "epoch-1",
+            &operation_id.to_string(),
+            &server_id.to_string(),
+        )?;
+        command.deadline_unix_ms = unix_ms().saturating_sub(1);
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: command.command_id.clone(),
+                idempotency_key: command.idempotency_key.clone(),
+                operation_id,
+                resource_id: server_id,
+                agent_id: command.agent_id.clone(),
+                agent_epoch: command.agent_epoch.clone(),
+                payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+                payload: command.encode_to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        let result = provider
+            .action_instance(
+                "domain-a",
+                o3k_provider::InstanceAction::Reboot,
+                operation_id,
+                "reboot-a",
+            )
+            .await;
+        match result {
+            Err(ProviderError::UnknownOutcome {
+                operation_id: unknown,
+            }) if unknown == operation_id => {}
+            other => {
+                return Err(format!(
+                    "a stalled-stream lifecycle re-dispatch must be an unknown outcome, got {other:?}"
+                )
+                .into());
+            }
+        }
+        // The accepted projection must not leak, and the durable command
+        // record must be untouched, ready for the reconciler's
+        // observe-before-retry pass.
+        assert!(
+            provider.state.read().await.operations.is_empty(),
+            "a failed dispatch must not leave an accepted operation projection"
+        );
+        assert_eq!(
+            store
+                .get_agent_command_by_operation(operation_id)
+                .await?
+                .state,
+            AgentCommandState::Pending
+        );
+        Ok(())
+    }
+
+    /// Issue #87 B2 invariant: a genuinely invalid command payload — a
+    /// durable record whose fingerprint does not match its canonical payload
+    /// — must STILL be rejected as `InvalidRequest` (the reconciler's
+    /// terminal failure path). The transport-stall reclassification never
+    /// weakens real validation.
+    #[tokio::test]
+    async fn lifecycle_redispatch_with_corrupt_payload_is_still_invalid_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(TestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let server_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        seed_lifecycle_binding(
+            &provider,
+            "domain-a",
+            &server_id.to_string(),
+            "node-a",
+            "epoch-1",
+        )
+        .await;
+        seed_lifecycle_operation(store.as_ref(), operation_id, server_id).await?;
+        let mut command = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "node-a",
+            "epoch-1",
+            &operation_id.to_string(),
+            &server_id.to_string(),
+        )?;
+        // The embedded deadline stays live so the fingerprint fence is the
+        // only validation that can fire.
+        command.payload_fingerprint_sha256 = "f".repeat(64);
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: command.command_id.clone(),
+                idempotency_key: command.idempotency_key.clone(),
+                operation_id,
+                resource_id: server_id,
+                agent_id: command.agent_id.clone(),
+                agent_epoch: command.agent_epoch.clone(),
+                payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+                payload: command.encode_to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        let result = provider
+            .action_instance(
+                "domain-a",
+                o3k_provider::InstanceAction::Reboot,
+                operation_id,
+                "reboot-a",
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(ProviderError::InvalidRequest),
+            "a corrupt command payload must stay a rejected request"
+        );
+        assert!(
+            provider.state.read().await.operations.is_empty(),
+            "a rejected dispatch must not leave an accepted operation projection"
+        );
         Ok(())
     }
 }
