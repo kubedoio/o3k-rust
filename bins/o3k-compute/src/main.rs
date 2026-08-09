@@ -936,15 +936,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         resource_id = %command.resource_id,
                         "create failed definitively; reporting terminal failure"
                     );
-                    Ok(CommandExecutionResult {
-                        state: proto::OperationState::Failed as i32,
-                        error_category: proto::ErrorCategory::Terminal as i32,
-                        resource_state: proto::ResourceState::Error as i32,
-                        redacted_message: error.to_string(),
-                        provider_resource_id: String::new(),
-                        console_log: None,
-                        block_device: None,
-                    })
+                    Ok(definitive_failure_result(&error))
                 };
                 let preparation = match prepare_network(command, &self.network, &self.dhcp) {
                     Ok(preparation) => preparation,
@@ -1438,6 +1430,27 @@ fn inspect_not_found_result(provider_resource_id: String) -> CommandExecutionRes
         resource_state: proto::ResourceState::Error as i32,
         redacted_message: "requested domain was not found".to_owned(),
         provider_resource_id,
+        console_log: None,
+        block_device: None,
+    }
+}
+
+/// Result for a create failure that provably happened before libvirt could
+/// define the domain (issue-87 C-1 qemu-img materialization, network
+/// preparation, domain-spec and console-log failures). Absence is proven by
+/// construction: every caller is upstream of the define/start boundary, so
+/// the instance can never exist and the operation is terminally Failed
+/// rather than of unknown outcome. The category reports the absence so the
+/// control plane can recognize that no provider side effect can exist and
+/// complete a local delete; the redacted reason is carried in the message
+/// for the durable record.
+fn definitive_failure_result(error: &AgentError) -> CommandExecutionResult {
+    CommandExecutionResult {
+        state: proto::OperationState::Failed as i32,
+        error_category: proto::ErrorCategory::NotFound as i32,
+        resource_state: proto::ResourceState::Error as i32,
+        redacted_message: error.to_string(),
+        provider_resource_id: String::new(),
         console_log: None,
         block_device: None,
     }
@@ -1997,6 +2010,42 @@ mod tests {
         assert_eq!(result.resource_state, proto::ResourceState::Error as i32);
         assert_eq!(result.redacted_message, "requested domain was not found");
         assert_eq!(result.provider_resource_id, "o3k-domain");
+        assert!(result.console_log.is_none());
+    }
+
+    /// The issue-87 C-1 qemu-img shape: a create that failed before libvirt
+    /// could define the domain (image materialization here) is absent by
+    /// construction — no provider side effect can exist. The result must
+    /// therefore carry the absence-proven category ("not_found" in the
+    /// durable record) that the control plane's local-delete completion
+    /// accepts, a terminal Failed state, and no provider resource identity.
+    /// A generic "terminal" category would leave the failed create
+    /// permanently undeletable: the accepted create carries a provider
+    /// operation identity, so the delete guard's never-accepted condition
+    /// cannot apply.
+    #[test]
+    fn definitive_pre_libvirt_failure_reports_absence_proven_category() {
+        let result = definitive_failure_result(&AgentError::Protocol(
+            "instance image overlay could not be realized".to_owned(),
+        ));
+        assert_eq!(result.state, proto::OperationState::Failed as i32);
+        assert_eq!(
+            result.error_category,
+            proto::ErrorCategory::NotFound as i32,
+            "a definitive pre-libvirt failure must record the absence-proven \
+             category so the control plane can complete a local delete"
+        );
+        assert_eq!(result.resource_state, proto::ResourceState::Error as i32);
+        assert!(
+            result
+                .redacted_message
+                .contains("instance image overlay could not be realized"),
+            "the redacted reason must be carried in the result for the durable record"
+        );
+        assert_eq!(
+            result.provider_resource_id, "",
+            "no provider resource identity can exist for a pre-libvirt failure"
+        );
         assert!(result.console_log.is_none());
     }
 
