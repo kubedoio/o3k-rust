@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned action; reads rust-toolchain.toml
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install protobuf compiler and compatibility-test parser
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils tgt
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
       - name: Refresh cached libvirt bindings
         run: cargo clean -p virt-sys
       - name: Format
@@ -46,6 +46,8 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test real-host leak verifier
+        run: bash tests/real-host-leak-verifier.sh
       - name: Test protected real-Cinder workflow guards
         run: bash tests/real-cinder-workflow-guards.sh
       - name: Test real-Cinder evidence artifacts

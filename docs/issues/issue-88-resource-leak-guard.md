@@ -35,6 +35,25 @@ The protected workflow supplies this required allowlist from the
 environment variable in the protected GitHub environment). An unset allowlist
 is rejected rather than treated as an empty clean baseline.
 
+## Repository-side verifier (2026-08-09)
+
+Repository-side tooling for the full issue acceptance now exists without
+claiming host evidence:
+
+- `scripts/real-host-owned-inventory.py` schema_version 3 (env-gated
+  `O3K_REAL_HOST_STATE_ROOT` / `O3K_REAL_HOST_PID_ROOT` /
+  `O3K_REAL_HOST_CANARIES`) adds managed-state, DHCP, process, durable-ledger,
+  and canary sections with the issue's classification contract;
+- `scripts/real-host-leak-verifier.py` provides `compare`, `negative-stale`,
+  `negative-foreign`, and `aggregate`, producing the protected
+  `resource-leak-result` artifact (schema_version 2) per ADR-0164;
+- `tests/real-host-leak-verifier.sh` exercises both against fake binaries
+  and a real sqlite3 ledger.
+
+The real-host run (clean baseline, canaries, normal E2E, and the full
+failure-injection matrix under the verifier) remains host-gated and is not
+claimed here. Decision: [ADR-0164](../adr/ADR-0164-independent-resource-leak-verifier.md).
+
 ## Explicit boundary
 
 The complete issue acceptance still requires an independent real-host

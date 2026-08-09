@@ -178,6 +178,7 @@ approval before `Accepted`.
 | [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md) | Keystone trust root and service identity | Proposed | identity, governance |
 | [ADR-0162](ADR-0162-contract-first-staged-runner-validation.md) | Contract-first development and staged runner validation | Proposed | compute, network, governance |
 | [ADR-0163](ADR-0163-product-profiles-and-deployment-posture.md) | Product profiles and deployment posture | Proposed | governance |
+| [ADR-0164](ADR-0164-independent-resource-leak-verifier.md) | Independent resource-leak and foreign-state verifier | Accepted | compute, network, placement, governance |
 
 ## Required audit
 
