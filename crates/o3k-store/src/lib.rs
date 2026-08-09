@@ -588,6 +588,15 @@ pub trait DurableStore: Send + Sync {
         error_category: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<OperationRecord, StoreError>;
+    /// Lists lifecycle-kind operations (`kind LIKE 'lifecycle:%'`) that have
+    /// not reached a terminal state (`succeeded`/`failed`, the reconciler's
+    /// terminal predicate). The periodic lifecycle-convergence sweep drives
+    /// exactly these rows: an unknown delete/action outcome can leave a
+    /// lifecycle operation non-terminal with no event-stream path ever
+    /// advancing it again (issue #88 B1).
+    async fn list_non_terminal_lifecycle_operations(
+        &self,
+    ) -> Result<Vec<OperationRecord>, StoreError>;
     async fn attach_provider_reference(
         &self,
         reference: &ProviderReference,
@@ -3795,6 +3804,18 @@ impl DurableStore for SqliteStore {
         operation_from_row(&row)
     }
 
+    async fn list_non_terminal_lifecycle_operations(
+        &self,
+    ) -> Result<Vec<OperationRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE kind LIKE 'lifecycle:%' AND state NOT IN ('succeeded', 'failed') ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(operation_from_row).collect()
+    }
+
     async fn update_operation(
         &self,
         id: Uuid,
@@ -6468,6 +6489,131 @@ mod tests {
     async fn sqlite_store_passes_conformance() -> Result<(), StoreError> {
         let store = SqliteStore::connect("sqlite::memory:").await?;
         run_conformance(&store).await
+    }
+
+    /// The lifecycle-convergence sweep drives exactly the rows returned by
+    /// `list_non_terminal_lifecycle_operations`: lifecycle-kind operations
+    /// that have not reached the reconciler's terminal predicate
+    /// (`succeeded`/`failed`). Every other row — terminal lifecycle ops and
+    /// non-lifecycle kinds such as `create` — must be excluded.
+    #[tokio::test]
+    async fn list_non_terminal_lifecycle_operations_returns_exactly_the_lifecycle_residue()
+    -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource_a = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("instance-a".to_owned()),
+        };
+        let resource_b = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-b".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: "ACTIVE".to_owned(),
+            provider_id: Some("instance-b".to_owned()),
+        };
+        store.insert_resource(&resource_a).await?;
+        store.insert_resource(&resource_b).await?;
+        let operation =
+            |serial: u32, resource_id: Uuid, kind: &str, state: OperationState| OperationRecord {
+                id: Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("o3k-store-lifecycle-query-{serial}").as_bytes(),
+                ),
+                resource_id,
+                kind: kind.to_owned(),
+                state,
+                provider_operation_id: Some(format!("provider-op-{serial}")),
+                error_category: None,
+                error_message: None,
+            };
+        // Non-terminal lifecycle rows: the sweep must see all six.
+        let pending_start = operation(1, resource_a.id, "lifecycle:start", OperationState::Pending);
+        let running_stop = operation(2, resource_a.id, "lifecycle:stop", OperationState::Running);
+        let running_reboot = operation(
+            3,
+            resource_a.id,
+            "lifecycle:reboot",
+            OperationState::Running,
+        );
+        let retryable_delete = operation(
+            4,
+            resource_a.id,
+            "lifecycle:delete",
+            OperationState::Retryable,
+        );
+        let unknown_delete = operation(
+            5,
+            resource_b.id,
+            "lifecycle:delete",
+            OperationState::UnknownOutcome,
+        );
+        let unknown_reboot = operation(
+            6,
+            resource_b.id,
+            "lifecycle:reboot",
+            OperationState::UnknownOutcome,
+        );
+        // Excluded rows: terminal lifecycle ops and a non-lifecycle kind.
+        let succeeded_delete = operation(
+            7,
+            resource_a.id,
+            "lifecycle:delete",
+            OperationState::Succeeded,
+        );
+        let failed_delete = operation(8, resource_a.id, "lifecycle:delete", OperationState::Failed);
+        let unknown_create = operation(9, resource_b.id, "create", OperationState::UnknownOutcome);
+        for row in [
+            &pending_start,
+            &running_stop,
+            &running_reboot,
+            &retryable_delete,
+            &unknown_delete,
+            &unknown_reboot,
+            &succeeded_delete,
+            &failed_delete,
+            &unknown_create,
+        ] {
+            store.insert_operation(row).await?;
+        }
+
+        let listed = store.list_non_terminal_lifecycle_operations().await?;
+        let mut listed_ids: Vec<Uuid> = listed.iter().map(|row| row.id).collect();
+        listed_ids.sort();
+        let mut expected_ids = [
+            pending_start.id,
+            running_stop.id,
+            running_reboot.id,
+            retryable_delete.id,
+            unknown_delete.id,
+            unknown_reboot.id,
+        ];
+        expected_ids.sort();
+        assert_eq!(listed_ids, expected_ids);
+        for row in listed {
+            assert!(
+                row.kind.starts_with("lifecycle:"),
+                "a non-lifecycle kind must never be listed: {}",
+                row.kind
+            );
+            assert!(
+                !matches!(
+                    row.state,
+                    OperationState::Succeeded | OperationState::Failed
+                ),
+                "a terminal operation must never be listed: {:?}",
+                row.state
+            );
+        }
+        Ok(())
     }
 
     #[tokio::test]
