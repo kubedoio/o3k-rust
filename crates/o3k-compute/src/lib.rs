@@ -1934,6 +1934,45 @@ impl ComputeService {
                 o3k_store::OperationState::Succeeded,
             )
             .await;
+            // Issue #88 S3 residue: the create may have been ACCEPTED by an
+            // agent (the config-drive transfers commit before acceptance)
+            // that crashed before any libvirt mutation. The accepted
+            // create's ConfigDriveIso manifests and content survive on that
+            // host with zero durable bindings, and nothing else ever tells
+            // the agent to reap them — the local completion above proves
+            // absence but does not remove the media. Dispatch a BEST-EFFORT
+            // delete for the never-defined resource with the same
+            // deterministic delete operation identity (the provider reuses
+            // the durable command record idempotently on re-dispatch) and a
+            // dedicated reap idempotency key. The agent's delete executor
+            // reaps the config-drive media, network, and console residue
+            // through its "domain already absent" arm — the single reaping
+            // authority. A failed dispatch is logged and never changes the
+            // already-terminal local delete: the residue verifier catches
+            // leftovers separately. NotFound means the create never reached
+            // any agent (e.g. the empty-registry terminal) — a clean no-op.
+            if let Err(error) = self
+                .provider
+                .delete_instance(DeleteInstanceRequest {
+                    operation_id,
+                    provider_instance_id: id.as_uuid().to_string(),
+                    idempotency_key: format!("o3k:delete-reap:{id}"),
+                })
+                .await
+            {
+                if matches!(error, ProviderError::NotFound) {
+                    tracing::debug!(
+                        resource_id = %id,
+                        "reap dispatch found no accepted create; nothing to reap"
+                    );
+                } else {
+                    tracing::warn!(
+                        resource_id = %id,
+                        error = ?error,
+                        "best-effort reap dispatch failed; the local delete is unaffected"
+                    );
+                }
+            }
             return Ok(());
         }
         let operation_id = Uuid::new_v5(
@@ -3838,11 +3877,15 @@ mod tests {
         Ok(())
     }
 
-    /// Counts provider delete dispatches so tests can prove a local delete
-    /// completion never reaches the provider boundary.
+    /// Counts and records provider delete dispatches so tests can prove a
+    /// local delete completion reaches the provider boundary exactly once,
+    /// with the best-effort reap shape (server id as the provider instance
+    /// identity, the deterministic delete operation id, and the dedicated
+    /// reap idempotency key).
     struct RecordingDeleteProvider {
         inner: FakeComputeProvider,
         delete_calls: AtomicUsize,
+        delete_requests: std::sync::Mutex<Vec<DeleteInstanceRequest>>,
     }
 
     impl RecordingDeleteProvider {
@@ -3850,11 +3893,19 @@ mod tests {
             Self {
                 inner: FakeComputeProvider::new(),
                 delete_calls: AtomicUsize::new(0),
+                delete_requests: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn delete_calls(&self) -> usize {
             self.delete_calls.load(Ordering::SeqCst)
+        }
+
+        fn delete_requests(&self) -> Vec<DeleteInstanceRequest> {
+            self.delete_requests
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
         }
     }
 
@@ -3883,6 +3934,10 @@ mod tests {
             request: DeleteInstanceRequest,
         ) -> Result<Operation, ProviderError> {
             self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            self.delete_requests
+                .lock()
+                .map(|mut guard| guard.push(request.clone()))
+                .unwrap_or_default();
             self.inner.delete_instance(request).await
         }
 
@@ -4080,8 +4135,10 @@ mod tests {
         );
         assert_eq!(
             provider.delete_calls(),
-            0,
-            "a create that never reached a provider must not dispatch a provider delete"
+            1,
+            "a create that never reached a provider must still get one \
+             best-effort reap dispatch (the empty-registry terminal is a \
+             clean provider NotFound)"
         );
         let delete_operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -4099,7 +4156,67 @@ mod tests {
         Ok(())
     }
 
-    /// The issue-87 S3 residue (#551-#554, rerun #4): the create was accepted
+    /// Issue #88 S3 residue: a create that WAS accepted by an agent (the
+    /// config-drive transfers committed before acceptance) which then crashed
+    /// before any libvirt mutation leaves the ConfigDriveIso manifests and
+    /// content on the agent host with zero durable bindings. The
+    /// local-completion delete proves absence and succeeds without a provider
+    /// call — but the agent still holds the media and nothing else tells it
+    /// to reap them. The local delete must now dispatch a BEST-EFFORT
+    /// provider delete with the same deterministic delete operation identity
+    /// (idempotent re-dispatch via the durable command record) and a
+    /// dedicated reap idempotency key; the agent's delete executor reaps the
+    /// config-drive media through its "domain already absent" arm. The
+    /// provider call never changes the already-terminal local outcome.
+    #[tokio::test]
+    async fn locally_completed_delete_dispatches_best_effort_reap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, _placement, request) =
+            stranded_failed_create_fixture("delete-reap", provider.clone()).await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the local delete must record a terminal Succeeded delete operation"
+        );
+        let requests = provider.delete_requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "the local-completion delete must dispatch exactly one best-effort reap"
+        );
+        assert_eq!(
+            requests[0].provider_instance_id,
+            request.o3k_server_id.to_string(),
+            "the reap must address the never-defined resource by its server id"
+        );
+        assert_eq!(
+            requests[0].operation_id, delete_operation_id,
+            "the reap must reuse the deterministic delete operation identity"
+        );
+        assert_eq!(
+            requests[0].idempotency_key,
+            format!("o3k:delete-reap:{}", request.o3k_server_id),
+            "the reap must carry the dedicated idempotency key"
+        );
+        Ok(())
+    }
     /// before the crash — the operation carries a provider operation identity
     /// — but the durable presence inspection provably found no instance, and
     /// `converge_absent_create` recorded a terminal Failed operation with
@@ -4148,8 +4265,9 @@ mod tests {
         );
         assert_eq!(
             provider.delete_calls(),
-            0,
-            "an absence-proven create must not dispatch a provider delete"
+            1,
+            "an absence-proven create must get exactly one best-effort reap \
+             dispatch so the accepting agent reaps its config-drive media"
         );
         let delete_operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
@@ -4218,8 +4336,9 @@ mod tests {
         );
         assert_eq!(
             provider.delete_calls(),
-            0,
-            "an absence-proven create must not dispatch a provider delete"
+            1,
+            "an absence-proven create must get exactly one best-effort reap \
+             dispatch so the accepting agent reaps its config-drive media"
         );
         let delete_operation_id = Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
