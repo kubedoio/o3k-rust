@@ -478,12 +478,40 @@ assert any(e["change"] == "content_changed" for e in value["foreign_changes"]), 
 PY
 
 # --- 10. missing inventory source fails closed ------------------------------
-if env O3K_REAL_HOST_STATE_ROOT="${WORK_DIR}/no-such-root" \
+# A CONFIGURED-BUT-MISSING state root is valid clean state (pre-bootstrap or
+# post-cleanup host): every state-root-backed section records `absent` and
+# the snapshot is available, so a clean-host baseline can pass with
+# `--expect-state-root absent`. The verifier's expect-state-root and
+# section-symmetry checks enforce fail-closed semantics at comparison time.
+env O3K_REAL_HOST_STATE_ROOT="${WORK_DIR}/no-such-root" \
     PATH="${FAKE_BIN}:${PATH}" \
-    bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/missing-root.json"; then
-    fail "missing state root was accepted"
-fi
+    bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/missing-root.json"
 python3 - "${WORK_DIR}/missing-root.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "available", value
+assert value["managed_state"]["status"] == "absent", value["managed_state"]
+assert value["durable"]["status"] == "absent", value["durable"]
+assert value["dhcp"]["status"] == "absent", value["dhcp"]
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/missing-root.json" --after "${WORK_DIR}/missing-root.json" \
+    --scope absent-root --expect-state-root absent \
+    --out "${WORK_DIR}/absent-root-verdict.json"
+python3 - "${WORK_DIR}/absent-root-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+PY
+# An EXISTING state root whose database is missing is broken state and still
+# fails closed (unavailable), never an apparently clean snapshot.
+mkdir -p "${WORK_DIR}/broken-root/data"
+if env O3K_REAL_HOST_STATE_ROOT="${WORK_DIR}/broken-root" \
+    PATH="${FAKE_BIN}:${PATH}" \
+    bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/broken-root.json"; then
+    fail "state root without its database was accepted"
+fi
+python3 - "${WORK_DIR}/broken-root.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["status"] == "unavailable", value

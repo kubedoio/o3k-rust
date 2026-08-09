@@ -1645,15 +1645,14 @@ def snapshot() -> dict[str, object] | None:
             if dhcp is None:
                 return None
         else:
-            # A missing root records `managed_state.status: "absent"` as
-            # valid clean state, but the durable and dhcp sources are
-            # configured and uninspectable: fail closed.
-            durable = collect_durable(state_root)
-            if durable is None:
-                return None
-            dhcp = collect_dhcp(state_root, durable)
-            if dhcp is None:
-                return None
+            # A missing configured root records `managed_state.status:
+            # "absent"` as valid clean state (pre-bootstrap or post-cleanup
+            # host); every other state-root-backed source is absent with the
+            # same reason instead of being queried against a nonexistent
+            # root. An EXISTING but unreadable root still fails closed in
+            # `collect_managed_state` (unavailable, not absent).
+            durable = {"status": "absent", "reason": "state_root_missing"}
+            dhcp = {"status": "absent", "reason": "state_root_missing"}
     else:
         managed_state = {"status": "not_checked"}
         durable = None
