@@ -13,7 +13,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -72,6 +75,14 @@ pub struct AgentComputeProvider {
     pub(crate) store: Option<Arc<dyn ComputeRepository>>,
     pub(crate) command_timeout: Duration,
 }
+
+/// Test-only fault pause (issue #88 E3 C3): sleeps the configured duration
+/// immediately before the durable command insert in `dispatch_recorded` when
+/// a test stores a non-zero value here. Zero (the production value) is a
+/// no-op; no production path ever writes this static. Mirrors the
+/// reconciler's `test_fault_pause_ms` pattern for driving the
+/// read-then-insert race deterministically.
+pub(crate) static DISPATCH_RECORDED_INSERT_PAUSE_MS: AtomicU64 = AtomicU64::new(0);
 
 impl AgentComputeProvider {
     #[must_use]
@@ -357,19 +368,11 @@ impl AgentComputeProvider {
     ) -> Result<Operation, ProviderError> {
         if let Some(store) = &self.store {
             if let Ok(existing) = store.get_agent_command_by_operation(operation_id).await {
-                // A repeated reconcile pass for the same operation must reuse
-                // the durable command payload: rebuilding it would drift the
-                // embedded deadline and break the agent journal's idempotent
-                // replay with an identity conflict.
-                if matches!(
-                    existing.state,
-                    AgentCommandState::Succeeded | AgentCommandState::Failed
-                ) {
-                    return self.get_operation(operation_id).await;
-                }
-                let recorded = agent_proto::Command::decode(existing.payload.as_slice())
-                    .map_err(|_| ProviderError::Storage)?;
-                return self.dispatch_accepted(recorded, operation_id).await;
+                return self.reuse_recorded_command(existing, operation_id).await;
+            }
+            let pause_ms = DISPATCH_RECORDED_INSERT_PAUSE_MS.load(Ordering::Relaxed);
+            if pause_ms > 0 {
+                std::thread::sleep(Duration::from_millis(pause_ms));
             }
             let record = AgentCommandRecord {
                 command_id: command.command_id.clone(),
@@ -387,12 +390,45 @@ impl AgentComputeProvider {
                 provider_operation_id: Some(operation_id.to_string()),
                 provider_resource_id: None,
             };
-            store
-                .insert_agent_command(&record)
-                .await
-                .map_err(|_| ProviderError::Conflict)?;
+            if store.insert_agent_command(&record).await.is_err() {
+                // The read above saw no row, but this insert conflicted: a
+                // concurrent dispatch for the same operation inserted its
+                // durable command in between (issue #88 E3 C3 — the API's
+                // synchronous create reconcile races the periodic
+                // create-convergence sweep, and both read "no row" before
+                // either inserts). The command identity is deterministic per
+                // operation, so the surviving row IS this command: adopt it
+                // and re-dispatch the recorded payload instead of failing.
+                // The agent journal replays by command identity, so the
+                // re-dispatch converges on one execution.
+                if let Ok(existing) = store.get_agent_command_by_operation(operation_id).await {
+                    return self.reuse_recorded_command(existing, operation_id).await;
+                }
+                return Err(ProviderError::Conflict);
+            }
         }
         self.dispatch_accepted(command, operation_id).await
+    }
+
+    /// Re-dispatches a durable command record for the operation: terminal
+    /// rows return the recorded operation; Pending/Accepted rows are
+    /// re-dispatched with their RECORDED payload (rebuilding would drift the
+    /// embedded deadline and break the agent journal's idempotent replay
+    /// with an identity conflict).
+    async fn reuse_recorded_command(
+        &self,
+        existing: AgentCommandRecord,
+        operation_id: Uuid,
+    ) -> Result<Operation, ProviderError> {
+        if matches!(
+            existing.state,
+            AgentCommandState::Succeeded | AgentCommandState::Failed
+        ) {
+            return self.get_operation(operation_id).await;
+        }
+        let recorded = agent_proto::Command::decode(existing.payload.as_slice())
+            .map_err(|_| ProviderError::Storage)?;
+        self.dispatch_accepted(recorded, operation_id).await
     }
 
     async fn dispatch_accepted(
@@ -1657,10 +1693,14 @@ impl ComputeProvider for AgentComputeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProviderAgentEvent;
     use o3k_provider::{
         AgentNodeSnapshot, AgentObservation, AgentOperationState, NetworkAttachmentSpec,
-        ResolvedCreateInputs, ResolvedCreateResolver, UnconfiguredResolvedCreateResolver,
+        ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
+        UnconfiguredResolvedCreateResolver,
     };
+    use sha2::Digest;
+    use tokio::sync::mpsc;
 
     fn register_request(id: &str, epoch: &str) -> agent_proto::RegisterRequest {
         agent_proto::RegisterRequest {
@@ -1673,6 +1713,13 @@ mod tests {
                 architecture: "x86_64".to_owned(),
                 agent_provider_name: "o3k-compute".to_owned(),
                 agent_provider_version: "test".to_owned(),
+                // The create dispatch transfers artifacts, which requires the
+                // negotiated capability flag (issue #88 E3 C3 race tests).
+                flags: vec![agent_proto::CapabilityFlag {
+                    name: crate::ARTIFACT_TRANSFER_CAPABILITY.to_owned(),
+                    supported: true,
+                    bounded_value: String::new(),
+                }],
                 ..Default::default()
             }),
         }
@@ -2523,6 +2570,609 @@ mod tests {
             provider.state.read().await.operations.is_empty(),
             "a rejected dispatch must not leave an accepted operation projection"
         );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #88 E3 C3: concurrent create dispatches racing the durable
+    // command insert (the API's synchronous create reconcile vs the periodic
+    // create-convergence sweep). The second insert must adopt the first
+    // caller's row instead of failing the fresh create with a terminal
+    // Conflict (the observed real-host 409 + terminalization).
+    // ------------------------------------------------------------------
+
+    /// Artifact payloads for the create race tests; the digests advertised by
+    /// `RaceTestResolvedCreateResolver` hash exactly these payloads (the wire
+    /// validation rehashes the dispatched bytes).
+    const IMAGE_PAYLOAD: &[u8] = b"o3k-race-test-image-payload";
+    const CONFIG_DRIVE_PAYLOAD: &[u8] = b"o3k-race-test-config-drive-payload";
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", sha2::Sha256::digest(bytes))
+    }
+
+    /// Resolved create inputs derived from the test artifact payloads so the
+    /// advertised digests are the actual payload hashes.
+    #[derive(Debug, Default)]
+    struct RaceTestResolvedCreateResolver;
+
+    #[async_trait]
+    impl ResolvedCreateResolver for RaceTestResolvedCreateResolver {
+        async fn resolve(
+            &self,
+            _request: &CreateInstanceRequest,
+            _agent: &AgentNodeSnapshot,
+        ) -> Result<ResolvedCreateInputs, ProviderError> {
+            Ok(ResolvedCreateInputs {
+                flavor_id: "flavor.test".to_owned(),
+                image_artifact_id: "artifact.test".to_owned(),
+                image_sha256: sha256_hex(IMAGE_PAYLOAD),
+                image_format: "qcow2".to_owned(),
+                disk_gib: 10,
+                config_drive_artifact_id: "config-drive.test".to_owned(),
+                config_drive_sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+                network_attachments: vec![NetworkAttachmentSpec {
+                    port_id: "port.test".to_owned(),
+                    mac: "52:54:00:12:34:56".to_owned(),
+                    fixed_ipv4: "192.0.2.10".to_owned(),
+                    subnet_cidr: "192.0.2.0/24".to_owned(),
+                    gateway_ipv4: "192.0.2.1".to_owned(),
+                }],
+            })
+        }
+    }
+
+    /// Resolves both required create artifacts from the test payloads.
+    #[derive(Debug, Default)]
+    struct RaceTestCreateArtifactResolver;
+
+    #[async_trait]
+    impl CreateArtifactResolver for RaceTestCreateArtifactResolver {
+        async fn resolve_artifacts(
+            &self,
+            _request: &CreateInstanceRequest,
+            _agent: &AgentNodeSnapshot,
+            _inputs: &ResolvedCreateInputs,
+        ) -> Result<Vec<ResolvedCreateArtifact>, ProviderError> {
+            Ok(vec![
+                ResolvedCreateArtifact {
+                    artifact_id: "artifact.test".to_owned(),
+                    kind: o3k_provider::ArtifactKind::ImageBase,
+                    sha256: sha256_hex(IMAGE_PAYLOAD),
+                    format: "qcow2".to_owned(),
+                    bytes: IMAGE_PAYLOAD.to_vec(),
+                },
+                ResolvedCreateArtifact {
+                    artifact_id: "config-drive.test".to_owned(),
+                    kind: o3k_provider::ArtifactKind::ConfigDriveIso,
+                    sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+                    format: "iso".to_owned(),
+                    bytes: CONFIG_DRIVE_PAYLOAD.to_vec(),
+                },
+            ])
+        }
+    }
+
+    /// The create request used by the race tests; every field matches the
+    /// durable command row seeded through `racing_create_command`.
+    fn race_create_request(operation_id: Uuid, server_id: Uuid) -> CreateInstanceRequest {
+        CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: server_id,
+            project_id: "project-a".to_owned(),
+            name: "race-server".to_owned(),
+            vcpus: 2,
+            memory_mib: 2048,
+            flavor_id: "flavor.test".to_owned(),
+            disk_gib: 10,
+            image_id: Some("image.test".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["net.test".to_owned()],
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "create-race".to_owned(),
+        }
+    }
+
+    /// The create command another dispatch already durably recorded for the
+    /// operation: the same deterministic command identity the fresh build
+    /// produces (agent + operation), with a deadline an hour away so its
+    /// payload provably differs from any freshly built command — exactly the
+    /// store-level interleaving the real-host race leaves behind.
+    fn racing_create_command(
+        operation_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<agent_proto::Command, AgentError> {
+        build_create_command(CreateCommandSpec {
+            agent_id: "node-a".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            project_id: "project-a".to_owned(),
+            operation_id: operation_id.to_string(),
+            resource_id: server_id.to_string(),
+            idempotency_key: "create-race".to_owned(),
+            deadline_unix_ms: unix_ms() + 3_600_000,
+            image_id: "image.test".to_owned(),
+            flavor_id: "flavor.test".to_owned(),
+            image_artifact_id: "artifact.test".to_owned(),
+            image_sha256: sha256_hex(IMAGE_PAYLOAD),
+            image_format: "qcow2".to_owned(),
+            vcpus: 2,
+            memory_mib: 2048,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive.test".to_owned(),
+            config_drive_sha256: sha256_hex(CONFIG_DRIVE_PAYLOAD),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port.test".to_owned(),
+                mac: "52:54:00:12:34:56".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
+            }],
+        })
+    }
+
+    /// Seeds the durable resource and operation rows a command record
+    /// references (foreign keys), exactly as the journal leaves them before
+    /// the create dispatch.
+    async fn seed_create_durable_rows(
+        store: &dyn ComputeRepository,
+        operation_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "BUILD".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id: server_id,
+                kind: "compute_create".to_owned(),
+                state: o3k_store::OperationState::Running,
+                provider_operation_id: Some(operation_id.to_string()),
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Drains the fenced agent control stream: acknowledges every artifact
+    /// offer as committed (so `create_instance` completes) and forwards every
+    /// dispatched command to the returned channel.
+    fn spawn_agent_reader(
+        registry: NodeRegistry,
+        mut receiver: mpsc::Receiver<Result<agent_proto::ControlResponse, tonic::Status>>,
+    ) -> mpsc::UnboundedReceiver<agent_proto::Command> {
+        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
+        let publisher = registry.clone();
+        tokio::spawn(async move {
+            while let Some(Ok(response)) = receiver.recv().await {
+                match response.body {
+                    Some(agent_proto::control_response::Body::ArtifactOffer(offer)) => {
+                        let Some(operation_id) = Uuid::parse_str(&offer.operation_id).ok() else {
+                            continue;
+                        };
+                        let Some(resource_id) = Uuid::parse_str(&offer.resource_id).ok() else {
+                            continue;
+                        };
+                        publisher.publish_event(ProviderAgentEvent::ArtifactAck(
+                            o3k_provider::AgentArtifactAck {
+                                transfer_id: offer.transfer_id,
+                                command_id: offer.command_id,
+                                operation_id,
+                                resource_id,
+                                agent_id: offer.agent_id,
+                                agent_epoch: "epoch-1".to_owned(),
+                                contiguous_bytes: offer.size_bytes,
+                                next_chunk_index: offer.chunk_count,
+                                state: o3k_provider::ArtifactTransferState::Committed,
+                                redacted_message: None,
+                            },
+                        ));
+                    }
+                    Some(agent_proto::control_response::Body::Command(command)) => {
+                        let _ = commands_tx.send(command);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        commands_rx
+    }
+
+    /// Issue #88 E3 C3 create-path race: while the first dispatch's durable
+    /// command row already exists, a second `create_instance` for the same
+    /// operation reaches its command insert (the observed
+    /// "agent create pending command persistence rejected"). The second
+    /// caller must adopt the surviving row and re-dispatch it instead of
+    /// failing with `Conflict`. The interleaving is driven deterministically
+    /// by pre-inserting the first caller's row — whose payload provably
+    /// differs from a fresh build (deadline an hour away, matching the
+    /// real-host deadline drift) — before the racing caller runs.
+    #[tokio::test]
+    async fn create_dispatch_race_adopts_existing_durable_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let (sender, receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let mut commands = spawn_agent_reader(registry.clone(), receiver);
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        )
+        .with_artifact_resolver(Arc::new(RaceTestCreateArtifactResolver));
+        let operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+        let recorded = racing_create_command(operation_id, server_id)?;
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: recorded.command_id.clone(),
+                idempotency_key: recorded.idempotency_key.clone(),
+                operation_id,
+                resource_id: server_id,
+                agent_id: recorded.agent_id.clone(),
+                agent_epoch: recorded.agent_epoch.clone(),
+                payload_fingerprint_sha256: recorded.payload_fingerprint_sha256.clone(),
+                payload: recorded.encode_to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+
+        let operation = provider
+            .create_instance(race_create_request(operation_id, server_id))
+            .await
+            .map_err(|error| {
+                format!(
+                    "the racing create must adopt the durable command instead \
+                     of failing, got {error:?}"
+                )
+            })?;
+        assert_eq!(operation.state, o3k_provider::OperationState::Accepted);
+        let durable = store.list_recoverable_agent_commands().await?;
+        assert_eq!(durable.len(), 1, "exactly one durable command row");
+        assert_eq!(durable[0].command_id, recorded.command_id);
+        let delivered = commands
+            .recv()
+            .await
+            .ok_or("the agent stream must deliver exactly one command")?;
+        assert_eq!(delivered.command_id, recorded.command_id);
+        assert_eq!(
+            delivered.deadline_unix_ms, recorded.deadline_unix_ms,
+            "the recorded payload is re-dispatched, not a rebuild"
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "the agent stream must carry exactly one command"
+        );
+        Ok(())
+    }
+
+    /// Issue #88 E3 C3: two REAL `create_instance` calls for the same
+    /// operation racing the durable command insert — the observed shape of
+    /// the API's synchronous create reconcile against the periodic
+    /// create-convergence sweep. Both callers must succeed, the second
+    /// adopting the first's row; exactly one durable command remains; every
+    /// command the agent stream carries is that single command identity.
+    /// The racing caller gets a different command timeout so its freshly
+    /// built payload (embedded deadline) provably differs from the first
+    /// caller's, and the second insert hits the same unique-identity
+    /// conflict the real host observed.
+    #[tokio::test]
+    async fn two_concurrent_create_dispatches_converge_on_one_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let (sender, receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let mut commands = spawn_agent_reader(registry.clone(), receiver);
+        let make_provider = |timeout: Duration| {
+            AgentComputeProvider::new_with_store(
+                registry.clone(),
+                Arc::new(RaceTestResolvedCreateResolver),
+                Some(store.clone()),
+            )
+            .with_command_timeout(timeout)
+            .with_artifact_resolver(Arc::new(RaceTestCreateArtifactResolver))
+        };
+        let first = make_provider(Duration::from_secs(30));
+        let racing = make_provider(Duration::from_secs(60));
+        let operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+        let request = race_create_request(operation_id, server_id);
+
+        let first_operation = first
+            .create_instance(request.clone())
+            .await
+            .map_err(|error| format!("the first create dispatch must succeed, got {error:?}"))?;
+        assert_eq!(
+            first_operation.state,
+            o3k_provider::OperationState::Accepted
+        );
+        let racing_operation = racing.create_instance(request).await.map_err(|error| {
+            format!(
+                "the racing create must adopt the durable command instead \
+                     of failing, got {error:?}"
+            )
+        })?;
+        assert_eq!(
+            racing_operation.state,
+            o3k_provider::OperationState::Accepted
+        );
+
+        let durable = store.list_recoverable_agent_commands().await?;
+        assert_eq!(durable.len(), 1, "exactly one durable command row");
+        let command_id = durable[0].command_id.clone();
+        let delivered = commands
+            .recv()
+            .await
+            .ok_or("the agent stream must carry the command")?;
+        assert_eq!(delivered.command_id, command_id);
+        let adopted = commands
+            .recv()
+            .await
+            .ok_or("the adopted re-dispatch must carry the same command identity")?;
+        assert_eq!(
+            adopted.command_id, command_id,
+            "every delivered command is the single durable command identity"
+        );
+        assert!(commands.try_recv().is_err());
+        Ok(())
+    }
+
+    /// Issue #88 E3 C3: the `dispatch_recorded` read-then-insert race (the
+    /// lifecycle path, where the durable command insert IS the dispatch
+    /// point). Two dispatches for the same operation read "no row" before
+    /// either inserts; the loser's insert must adopt the winner's row and
+    /// re-dispatch its recorded payload instead of failing with `Conflict`.
+    /// The interleaving is driven deterministically with the test-only
+    /// insert pause parked between the read and the insert.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn concurrent_dispatch_recorded_insert_conflict_reuses_existing_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        super::DISPATCH_RECORDED_INSERT_PAUSE_MS.store(600, std::sync::atomic::Ordering::Relaxed);
+        let result = async {
+            let store: Arc<dyn ComputeRepository> =
+                Arc::new(o3k_store::testkit::open_memory().await?);
+            let registry = NodeRegistry::default();
+            registry
+                .register(&register_request("node-a", "epoch-1"))
+                .await?;
+            let (sender, mut receiver) = mpsc::channel(32);
+            registry
+                .attach_connection("node-a", "epoch-1", sender)
+                .await?;
+            let provider = AgentComputeProvider::new_with_store(
+                registry.clone(),
+                Arc::new(RaceTestResolvedCreateResolver),
+                Some(store.clone()),
+            );
+            let operation_id = Uuid::now_v7();
+            let server_id = Uuid::now_v7();
+            seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+            let command = build_lifecycle_command(
+                LifecycleCommand::HardReboot,
+                "node-a",
+                "epoch-1",
+                &operation_id.to_string(),
+                &server_id.to_string(),
+            )?;
+            let mut racing_command = command.clone();
+            racing_command.deadline_unix_ms += 5_000;
+
+            // The loser reads "no row" first, then parks inside the insert
+            // pause; the winner runs to completion while it is parked.
+            let racing = provider.clone();
+            let parked = tokio::spawn(async move {
+                racing.dispatch_recorded(racing_command, operation_id).await
+            });
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let winner = tokio::spawn({
+                let provider = provider.clone();
+                let command = command.clone();
+                async move { provider.dispatch_recorded(command, operation_id).await }
+            });
+            let winner_operation = winner.await??.state;
+            let parked_operation = parked.await??;
+            assert_eq!(winner_operation, o3k_provider::OperationState::Accepted);
+            assert_eq!(
+                parked_operation.state,
+                o3k_provider::OperationState::Accepted
+            );
+
+            let durable = store.list_recoverable_agent_commands().await?;
+            assert_eq!(durable.len(), 1, "exactly one durable command row");
+            let first = receiver
+                .recv()
+                .await
+                .ok_or("the winner must dispatch the command")??;
+            let second = receiver
+                .recv()
+                .await
+                .ok_or("the adopter must re-dispatch the same command identity")??;
+            let Some(agent_proto::control_response::Body::Command(winner_command)) = first.body
+            else {
+                return Err("expected a dispatched command".into());
+            };
+            let Some(agent_proto::control_response::Body::Command(adopted_command)) = second.body
+            else {
+                return Err("expected a dispatched command".into());
+            };
+            assert_eq!(adopted_command.command_id, winner_command.command_id);
+            assert_eq!(
+                adopted_command.deadline_unix_ms, winner_command.deadline_unix_ms,
+                "the adopted re-dispatch carries the recorded payload"
+            );
+            Ok(())
+        }
+        .await;
+        super::DISPATCH_RECORDED_INSERT_PAUSE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+        result
+    }
+
+    /// Issue #88 E3 C3 regression: the read-time-existing reuse semantics of
+    /// `dispatch_recorded` are unchanged — a pre-existing Pending row is
+    /// re-dispatched with its RECORDED payload; Succeeded/Failed rows return
+    /// the recorded operation without dispatching.
+    #[tokio::test]
+    async fn dispatch_recorded_reuse_semantics_are_preserved()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let (sender, mut receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+        let mut command = build_lifecycle_command(
+            LifecycleCommand::HardReboot,
+            "node-a",
+            "epoch-1",
+            &operation_id.to_string(),
+            &server_id.to_string(),
+        )?;
+        // A fresh dispatch attempt that differs from the recorded payload.
+        let mut fresh = command.clone();
+        fresh.deadline_unix_ms += 5_000;
+        // The recorded payload: deadline an hour away, so it can never equal
+        // the fresh attempt's.
+        command.deadline_unix_ms += 3_600_000;
+        let recorded = command.clone();
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: command.command_id.clone(),
+                idempotency_key: command.idempotency_key.clone(),
+                operation_id,
+                resource_id: server_id,
+                agent_id: command.agent_id.clone(),
+                agent_epoch: command.agent_epoch.clone(),
+                payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+                payload: command.encode_to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        let operation = provider
+            .dispatch_recorded(fresh.clone(), operation_id)
+            .await?;
+        assert_eq!(operation.state, o3k_provider::OperationState::Accepted);
+        let delivered = receiver
+            .recv()
+            .await
+            .ok_or("the pending row must be re-dispatched")??;
+        let Some(agent_proto::control_response::Body::Command(delivered_command)) = delivered.body
+        else {
+            return Err("expected a dispatched command".into());
+        };
+        assert_eq!(delivered_command.command_id, recorded.command_id);
+        assert_eq!(
+            delivered_command.deadline_unix_ms, recorded.deadline_unix_ms,
+            "the RECORDED payload is re-dispatched, not the fresh attempt"
+        );
+
+        // Terminal rows return the recorded operation without dispatching.
+        for (state, durable_state, provider_state) in [
+            (
+                AgentCommandState::Succeeded,
+                o3k_store::OperationState::Succeeded,
+                o3k_provider::OperationState::Succeeded,
+            ),
+            (
+                AgentCommandState::Failed,
+                o3k_store::OperationState::Failed,
+                o3k_provider::OperationState::Failed,
+            ),
+        ] {
+            let terminal_operation_id = Uuid::now_v7();
+            let terminal_server_id = Uuid::now_v7();
+            seed_create_durable_rows(store.as_ref(), terminal_operation_id, terminal_server_id)
+                .await?;
+            let terminal_command = build_lifecycle_command(
+                LifecycleCommand::HardReboot,
+                "node-a",
+                "epoch-1",
+                &terminal_operation_id.to_string(),
+                &terminal_server_id.to_string(),
+            )?;
+            store
+                .insert_agent_command(&AgentCommandRecord {
+                    command_id: terminal_command.command_id.clone(),
+                    idempotency_key: terminal_command.idempotency_key.clone(),
+                    operation_id: terminal_operation_id,
+                    resource_id: terminal_server_id,
+                    agent_id: terminal_command.agent_id.clone(),
+                    agent_epoch: terminal_command.agent_epoch.clone(),
+                    payload_fingerprint_sha256: terminal_command.payload_fingerprint_sha256.clone(),
+                    payload: terminal_command.encode_to_vec(),
+                    state,
+                    accepted_sequence: 0,
+                    last_sequence: 0,
+                    provider_operation_id: Some(terminal_operation_id.to_string()),
+                    provider_resource_id: None,
+                })
+                .await?;
+            store
+                .update_operation(
+                    terminal_operation_id,
+                    durable_state,
+                    Some(&terminal_operation_id.to_string()),
+                    None,
+                    None,
+                )
+                .await?;
+            let operation = provider
+                .dispatch_recorded(terminal_command, terminal_operation_id)
+                .await?;
+            assert_eq!(
+                operation.state, provider_state,
+                "a terminal durable command returns the recorded operation"
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "a terminal durable command must not dispatch"
+            );
+        }
         Ok(())
     }
 }
