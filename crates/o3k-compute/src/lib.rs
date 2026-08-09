@@ -1823,10 +1823,13 @@ impl ComputeService {
             // "domain already absent" handling of provider NotFound on
             // delete. A create that WAS accepted (a provider operation
             // identity exists) is equally absent-proven when the durable
-            // presence inspection recorded error_category "not_found":
-            // converge_absent_create's terminal evidence that the create
-            // never took effect, so no provider side effect can exist either
-            // (issue-87 S3 rerun #4). Every other shape — in-flight,
+            // error_category is "not_found": the create provably never took
+            // effect, so no provider side effect can exist either — either
+            // converge_absent_create's presence-inspection evidence (issue-87
+            // S3 rerun #4) or the agent's definitive pre-libvirt failure
+            // evidence, where the failure provably happened before any
+            // libvirt define (issue-87 C-1 qemu-img failure). Every other
+            // shape — in-flight,
             // accepted without absence proof, or terminally failed for a
             // reason other than absence — still fails closed: the provider
             // may hold side effects that only the provider delete can
@@ -4084,6 +4087,76 @@ mod tests {
                 Some(&request.operation_id.to_string()),
                 Some("not_found"),
                 Some("presence inspection: create never took effect; instance is absent"),
+            )
+            .await?;
+        let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
+
+        service
+            .delete_server("project-a", ServerId::from_uuid(request.o3k_server_id))
+            .await?;
+
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(resource.observed_state, "DELETED");
+        assert_eq!(
+            store.get_server_keypair_name(request.o3k_server_id).await?,
+            None,
+            "the delete must run reverse-order compensation for the keypair"
+        );
+        assert!(
+            placement.provider("node-a").await?.allocations.is_empty(),
+            "the delete must release the placement allocation"
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "an absence-proven create must not dispatch a provider delete"
+        );
+        let delete_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:project-a:{}:{}",
+                request.o3k_server_id, generation_at_delete
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            store.get_operation(delete_operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the local delete must record a terminal Succeeded delete operation"
+        );
+        Ok(())
+    }
+
+    /// The issue-87 C-1 qemu-img shape: the create was accepted before the
+    /// failure — the operation carries a provider operation identity — and
+    /// then failed definitively before libvirt could define the domain:
+    /// image materialization (qemu-img) failed, so absence is proven BY
+    /// CONSTRUCTION and the agent records the category it uses for
+    /// definitive pre-libvirt failures. No provider side effect can exist;
+    /// the delete must complete locally exactly like the never-dispatched
+    /// (#550) and presence-inspected (#554) shapes: no provider call,
+    /// resource DELETED, delete operation terminal Succeeded, and the
+    /// reverse-order compensation (placement allocation, keypair, ports)
+    /// runs. Before the fix, the category the agent recorded for this path
+    /// ("terminal") made the local-completion gate 409 the delete even
+    /// though absence is proven.
+    #[tokio::test]
+    async fn delete_definitive_pre_libvirt_failed_create_with_provider_operation_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, placement, request) =
+            stranded_failed_create_fixture("delete-definitive", provider.clone()).await?;
+        // Seed exactly what the definitive pre-libvirt failure path leaves:
+        // terminal Failed, the accepted provider operation identity
+        // preserved, the absence-proven category, and the redacted qemu-img
+        // materialization reason.
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Failed,
+                Some(&request.operation_id.to_string()),
+                Some("not_found"),
+                Some("instance image overlay could not be realized"),
             )
             .await?;
         let generation_at_delete = store.get_resource(request.o3k_server_id).await?.generation;
