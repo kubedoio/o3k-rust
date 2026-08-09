@@ -39,8 +39,10 @@ schema versions.
   `-tmp-`/`-old-`/`.iso-*` temporaries, `base-<sha>.tmp-*`, overlay
   temporaries, `ownership/<id>.json.tmp-*`, `<uuid>.upload-<uuid>`,
   `<identity>.commands.tmp`/`.state.tmp`). A configured root that does not
-  exist records `status: "absent"` as valid clean state; the durable and dhcp
-  sources still fail closed because they are configured and uninspectable.
+  exist records `status: "absent"` as valid clean state — including for the
+  durable and dhcp sources, which are absent with the same reason rather than
+  queried against a nonexistent root — while an existing root whose database
+  is missing or unreadable still fails closed as unavailable.
 - `dhcp` classifies dnsmasq processes by scanning `/proc/*/cmdline` (owned
   when the cmdline references the state root's dhcp directory; foreign
   processes recorded only as count plus a redacted args digest), parses the
