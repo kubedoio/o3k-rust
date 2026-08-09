@@ -7,8 +7,20 @@ use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Child, Command},
+    time::{Duration, Instant},
 };
 use thiserror::Error;
+
+/// Bounded window for the `dnsmasq --test` config preflight. A real dnsmasq
+/// parses the config and exits in milliseconds; test stubs may never exit, so
+/// the probe is abandoned (treated as unknown) rather than blocking startup.
+const CONFIG_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Bounded post-spawn liveness window: a dnsmasq that dies from a startup
+/// error (bad config, missing interface) does so within a few hundred
+/// milliseconds of spawning.
+const LIVENESS_GRACE: Duration = Duration::from_millis(500);
+/// Poll interval for the bounded waits above.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DhcpConfig {
@@ -56,22 +68,7 @@ impl DnsmasqSupervisor {
     fn spawn(root: &Path, binary: &Path) -> Result<Self, DhcpError> {
         let config = root.join("dnsmasq.conf");
         let pid_file = root.join(format!("dnsmasq-{}.pid", uuid::Uuid::now_v7()));
-        let mut child = Command::new(binary)
-            // dnsmasq 2.90 rejects the space-separated form for these optional
-            // long options ("junk found in command line"); use `--opt=value`.
-            .arg(format!("--conf-file={}", config.display()))
-            .arg(format!("--pid-file={}", pid_file.display()))
-            .arg("--keep-in-foreground")
-            .spawn()
-            .map_err(|_| DhcpError::CommandFailed)?;
-        if child
-            .try_wait()
-            .map_err(|_| DhcpError::CommandFailed)?
-            .is_some()
-        {
-            let _ = fs::remove_file(&pid_file);
-            return Err(DhcpError::CommandFailed);
-        }
+        let child = launch(binary, &config, &pid_file)?;
         Ok(Self {
             binary: binary.to_path_buf(),
             config,
@@ -92,21 +89,7 @@ impl DnsmasqSupervisor {
     /// Restart the owned process after the caller has published new config.
     pub fn restart(&mut self) -> Result<(), DhcpError> {
         self.stop()?;
-        let mut child = Command::new(&self.binary)
-            .arg(format!("--conf-file={}", self.config.display()))
-            .arg(format!("--pid-file={}", self.pid_file.display()))
-            .arg("--keep-in-foreground")
-            .spawn()
-            .map_err(|_| DhcpError::CommandFailed)?;
-        if child
-            .try_wait()
-            .map_err(|_| DhcpError::CommandFailed)?
-            .is_some()
-        {
-            let _ = fs::remove_file(&self.pid_file);
-            return Err(DhcpError::CommandFailed);
-        }
-        self.child = child;
+        self.child = launch(&self.binary, &self.config, &self.pid_file)?;
         Ok(())
     }
 
@@ -132,6 +115,71 @@ impl DnsmasqSupervisor {
 impl Drop for DnsmasqSupervisor {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+/// Fail closed before any serving process is spawned if the binary rejects
+/// the rendered config (`dnsmasq --test`). dnsmasq 2.90 rejects the
+/// previously rendered `start,end,static` dhcp-range shape with "bad
+/// dhcp-range" and would then exit immediately after spawn; the preflight
+/// catches config errors deterministically instead of relying on death
+/// timing. A binary that neither accepts nor rejects the config within the
+/// bounded window (e.g. a test stub that ignores arguments) is treated as
+/// unknown and allowed to proceed; the post-spawn liveness check in
+/// [`launch`] still guards the serving process.
+fn verify_config(binary: &Path, config: &Path) -> Result<(), DhcpError> {
+    let mut probe = Command::new(binary)
+        .arg("--test")
+        .arg(format!("--conf-file={}", config.display()))
+        .spawn()
+        .map_err(|_| DhcpError::CommandFailed)?;
+    let deadline = Instant::now() + CONFIG_PROBE_TIMEOUT;
+    loop {
+        match probe.try_wait().map_err(|_| DhcpError::CommandFailed)? {
+            Some(status) if status.success() => return Ok(()),
+            Some(_) => return Err(DhcpError::CommandFailed),
+            None if Instant::now() >= deadline => {
+                let _ = probe.kill();
+                let _ = probe.wait();
+                return Ok(());
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
+        }
+    }
+}
+
+/// Spawn the serving dnsmasq and fail closed if it does not stay alive.
+///
+/// A single spawn-time `try_wait` races a child that starts and then exits
+/// immediately (bad config, missing interface, ...): by the time the check
+/// runs the child is often still alive, so the caller would get a supervisor
+/// that owns a corpse and project the create ACTIVE with no DHCP. A short
+/// bounded liveness window after spawn turns that early death into a failed
+/// start instead.
+fn launch(binary: &Path, config: &Path, pid_file: &Path) -> Result<Child, DhcpError> {
+    verify_config(binary, config)?;
+    let mut child = Command::new(binary)
+        // dnsmasq 2.90 rejects the space-separated form for these optional
+        // long options ("junk found in command line"); use `--opt=value`.
+        .arg(format!("--conf-file={}", config.display()))
+        .arg(format!("--pid-file={}", pid_file.display()))
+        .arg("--keep-in-foreground")
+        .spawn()
+        .map_err(|_| DhcpError::CommandFailed)?;
+    let deadline = Instant::now() + LIVENESS_GRACE;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| DhcpError::CommandFailed)?
+            .is_some()
+        {
+            let _ = fs::remove_file(pid_file);
+            return Err(DhcpError::CommandFailed);
+        }
+        if Instant::now() >= deadline {
+            return Ok(child);
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -212,9 +260,8 @@ impl DhcpService {
     pub fn render_config(&self) -> Result<String, DhcpError> {
         let config = self.state.config.as_ref().ok_or(DhcpError::InvalidConfig)?;
         validate_config(config)?;
-        let (network, broadcast) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
+        let (network, _) = subnet_bounds(&config.subnet).ok_or(DhcpError::InvalidConfig)?;
         let dhcp_start = Ipv4Addr::from(u32::from(network) + 1);
-        let dhcp_end = Ipv4Addr::from(u32::from(broadcast) - 1);
         let mut lines = vec![
             "# Managed by o3k-dhcp; do not edit.".to_owned(),
             format!("interface={}", config.interface),
@@ -223,10 +270,12 @@ impl DhcpService {
                 "dhcp-leasefile={}",
                 self.root.join("dnsmasq.leases").display()
             ),
-            format!(
-                "dhcp-range={},{},static,{}",
-                dhcp_start, dhcp_end, config.lease_seconds
-            ),
+            // dnsmasq's `<mode>` keyword occupies the `<end-addr>` position,
+            // so `start,end,static` is rejected by 2.90 ("bad dhcp-range").
+            // `start,static[,lease]` spans the interface subnet and serves
+            // only hosts with a dhcp-host binding, preserving the static-only
+            // intent for fixed IPs.
+            format!("dhcp-range={},static,{}", dhcp_start, config.lease_seconds),
             format!("dhcp-option=3,{}", config.gateway),
         ];
         if !config.dns.is_empty() {
@@ -378,7 +427,10 @@ mod tests {
         ));
         let rendered = service.render_config()?;
         assert!(rendered.contains("dhcp-host=02:00:00:00:00:01,192.0.2.10"));
-        assert!(rendered.contains("dhcp-range=192.0.2.1,192.0.2.254,static,3600"));
+        // dnsmasq 2.90 grammar: `<mode>` occupies the <end-addr> position, so
+        // `start,end,static` is rejected ("bad dhcp-range"); the static-only
+        // intent is `start,static[,lease]`, which spans the interface subnet.
+        assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
         assert!(rendered.contains("dhcp-leasefile="));
         assert!(
             service
@@ -477,6 +529,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn start_fails_closed_when_child_dies_after_spawn() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("o3k-dhcp-early-death-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        // Mimic dnsmasq's two phases: `--test` passes, but the serving
+        // process exits nonzero shortly after spawn. The exit is delayed past
+        // the supervisor's spawn-time try_wait, so pre-fix this start
+        // succeeds; the post-spawn liveness window must fail it closed.
+        let binary = root.join("dies-after-spawn.sh");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 0.2\nexit 1\n",
+        )
+        .map_err(DhcpError::Storage)?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(DhcpError::Storage)?;
+
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        assert!(matches!(
+            service.start(&binary),
+            Err(DhcpError::CommandFailed)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_fails_closed_when_config_probe_rejects() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("o3k-dhcp-test-reject-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        // A binary whose `--test` rejects the rendered config (as dnsmasq
+        // 2.90 does for `start,end,static`) must fail the start before any
+        // serving process is spawned. Without the preflight the serving
+        // process stays alive and the start succeeds, so this fails pre-fix.
+        let binary = root.join("rejects-config.sh");
+        fs::write(
+            &binary,
+            "#!/bin/sh\n[ \"$1\" = \"--test\" ] && exit 1\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
+        )
+        .map_err(DhcpError::Storage)?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(DhcpError::Storage)?;
+
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        assert!(matches!(
+            service.start(&binary),
+            Err(DhcpError::CommandFailed)
+        ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn spawn_uses_equals_form_for_path_options() -> Result<(), DhcpError> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -487,7 +603,7 @@ mod tests {
         fs::write(
             &binary,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntrap 'exit 0' TERM INT HUP\nfor arg in \"$@\"; do\n  [ \"$arg\" = \"--test\" ] && exit 0\ndone\nsleep 30\n",
                 argv_file.display()
             ),
         )
