@@ -134,15 +134,28 @@ impl ArtifactStore {
                 return Ok(receipt(&manifest, Some(path)));
             }
             let part = self.part_path(&offer.transfer_id)?;
-            if part.is_symlink()
-                || fs::metadata(&part)
-                    .map_err(ArtifactStoreError::Storage)?
-                    .len()
-                    != manifest.bytes
-            {
+            if part.is_symlink() {
                 return Err(ArtifactStoreError::CorruptManifest);
             }
-            return Ok(receipt(&manifest, None));
+            match fs::metadata(&part) {
+                Ok(metadata) if metadata.len() == manifest.bytes => {
+                    return Ok(receipt(&manifest, None));
+                }
+                Ok(_) => return Err(ArtifactStoreError::CorruptManifest),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // The finish crash window: an interrupted finish renamed
+                    // the part to the final before the manifest commit, so
+                    // the part is absent. Continue the transfer only when
+                    // the final verifies — the resume's finish then commits
+                    // through the existing final; anything else is provably
+                    // invalid residue that must not be resumed.
+                    match verify_file(&self.final_path(offer)?, offer) {
+                        Ok(()) => return Ok(receipt(&manifest, Some(self.final_path(offer)?))),
+                        Err(_) => return Err(ArtifactStoreError::CorruptManifest),
+                    }
+                }
+                Err(error) => return Err(ArtifactStoreError::Storage(error)),
+            }
         }
         let manifest = Manifest {
             offer: offer.clone(),
@@ -161,7 +174,41 @@ impl ArtifactStore {
         Ok(receipt(&manifest, None))
     }
 
+    /// Removes the part and manifest of a transfer proven invalid (issue
+    /// #88 C2): a failed `accept_chunk`/`finish` means the received content
+    /// can never match the offer digest, so the residue must not replay on
+    /// reconnect (which would fail closed forever) or leak on the host.
+    /// Best-effort: a cleanup failure is logged and the next transfer
+    /// attempt re-creates the state from scratch.
+    fn cleanup_failed_transfer(&self, transfer_id: &str) {
+        for path in [self.part_path(transfer_id), self.manifest_path(transfer_id)] {
+            let Ok(path) = path else {
+                continue;
+            };
+            if let Err(error) = remove_owned_file(&path) {
+                tracing::warn!(
+                    transfer_id,
+                    path = %path.display(),
+                    error = %error,
+                    "failed-transfer residue cleanup failed"
+                );
+            }
+        }
+    }
+
     pub fn accept_chunk(
+        &self,
+        offer: &proto::ArtifactOffer,
+        chunk: &proto::ArtifactChunk,
+    ) -> Result<ArtifactReceipt, ArtifactStoreError> {
+        let result = self.try_accept_chunk(offer, chunk);
+        if result.is_err() {
+            self.cleanup_failed_transfer(&offer.transfer_id);
+        }
+        result
+    }
+
+    fn try_accept_chunk(
         &self,
         offer: &proto::ArtifactOffer,
         chunk: &proto::ArtifactChunk,
@@ -249,6 +296,18 @@ impl ArtifactStore {
         offer: &proto::ArtifactOffer,
         end: &proto::ArtifactEnd,
     ) -> Result<ArtifactReceipt, ArtifactStoreError> {
+        let result = self.try_finish(offer, end);
+        if result.is_err() {
+            self.cleanup_failed_transfer(&offer.transfer_id);
+        }
+        result
+    }
+
+    fn try_finish(
+        &self,
+        offer: &proto::ArtifactOffer,
+        end: &proto::ArtifactEnd,
+    ) -> Result<ArtifactReceipt, ArtifactStoreError> {
         validate_offer(offer, &self.agent_id)?;
         if end.transfer_id != offer.transfer_id
             || end.sha256 != offer.sha256
@@ -268,14 +327,27 @@ impl ArtifactStore {
             return Err(ArtifactStoreError::DigestMismatch);
         }
         let part = self.part_path(&offer.transfer_id)?;
-        verify_file(&part, offer)?;
         let final_path = self.final_path(offer)?;
+        // The finish crash window: an interrupted finish already renamed the
+        // part to the final before the manifest commit, so the part is
+        // absent and the final is the only verifiable content. Verify it
+        // directly so the resume commits the transfer instead of failing
+        // closed on a missing part forever.
+        let part_is_missing = matches!(
+            fs::symlink_metadata(&part),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+        if part_is_missing && fs::symlink_metadata(&final_path).is_ok() {
+            verify_file(&final_path, offer)?;
+        } else {
+            verify_file(&part, offer)?;
+        }
         if final_path.exists() || final_path.is_symlink() {
             if final_path.is_symlink() {
                 return Err(ArtifactStoreError::UnownedPath);
             }
             verify_file(&final_path, offer)?;
-            fs::remove_file(&part).map_err(ArtifactStoreError::Storage)?;
+            remove_owned_file(&part)?;
         } else {
             fs::rename(&part, &final_path).map_err(ArtifactStoreError::Storage)?;
         }
@@ -407,12 +479,34 @@ impl ArtifactStore {
                 continue;
             }
             if state == proto::ArtifactTransferState::Committed {
-                verify_file(&self.final_path(&manifest.offer)?, &manifest.offer)?;
+                // A committed manifest whose content no longer verifies
+                // (post-commit tampering, issue #88 C2) is skipped, never
+                // fatal: aborting the status exchange would fail the agent's
+                // connection with "artifact transfer failed closed" forever.
+                // Genuinely committed content replays as before.
+                if verify_file(&self.final_path(&manifest.offer)?, &manifest.offer).is_err() {
+                    continue;
+                }
             } else {
                 let part = self.part_path(&manifest.offer.transfer_id)?;
-                let metadata = fs::symlink_metadata(&part).map_err(ArtifactStoreError::Storage)?;
-                if !metadata.file_type().is_file() || metadata.len() != manifest.bytes {
-                    return Err(ArtifactStoreError::CorruptManifest);
+                match fs::symlink_metadata(&part) {
+                    Ok(metadata)
+                        if metadata.file_type().is_file() && metadata.len() == manifest.bytes => {}
+                    Ok(_) => {
+                        // Provably invalid part shape: skip, never abort.
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        // The finish crash window: an interrupted finish
+                        // renamed the part to the final before the manifest
+                        // commit. Report only when the final verifies — the
+                        // resume then commits it; otherwise skip.
+                        if verify_file(&self.final_path(&manifest.offer)?, &manifest.offer).is_err()
+                        {
+                            continue;
+                        }
+                    }
+                    Err(error) => return Err(ArtifactStoreError::Storage(error)),
                 }
             }
             statuses.push(proto::ArtifactStatus {
@@ -1081,6 +1175,243 @@ mod tests {
             statuses.is_empty(),
             "expired incomplete transfer must be skipped, not fatal"
         );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Issue #88 C2 (image-checksum-mismatch): a chunk whose content does
+    /// not match its declared digest proves the transfer invalid. The
+    /// failed-closed path must leave NO replayable residue — the part and
+    /// the manifest are removed — so the reconnect status exchange never
+    /// reports the transfer and the agent never loops on it.
+    #[test]
+    fn chunk_verification_failure_leaves_no_replayable_residue() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-chunk-invalid-{}", Uuid::now_v7()));
+        let (store, offer, _) = fixture(&root);
+        store.begin(&offer).unwrap();
+        let bad_chunk = proto::ArtifactChunk {
+            transfer_id: offer.transfer_id.clone(),
+            chunk_index: 0,
+            offset_bytes: 0,
+            data: b"zzzz".to_vec(),
+            chunk_sha256: "0".repeat(64),
+        };
+        assert!(matches!(
+            store.accept_chunk(&offer, &bad_chunk),
+            Err(ArtifactStoreError::InvalidChunk)
+        ));
+        assert!(
+            !root
+                .join(format!(".{}.manifest", offer.transfer_id))
+                .exists(),
+            "the manifest of a verification-failed transfer must be removed"
+        );
+        assert!(
+            !root.join(format!(".{}.part", offer.transfer_id)).exists(),
+            "the part of a verification-failed transfer must be removed"
+        );
+        assert!(
+            store.artifact_statuses("epoch-new").unwrap().is_empty(),
+            "a verification-failed transfer must never be reported for replay"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Issue #88 C2: the whole-file verification fails at `finish` when the
+    /// received content differs from the offer digest (the source blob was
+    /// byte-flipped; per-chunk digests stayed self-consistent). No
+    /// Committed-with-invalid-content state may be observable, and the
+    /// part, final, and manifest are cleaned so nothing replays.
+    #[test]
+    fn whole_file_verification_failure_at_finish_cleans_residue() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-finish-invalid-{}", Uuid::now_v7()));
+        let (store, offer, content) = fixture(&root);
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        // Byte-flip the received part exactly as the C2 scenario flipped the
+        // source blob: size unchanged, content invalid.
+        let part = root.join(format!(".{}.part", offer.transfer_id));
+        let mut received = fs::read(&part).unwrap();
+        let last = received.last_mut().unwrap();
+        *last ^= 0x01;
+        fs::write(&part, received).unwrap();
+        assert!(matches!(
+            store.finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            ),
+            Err(ArtifactStoreError::DigestMismatch)
+        ));
+        assert!(
+            !root
+                .join(format!(".{}.manifest", offer.transfer_id))
+                .exists(),
+            "the manifest of a verification-failed transfer must be removed"
+        );
+        assert!(
+            !root.join(format!(".{}.part", offer.transfer_id)).exists(),
+            "the part of a verification-failed transfer must be removed"
+        );
+        assert!(
+            !root
+                .join(format!("{}.{}", offer.sha256, offer.format))
+                .exists(),
+            "no invalid final may be left behind by a failed finish"
+        );
+        assert!(
+            store.artifact_statuses("epoch-new").unwrap().is_empty(),
+            "a verification-failed transfer must never be reported for replay"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A committed manifest whose final content no longer verifies (the
+    /// post-commit tampering shape) must be SKIPPED by the reconnect status
+    /// exchange, never abort it — aborting fails the connection with
+    /// "artifact transfer failed closed" forever (issue #88 C2). Genuinely
+    /// committed content is still reported.
+    #[test]
+    fn statuses_skip_invalid_committed_content_without_aborting() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-status-invalid-{}", Uuid::now_v7()));
+        let (store, valid_offer, valid_content) = fixture(&root);
+        let tampered_content = b"ijklmnop".to_vec();
+        let mut tampered_offer = valid_offer.clone();
+        tampered_offer.transfer_id =
+            Uuid::new_v5(&Uuid::NAMESPACE_URL, b"command-1:0:image-2").to_string();
+        tampered_offer.artifact_id = "image-2".into();
+        tampered_offer.sha256 = digest(&tampered_content);
+        for offer in [&valid_offer, &tampered_offer] {
+            let content = if offer.artifact_id == "image-1" {
+                &valid_content
+            } else {
+                &tampered_content
+            };
+            store.begin(offer).unwrap();
+            for (index, data) in content.chunks(4).enumerate() {
+                store
+                    .accept_chunk(
+                        offer,
+                        &proto::ArtifactChunk {
+                            transfer_id: offer.transfer_id.clone(),
+                            chunk_index: index as u32,
+                            offset_bytes: (index * 4) as u64,
+                            data: data.to_vec(),
+                            chunk_sha256: digest(data),
+                        },
+                    )
+                    .unwrap();
+            }
+            store
+                .finish(
+                    offer,
+                    &proto::ArtifactEnd {
+                        transfer_id: offer.transfer_id.clone(),
+                        sha256: offer.sha256.clone(),
+                        size_bytes: offer.size_bytes,
+                    },
+                )
+                .unwrap();
+        }
+        // Byte-flip only the second transfer's content-addressed final.
+        let tampered_final = root.join(format!(
+            "{}.{}",
+            tampered_offer.sha256, tampered_offer.format
+        ));
+        let mut bytes = fs::read(&tampered_final).unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 0x01;
+        fs::write(&tampered_final, bytes).unwrap();
+
+        let statuses = store.artifact_statuses("epoch-new").unwrap();
+        assert_eq!(
+            statuses.len(),
+            1,
+            "the invalid committed transfer must be skipped, the valid one reported"
+        );
+        assert_eq!(statuses[0].transfer_id, valid_offer.transfer_id);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The finish crash window: the part was renamed to the final but the
+    /// manifest commit was interrupted, leaving a Receiving manifest with no
+    /// part and a verified final. The status exchange must report the
+    /// transfer (the resume commits it through the existing final), and a
+    /// re-begin must continue it instead of failing closed — otherwise the
+    /// agent loops on "artifact transfer failed closed".
+    #[test]
+    fn renamed_final_with_missing_part_replays_and_rebegins() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-crash-window-{}", Uuid::now_v7()));
+        let (store, offer, content) = fixture(&root);
+        store.begin(&offer).unwrap();
+        for (index, data) in content.chunks(4).enumerate() {
+            store
+                .accept_chunk(
+                    &offer,
+                    &proto::ArtifactChunk {
+                        transfer_id: offer.transfer_id.clone(),
+                        chunk_index: index as u32,
+                        offset_bytes: (index * 4) as u64,
+                        data: data.to_vec(),
+                        chunk_sha256: digest(data),
+                    },
+                )
+                .unwrap();
+        }
+        // Simulate the crash between the final rename and the manifest
+        // commit: move the part to the final path, leave the manifest
+        // Receiving.
+        let part = root.join(format!(".{}.part", offer.transfer_id));
+        let final_path = root.join(format!("{}.{}", offer.sha256, offer.format));
+        fs::rename(&part, &final_path).unwrap();
+
+        let statuses = store.artifact_statuses("epoch-new").unwrap();
+        assert_eq!(
+            statuses.len(),
+            1,
+            "a renamed final with a Receiving manifest must replay so the resume commits it"
+        );
+        assert_eq!(statuses[0].transfer_id, offer.transfer_id);
+
+        let reopened = ArtifactStore::open(&root, "agent-1").unwrap();
+        let receipt = reopened.begin(&offer).unwrap();
+        assert!(
+            receipt.contiguous_bytes == offer.size_bytes
+                && receipt.next_chunk_index == offer.chunk_count,
+            "the re-begin must continue the renamed final, not fail closed"
+        );
+        // The finish commits through the existing final.
+        let committed = reopened
+            .finish(
+                &offer,
+                &proto::ArtifactEnd {
+                    transfer_id: offer.transfer_id.clone(),
+                    sha256: offer.sha256.clone(),
+                    size_bytes: offer.size_bytes,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.path, Some(final_path.clone()));
+        assert_eq!(fs::read(&final_path).unwrap(), content);
         std::fs::remove_dir_all(root).ok();
     }
 
