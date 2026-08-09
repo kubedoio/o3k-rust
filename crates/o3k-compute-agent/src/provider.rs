@@ -458,6 +458,55 @@ impl AgentComputeProvider {
             .await
             .map_err(|_| ProviderError::Conflict)
     }
+
+    /// Issue #88 S5 fallback: reap a NEVER-ACCEPTED create through its
+    /// durable command row — the only residue evidence the control plane
+    /// has when no binding exists. `provider_instance_id` is the O3K server
+    /// id (the local-completion reap shape): resolve the create intent from
+    /// the resource's desired state (the same JSON the reconciler parses),
+    /// take the create command's agent, and dispatch the Delete with the
+    /// REGISTRY's current epoch — the row's epoch is stale after a
+    /// control-plane restart, and the registry is authoritative for the
+    /// agent's current epoch (the #568 never-defined relaxation rationale;
+    /// the wire dispatch additionally fences the command by the current
+    /// registered epoch). Missing or unparseable residue evidence falls
+    /// through to `NotFound`: the local completion is unaffected and the
+    /// residue verifier catches leftovers.
+    async fn reap_never_accepted_create(
+        &self,
+        request: DeleteInstanceRequest,
+    ) -> Result<Operation, ProviderError> {
+        let Some(store) = &self.store else {
+            return Err(ProviderError::NotFound);
+        };
+        let Ok(server_id) = Uuid::parse_str(&request.provider_instance_id) else {
+            return Err(ProviderError::NotFound);
+        };
+        let Ok(resource) = store.get_resource(server_id).await else {
+            return Err(ProviderError::NotFound);
+        };
+        let Ok(create) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
+        else {
+            return Err(ProviderError::NotFound);
+        };
+        let Ok(command) = store
+            .get_agent_command_by_operation(create.operation_id)
+            .await
+        else {
+            return Err(ProviderError::NotFound);
+        };
+        let agent = self.selected_agent(&command.agent_id).await?;
+        let mut delete = build_lifecycle_command(
+            LifecycleCommand::Delete,
+            &agent.agent_id,
+            &agent.agent_epoch,
+            &request.operation_id.to_string(),
+            &server_id.to_string(),
+        )
+        .map_err(map_agent_error)?;
+        delete.idempotency_key = request.idempotency_key.clone();
+        self.dispatch_recorded(delete, request.operation_id).await
+    }
 }
 
 async fn recover_artifact_transfers(
@@ -1435,7 +1484,19 @@ impl ComputeProvider for AgentComputeProvider {
                         .cloned()
                 })
         };
-        let binding = binding.ok_or(ProviderError::NotFound)?;
+        let Some(binding) = binding else {
+            // Issue #88 S5: no binding exists at all, so the create dispatch
+            // was never accepted (the transfer died mid-receipt or committed
+            // before acceptance, then the create terminalized Failed/not_found
+            // and the delete completed locally). The agent-side residue (the
+            // mid-receipt `.part`, the committed config-drive manifest) is
+            // otherwise unreachable: the agent never restarts (o3kd-side
+            // kill), so the startup reap never runs, and no delete command
+            // ever reaches the agent for the resource-scoped reaps. Reap
+            // through the durable create command row and the agent's
+            // domain-absent delete arm.
+            return self.reap_never_accepted_create(request).await;
+        };
         let agent = self.selected_agent(&binding.agent_id).await?;
         if binding.provider_resource_id.is_some() && agent.agent_epoch != binding.agent_epoch {
             return Err(ProviderError::StaleState);
@@ -3173,6 +3234,347 @@ mod tests {
                 "a terminal durable command must not dispatch"
             );
         }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #88 S5: the best-effort reap delete for a NEVER-ACCEPTED create.
+    // No binding exists (the transfer died mid-receipt or committed before
+    // acceptance, then the create terminalized Failed/not_found and the
+    // delete completed locally), so `delete_instance` falls back to the
+    // durable create command row: resolve the create intent from the
+    // resource's desired state, take the create command's agent, and
+    // dispatch the Delete with the REGISTRY's current epoch.
+    // ------------------------------------------------------------------
+
+    /// Seeds the durable residue of a never-accepted create exactly as the
+    /// local-completion shape leaves it: a terminal ERROR resource whose
+    /// desired state is the create request, and a Failed create operation
+    /// with no provider identity.
+    async fn seed_never_accepted_resource(
+        store: &dyn ComputeRepository,
+        create_request: &CreateInstanceRequest,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: create_request.o3k_server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: create_request.project_id.clone(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(create_request)?,
+                observed_state: "ERROR".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: create_request.operation_id,
+                resource_id: create_request.o3k_server_id,
+                kind: "compute_create".to_owned(),
+                state: o3k_store::OperationState::Failed,
+                provider_operation_id: None,
+                error_category: Some("not_found".to_owned()),
+                error_message: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Seeds the never-accepted create's durable command row (the row whose
+    /// agent identity the reap fallback resolves).
+    async fn seed_never_accepted_create_command(
+        store: &dyn ComputeRepository,
+        create_request: &CreateInstanceRequest,
+        command: &agent_proto::Command,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: command.command_id.clone(),
+                idempotency_key: command.idempotency_key.clone(),
+                operation_id: create_request.operation_id,
+                resource_id: create_request.o3k_server_id,
+                agent_id: command.agent_id.clone(),
+                agent_epoch: command.agent_epoch.clone(),
+                payload_fingerprint_sha256: command.payload_fingerprint_sha256.clone(),
+                payload: command.encode_to_vec(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(create_request.operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Seeds the durable delete operation row the local-completion branch
+    /// records before dispatching the best-effort reap (the dispatched
+    /// delete command record references it).
+    async fn seed_delete_operation(
+        store: &dyn ComputeRepository,
+        operation_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id: server_id,
+                kind: "compute_delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Issue #88 S5 exact shape: no binding exists (the create dispatch was
+    /// never accepted), but the durable residue is complete — the terminal
+    /// resource with the create intent, the Failed create operation, and the
+    /// create command row carrying a STALE agent epoch after the
+    /// control-plane restart. `delete_instance` must dispatch a Delete
+    /// command carrying the CURRENT registry epoch (the row's epoch is never
+    /// trusted) with the request's operation identity, and the durable
+    /// delete command row must be recorded for idempotent replay.
+    #[tokio::test]
+    async fn delete_reaps_never_accepted_create_via_durable_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        // The agent re-registered under a fresh per-connection epoch after
+        // the control-plane restart; the durable create command row below
+        // still carries the pre-restart epoch.
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let (sender, mut receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-2", sender)
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let create_operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        let create_request = race_create_request(create_operation_id, server_id);
+        let create_command = racing_create_command(create_operation_id, server_id)?;
+        seed_never_accepted_resource(store.as_ref(), &create_request).await?;
+        seed_never_accepted_create_command(store.as_ref(), &create_request, &create_command)
+            .await?;
+        let delete_operation_id = Uuid::now_v7();
+        seed_delete_operation(store.as_ref(), delete_operation_id, server_id).await?;
+
+        let operation = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: delete_operation_id,
+                provider_instance_id: server_id.to_string(),
+                idempotency_key: format!("o3k:delete-reap:{server_id}"),
+            })
+            .await
+            .map_err(|error| format!("the never-accepted reap must dispatch, got {error:?}"))?;
+        assert_eq!(operation.state, o3k_provider::OperationState::Accepted);
+        let delivered = receiver
+            .recv()
+            .await
+            .ok_or("the reap delete must reach the agent")??;
+        let Some(agent_proto::control_response::Body::Command(command)) = delivered.body else {
+            return Err("expected a dispatched delete command".into());
+        };
+        assert!(
+            matches!(
+                command.action,
+                Some(agent_proto::command::Action::Delete(_))
+            ),
+            "the reaped command must be a Delete"
+        );
+        assert_eq!(command.resource_id, server_id.to_string());
+        assert_eq!(
+            command.agent_epoch, "epoch-2",
+            "the reap dispatches with the CURRENT registry epoch, not the stale row epoch"
+        );
+        assert_eq!(command.operation_id, delete_operation_id.to_string());
+        assert_eq!(
+            command.idempotency_key,
+            format!("o3k:delete-reap:{server_id}"),
+            "the reap command carries the request's reap idempotency key"
+        );
+        assert!(
+            receiver.try_recv().is_err(),
+            "the agent stream must carry exactly one command"
+        );
+        let durable = store
+            .get_agent_command_by_operation(delete_operation_id)
+            .await?;
+        assert_eq!(
+            durable.command_id, command.command_id,
+            "the durable delete command row is recorded for idempotent replay"
+        );
+        Ok(())
+    }
+
+    /// Issue #88 S5 no-op shapes: the durable fallback must not invent a reap
+    /// when the residue evidence is incomplete — a missing resource row, an
+    /// unparseable desired state, a missing create command row, or an
+    /// unregistered agent all fall through to the existing `NotFound` and
+    /// nothing is dispatched (the local completion stays a clean no-op).
+    #[tokio::test]
+    async fn delete_never_accepted_fallback_noops_without_durable_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let (sender, mut receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let delete = |server_id: Uuid, operation_id: Uuid| DeleteInstanceRequest {
+            operation_id,
+            provider_instance_id: server_id.to_string(),
+            idempotency_key: format!("o3k:delete-reap:{server_id}"),
+        };
+
+        // Missing resource row.
+        let server_id = Uuid::now_v7();
+        let result = provider
+            .delete_instance(delete(server_id, Uuid::now_v7()))
+            .await;
+        assert_eq!(result, Err(ProviderError::NotFound));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no dispatch for a missing resource"
+        );
+
+        // Unparseable desired state (no create operation identity).
+        let server_id = Uuid::now_v7();
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "ERROR".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        let result = provider
+            .delete_instance(delete(server_id, Uuid::now_v7()))
+            .await;
+        assert_eq!(result, Err(ProviderError::NotFound));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no dispatch for an unparseable intent"
+        );
+
+        // Missing create command row (resource + create operation exist).
+        let server_id = Uuid::now_v7();
+        let create_operation_id = Uuid::now_v7();
+        let create_request = race_create_request(create_operation_id, server_id);
+        seed_never_accepted_resource(store.as_ref(), &create_request).await?;
+        let result = provider
+            .delete_instance(delete(server_id, Uuid::now_v7()))
+            .await;
+        assert_eq!(result, Err(ProviderError::NotFound));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no dispatch without a create command row"
+        );
+
+        // Unregistered agent (complete residue, but the command row's agent
+        // never registered).
+        let server_id = Uuid::now_v7();
+        let create_operation_id = Uuid::now_v7();
+        let create_request = race_create_request(create_operation_id, server_id);
+        seed_never_accepted_resource(store.as_ref(), &create_request).await?;
+        let mut ghost_command = racing_create_command(create_operation_id, server_id)?;
+        ghost_command.agent_id = "ghost".to_owned();
+        ghost_command.agent_epoch = "epoch-9".to_owned();
+        seed_never_accepted_create_command(store.as_ref(), &create_request, &ghost_command).await?;
+        let result = provider
+            .delete_instance(delete(server_id, Uuid::now_v7()))
+            .await;
+        assert_eq!(result, Err(ProviderError::NotFound));
+        assert!(
+            receiver.try_recv().is_err(),
+            "no dispatch for an unregistered agent"
+        );
+        Ok(())
+    }
+
+    /// Issue #88 S5 regression: the durable fallback applies ONLY when no
+    /// binding exists. A never-defined binding (stale epoch, no provider
+    /// object) still dispatches through the binding path with the registry
+    /// epoch — even when a durable create command row owned by a DIFFERENT,
+    /// unregistered agent would make the fallback fail.
+    #[tokio::test]
+    async fn delete_with_binding_takes_precedence_over_durable_fallback()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let (sender, mut receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-2", sender)
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let server_id = Uuid::now_v7();
+        let create_operation_id = Uuid::now_v7();
+        // The never-defined binding (create accepted, no provider object).
+        seed_create_binding(&provider, server_id, "node-a", "epoch-1").await;
+        // The durable resource so rehydration preserves the never-defined
+        // binding, plus a fallback-tempting command row owned by an
+        // UNREGISTERED agent: the binding path must win.
+        let create_request = race_create_request(create_operation_id, server_id);
+        seed_never_accepted_resource(store.as_ref(), &create_request).await?;
+        let mut ghost_command = racing_create_command(create_operation_id, server_id)?;
+        ghost_command.agent_id = "ghost".to_owned();
+        ghost_command.agent_epoch = "epoch-9".to_owned();
+        seed_never_accepted_create_command(store.as_ref(), &create_request, &ghost_command).await?;
+        let delete_operation_id = Uuid::now_v7();
+        seed_delete_operation(store.as_ref(), delete_operation_id, server_id).await?;
+
+        let operation = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: delete_operation_id,
+                provider_instance_id: server_id.to_string(),
+                idempotency_key: format!("o3k:delete-reap:{server_id}"),
+            })
+            .await
+            .map_err(|error| format!("the binding path must dispatch, got {error:?}"))?;
+        assert_eq!(operation.state, o3k_provider::OperationState::Accepted);
+        let delivered = receiver
+            .recv()
+            .await
+            .ok_or("the binding path must reach the agent")??;
+        let Some(agent_proto::control_response::Body::Command(command)) = delivered.body else {
+            return Err("expected a dispatched command".into());
+        };
+        assert_eq!(command.agent_id, "node-a");
+        assert_eq!(command.agent_epoch, "epoch-2");
         Ok(())
     }
 }
