@@ -265,6 +265,12 @@ impl DhcpService {
         let mut lines = vec![
             "# Managed by o3k-dhcp; do not edit.".to_owned(),
             format!("interface={}", config.interface),
+            // dnsmasq always opens a DNS listener on 127.0.0.1:53 regardless
+            // of `interface=`/`bind-interfaces`; on hosts with a system
+            // dnsmasq that listener is EADDRINUSE and the DHCP server dies
+            // at spawn. Exclude the loopback so the DHCP server binds the
+            // managed bridge only (issue #87 re-probe matrix, dnsmasq 2.90).
+            "except-interface=lo".to_owned(),
             "bind-interfaces".to_owned(),
             format!(
                 "dhcp-leasefile={}",
@@ -436,6 +442,23 @@ mod tests {
             service
                 .managed_lease_path()
                 .ends_with("o3k-dhcp-tests/dnsmasq.leases")
+        );
+        Ok(())
+    }
+
+    /// dnsmasq always opens a DNS listener on 127.0.0.1:53 regardless of
+    /// `interface=`/`bind-interfaces`; on hosts with a system dnsmasq that
+    /// listener is EADDRINUSE and the DHCP server dies at spawn (issue #87
+    /// re-probe capability matrix, dnsmasq 2.90). The loopback must be
+    /// excluded so the DHCP server binds the managed bridge only.
+    #[test]
+    fn rendered_config_excludes_loopback() -> Result<(), DhcpError> {
+        let mut service = service()?;
+        service.configure(config()?)?;
+        let rendered = service.render_config()?;
+        assert!(
+            rendered.contains("except-interface=lo"),
+            "rendered dnsmasq config must exclude the loopback:\n{rendered}"
         );
         Ok(())
     }
