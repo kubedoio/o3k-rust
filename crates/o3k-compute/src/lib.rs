@@ -94,6 +94,7 @@ pub struct ComputeService {
     cinder: Option<Arc<dyn VolumeAttachmentProvider>>,
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
+    config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
 }
 
 #[derive(Clone)]
@@ -350,6 +351,36 @@ impl ComputeService {
             cinder: None,
             attachments,
             binding_projector: None,
+            config_drive_cleaner: None,
+        }
+    }
+
+    /// Configures the control-plane config-drive store whose per-instance
+    /// media is reaped when a server delete reaches terminal success.
+    /// Reaping is best-effort and idempotent; without this builder the
+    /// cleanup is a no-op, so tests and hosts that do not own a config-drive
+    /// store are unchanged.
+    #[must_use]
+    pub fn with_config_drive_cleaner(mut self, store: o3k_config_drive::ConfigDriveStore) -> Self {
+        self.config_drive_cleaner = Some(store);
+        self
+    }
+
+    /// Best-effort removal of the per-instance config-drive media owned by
+    /// this control plane once a server delete is known terminal. A failed
+    /// cleanup is logged, never a compute failure: the leak verifier catches
+    /// residue separately, and the cleanup is idempotent so a replayed
+    /// terminal update reaps nothing more than the first one.
+    fn cleanup_config_drive_best_effort(&self, server_id: &str) {
+        let Some(store) = self.config_drive_cleaner.as_ref() else {
+            return;
+        };
+        if let Err(error) = store.cleanup(server_id) {
+            tracing::warn!(
+                server_id = %server_id,
+                error = %error,
+                "config-drive cleanup failed; the delete outcome is unaffected"
+            );
         }
     }
 
@@ -426,22 +457,20 @@ impl ComputeService {
     }
 
     /// Reflects a terminal operation outcome into the durable port binding
-    /// state of the network control plane. The server's ports are read from
-    /// the durable desired-state snapshot, and the binding host comes from
-    /// the intent the network service recorded at dispatch. Projection is
-    /// best-effort and idempotent: it is a side observation, never a compute
-    /// failure, and a replayed terminal update projects the same state again.
-    /// Integrity anomalies (a missing operation or resource, or an
-    /// unparseable desired-state snapshot) are surfaced as warnings instead
-    /// of failing the compute path.
+    /// state of the network control plane, and reaps the per-instance
+    /// config-drive media when a delete reached terminal success. The
+    /// server's ports are read from the durable desired-state snapshot, and
+    /// the binding host comes from the intent the network service recorded at
+    /// dispatch. Projection and reaping are best-effort and idempotent: they
+    /// are side observations, never compute failures, and a replayed terminal
+    /// update projects and reaps the same state again. Integrity anomalies (a
+    /// missing operation or resource, or an unparseable desired-state
+    /// snapshot) are surfaced as warnings instead of failing the compute path.
     async fn project_terminal_binding_outcome(
         &self,
         operation_id: &str,
         state: o3k_store::OperationState,
     ) {
-        let Some(projector) = self.binding_projector.as_ref() else {
-            return;
-        };
         let Ok(operation_id) = Uuid::parse_str(operation_id) else {
             tracing::warn!(
                 operation_id = %operation_id,
@@ -454,6 +483,15 @@ impl ComputeService {
                 operation_id = %operation_id,
                 "port binding outcome skipped: operation is missing from the durable store"
             );
+            return;
+        };
+        // Terminal successful delete reaps the per-instance config-drive
+        // media owned by this control plane (best-effort, idempotent, and
+        // independent of the binding projector).
+        if operation.kind == "lifecycle:delete" && state == o3k_store::OperationState::Succeeded {
+            self.cleanup_config_drive_best_effort(&operation.resource_id.to_string());
+        }
+        let Some(projector) = self.binding_projector.as_ref() else {
             return;
         };
         let Ok(resource) = self.store.get_resource(operation.resource_id).await else {
@@ -1808,8 +1846,10 @@ impl ComputeService {
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
             // The delete reached terminal success in a previous run; clear
-            // any binding that was not yet unbound.
+            // any binding that was not yet unbound and reap the config-drive
+            // media that the earlier run could not.
             self.unbind_ports_from_intent(&intent).await;
+            self.cleanup_config_drive_best_effort(&id.as_uuid().to_string());
             return Ok(());
         }
         if resource.provider_id.is_none() {
@@ -2177,7 +2217,7 @@ mod tests {
         AgentNodeSnapshot, AgentObservation, AgentOperationState, AgentOperationUpdate,
         FailureInjection,
     };
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Stateful in-memory agent registry used to test application scheduling
@@ -4456,6 +4496,145 @@ mod tests {
             2
         );
         std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    fn config_drive_input(instance_id: &str) -> o3k_config_drive::ConfigDriveInput {
+        o3k_config_drive::ConfigDriveInput {
+            instance_id: instance_id.to_owned(),
+            hostname: "cd-server".to_owned(),
+            ssh_public_key: "ssh-ed25519 AAAA test@example".to_owned(),
+            user_data: b"#cloud-config\nhostname: cd-server\n".to_vec(),
+            metadata: BTreeMap::new(),
+            network_data: BTreeMap::new(),
+            vendor_data: None,
+        }
+    }
+
+    /// Publishes an ISO pair that satisfies the config-drive ownership
+    /// contract (managed_by `o3k-config-drive-iso`, schema_version 1,
+    /// matching instance id and output name). Used to assert that terminal
+    /// deletes reap the transfer-source media without invoking an ISO builder.
+    fn publish_config_drive_iso_pair(
+        root: &Path,
+        instance_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let iso = root.join(format!("{instance_id}.iso"));
+        std::fs::write(&iso, b"owned-iso-bytes")?;
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "managed_by": "o3k-config-drive-iso",
+            "instance_id": instance_id,
+            "source_fingerprint_sha256": "0".repeat(64),
+            "artifact_fingerprint_sha256": "0".repeat(64),
+            "output_name": format!("{instance_id}.iso"),
+        });
+        std::fs::write(
+            root.join(format!("{instance_id}.iso.o3k-iso-ownership.json")),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_delete_reaps_owned_config_drive_media()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-config-drive-reap-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let config_drive_root =
+            std::env::temp_dir().join(format!("o3k-compute-config-drive-{}", Uuid::now_v7()));
+        let config_drive = o3k_config_drive::ConfigDriveStore::open(&config_drive_root)?;
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_config_drive_cleaner(config_drive.clone());
+
+        // The already-deleted shortcut: a server whose delete completed in a
+        // previous run still owns config-drive media on this control plane.
+        let shortcut_id = Uuid::now_v7();
+        let shortcut_request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: shortcut_id,
+            project_id: "project-a".to_owned(),
+            name: "shortcut".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: Vec::new(),
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "shortcut-cd".to_owned(),
+        };
+        config_drive.generate(&config_drive_input(&shortcut_id.to_string()))?;
+        publish_config_drive_iso_pair(&config_drive_root, &shortcut_id.to_string())?;
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: shortcut_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&shortcut_request)?,
+                observed_state: server_state_to_storage(ServerState::Deleted).to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        service
+            .delete_server("project-a", ServerId::from_uuid(shortcut_id))
+            .await?;
+        assert!(
+            !config_drive_root.join(shortcut_id.to_string()).exists(),
+            "the already-deleted shortcut must reap the config-drive directory"
+        );
+        assert!(
+            !config_drive_root
+                .join(format!("{shortcut_id}.iso"))
+                .exists(),
+            "the already-deleted shortcut must reap the config-drive ISO"
+        );
+        assert!(
+            !config_drive_root
+                .join(format!("{shortcut_id}.iso.o3k-iso-ownership.json"))
+                .exists(),
+            "the already-deleted shortcut must reap the config-drive ISO manifest"
+        );
+
+        // The terminal projection path (delete completed through the provider
+        // and reconciler) reaps the media too, and a repeated delete takes
+        // the already-deleted shortcut without disturbing the reaping.
+        let server = service
+            .create_server(
+                "project-a",
+                "cd-server".to_owned(),
+                "image-1".to_owned(),
+                service.flavors()[0].id,
+                vec!["network-1".to_owned()],
+                "terminal-cd".to_owned(),
+            )
+            .await?;
+        let live_id = server.id.as_uuid();
+        config_drive.generate(&config_drive_input(&live_id.to_string()))?;
+        publish_config_drive_iso_pair(&config_drive_root, &live_id.to_string())?;
+        service.delete_server("project-a", server.id).await?;
+        assert!(!config_drive_root.join(live_id.to_string()).exists());
+        assert!(!config_drive_root.join(format!("{live_id}.iso")).exists());
+        assert!(
+            !config_drive_root
+                .join(format!("{live_id}.iso.o3k-iso-ownership.json"))
+                .exists()
+        );
+        service.delete_server("project-a", server.id).await?;
+
+        std::fs::remove_dir_all(&config_drive_root)?;
+        std::fs::remove_file(&database_path)?;
         Ok(())
     }
 

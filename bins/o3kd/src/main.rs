@@ -343,6 +343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_binding_projector(Arc::new(NetworkBindingProjector {
             network: network_service.clone(),
         }))
+        .with_config_drive_cleaner(config_drive_store.clone())
     } else {
         match config.provider {
             o3k_config::Provider::Libvirt => {
