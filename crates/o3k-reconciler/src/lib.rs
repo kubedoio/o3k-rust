@@ -3697,4 +3697,188 @@ mod tests {
         assert_eq!(provider.instance_count(), 1);
         Ok(())
     }
+
+    /// Wraps the stateful fake provider so every lifecycle action is
+    /// rejected as an invalid request before any provider mutation, exactly
+    /// what the agent provider reports for a genuinely invalid command
+    /// (bad payload, unknown action). Pins the reconciler's terminalization
+    /// of a real validation rejection: the issue-87 transport-stall
+    /// reclassification must never weaken real validation.
+    struct RejectingActionProvider {
+        inner: FakeComputeProvider,
+    }
+
+    impl RejectingActionProvider {
+        fn new(inner: FakeComputeProvider) -> Self {
+            Self { inner }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for RejectingActionProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            _provider_instance_id: &str,
+            _action: o3k_provider::InstanceAction,
+            _operation_id: Uuid,
+            _idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            Err(o3k_provider::ProviderError::InvalidRequest)
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// Issue #87 B2 invariant: a lifecycle dispatch rejected as
+    /// `InvalidRequest` by the provider — a genuinely invalid command — must
+    /// STILL terminalize as `Failed` with `invalid_request`, wiping no
+    /// recovery path behind it. The transport-stall fix reclassifies the
+    /// stall at the provider boundary; it must not turn real validation
+    /// rejections into unknown outcomes.
+    #[tokio::test]
+    async fn rejected_lifecycle_action_still_terminalizes_as_invalid_request()
+    -> Result<(), ReconcileError> {
+        let (_, store, inner) = journal("rejected-action", 2).await?;
+        let provider = Arc::new(RejectingActionProvider::new(inner.as_ref().clone()));
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Reboot)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Failed
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::Failed);
+        assert_eq!(
+            operation.error_category.as_deref(),
+            Some("invalid_request"),
+            "a genuine validation rejection must keep its classified category"
+        );
+        assert_eq!(
+            operation.error_message.as_deref(),
+            Some("provider rejected the request")
+        );
+        assert!(
+            operation.provider_operation_id.is_none(),
+            "a rejected request never dispatches, so no provider identity exists"
+        );
+        // The resource stays ACTIVE: the rejected reboot never mutated it.
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "ACTIVE"
+        );
+        Ok(())
+    }
+
+    /// Issue #87 B2: a lifecycle operation already in `UnknownOutcome` (the
+    /// state the transport-stall fix now produces) must ADOPT the agent's
+    /// re-delivered terminal observation instead of staying stuck: when the
+    /// stalled stream is restored and the agent replays the terminal
+    /// observation it produced during the hold, `apply_agent_observation`
+    /// promotes the operation to `Succeeded` and projects the resource
+    /// ACTIVE — the durable inconsistency (failed operation + succeeded
+    /// agent command + ACTIVE resource) never forms.
+    #[tokio::test]
+    async fn unknown_lifecycle_adopts_late_terminal_observation() -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("adopt-late-observation", 2).await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        provider.set_failure(FailureInjection::Timeout)?;
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Reboot)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::UnknownOutcome
+        );
+        provider.set_failure(FailureInjection::None)?;
+        // The stream is restored; the agent re-delivers the terminal
+        // observation it already produced during the hold (the reboot
+        // executed: state Running/ACTIVE).
+        journal
+            .apply_agent_observation(&AgentObservation {
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                resource_id: resource.id,
+                provider_resource_id: resource.provider_id.clone(),
+                state: o3k_provider::InstanceState::Running,
+                operation_id,
+                operation_state: AgentOperationState::Succeeded,
+                observation_sequence: 1,
+                observed_at_unix_ms: 1,
+                redacted_message: Some("rebooted".to_owned()),
+                console_log_bytes: Vec::new(),
+                console_log_offset: 0,
+                console_log_complete: false,
+                console_log_truncated: false,
+                block_device: None,
+            })
+            .await?;
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(
+            operation.state,
+            OperationState::Succeeded,
+            "the re-delivered terminal observation must be adopted by the unknown lifecycle"
+        );
+        assert!(
+            operation.provider_operation_id.is_some(),
+            "the adopted operation keeps its provider operation identity"
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "ACTIVE"
+        );
+        Ok(())
+    }
 }
