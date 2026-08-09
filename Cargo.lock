@@ -1020,6 +1020,7 @@ version = "0.1.0-alpha.0"
 dependencies = [
  "async-trait",
  "o3k-cinder",
+ "o3k-config-drive",
  "o3k-domain",
  "o3k-placement",
  "o3k-provider",

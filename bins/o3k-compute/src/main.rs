@@ -77,6 +77,21 @@ fn cleanup_config_drive_artifact(
         .map_err(|_| AgentError::Protocol("owned config-drive cleanup failed".to_owned()))
 }
 
+/// Best-effort reaping of the resource's owned config-drive artifacts after
+/// the delete's host mutation cleanup. A failed cleanup is logged and never
+/// changes the already-successful delete outcome: the leak verifier catches
+/// residue separately, so a cleanup error must not turn a successful delete
+/// into a failed or unknown command outcome.
+fn reap_config_drive_artifacts(artifact_root: &std::path::Path, agent_id: &str, resource_id: &str) {
+    if let Err(error) = cleanup_config_drive_artifact(artifact_root, agent_id, resource_id) {
+        tracing::warn!(
+            resource_id = %resource_id,
+            error = %error,
+            "owned config-drive artifact cleanup failed; the delete outcome is unaffected"
+        );
+    }
+}
+
 impl DhcpRuntime {
     fn open(
         root: impl Into<PathBuf>,
@@ -878,16 +893,16 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     Ok(value) => value,
                     Err(error) if error.category == ErrorCategory::NotFound => {
                         cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
-                        cleanup_config_drive_artifact(
-                            &self.artifact_root,
-                            &command.agent_id,
-                            &command.resource_id,
-                        )?;
                         self.image_materializer
                             .delete_instance(&command.resource_id)
                             .map_err(|_| {
                                 AgentError::Protocol("instance image cleanup failed".to_owned())
                             })?;
+                        reap_config_drive_artifacts(
+                            &self.artifact_root,
+                            &command.agent_id,
+                            &command.resource_id,
+                        );
                         cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
@@ -905,16 +920,16 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .await
                     .map_err(agent_error)?;
                 cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
-                cleanup_config_drive_artifact(
-                    &self.artifact_root,
-                    &command.agent_id,
-                    &command.resource_id,
-                )?;
                 self.image_materializer
                     .delete_instance(&command.resource_id)
                     .map_err(|_| {
                         AgentError::Protocol("instance image cleanup failed".to_owned())
                     })?;
+                reap_config_drive_artifacts(
+                    &self.artifact_root,
+                    &command.agent_id,
+                    &command.resource_id,
+                );
                 cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                 success("domain deleted", proto::ResourceState::Deleted)
             }
@@ -926,17 +941,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 // failures after a possible provider side effect (define,
                 // start, or a failed rollback) and for observation errors.
                 let definitive_failure = |error: AgentError| {
-                    // The redacted reason is also carried in the result so the
-                    // control plane can persist it; log the same redacted
-                    // string here so host-side diagnosis does not require the
-                    // durable store.
-                    tracing::warn!(
-                        error = %error,
-                        operation_id = %command.operation_id,
-                        resource_id = %command.resource_id,
-                        "create failed definitively; reporting terminal failure"
-                    );
-                    Ok(definitive_failure_result(&error))
+                    definitive_create_failure_result(
+                        &self.artifact_root,
+                        &command.agent_id,
+                        &command.resource_id,
+                        &command.operation_id,
+                        error,
+                    )
                 };
                 let preparation = match prepare_network(command, &self.network, &self.dhcp) {
                     Ok(preparation) => preparation,
@@ -1433,6 +1444,36 @@ fn inspect_not_found_result(provider_resource_id: String) -> CommandExecutionRes
         console_log: None,
         block_device: None,
     }
+}
+
+/// Builds the definitive (absence-proven) terminal failure result for a
+/// create that failed before libvirt could define the domain. The control
+/// plane terminalizes this outcome as Failed and later completes the delete
+/// locally through the never-reached-provider path — no agent delete command
+/// is ever dispatched — so the resource's committed config-drive transfer
+/// state would otherwise leak (issue #88 C6). The resource's owned
+/// config-drive artifacts are therefore reaped here, best-effort: a failed
+/// reap is logged and never changes the command outcome. This is the ONLY
+/// create path that reaps; unknown-outcome and retryable failures never
+/// reach it, so a retried create still finds its committed manifests.
+fn definitive_create_failure_result(
+    artifact_root: &std::path::Path,
+    agent_id: &str,
+    resource_id: &str,
+    operation_id: &str,
+    error: AgentError,
+) -> Result<CommandExecutionResult, AgentError> {
+    // The redacted reason is also carried in the result so the control plane
+    // can persist it; log the same redacted string here so host-side
+    // diagnosis does not require the durable store.
+    tracing::warn!(
+        error = %error,
+        operation_id = %operation_id,
+        resource_id = %resource_id,
+        "create failed definitively; reporting terminal failure"
+    );
+    reap_config_drive_artifacts(artifact_root, agent_id, resource_id);
+    Ok(definitive_failure_result(&error))
 }
 
 /// Result for a create failure that provably happened before libvirt could
@@ -2379,5 +2420,255 @@ mod tests {
         if let Err(error) = result {
             assert!(error.to_string().contains("owned TAP evidence"));
         }
+    }
+
+    /// Commits an artifact through the same store API the agent's transfer
+    /// protocol uses, returning its transfer id so tests can assert on the
+    /// durable manifest. Content is a single 4-byte chunk; the digest
+    /// constants are precomputed sha256 values of the fixed contents.
+    fn commit_artifact(
+        root: &std::path::Path,
+        resource_id: &str,
+        artifact_id: &str,
+        kind: proto::ArtifactKind,
+        format: &str,
+        content: &[u8],
+        sha256: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let store = ArtifactStore::open(root, "agent-1")?;
+        let transfer_id = format!("transfer-{resource_id}-{artifact_id}");
+        let offer = proto::ArtifactOffer {
+            transfer_id: transfer_id.clone(),
+            command_id: format!("command-{resource_id}"),
+            operation_id: format!("operation-{resource_id}"),
+            resource_id: resource_id.to_owned(),
+            agent_id: "agent-1".to_owned(),
+            artifact_id: artifact_id.to_owned(),
+            kind: kind as i32,
+            sha256: sha256.to_owned(),
+            size_bytes: content.len() as u64,
+            format: format.to_owned(),
+            chunk_size_bytes: 4,
+            chunk_count: content.len().div_ceil(4) as u32,
+            expires_at_unix_ms: i64::MAX,
+        };
+        store.begin(&offer)?;
+        store.accept_chunk(
+            &offer,
+            &proto::ArtifactChunk {
+                transfer_id: offer.transfer_id.clone(),
+                chunk_index: 0,
+                offset_bytes: 0,
+                data: content.to_vec(),
+                chunk_sha256: sha256.to_owned(),
+            },
+        )?;
+        store.finish(
+            &offer,
+            &proto::ArtifactEnd {
+                transfer_id: offer.transfer_id.clone(),
+                sha256: sha256.to_owned(),
+                size_bytes: content.len() as u64,
+            },
+        )?;
+        Ok(transfer_id)
+    }
+
+    /// The delete executor's config-drive reaping seam: executing the cleanup
+    /// for a deleted resource removes its committed ConfigDriveIso manifest
+    /// and the content-addressed final file when this manifest was its last
+    /// reference, while manifests and finals of other resources and of the
+    /// shared image base remain. This is the exact function the libvirt
+    /// delete arm calls after the host mutation cleanup.
+    #[test]
+    fn config_drive_delete_cleanup_removes_owned_manifests_and_finals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-cd-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config_transfer = commit_artifact(
+            &root,
+            "resource-1",
+            "config-1",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"1111",
+            "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
+        )?;
+        let image_transfer = commit_artifact(
+            &root,
+            "resource-1",
+            "image-1",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"2222",
+            "edee29f882543b956620b26d0ee0e7e950399b1c4222f5de05e06425b4c995e9",
+        )?;
+        let other_transfer = commit_artifact(
+            &root,
+            "resource-2",
+            "config-1",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"3333",
+            "318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69",
+        )?;
+
+        cleanup_config_drive_artifact(&root, "agent-1", "resource-1")?;
+
+        assert!(
+            !root.join(format!(".{config_transfer}.manifest")).exists(),
+            "the deleted resource's config-drive manifest must be removed"
+        );
+        assert!(
+            !root
+                .join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.iso")
+                .exists(),
+            "the config-drive final must be removed when this manifest was its \
+             last reference"
+        );
+        assert!(
+            root.join(format!(".{image_transfer}.manifest")).exists(),
+            "the image-base manifest must be preserved"
+        );
+        assert!(
+            root.join("edee29f882543b956620b26d0ee0e7e950399b1c4222f5de05e06425b4c995e9.qcow2")
+                .exists(),
+            "the shared image-base final must be preserved"
+        );
+        assert!(
+            root.join(format!(".{other_transfer}.manifest")).exists(),
+            "a resource that was not deleted keeps its config-drive manifest"
+        );
+        assert!(
+            root.join("318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69.iso")
+                .exists(),
+            "a resource that was not deleted keeps its config-drive final"
+        );
+        cleanup_config_drive_artifact(&root, "agent-1", "resource-1")?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The create executor's definitive-failure path: a create that failed
+    /// before libvirt could define the domain is terminal and absence-proven
+    /// (the control plane completes the delete locally without dispatching an
+    /// agent delete), so the resource's committed config-drive transfer state
+    /// must be reaped. Manifests and finals of resources whose create did not
+    /// fail stay untouched, and a replayed definitive failure is idempotent.
+    /// Unknown-outcome failures never reach this builder (the framework
+    /// converts `Err` executions at
+    /// `crates/o3k-compute-agent/src/lib.rs` ~4104), so a retried create
+    /// still finds its committed manifests.
+    #[test]
+    fn definitive_create_failure_reaps_owned_config_drive_manifests()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            env::temp_dir().join(format!("o3k-compute-cd-definitive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let failed_transfer = commit_artifact(
+            &root,
+            "resource-1",
+            "config-1",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"1111",
+            "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
+        )?;
+        let live_transfer = commit_artifact(
+            &root,
+            "resource-2",
+            "config-1",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"3333",
+            "318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69",
+        )?;
+
+        // The d0f263ee/44e1fa48 shape: "DHCP start failed" before libvirt
+        // define, reported as a definitive terminal failure.
+        let result = definitive_create_failure_result(
+            &root,
+            "agent-1",
+            "resource-1",
+            "operation-1",
+            AgentError::Protocol("DHCP start failed".to_owned()),
+        )?;
+        assert_eq!(result.state, proto::OperationState::Failed as i32);
+        assert_eq!(
+            result.error_category,
+            proto::ErrorCategory::NotFound as i32,
+            "a definitive pre-libvirt failure must stay absence-proven"
+        );
+        assert!(
+            !root.join(format!(".{failed_transfer}.manifest")).exists(),
+            "the definitively failed create's config-drive manifest must be reaped"
+        );
+        assert!(
+            !root
+                .join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.iso")
+                .exists(),
+            "the definitively failed create's config-drive final must be reaped"
+        );
+        assert!(
+            root.join(format!(".{live_transfer}.manifest")).exists(),
+            "a create that did not fail keeps its config-drive manifest"
+        );
+        assert!(
+            root.join("318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69.iso")
+                .exists(),
+            "a create that did not fail keeps its config-drive final"
+        );
+
+        // A replayed definitive failure is idempotent.
+        definitive_create_failure_result(
+            &root,
+            "agent-1",
+            "resource-1",
+            "operation-1",
+            AgentError::Protocol("instance image overlay could not be realized".to_owned()),
+        )?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A config-drive cleanup failure must never turn a successful delete
+    /// into a failed or unknown command outcome: the delete executor calls
+    /// the best-effort seam, which logs and continues. A poisoned (symlinked)
+    /// manifest makes the store fail closed without deleting anything.
+    #[cfg(unix)]
+    #[test]
+    fn config_drive_delete_cleanup_is_best_effort_when_the_store_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!("o3k-compute-cd-soft-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let transfer = commit_artifact(
+            &root,
+            "resource-1",
+            "config-1",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"1111",
+            "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
+        )?;
+        let manifest = root.join(format!(".{transfer}.manifest"));
+        let outside = root.join("outside");
+        std::fs::write(&outside, b"foreign")?;
+        std::fs::remove_file(&manifest)?;
+        symlink(&outside, &manifest)?;
+
+        reap_config_drive_artifacts(&root, "agent-1", "resource-1");
+        assert!(
+            manifest.is_symlink(),
+            "the poisoned manifest must be preserved by the fail-closed store"
+        );
+        assert!(
+            root.join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.iso")
+                .exists(),
+            "nothing may be deleted while the ownership unit is unverified"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }

@@ -173,6 +173,12 @@ impl ConfigDriveStore {
         generate_at(&self.root, input)
     }
 
+    /// Removes the per-instance ownership unit: the generated directory
+    /// (`<instance_id>/`) and the published ISO transfer-source pair
+    /// (`<instance_id>.iso` plus its ownership manifest), each validated as
+    /// O3K-owned before anything is removed. Idempotent: an already absent
+    /// unit returns `Ok(())`, and any unowned or tampered part fails closed
+    /// without deleting anything.
     pub fn cleanup(&self, instance_id: &str) -> Result<(), ConfigDriveError> {
         if !valid_instance_id(instance_id) {
             return Err(ConfigDriveError::InvalidInput);
@@ -371,6 +377,16 @@ fn generate_at(
     })
 }
 
+/// Removes the per-instance ownership unit at `path` (a directory named by
+/// the instance id): the generated directory plus the published ISO
+/// transfer-source pair (`<instance_id>.iso` and its ownership manifest) in
+/// the same parent. Every part is validated as O3K-owned before anything is
+/// removed, so a symlink anywhere, an unowned or corrupt ISO ownership
+/// manifest, an ISO present without its manifest, an output-name mismatch, or
+/// a non-regular oversized ISO fails closed and deletes nothing. Idempotent:
+/// an already absent unit returns `Ok(())`, and partial residue (for example
+/// a lone manifest whose ISO is already gone) is removed only after it
+/// validates as owned.
 pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
     let Some(instance_id) = path.file_name().and_then(|value| value.to_str()) else {
         return Err(ConfigDriveError::InvalidInput);
@@ -378,11 +394,28 @@ pub fn cleanup(path: &Path) -> Result<(), ConfigDriveError> {
     if instance_id.starts_with('.') || path.is_symlink() {
         return Err(ConfigDriveError::InvalidInput);
     }
-    if !path.exists() {
-        return Ok(());
+    let directory_present = path.exists();
+    if directory_present {
+        validate_owned_directory(path, instance_id)?;
     }
-    validate_owned_directory(path, instance_id)?;
-    fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
+    let iso = path.with_file_name(format!("{instance_id}.iso"));
+    let manifest_path = iso_manifest_path(&iso)?;
+    let iso_present = iso.exists() || iso.is_symlink();
+    let manifest_present = manifest_path.exists() || manifest_path.is_symlink();
+    if iso_present {
+        validate_owned_iso_pair(&iso, &manifest_path, instance_id)?;
+    } else if manifest_present {
+        validate_owned_iso_manifest(&manifest_path, instance_id)?;
+    }
+    if directory_present {
+        fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
+    }
+    if iso_present {
+        fs::remove_file(&iso).map_err(ConfigDriveError::Storage)?;
+        fs::remove_file(&manifest_path).map_err(ConfigDriveError::Storage)?;
+    } else if manifest_present {
+        fs::remove_file(&manifest_path).map_err(ConfigDriveError::Storage)?;
+    }
     Ok(())
 }
 
@@ -650,6 +683,62 @@ fn inspect_owned_iso(
         return Err(ConfigDriveError::InvalidIsoOutput);
     }
     Ok((manifest, fingerprint_sha256))
+}
+
+/// Validates the ISO ownership manifest before the sibling ISO (or a lone
+/// manifest) may be removed. Fail-closed: a symlink, a missing or corrupt
+/// manifest, or a manifest that does not name this instance and the canonical
+/// `<instance_id>.iso` output yields `UnownedPath`.
+fn validate_owned_iso_manifest(
+    manifest_path: &Path,
+    instance_id: &str,
+) -> Result<(), ConfigDriveError> {
+    if manifest_path.is_symlink() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let expected_output_name = format!("{instance_id}.iso");
+    let manifest: IsoOwnershipManifest = serde_json::from_slice(&read_owned_file(manifest_path)?)
+        .map_err(|_| ConfigDriveError::UnownedPath)?;
+    if manifest.schema_version != 1
+        || manifest.managed_by != ISO_MANAGED_BY
+        || manifest.instance_id != instance_id
+        || manifest.output_name != expected_output_name
+    {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    Ok(())
+}
+
+/// Validates the full ISO ownership pair before removal: the ownership
+/// manifest must be present, regular, and name this instance and this exact
+/// output, and the ISO itself must be a regular file within the bounded
+/// maximum size. Fail-closed: nothing is removed on any violation.
+fn validate_owned_iso_pair(
+    iso: &Path,
+    manifest_path: &Path,
+    instance_id: &str,
+) -> Result<(), ConfigDriveError> {
+    if iso.is_symlink() || manifest_path.is_symlink() {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let expected_output_name = iso
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or(ConfigDriveError::InvalidInput)?;
+    let manifest: IsoOwnershipManifest = serde_json::from_slice(&read_owned_file(manifest_path)?)
+        .map_err(|_| ConfigDriveError::UnownedPath)?;
+    if manifest.schema_version != 1
+        || manifest.managed_by != ISO_MANAGED_BY
+        || manifest.instance_id != instance_id
+        || manifest.output_name != expected_output_name
+    {
+        return Err(ConfigDriveError::UnownedPath);
+    }
+    let metadata = fs::symlink_metadata(iso).map_err(|_| ConfigDriveError::UnownedPath)?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_ISO_BYTES as u64 {
+        return Err(ConfigDriveError::InvalidIsoOutput);
+    }
+    Ok(())
 }
 
 fn validate_owned_directory(path: &Path, instance_id: &str) -> Result<(), ConfigDriveError> {
@@ -934,6 +1023,22 @@ mod tests {
         assert!(unowned.exists());
 
         let store = ConfigDriveStore::open(&root)?;
+        // An ISO present without its ownership manifest is foreign state even
+        // when the instance directory itself is O3K-owned: cleanup must fail
+        // closed and remove nothing.
+        let mut iso_input = input();
+        iso_input.instance_id = "instance-2".to_owned();
+        let generated = store.generate(&iso_input)?;
+        let foreign_iso = root.join("instance-2.iso");
+        fs::write(&foreign_iso, b"foreign").map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            store.cleanup("instance-2"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(generated.directory.exists());
+        assert!(foreign_iso.exists());
+        fs::remove_file(&foreign_iso).map_err(ConfigDriveError::Storage)?;
+
         assert!(matches!(
             store.generate(&input()),
             Err(ConfigDriveError::UnownedPath)
@@ -1099,6 +1204,119 @@ mod tests {
             materialize_iso_with_runner(&source, &output, &runner),
             Err(ConfigDriveError::UnownedPath)
         ));
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_removes_directory_and_published_iso_pair_for_owned_instance()
+    -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-cleanup-iso");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        materialize_iso_with_runner(&source, &output, &FakeRunner::successful(b"iso-bytes"))?;
+        let manifest_path = iso_manifest_path(&output)?;
+        assert!(output.exists() && manifest_path.exists());
+
+        store.cleanup("instance-1")?;
+        assert!(!source.exists(), "the owned directory must be removed");
+        assert!(!output.exists(), "the owned ISO must be removed");
+        assert!(
+            !manifest_path.exists(),
+            "the owned ISO manifest must be removed"
+        );
+
+        // Idempotent when the whole ownership unit is already absent.
+        store.cleanup("instance-1")?;
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_rejects_iso_whose_ownership_manifest_does_not_match_the_instance()
+    -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-cleanup-iso-foreign");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        materialize_iso_with_runner(&source, &output, &FakeRunner::successful(b"iso-bytes"))?;
+        let manifest_path = iso_manifest_path(&output)?;
+        let mut manifest: IsoOwnershipManifest =
+            serde_json::from_slice(&fs::read(&manifest_path).map_err(ConfigDriveError::Storage)?)
+                .map_err(ConfigDriveError::CorruptManifest)?;
+        manifest.instance_id = "instance-2".to_owned();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?,
+        )
+        .map_err(ConfigDriveError::Storage)?;
+
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        // Nothing of the ownership unit may be removed while any part of it
+        // is unverified: neither the directory nor the ISO may be deleted.
+        assert!(source.exists());
+        assert!(output.exists());
+        assert!(manifest_path.exists());
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_fails_closed_for_iso_without_manifest_and_oversized_iso()
+    -> Result<(), ConfigDriveError> {
+        let root = test_root("o3k-drive-cleanup-iso-unowned");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let output = root.join("instance-1.iso");
+        let manifest_path = iso_manifest_path(&output)?;
+
+        // An ISO present without its ownership manifest is foreign state.
+        fs::write(&output, b"foreign").map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(source.exists() && output.exists() && !manifest_path.exists());
+        fs::remove_file(&output).map_err(ConfigDriveError::Storage)?;
+
+        // An ISO larger than the bounded maximum is never removed even when
+        // its ownership manifest matches the instance.
+        materialize_iso_with_runner(&source, &output, &FakeRunner::successful(b"iso-bytes"))?;
+        fs::write(&output, vec![b'x'; MAX_ISO_BYTES + 1]).map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::InvalidIsoOutput)
+        ));
+        assert!(source.exists() && output.exists() && manifest_path.exists());
+
+        fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_fails_closed_for_symlinked_iso() -> Result<(), ConfigDriveError> {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("o3k-drive-cleanup-iso-symlink");
+        let store = ConfigDriveStore::open(&root)?;
+        let source = store.generate(&input())?.directory;
+        let outside = root.with_extension("outside");
+        fs::write(&outside, b"outside").map_err(ConfigDriveError::Storage)?;
+        let output = root.join("instance-1.iso");
+        symlink(&outside, &output).map_err(ConfigDriveError::Storage)?;
+
+        assert!(matches!(
+            store.cleanup("instance-1"),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(source.exists() && output.is_symlink());
+        fs::remove_file(&output).map_err(ConfigDriveError::Storage)?;
+        fs::remove_file(&outside).map_err(ConfigDriveError::Storage)?;
         fs::remove_dir_all(root).map_err(ConfigDriveError::Storage)?;
         Ok(())
     }
