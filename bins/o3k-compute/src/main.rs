@@ -507,6 +507,28 @@ fn cleanup_instance_network(
         .map_err(|error| AgentError::Protocol(format!("owned bridge cleanup failed: {error}")))
 }
 
+/// Domain-presence probe for the startup residue reaps. The real adapter
+/// classifies libvirt outcomes; tests inject a fake for the absent shape
+/// (the bin's default test build has no libvirt feature).
+#[async_trait]
+trait DomainPresence: Send + Sync {
+    /// `Ok(true)`: the domain provably does not exist — its recorded network
+    /// state may be reaped. `Ok(false)`: the domain exists. `Err`: presence
+    /// is unknown — fail closed, the instance keeps its network state.
+    async fn domain_is_absent(&self, name: &str) -> Result<bool, AgentError>;
+}
+
+#[async_trait]
+impl DomainPresence for LibvirtAdapter {
+    async fn domain_is_absent(&self, name: &str) -> Result<bool, AgentError> {
+        match self.inspect(name.to_owned()).await {
+            Err(error) if error.category == ErrorCategory::NotFound => Ok(true),
+            Ok(_) => Ok(false),
+            Err(error) => Err(agent_error(error)),
+        }
+    }
+}
+
 /// Startup reconciliation for crash residue (issue #87 S3 rerun #5): a
 /// create prepares the host network (bridge, TAPs, DHCP bindings) before the
 /// domain is defined, so an agent death in that window leaves O3K-owned
@@ -525,15 +547,18 @@ fn cleanup_instance_network(
 async fn reap_stale_instance_networks(
     network: &o3k_network::HostNetworkManager,
     dhcp: &Arc<Mutex<DhcpRuntime>>,
-    adapter: &LibvirtAdapter,
+    presence: &dyn DomainPresence,
 ) -> Result<(), AgentError> {
     let instance_ids = network
         .owned_instance_ids()
         .map_err(|error| AgentError::Protocol(format!("owned instance lookup failed: {error}")))?;
     let mut first_error = None;
     for instance_id in instance_ids {
-        match adapter.inspect(stable_domain_name(&instance_id)).await {
-            Err(error) if error.category == ErrorCategory::NotFound => {
+        match presence
+            .domain_is_absent(&stable_domain_name(&instance_id))
+            .await
+        {
+            Ok(true) => {
                 tracing::info!(
                     instance_id = %instance_id,
                     "reaping network residue of absent instance"
@@ -542,7 +567,7 @@ async fn reap_stale_instance_networks(
                     first_error.get_or_insert(error);
                 }
             }
-            Ok(_) => {}
+            Ok(false) => {}
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -1978,15 +2003,34 @@ fn reconcile_dhcp_on_startup(
         .map_err(|error| format!("DHCP reconciliation failed: {error}"))
 }
 
-/// Startup residue reap for a dnsmasq left behind by a crashed agent process
-/// (issue #88 S3): an owned dnsmasq with zero durable bindings is residue.
-/// Best-effort: a reap failure is logged and never takes the agent down —
-/// the process inventory and verifier catch residue separately.
-fn reap_orphaned_dnsmasq_on_startup(dhcp: &Arc<Mutex<DhcpRuntime>>) -> Result<(), String> {
-    dhcp.lock()
-        .map_err(|_| "DHCP runtime lock is poisoned".to_owned())?
-        .reap_orphaned_dnsmasq()
-        .map_err(|error| format!("orphaned dnsmasq reap failed: {error}"))
+/// Startup residue cleanup for crash residue (issue #87 S3 rerun #5 and
+/// issue #88 S3 rerun): the stale-network reap removes the persisted DHCP
+/// bindings and TAPs of instances whose domains provably do not exist, and
+/// the zero-binding orphaned-dnsmasq reap removes a dnsmasq left behind by a
+/// crashed agent. Ordering invariant: the stale-network reap MUST run first
+/// (a crashed create whose DHCP prep completed persists its binding, so the
+/// zero-binding gate would otherwise skip a genuinely orphaned dnsmasq),
+/// then the orphan reap, then live bindings get their supervisor in
+/// [`reconcile_dhcp_on_startup`]. Errors are logged and never fatal, so
+/// residue is retried on the next restart; startup is never blocked by an
+/// unreachable or unknown libvirt.
+async fn reap_startup_residue(
+    network: &o3k_network::HostNetworkManager,
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    presence: &dyn DomainPresence,
+) -> Result<(), AgentError> {
+    let stale_error = reap_stale_instance_networks(network, dhcp, presence)
+        .await
+        .err();
+    let orphan_error = dhcp
+        .lock()
+        .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))
+        .and_then(|runtime| runtime.reap_orphaned_dnsmasq())
+        .err();
+    match (stale_error, orphan_error) {
+        (Some(error), _) | (None, Some(error)) => Err(error),
+        (None, None) => Ok(()),
+    }
 }
 
 #[tokio::main]
@@ -2038,26 +2082,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
         bridge_name,
     )?));
-    // Reap an owned dnsmasq left behind by a crashed agent process (issue
-    // #88 S3) before any restart reconciliation: dnsmasq runs only while
-    // durable bindings exist, so a zero-binding dnsmasq is residue. The reap
-    // is best-effort and never fatal — the process inventory and verifier
-    // catch residue separately.
-    if let Err(error) = reap_orphaned_dnsmasq_on_startup(&dhcp) {
+    // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3 rerun):
+    // the stale-network reap removes the persisted DHCP bindings and TAPs of
+    // instances whose domains provably do not exist FIRST, then the
+    // zero-binding orphaned-dnsmasq reap removes a dnsmasq left behind by a
+    // crashed agent (running the zero-binding gate before the binding
+    // removal would skip a genuinely orphaned process whose crash persisted
+    // its binding), then live bindings get their supervisor below. Errors
+    // are logged and retried on the next restart; startup is never blocked.
+    if let Err(error) = reap_startup_residue(&network, &dhcp, &libvirt).await {
         tracing::warn!(
             error = %error,
-            "the agent stays up; owned dnsmasq residue is caught by the inventory/verifier"
-        );
-    }
-    // Reap network residue of instances whose domains provably do not exist
-    // (issue #87 S3 rerun #5) before restarting DHCP for persisted bindings,
-    // so stale bindings are removed first and dnsmasq is never started for
-    // them. Errors are logged and retried on the next restart; startup is
-    // never blocked by an unreachable or unknown libvirt.
-    if let Err(error) = reap_stale_instance_networks(&network, &dhcp, &libvirt).await {
-        tracing::warn!(
-            error = %error,
-            "stale instance network reap failed; retried on the next restart"
+            "startup residue reap failed; retried on the next restart"
         );
     }
     // A DHCP that cannot start at boot (missing capabilities, a port
@@ -2545,6 +2581,170 @@ mod tests {
         );
         foreign.kill()?;
         foreign.wait()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Fake domain-presence probe for the startup residue sequence tests:
+    /// the bin's default test build has no libvirt feature, so the real
+    /// adapter can never produce the absent (`NotFound`) classification.
+    struct FakeDomainPresence {
+        absent: bool,
+    }
+
+    #[async_trait]
+    impl DomainPresence for FakeDomainPresence {
+        async fn domain_is_absent(&self, _name: &str) -> Result<bool, AgentError> {
+            Ok(self.absent)
+        }
+    }
+
+    /// Builds the S3-shaped startup fixture: durable DHCP state (config plus
+    /// the binding of `port_id`, exactly as the crash leaves it — DHCP prep
+    /// completed before the kill), an owned-manifest TAP record binding the
+    /// port to `instance_id` (no bridge/gateway records, so the
+    /// manifest-only cleanup path is deterministic without kernel
+    /// interfaces), and a live fake owned dnsmasq with its pidfile.
+    #[cfg(unix)]
+    #[allow(clippy::type_complexity)]
+    fn startup_residue_fixture(
+        root: &std::path::Path,
+        instance_id: &str,
+        port_id: &str,
+        pidfile: &str,
+    ) -> Result<
+        (
+            Arc<Mutex<DhcpRuntime>>,
+            o3k_network::HostNetworkManager,
+            std::process::Child,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let dhcp_root = root.join("dhcp");
+        let mut runtime = DhcpRuntime::open(&dhcp_root, "/does/not/exist", "o3k-br0".to_owned())?;
+        runtime.service.configure(o3k_dhcp::DhcpConfig {
+            subnet: "192.0.2.0/24".to_owned(),
+            gateway: "192.0.2.1".parse()?,
+            dns: vec!["192.0.2.1".parse()?],
+            interface: "o3k-br0".to_owned(),
+            lease_seconds: 3600,
+        })?;
+        runtime.service.upsert_binding(o3k_dhcp::Binding {
+            port_id: port_id.to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            address: "192.0.2.10".parse()?,
+        })?;
+        let owned = spawn_fake_owned_dnsmasq(&dhcp_root, pidfile)?;
+        std::fs::write(dhcp_root.join(pidfile), owned.id().to_string())?;
+        let tap_interface = o3k_network::HostNetworkManager::tap_name(port_id)?;
+        let network_root = root.join("network");
+        std::fs::create_dir_all(&network_root)?;
+        std::fs::write(
+            network_root.join("ownership.json"),
+            serde_json::to_vec(&o3k_network::NetworkOwnershipManifest {
+                bridge: None,
+                taps: std::collections::BTreeMap::from([(
+                    tap_interface.clone(),
+                    o3k_network::TapOwnership {
+                        interface: tap_interface,
+                        instance_id: instance_id.to_owned(),
+                        port_id: port_id.to_owned(),
+                        mac: "02:00:00:00:00:01".to_owned(),
+                        bridge: "o3k-br0".to_owned(),
+                        created_by_o3k: true,
+                    },
+                )]),
+            })?,
+        )?;
+        let network = o3k_network::HostNetworkManager::with_ownership_root(
+            o3k_network::HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            &network_root,
+        )?;
+        Ok((Arc::new(Mutex::new(runtime)), network, owned))
+    }
+
+    /// Issue #88 S3 rerun (PR #569): a create whose DHCP prep completed
+    /// before the agent crash leaves a PERSISTED durable binding; the
+    /// orphaned dnsmasq (reparented to init) keeps running. The startup
+    /// residue sequence must remove the stale binding FIRST (the
+    /// stale-network reap of the absent domain) and only THEN run the
+    /// zero-binding orphan reap — running the reap before the binding
+    /// removal would gate on the stale binding and leave the process running
+    /// forever (the real-host rerun caught exactly this: owned dnsmasq leak,
+    /// pid 53279). This test drives the exact startup sequence function
+    /// (`reap_startup_residue`) with a fake absent-domain presence probe.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_residue_reaps_dnsmasq_of_stale_bound_absent_instance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!(
+            "o3k-compute-startup-residue-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dhcp, network, mut owned) =
+            startup_residue_fixture(&root, "instance-absent-1", "port-1", "dnsmasq-crashed.pid")?;
+        assert!(
+            pid_is_alive(owned.id() as i32),
+            "the orphaned dnsmasq must be running before the sequence"
+        );
+
+        reap_startup_residue(&network, &dhcp, &FakeDomainPresence { absent: true }).await?;
+
+        assert!(
+            owned.try_wait()?.is_some(),
+            "the orphaned dnsmasq of a stale-bound absent instance must be killed"
+        );
+        assert!(
+            !root.join("dhcp/dnsmasq-crashed.pid").exists(),
+            "the reap must remove the pidfile"
+        );
+        assert_eq!(
+            dhcp.lock()
+                .map_err(|_| "DHCP runtime lock is poisoned")?
+                .service
+                .bindings()
+                .count(),
+            0,
+            "the stale binding of the absent instance must be removed by the sequence"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A binding whose instance is still present (the domain exists) is NOT
+    /// removed by the stale-network reap; the orphan reap then gates on the
+    /// live binding and must leave the running dnsmasq alone — live bindings
+    /// get their supervisor in `start_after_restart`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_residue_preserves_dnsmasq_of_live_bound_instance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-startup-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (dhcp, network, mut owned) =
+            startup_residue_fixture(&root, "instance-live-1", "port-1", "dnsmasq-live.pid")?;
+
+        reap_startup_residue(&network, &dhcp, &FakeDomainPresence { absent: false }).await?;
+
+        assert!(
+            pid_is_alive(owned.id() as i32),
+            "a dnsmasq with a live binding must survive the startup sequence"
+        );
+        assert_eq!(
+            dhcp.lock()
+                .map_err(|_| "DHCP runtime lock is poisoned")?
+                .service
+                .bindings()
+                .count(),
+            1,
+            "the live binding must survive the startup sequence"
+        );
+        signal_pid(owned.id() as i32, "TERM");
+        owned.wait()?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
