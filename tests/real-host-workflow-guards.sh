@@ -262,6 +262,33 @@ assert value["artifact_type"] == "resource-leak-result"
 assert value["status"] == "passed"
 PY
 
+# schema_version 3 snapshots (extended inventory) are accepted by both guards
+V3_ROOT="${WORK_DIR}/v3-state"
+mkdir -p "${V3_ROOT}/data/dhcp"
+printf '{"config": null, "bindings": {}}\n' >"${V3_ROOT}/data/dhcp/state.json"
+for migration in "${ROOT_DIR}"/crates/o3k-store/migrations/*.sql; do
+    sqlite3 "${V3_ROOT}/data/o3k.sqlite" <"${migration}"
+done
+export O3K_REAL_HOST_STATE_ROOT="${V3_ROOT}"
+bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/real-host-workflow-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+baseline = value["inventory_baseline"]
+assert baseline["schema_version"] == 3, baseline.get("schema_version")
+assert baseline["status"] == "available", baseline
+assert baseline["managed_state"]["status"] == "available", baseline["managed_state"]
+assert baseline["durable"]["status"] == "available", baseline["durable"]
+assert baseline["dhcp"]["status"] == "available", baseline["dhcp"]
+PY
+bash "${ROOT_DIR}/scripts/real-host-post-run-guard.sh"
+python3 - "${O3K_REAL_HOST_ARTIFACT_DIR}/resource-leak-result.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+PY
+unset O3K_REAL_HOST_STATE_ROOT
+
 export O3K_REAL_HOST_WORKFLOW_STEP_STATUS=success
 bash "${ROOT_DIR}/scripts/real-host-pre-run-guard.sh"
 printf 'mutated protected state\n' >"${O3K_REAL_HOST_PROTECTED_PATHS}"

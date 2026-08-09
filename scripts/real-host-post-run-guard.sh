@@ -74,7 +74,7 @@ if status == "ready" and inventory_status == "available":
             after = json.load(stream)
     except (OSError, json.JSONDecodeError):
         after = {"status": "unavailable", "redacted": True}
-    if (baseline.get("schema_version") == 2 and after.get("schema_version") == 2
+    if (baseline.get("schema_version") in (2, 3) and after.get("schema_version") in (2, 3)
             and baseline.get("status") == "available" and after.get("status") == "available"):
         baseline_resources = baseline.get("openstack", {}).get("resources", {})
         after_resources = after.get("openstack", {}).get("resources", {})

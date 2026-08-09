@@ -68,7 +68,13 @@ contract rather than duplicating its key lists.
 The protected `resource-leak-result` artifact may expose owned
 `leaks.network_links`, containing only validated `o3k-*` interface names. A
 new owned link relative to the baseline is a leak; foreign interface names
-remain represented only by the redacted `foreign_state` digest.
+remain represented only by the redacted `foreign_state` digest. The full
+verifier artifact is the output of
+`scripts/real-host-leak-verifier.py aggregate` (schema_version 2,
+`artifact_type: "resource-leak-result"`, per ADR-0164): owned leaks expose
+only validated O3K-owned identities with their classification, foreign state
+only digests and operator-chosen canary identities, and the aggregate passes
+only when every scope verdict and both negative tests pass.
 
 The gate captures one current epoch timestamp for the invocation and applies
 the same timestamp policy to every artifact. A timestamp equal to the maximum
