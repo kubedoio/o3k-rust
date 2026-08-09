@@ -1774,6 +1774,22 @@ impl LibvirtCommandExecutor {
     }
 }
 
+/// Startup DHCP reconciliation for persisted bindings (issue #87 S3 rerun
+/// #5). The caller must treat a failure as a logged, non-fatal condition:
+/// the agent has to stay up (control-plane connection, journal replay) even
+/// when DHCP cannot start at boot, and DHCP is retried on the next restart
+/// or the next create. Create-time DHCP failures stay fail-closed in
+/// [`DhcpRuntime::apply`]; only the boot reconciliation may fail softly.
+fn reconcile_dhcp_on_startup(
+    dhcp: &Arc<Mutex<DhcpRuntime>>,
+    network: &o3k_network::HostNetworkManager,
+) -> Result<(), String> {
+    dhcp.lock()
+        .map_err(|_| "DHCP runtime lock is poisoned".to_owned())?
+        .start_after_restart(network)
+        .map_err(|error| format!("DHCP reconciliation failed: {error}"))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_from_env()?;
@@ -1834,10 +1850,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "stale instance network reap failed; retried on the next restart"
         );
     }
-    dhcp.lock()
-        .map_err(|_| "DHCP runtime lock is poisoned")?
-        .start_after_restart(&network)
-        .map_err(|error| format!("DHCP reconciliation failed: {error}"))?;
+    // A DHCP that cannot start at boot (missing capabilities, a port
+    // conflict, the host's own dnsmasq on 127.0.0.1:53, ...) must not take
+    // the agent down: the failure is logged, the agent stays up, and DHCP
+    // is retried on the next restart or the next create. Create-time DHCP
+    // failures remain fail-closed in DhcpRuntime::apply.
+    if let Err(error) = reconcile_dhcp_on_startup(&dhcp, &network) {
+        tracing::warn!(
+            error = %error,
+            "DHCP reconciliation failed at startup; the agent stays up and \
+             retries on the next restart or create"
+        );
+    }
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
@@ -2085,6 +2109,93 @@ mod tests {
             network_attachment("port-2", "198.51.100.2", "198.51.100.0/29", "198.51.100.1"),
         ];
         assert!(runtime.validate(&attachments).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Startup DHCP reconciliation (issue #87): a DHCP that cannot start at
+    /// boot (missing capabilities, port conflict, a host dnsmasq on
+    /// 127.0.0.1:53, ...) must be a logged error, never a fatal one — the
+    /// agent stays up for control-plane connection and journal replay, and
+    /// DHCP is retried on the next restart or the next create. The pre-fix
+    /// call site in main() propagated the error out of the process, which
+    /// this test pins via the reconciliation seam that main() now calls.
+    #[test]
+    fn startup_dhcp_failure_is_non_fatal_and_preserves_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-startup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Persisted bindings make the restart reconciliation proceed; the
+        // binary is irrelevant because the reconciliation fails before any
+        // dnsmasq spawn (see the ownership manifest below).
+        let mut runtime =
+            DhcpRuntime::open(root.join("dhcp"), "/does/not/exist", "o3k-br0".to_owned())?;
+        runtime.service.configure(o3k_dhcp::DhcpConfig {
+            subnet: "192.0.2.0/24".to_owned(),
+            gateway: "192.0.2.1".parse()?,
+            dns: vec!["192.0.2.1".parse()?],
+            interface: "o3k-br0".to_owned(),
+            lease_seconds: 3600,
+        })?;
+        runtime.service.upsert_binding(o3k_dhcp::Binding {
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            address: "192.0.2.10".parse()?,
+        })?;
+
+        // Pre-seed an ownership manifest recording a different gateway so
+        // the reconciliation fails at ensure_gateway (ownership conflict)
+        // before any host mutation — the startup-DHCP-cannot-start shape.
+        let network_root = root.join("network");
+        std::fs::create_dir_all(&network_root)?;
+        std::fs::write(
+            network_root.join("ownership.json"),
+            serde_json::to_vec(&o3k_network::NetworkOwnershipManifest {
+                bridge: Some(o3k_network::BridgeOwnership {
+                    name: "o3k-br0".to_owned(),
+                    uplink: None,
+                    created_by_o3k: true,
+                    gateway: Some(o3k_network::GatewayOwnership {
+                        address: "203.0.113.1".parse()?,
+                        prefix_len: 24,
+                    }),
+                }),
+                taps: Default::default(),
+            })?,
+        )?;
+        let network = o3k_network::HostNetworkManager::with_ownership_root(
+            o3k_network::HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            &network_root,
+        )?;
+
+        let dhcp = Arc::new(Mutex::new(runtime));
+        let result = reconcile_dhcp_on_startup(&dhcp, &network);
+        assert!(
+            result.is_err(),
+            "a DHCP that cannot start at boot must be a logged, non-fatal failure"
+        );
+        let error = match result {
+            Ok(()) => String::new(),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("DHCP reconciliation failed"),
+            "unexpected reconciliation error: {error}"
+        );
+        let runtime = dhcp.lock().map_err(|_| "DHCP runtime lock is poisoned")?;
+        assert!(
+            runtime.supervisor.is_none(),
+            "no dnsmasq may be spawned when startup reconciliation fails"
+        );
+        assert_eq!(
+            runtime.service.bindings().count(),
+            1,
+            "durable DHCP state must survive a failed startup reconciliation"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

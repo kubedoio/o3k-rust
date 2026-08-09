@@ -419,11 +419,15 @@ sudo -n install -d -o "$SERVICE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/data/agent-
 # link afterwards. CAP_DAC_READ_SEARCH is required because libvirtd always owns
 # durable console log files as root:root mode 0600 (proven by protected run
 # 30805258510 and local reproduction); the console read must bypass file DAC
-# without granting any write bypass or a root shell.
+# without granting any write bypass or a root shell. CAP_NET_BIND_SERVICE and
+# CAP_NET_RAW are required by the spawned dnsmasq: binding the DHCP server
+# socket on UDP/67 needs the former, serving DHCP (raw socket) needs the
+# latter (proven by the issue-87 re-probe capability matrix on dnsmasq 2.90).
 network_probe_name="o3k-cp-${RUN_ID:0:8}"
 sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
   --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
-  --inh-caps=+net_admin,+dac_read_search --ambient-caps=+net_admin,+dac_read_search -- \
+  --inh-caps=+net_admin,+dac_read_search,+net_bind_service,+net_raw \
+  --ambient-caps=+net_admin,+dac_read_search,+net_bind_service,+net_raw -- \
   ip link add name "$network_probe_name" type dummy \
   || fail "o3k-compute ambient CAP_NET_ADMIN capability is unavailable"
 sudo -n ip link delete "$network_probe_name" \
@@ -438,11 +442,14 @@ start_service() {
     # CAP_NET_ADMIN must be ambient so helper processes such as ip(8) and
     # dnsmasq retain it across exec. CAP_DAC_READ_SEARCH is ambient for the
     # same reason and lets the service read the libvirtd-owned root:root 0600
-    # durable console files. setpriv applies both before dropping to the
-    # dedicated service account; no daemon runs as root.
+    # durable console files. CAP_NET_BIND_SERVICE + CAP_NET_RAW are ambient
+    # so the spawned dnsmasq can bind UDP/67 and serve DHCP (issue-87 re-probe
+    # matrix). setpriv applies all of them before dropping to the dedicated
+    # service account; no daemon runs as root.
     sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
       --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
-      --inh-caps=+net_admin,+dac_read_search --ambient-caps=+net_admin,+dac_read_search -- \
+      --inh-caps=+net_admin,+dac_read_search,+net_bind_service,+net_raw \
+      --ambient-caps=+net_admin,+dac_read_search,+net_bind_service,+net_raw -- \
       bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   else
