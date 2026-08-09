@@ -95,7 +95,7 @@ const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
 const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
 const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
-const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
+pub(crate) const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
 
 /// Derives the stable transfer identity shared by the control-plane journal
 /// and the agent-local committed-artifact lookup. The artifact kind is part
@@ -379,7 +379,7 @@ impl NodeRegistry {
             .map_err(|_| AgentError::Protocol("agent command record already exists".to_owned()))
     }
 
-    async fn attach_connection(
+    pub(crate) async fn attach_connection(
         &self,
         agent_id: &str,
         agent_epoch: &str,
@@ -770,7 +770,7 @@ impl NodeRegistry {
         }
     }
 
-    fn publish_event(&self, event: ProviderAgentEvent) {
+    pub(crate) fn publish_event(&self, event: ProviderAgentEvent) {
         let _ = self.events.send(event);
     }
 
@@ -1025,7 +1025,12 @@ pub fn agent_snapshot(node: &NodeSnapshot) -> o3k_provider::AgentNodeSnapshot {
 /// Builds and persists the durable pending record for a dispatched wire
 /// command. The payload is the exact encoded wire command so replay rebuilds
 /// the same deadline and fingerprint; the operation record is created when
-/// missing. Callers map the store error to their own vocabulary.
+/// missing. A concurrent dispatch that already inserted the deterministic
+/// command identity (issue #88 E3 C3 — the API's synchronous create
+/// reconcile races the periodic create-convergence sweep) is adopted rather
+/// than reported as a conflict: the surviving row is returned so the caller
+/// re-dispatches it and the fresh create is never terminalized. Callers map
+/// genuine store errors to their own vocabulary.
 pub(crate) async fn persist_command_record(
     store: &dyn o3k_store::ComputeRepository,
     command: &proto::Command,
@@ -1060,7 +1065,22 @@ pub(crate) async fn persist_command_record(
             })
             .await;
     }
-    store.insert_agent_command(&record).await.map(Some)
+    match store.insert_agent_command(&record).await {
+        Ok(existing) => Ok(Some(existing)),
+        Err(error) => {
+            // A concurrent dispatch for the same operation inserted the
+            // durable command between this caller's readiness work and this
+            // insert. The command identity is deterministic per operation
+            // (agent + operation), so the surviving row IS this command:
+            // adopt it and let the caller re-dispatch it instead of failing
+            // the fresh create. The agent journal replays by command
+            // identity, so the re-dispatch converges on one execution.
+            match store.get_agent_command_by_operation(operation_id).await {
+                Ok(existing) => Ok(Some(existing)),
+                Err(_) => Err(error),
+            }
+        }
+    }
 }
 
 fn valid_admin_state(state: i32) -> bool {
