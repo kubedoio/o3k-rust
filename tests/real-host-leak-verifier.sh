@@ -509,6 +509,48 @@ assert any(
 ), value
 PY
 
+# --- 6b. owned dnsmasq restart is identity-stable; a NEW owned dnsmasq
+#       (different args digest) is a leak --------------------------------
+python3 - "${WORK_DIR}/base-a.json" "${WORK_DIR}/dhcp-base.json" "${WORK_DIR}/dhcp-after.json" "${WORK_DIR}/dhcp-after-new.json" <<'PY'
+import json, sys
+base = json.load(open(sys.argv[1], encoding="utf-8"))
+dhcp = base.get("dhcp", {})
+owned = [{"pid": "100", "args_sha256": "a" * 64, "classification": "active_owned",
+          "contract": "owned dnsmasq"}]
+dhcp["processes"] = {"owned": owned, "foreign_count": 0, "foreign_args_sha256": ""}
+base["dhcp"] = dhcp
+json.dump(base, open(sys.argv[2], "w", encoding="utf-8"), sort_keys=True)
+after = json.loads(json.dumps(base))
+after["dhcp"]["processes"]["owned"] = [dict(owned[0], pid="200")]
+json.dump(after, open(sys.argv[3], "w", encoding="utf-8"), sort_keys=True)
+after_new = json.loads(json.dumps(base))
+after_new["dhcp"]["processes"]["owned"] = [dict(owned[0], pid="300", args_sha256="b" * 64)]
+json.dump(after_new, open(sys.argv[4], "w", encoding="utf-8"), sort_keys=True)
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/dhcp-base.json" --after "${WORK_DIR}/dhcp-after.json" \
+    --scope dhcp-restart --expect-state-root present \
+    --out "${WORK_DIR}/dhcp-restart-verdict.json"
+python3 - "${WORK_DIR}/dhcp-restart-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+assert not any(e["kind"] == "dhcp_process" for e in value["owned_leaks"]), value["owned_leaks"]
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/dhcp-base.json" --after "${WORK_DIR}/dhcp-after-new.json" \
+    --scope dhcp-new --expect-state-root present \
+    --out "${WORK_DIR}/dhcp-new-verdict.json" || true
+python3 - "${WORK_DIR}/dhcp-new-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "failed", value
+assert any(
+    e["kind"] == "dhcp_process" and e["identity"] == "b" * 64
+    for e in value["owned_leaks"]
+), value["owned_leaks"]
+PY
+
 # --- 7. stale temp artifact IS detected ------------------------------------
 printf 'half-written transfer\n' >"${ARTIFACT_ROOT}/.66666666-6666-6666-6666-666666666666.part"
 collect "${WORK_DIR}/temp-after.json"
