@@ -490,17 +490,23 @@ def compare_snapshots(
                     "contract": entry.get("contract", ""),
                 })
 
-        # Owned dnsmasq processes and daemons: after-only identities.
+        # Owned dnsmasq processes and daemons: after-only identities. The
+        # owned-dnsmasq identity is the redacted args digest (stable across a
+        # process restart with the same configuration), never the pid: a
+        # restart mid-scenario must not look like a new owned process.
         baseline_dhcp_procs = {
-            str(entry.get("pid", ""))
+            str(entry.get("args_sha256") or entry.get("pid", ""))
             for entry in baseline.get("dhcp", {}).get("processes", {}).get("owned", [])
             if isinstance(entry, dict)
         }
         for entry in after.get("dhcp", {}).get("processes", {}).get("owned", []):
-            if isinstance(entry, dict) and after_only(str(entry.get("pid", "")), baseline_dhcp_procs):
+            if isinstance(entry, dict) and after_only(
+                str(entry.get("args_sha256") or entry.get("pid", "")),
+                baseline_dhcp_procs,
+            ):
                 leaks.append({
                     "kind": "dhcp_process",
-                    "identity": entry.get("pid", ""),
+                    "identity": entry.get("args_sha256") or entry.get("pid", ""),
                     "classification": entry.get("classification", "active_owned"),
                     "contract": entry.get("contract", ""),
                 })
