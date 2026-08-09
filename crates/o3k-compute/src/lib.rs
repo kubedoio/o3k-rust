@@ -722,9 +722,11 @@ impl ComputeService {
         })
     }
 
-    /// Drives create convergence for every durable compute instance. The
-    /// per-resource drive is lazy and bounded, so healthy servers are skipped
-    /// and a stuck server converges regardless of which project owns it.
+    /// Drives create convergence for every durable compute instance, then
+    /// expires artifact transfers abandoned by operations that have already
+    /// reached a terminal state (issue #88). The per-resource drive is lazy
+    /// and bounded, so healthy servers are skipped and a stuck server
+    /// converges regardless of which project owns it.
     async fn drive_all_create_convergence(&self) -> Result<(), ComputeError> {
         let resources = self
             .store
@@ -732,6 +734,16 @@ impl ComputeService {
             .await?;
         for resource in resources {
             self.drive_create_convergence(&resource).await;
+        }
+        // Issue #88: an operation can reach a terminal state while its
+        // artifact handshake rows are still `offered`/`receiving` (an agent
+        // crash can strand them, and a terminalized operation is never driven
+        // again), so no per-operation path ever advances them. This per-pass
+        // sweep expires exactly those rows. Best-effort and idempotent:
+        // repeated passes expire nothing, committed/rejected/expired rows are
+        // never touched, and a failure is a warning, not a sweep abort.
+        if let Err(error) = self.store.expire_transfers_of_terminal_operations().await {
+            tracing::warn!(%error, "artifact transfer expiry sweep failed");
         }
         Ok(())
     }
@@ -3691,6 +3703,151 @@ mod tests {
         );
         task.abort();
         let _ = task.await;
+        Ok(())
+    }
+
+    /// Builds an artifact transfer row for the given operation, mirroring the
+    /// rows the compute-agent persists during the artifact handshake.
+    fn artifact_transfer(
+        transfer_id: &str,
+        operation_id: Uuid,
+        resource_id: Uuid,
+        state: o3k_store::ArtifactTransferState,
+        contiguous_bytes: u64,
+        next_chunk_index: u64,
+    ) -> o3k_store::ArtifactTransferRecord {
+        o3k_store::ArtifactTransferRecord {
+            transfer_id: transfer_id.to_owned(),
+            command_id: format!("command-{transfer_id}"),
+            operation_id,
+            resource_id,
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            artifact_id: "image-1".to_owned(),
+            artifact_kind: "image_base".to_owned(),
+            sha256: "a".repeat(64),
+            size_bytes: 512 * 1024,
+            expires_at_unix_ms: i64::MAX,
+            format: "qcow2".to_owned(),
+            chunk_size_bytes: 256 * 1024,
+            chunk_count: 2,
+            state,
+            contiguous_bytes,
+            next_chunk_index,
+            retry_count: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    /// Issue #88: an operation that terminalizes through the reconciler sweep
+    /// (the issue-88 live evidence: a create terminalized Failed after the
+    /// agent crashed and the sweep re-dispatch timed out) leaves its
+    /// non-terminal artifact transfers `expired` afterward — two rows stayed
+    /// `offered` past their admission expiry while the operation was already
+    /// terminal. Committed transfers of the same operation stay committed:
+    /// they are durable cache/evidence the agent's committed manifests rely
+    /// on. Transfers of a still non-terminal operation stay untouched.
+    #[tokio::test]
+    async fn create_convergence_sweep_expires_transfers_of_terminalized_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Terminal)?;
+        let (service, store, request) =
+            crash_before_dispatch_fixture("sweep-transfer-expiry", fake.clone()).await?;
+        // A still-running operation keeps its own offer: the sweep must not
+        // touch transfers whose operation is not terminal. The desired state
+        // is intentionally unparseable so the drive loop skips this resource
+        // (only the sweep cares about it).
+        let running_resource = o3k_store::ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "unparseable-intent".to_owned(),
+            observed_state: "BUILD".to_owned(),
+            provider_id: None,
+        };
+        let running_operation = o3k_store::OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: running_resource.id,
+            kind: "create".to_owned(),
+            state: o3k_store::OperationState::Running,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource_and_operation(&running_resource, &running_operation)
+            .await?;
+        for transfer in [
+            artifact_transfer(
+                "t-offered",
+                request.operation_id,
+                request.o3k_server_id,
+                o3k_store::ArtifactTransferState::Offered,
+                0,
+                0,
+            ),
+            artifact_transfer(
+                "t-receiving",
+                request.operation_id,
+                request.o3k_server_id,
+                o3k_store::ArtifactTransferState::Receiving,
+                256 * 1024,
+                1,
+            ),
+            artifact_transfer(
+                "t-committed",
+                request.operation_id,
+                request.o3k_server_id,
+                o3k_store::ArtifactTransferState::Committed,
+                512 * 1024,
+                2,
+            ),
+            artifact_transfer(
+                "t-running",
+                running_operation.id,
+                running_resource.id,
+                o3k_store::ArtifactTransferState::Offered,
+                0,
+                0,
+            ),
+        ] {
+            store.insert_artifact_transfer(&transfer).await?;
+        }
+
+        // One pass: the drive terminalizes the create through the reconciler
+        // path and the per-pass sweep expires its abandoned handshake rows.
+        service.drive_all_create_convergence().await?;
+
+        assert_eq!(
+            store.get_operation(request.operation_id).await?.state,
+            o3k_store::OperationState::Failed
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-offered").await?.state,
+            o3k_store::ArtifactTransferState::Expired
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-receiving").await?.state,
+            o3k_store::ArtifactTransferState::Expired
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-committed").await?.state,
+            o3k_store::ArtifactTransferState::Committed
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-running").await?.state,
+            o3k_store::ArtifactTransferState::Offered
+        );
+        // The sweep is idempotent: a second pass expires nothing.
+        service.drive_all_create_convergence().await?;
+        assert_eq!(
+            store.get_artifact_transfer("t-offered").await?.state,
+            o3k_store::ArtifactTransferState::Expired
+        );
         Ok(())
     }
 

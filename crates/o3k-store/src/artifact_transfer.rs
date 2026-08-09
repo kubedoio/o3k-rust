@@ -345,6 +345,34 @@ pub(crate) async fn list_recoverable(
     rows.iter().map(from_row).collect()
 }
 
+/// Marks every artifact transfer whose owning operation has already reached
+/// a terminal state as `expired`, and returns the number of rows expired.
+///
+/// Operations terminalize independently of their artifact handshakes: an
+/// agent crash can leave `offered`/`receiving` rows behind, and a terminalized
+/// operation is never driven again, so no per-operation path ever advances
+/// those rows (issue #88). The terminal predicate is the reconciler's
+/// (`OperationState::Succeeded | OperationState::Failed` — `succeeded`/
+/// `failed`); every other stored operation state is non-terminal. The sweep
+/// is idempotent (a second run finds no matching rows) and never touches
+/// `committed`, `rejected`, or `expired` rows: a committed transfer of a
+/// terminal operation is durable cache/evidence that must survive the
+/// operation, and the other two states are already terminal.
+pub(crate) async fn expire_transfers_of_terminal_operations(
+    pool: &SqlitePool,
+) -> Result<u64, StoreError> {
+    let result = sqlx::query(
+        "UPDATE artifact_transfers \
+         SET state = 'expired', updated_at = CURRENT_TIMESTAMP \
+         WHERE state NOT IN ('committed', 'rejected', 'expired') \
+           AND operation_id IN (SELECT id FROM operations WHERE state IN ('succeeded', 'failed'))",
+    )
+    .execute(pool)
+    .await
+    .map_err(StoreError::Database)?;
+    Ok(result.rows_affected())
+}
+
 fn same_identity(left: &ArtifactTransferRecord, right: &ArtifactTransferRecord) -> bool {
     left.transfer_id == right.transfer_id
         && left.command_id == right.command_id
@@ -418,9 +446,27 @@ mod tests {
     use crate::{DurableStore, OperationRecord, OperationState, ResourceRecord, SqliteStore};
 
     fn transfer(operation_id: Uuid, resource_id: Uuid) -> ArtifactTransferRecord {
+        transfer_with(
+            "transfer-1",
+            operation_id,
+            resource_id,
+            ArtifactTransferState::Offered,
+            0,
+            0,
+        )
+    }
+
+    fn transfer_with(
+        transfer_id: &str,
+        operation_id: Uuid,
+        resource_id: Uuid,
+        state: ArtifactTransferState,
+        contiguous_bytes: u64,
+        next_chunk_index: u64,
+    ) -> ArtifactTransferRecord {
         ArtifactTransferRecord {
-            transfer_id: "transfer-1".to_owned(),
-            command_id: "command-1".to_owned(),
+            transfer_id: transfer_id.to_owned(),
+            command_id: format!("command-{transfer_id}"),
             operation_id,
             resource_id,
             agent_id: "agent-1".to_owned(),
@@ -433,9 +479,9 @@ mod tests {
             format: "qcow2".to_owned(),
             chunk_size_bytes: 256 * 1024,
             chunk_count: 2,
-            state: ArtifactTransferState::Offered,
-            contiguous_bytes: 0,
-            next_chunk_index: 0,
+            state,
+            contiguous_bytes,
+            next_chunk_index,
             retry_count: 0,
             created_at: String::new(),
             updated_at: String::new(),
@@ -647,5 +693,134 @@ mod tests {
         let stored = store.get_artifact_transfer(&record.transfer_id).await?;
         assert_eq!(stored.transfer_id, record.transfer_id);
         Ok(stored)
+    }
+
+    /// Issue #88: an operation can reach a terminal state while its artifact
+    /// handshake rows are still non-terminal (an agent crash can leave
+    /// `offered` or `receiving` rows behind, and a terminalized operation is
+    /// never driven again), so no per-operation path ever advances them. The
+    /// store sweep expires exactly those rows: non-terminal transfers whose
+    /// operation is terminal (`succeeded`/`failed`, the reconciler's terminal
+    /// predicate), leaving `committed`/`rejected`/`expired` rows and transfers
+    /// of non-terminal operations untouched. Idempotent: a second run expires
+    /// nothing.
+    #[tokio::test]
+    async fn sweep_expires_non_terminal_transfers_of_terminal_operations() -> Result<(), StoreError>
+    {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        let failed = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let running = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource_and_operation(&resource, &failed)
+            .await?;
+        store.insert_operation(&running).await?;
+        store
+            .update_operation(failed.id, OperationState::Failed, None, None, None)
+            .await?;
+        store
+            .update_operation(running.id, OperationState::Running, None, None, None)
+            .await?;
+        for transfer in [
+            transfer_with(
+                "t-offered",
+                failed.id,
+                resource.id,
+                ArtifactTransferState::Offered,
+                0,
+                0,
+            ),
+            transfer_with(
+                "t-receiving",
+                failed.id,
+                resource.id,
+                ArtifactTransferState::Receiving,
+                256 * 1024,
+                1,
+            ),
+            transfer_with(
+                "t-committed",
+                failed.id,
+                resource.id,
+                ArtifactTransferState::Committed,
+                512 * 1024,
+                2,
+            ),
+            transfer_with(
+                "t-rejected",
+                failed.id,
+                resource.id,
+                ArtifactTransferState::Rejected,
+                0,
+                0,
+            ),
+            transfer_with(
+                "t-running",
+                running.id,
+                resource.id,
+                ArtifactTransferState::Offered,
+                0,
+                0,
+            ),
+        ] {
+            store.insert_artifact_transfer(&transfer).await?;
+        }
+
+        // The sweep expires the failed operation's abandoned offers/receives.
+        assert_eq!(store.expire_transfers_of_terminal_operations().await?, 2);
+        assert_eq!(
+            store.get_artifact_transfer("t-offered").await?.state,
+            ArtifactTransferState::Expired
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-receiving").await?.state,
+            ArtifactTransferState::Expired
+        );
+        // ...but never touches committed or rejected rows (a committed
+        // transfer of a terminal operation is durable cache/evidence), nor
+        // transfers of an operation that is still non-terminal.
+        assert_eq!(
+            store.get_artifact_transfer("t-committed").await?.state,
+            ArtifactTransferState::Committed
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-rejected").await?.state,
+            ArtifactTransferState::Rejected
+        );
+        assert_eq!(
+            store.get_artifact_transfer("t-running").await?.state,
+            ArtifactTransferState::Offered
+        );
+        // Repeated runs are idempotent and expire nothing.
+        assert_eq!(store.expire_transfers_of_terminal_operations().await?, 0);
+        let recoverable = store.list_recoverable_artifact_transfers().await?;
+        assert_eq!(recoverable.len(), 1);
+        assert_eq!(recoverable[0].transfer_id, "t-running");
+        Ok(())
     }
 }
