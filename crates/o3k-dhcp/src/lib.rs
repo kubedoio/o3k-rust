@@ -57,13 +57,11 @@ impl DnsmasqSupervisor {
         let config = root.join("dnsmasq.conf");
         let pid_file = root.join(format!("dnsmasq-{}.pid", uuid::Uuid::now_v7()));
         let mut child = Command::new(binary)
-            .args([
-                "--conf-file",
-                config.to_str().ok_or(DhcpError::CommandFailed)?,
-                "--pid-file",
-                pid_file.to_str().ok_or(DhcpError::CommandFailed)?,
-                "--keep-in-foreground",
-            ])
+            // dnsmasq 2.90 rejects the space-separated form for these optional
+            // long options ("junk found in command line"); use `--opt=value`.
+            .arg(format!("--conf-file={}", config.display()))
+            .arg(format!("--pid-file={}", pid_file.display()))
+            .arg("--keep-in-foreground")
             .spawn()
             .map_err(|_| DhcpError::CommandFailed)?;
         if child
@@ -95,13 +93,9 @@ impl DnsmasqSupervisor {
     pub fn restart(&mut self) -> Result<(), DhcpError> {
         self.stop()?;
         let mut child = Command::new(&self.binary)
-            .args([
-                "--conf-file",
-                self.config.to_str().ok_or(DhcpError::CommandFailed)?,
-                "--pid-file",
-                self.pid_file.to_str().ok_or(DhcpError::CommandFailed)?,
-                "--keep-in-foreground",
-            ])
+            .arg(format!("--conf-file={}", self.config.display()))
+            .arg(format!("--pid-file={}", self.pid_file.display()))
+            .arg("--keep-in-foreground")
             .spawn()
             .map_err(|_| DhcpError::CommandFailed)?;
         if child
@@ -476,6 +470,56 @@ mod tests {
             service.start(&failing_binary),
             Err(DhcpError::CommandFailed)
         ));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_uses_equals_form_for_path_options() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("o3k-dhcp-argv-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        let argv_file = root.join("argv.txt");
+        let binary = root.join("fake-dnsmasq-argv.sh");
+        fs::write(
+            &binary,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
+                argv_file.display()
+            ),
+        )
+        .map_err(DhcpError::Storage)?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(DhcpError::Storage)?;
+
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        let mut supervisor = service.start(&binary)?;
+        // The child records argv then holds; startup is asynchronous, so poll
+        // for the recording with a bounded wait before asserting on it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !argv_file.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake dnsmasq never recorded its argv within 5s"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let recorded = fs::read_to_string(&argv_file).map_err(DhcpError::Storage)?;
+        let args: Vec<&str> = recorded.lines().collect();
+        let expected_config = format!("--conf-file={}", service.managed_config_path().display());
+        assert!(
+            args.contains(&expected_config.as_str()),
+            "expected {expected_config} in argv, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg.starts_with("--pid-file=")),
+            "expected --pid-file=<path> in argv, got {args:?}"
+        );
+        supervisor.stop()?;
 
         let _ = fs::remove_dir_all(root);
         Ok(())
