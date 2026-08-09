@@ -748,6 +748,77 @@ impl ComputeService {
         Ok(())
     }
 
+    /// Periodically drives lifecycle convergence for operations left in a
+    /// state that nothing else will ever advance. A lifecycle operation can
+    /// be stranded non-terminal by an unknown delete/action outcome
+    /// (issue-88 B1: the delete undefine raced a libvirtd restart, the agent
+    /// reported unknown, the API's synchronous 10s poll has long returned,
+    /// and the event stream rejects non-Succeeded observations), and no path
+    /// ever calls `reconcile_lifecycle_once` again — the resource stays
+    /// ACTIVE, the API delete retry 409s, and every owned residue (op row,
+    /// command row, allocation, config-drive media) is held. This bounded
+    /// periodic task is the recovery authority, mirroring the
+    /// create-convergence sweep. Each pass is lazy and idempotent: terminal
+    /// operations are not listed, in-flight operations are skipped, and
+    /// re-dispatches reuse the durable command row and the deterministic
+    /// `o3k-operation-{id}` idempotency key.
+    pub fn spawn_lifecycle_convergence_reconciler(
+        &self,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if let Err(error) = service.drive_all_lifecycle_convergence().await {
+                    tracing::warn!(%error, "lifecycle convergence reconcile pass failed");
+                }
+            }
+        })
+    }
+
+    /// Drives lifecycle convergence for every non-terminal lifecycle
+    /// operation. The per-operation drive is lazy and bounded, so healthy
+    /// operations are skipped and a stranded operation converges regardless
+    /// of which project owns it.
+    async fn drive_all_lifecycle_convergence(&self) -> Result<(), ComputeError> {
+        let operations = self.store.list_non_terminal_lifecycle_operations().await?;
+        for operation in operations {
+            // Issue #88 B1: re-drive exactly the states nothing else will
+            // ever advance — `Pending`, `UnknownOutcome` (observed, not
+            // re-dispatched: presence inspection and adoption decide),
+            // `Retryable` (the #572 retry-scheduling addition), and
+            // `Running` without a provider operation identity (a crash
+            // between persisting `Running` and dispatching). A `Running`
+            // operation WITH the identity was accepted and is in flight: the
+            // agent event stream terminalizes it, and a re-dispatch would
+            // race it on the same operation records.
+            let re_drive = matches!(
+                operation.state,
+                o3k_store::OperationState::Pending
+                    | o3k_store::OperationState::UnknownOutcome
+                    | o3k_store::OperationState::Retryable
+            ) || (operation.state == o3k_store::OperationState::Running
+                && operation.provider_operation_id.is_none());
+            if !re_drive {
+                continue;
+            }
+            // Best-effort: an error is a warning, never an aborted pass; the
+            // next sweep tick re-drives the operation.
+            if let Err(error) = self.journal.reconcile_lifecycle_once(operation.id).await {
+                tracing::warn!(
+                    operation_id = %operation.id,
+                    resource_id = %operation.resource_id,
+                    error = %error,
+                    "server lifecycle convergence pass failed; server state is unchanged"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn flavors(&self) -> Vec<Flavor> {
         vec![
@@ -3900,6 +3971,289 @@ mod tests {
             "the re-driven Retryable create must reach a terminal state, got {:?}",
             operation.state
         );
+        Ok(())
+    }
+
+    /// Seeds the issue-88 B1 residue: a delete lifecycle operation durably
+    /// `UnknownOutcome` with a provider operation identity (exactly what
+    /// `handle_lifecycle_result` persists when the provider reports an
+    /// unknown delete outcome) on a resource that still projects ACTIVE,
+    /// while the provider-side domain is already gone — the undefine
+    /// executed and the agent's outcome report was lost when libvirtd
+    /// restarted mid-race. The provider answers the presence inspection
+    /// (`get_instance`) with NotFound, which is what lets `observe_lifecycle`
+    /// reach its adoption/terminalization arm for a delete.
+    #[allow(clippy::type_complexity)]
+    async fn lifecycle_unknown_outcome_fixture<P>(
+        label: &str,
+        provider: Arc<P>,
+    ) -> Result<
+        (ComputeService, Arc<dyn ComputeRepository>, Uuid, Uuid, Uuid),
+        Box<dyn std::error::Error>,
+    >
+    where
+        P: ComputeProvider + 'static,
+    {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-{label}-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let service = ComputeService::new(store.clone(), provider);
+        let resource_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        let provider_operation_id = Uuid::now_v7();
+        let request = CreateInstanceRequest {
+            operation_id,
+            o3k_server_id: resource_id,
+            project_id: "project-a".to_owned(),
+            name: format!("{label}-server"),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 0,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: Vec::new(),
+            placement_provider_id: Some("node-a".to_owned()),
+            placement_allocation_id: Some("alloc-1".to_owned()),
+            config_drive: None,
+            idempotency_key: format!("{label}-request"),
+        };
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: serde_json::to_string(&request)?,
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: Some("fake-instance-1".to_owned()),
+            })
+            .await?;
+        service
+            .journal
+            .begin_lifecycle(resource_id, operation_id, LifecycleAction::Delete)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        store
+            .update_operation(
+                operation_id,
+                o3k_store::OperationState::UnknownOutcome,
+                Some(&provider_operation_id.to_string()),
+                Some("unknown_outcome"),
+                None,
+            )
+            .await?;
+        Ok((
+            service,
+            store,
+            operation_id,
+            resource_id,
+            provider_operation_id,
+        ))
+    }
+
+    /// Issue #88 B1: a delete lifecycle operation left in `UnknownOutcome`
+    /// is never converged by anything after the API's synchronous 10s poll
+    /// returns — the create-convergence sweep only drives create operations,
+    /// the event stream rejects non-Succeeded observations
+    /// (`apply_agent_observation`), and no periodic path calls
+    /// `reconcile_lifecycle_once` again. The resource stays ACTIVE, the
+    /// delete retry 409s, and every owned residue (op row, command row,
+    /// allocation, config-drive media) is held. The periodic lifecycle sweep
+    /// must re-drive the operation so `observe_lifecycle`'s presence
+    /// inspection adopts the already-executed delete (provider domain absent
+    /// → terminal DELETED). Before the fix the sweep does not exist: the
+    /// operation stays UnknownOutcome forever.
+    #[tokio::test]
+    async fn lifecycle_convergence_sweep_terminalizes_unknown_outcome_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, operation_id, resource_id, _provider_operation_id) =
+            lifecycle_unknown_outcome_fixture("b1-sweep", provider.clone()).await?;
+
+        service.drive_all_lifecycle_convergence().await?;
+
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            o3k_store::OperationState::Succeeded,
+            "the lifecycle sweep must converge the UnknownOutcome delete"
+        );
+        assert_eq!(
+            store.get_resource(resource_id).await?.observed_state,
+            "DELETED",
+            "the resource must converge to DELETED"
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "an UnknownOutcome delete is observed (presence inspection), never re-dispatched"
+        );
+        Ok(())
+    }
+
+    /// The accepted-command invariant (#542) extends to lifecycle operations:
+    /// a `Running` lifecycle operation WITH a provider operation identity was
+    /// accepted by the provider and its terminal evidence arrives through the
+    /// agent event stream. The lifecycle sweep must NOT re-drive it — a
+    /// re-dispatch would race the event stream on the same operation records.
+    #[tokio::test]
+    async fn lifecycle_convergence_sweep_skips_running_operations_with_provider_operation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, operation_id, resource_id, provider_operation_id) =
+            lifecycle_unknown_outcome_fixture("running-skip", provider.clone()).await?;
+        // The accepted window: durably Running with the provider operation
+        // identity, exactly as the reconciler persists an accepted in-flight
+        // provider operation.
+        store
+            .update_operation(
+                operation_id,
+                o3k_store::OperationState::Running,
+                Some(&provider_operation_id.to_string()),
+                None,
+                None,
+            )
+            .await?;
+
+        service.drive_all_lifecycle_convergence().await?;
+
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            o3k_store::OperationState::Running,
+            "an in-flight lifecycle operation must never be re-driven"
+        );
+        assert_eq!(
+            store.get_resource(resource_id).await?.observed_state,
+            "ACTIVE",
+            "an in-flight lifecycle operation must never be re-driven"
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "no provider dispatch may happen for an in-flight lifecycle operation"
+        );
+        Ok(())
+    }
+
+    /// Issue #88 S5 rerun, lifecycle analogue: a lifecycle operation marked
+    /// `Retryable` by `retry_or_fail` (a delete dispatch rejected mid-flight
+    /// when the agent was killed) must be re-driven by the lifecycle sweep —
+    /// before the fix no periodic path ever re-dispatches it, so the
+    /// scheduled retry never fires and the operation stays Retryable
+    /// forever. The retry budget in `retry_or_fail` still bounds the re-drive
+    /// (attempts >= max_attempts terminalizes Failed), and the deterministic
+    /// `o3k-operation-{id}` idempotency key makes the re-dispatch idempotent
+    /// at the provider.
+    #[tokio::test]
+    async fn lifecycle_convergence_sweep_re_drives_retryable_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, operation_id, resource_id, _provider_operation_id) =
+            lifecycle_unknown_outcome_fixture("retryable-re-drive", provider.clone()).await?;
+        store
+            .update_operation(
+                operation_id,
+                o3k_store::OperationState::Retryable,
+                None,
+                Some("retryable"),
+                None,
+            )
+            .await?;
+
+        service.drive_all_lifecycle_convergence().await?;
+
+        let operation = store.get_operation(operation_id).await?;
+        assert_ne!(
+            operation.state,
+            o3k_store::OperationState::Retryable,
+            "a Retryable lifecycle operation must be re-driven by the sweep"
+        );
+        assert!(
+            matches!(
+                operation.state,
+                o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            ),
+            "the re-driven Retryable lifecycle operation must reach a terminal state, got {:?}",
+            operation.state
+        );
+        assert_eq!(
+            provider.delete_calls(),
+            1,
+            "the Retryable delete must be re-dispatched exactly once"
+        );
+        assert_eq!(
+            store.get_resource(resource_id).await?.observed_state,
+            "DELETED",
+            "the re-driven delete must converge the resource"
+        );
+        Ok(())
+    }
+
+    /// Terminal lifecycle operations are the reconciler's sticky terminal
+    /// predicate: the sweep must never touch a Succeeded or Failed lifecycle
+    /// operation.
+    #[tokio::test]
+    async fn lifecycle_convergence_sweep_leaves_terminal_operations_untouched()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = Arc::new(RecordingDeleteProvider::new());
+        let (service, store, _operation_id, _resource_id, _provider_operation_id) =
+            lifecycle_unknown_outcome_fixture("terminal-untouched", provider.clone()).await?;
+        let mut terminal_operations = Vec::new();
+        for (label, state) in [
+            ("succeeded", o3k_store::OperationState::Succeeded),
+            ("failed", o3k_store::OperationState::Failed),
+        ] {
+            let resource_id = Uuid::now_v7();
+            let operation_id = Uuid::now_v7();
+            store
+                .insert_resource(&o3k_store::ResourceRecord {
+                    id: resource_id,
+                    kind: "compute_instance".to_owned(),
+                    project_id: "project-a".to_owned(),
+                    generation: 1,
+                    observed_generation: 1,
+                    desired_state: "{}".to_owned(),
+                    observed_state: "ACTIVE".to_owned(),
+                    provider_id: Some(format!("fake-{label}-instance")),
+                })
+                .await?;
+            service
+                .journal
+                .begin_lifecycle(resource_id, operation_id, LifecycleAction::Delete)
+                .await
+                .map_err(ComputeError::Reconcile)?;
+            store
+                .update_operation(
+                    operation_id,
+                    state,
+                    Some(&operation_id.to_string()),
+                    None,
+                    None,
+                )
+                .await?;
+            terminal_operations.push((operation_id, state));
+        }
+
+        service.drive_all_lifecycle_convergence().await?;
+
+        assert_eq!(
+            provider.delete_calls(),
+            0,
+            "terminal lifecycle operations must never be re-driven"
+        );
+        for (operation_id, state) in terminal_operations {
+            assert_eq!(
+                store.get_operation(operation_id).await?.state,
+                state,
+                "a terminal lifecycle operation must be untouched"
+            );
+        }
         Ok(())
     }
 

@@ -434,6 +434,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         spawn_console_event_consumer(registry.clone(), console_service.clone());
     let attachment_reconciler = compute_service.spawn_attachment_reconciler(5);
     let create_convergence_reconciler = compute_service.spawn_create_convergence_reconciler(5);
+    let lifecycle_convergence_reconciler =
+        compute_service.spawn_lifecycle_convergence_reconciler(5);
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
             let catalog_endpoint = format!("http://{}", config.listen_addr);
@@ -558,6 +560,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = attachment_reconciler.await;
     create_convergence_reconciler.abort();
     let _ = create_convergence_reconciler.await;
+    lifecycle_convergence_reconciler.abort();
+    let _ = lifecycle_convergence_reconciler.await;
     if let Some(task) = inventory_task {
         task.abort();
         let _ = task.await;
