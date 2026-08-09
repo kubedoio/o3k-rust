@@ -27,6 +27,12 @@ Schema versions
     unmanaged-daemon detection under the state root).
   - ``O3K_REAL_HOST_CANARIES`` enables `canaries` (path to a small JSON
     config; see below).
+  - ``O3K_REAL_HOST_MANAGED_INJECTION_ROOT`` enables `injection_root`: a
+    bounded, explicitly O3K-owned test sink used only by the stale-artifact
+    negative test. Every entry inside it is classified ``stale_owned`` (no
+    durable reference exists by construction); an absent configured root is
+    valid state, an unreadable or symlink-containing root fails closed.
+    Normal runs never set this env.
 
 Non-terminal durable predicates (derived from the code, not guessed)
 --------------------------------------------------------------------
@@ -229,6 +235,7 @@ EXTENDED_ENVS = (
     "O3K_REAL_HOST_STATE_ROOT",
     "O3K_REAL_HOST_PID_ROOT",
     "O3K_REAL_HOST_CANARIES",
+    "O3K_REAL_HOST_MANAGED_INJECTION_ROOT",
 )
 SECRET_MARKERS = (
     "password",
@@ -769,6 +776,79 @@ def classification_summary(document: dict[str, object]) -> dict[str, int]:
         if key in document:
             count(document[key])
     return counts
+
+
+def collect_injection_root() -> dict[str, object] | None:
+    """Inventory the configured O3K-owned test injection root.
+
+    The injection root is a bounded, explicitly O3K-owned managed sink used
+    only by the verifier's stale-artifact negative test. Every entry inside
+    it is O3K-owned managed state with no durable reference by construction,
+    so every entry is classified ``stale_owned``. A configured root that does
+    not exist is valid state (`status: "absent"`); an existing but unreadable
+    or symlink-containing root fails closed (`None`), and oversized trees
+    fail closed. Normal O3K runs never configure this env, so the sink has no
+    effect outside the negative-test harness.
+    """
+    global LAST_FAILURE_REASON
+    raw = os.environ.get("O3K_REAL_HOST_MANAGED_INJECTION_ROOT")
+    if raw is None:
+        return {"status": "not_checked"}
+    root = Path(raw)
+    if not root.is_dir():
+        return {"status": "absent", "reason": "injection_root_missing"}
+    entries: list[dict[str, object]] = []
+    total_bytes = 0
+    try:
+        walker = [root]
+        while walker:
+            directory = walker.pop()
+            try:
+                children = sorted(
+                    (child for child in directory.iterdir()),
+                    key=lambda child: child.name,
+                )
+            except OSError:
+                LAST_FAILURE_REASON = "injection_root_unreadable_dir"
+                return None
+            for path in children:
+                try:
+                    stat = path.lstat()
+                except OSError:
+                    LAST_FAILURE_REASON = "injection_root_unreadable"
+                    return None
+                kind = ("dir" if stat_module.S_ISDIR(stat.st_mode)
+                        else "file" if stat_module.S_ISREG(stat.st_mode)
+                        else "symlink" if stat_module.S_ISLNK(stat.st_mode) else "other")
+                if kind == "symlink" or kind == "other":
+                    LAST_FAILURE_REASON = "injection_root_unowned_path"
+                    return None
+                record: dict[str, object] = {
+                    "path": str(path.relative_to(root)),
+                    "kind": kind,
+                    "size": stat.st_size,
+                    "classification": "stale_owned",
+                    "contract": (
+                        "configured O3K-owned test injection root; entries have "
+                        "no durable reference by construction"
+                    ),
+                }
+                if kind == "file":
+                    if stat.st_size > MAX_MANAGED_FILE_BYTES:
+                        LAST_FAILURE_REASON = "injection_root_file_too_large"
+                        return None
+                    total_bytes += stat.st_size
+                    if total_bytes > MAX_MANAGED_TOTAL_BYTES:
+                        LAST_FAILURE_REASON = "injection_root_total_too_large"
+                        return None
+                    record["sha256"] = sha256_file(path)
+                entries.append(record)
+                if kind == "dir":
+                    walker.append(path)
+    except (OSError, UnicodeError):
+        LAST_FAILURE_REASON = "injection_root_unreadable"
+        return None
+    return {"status": "available", "entries": entries}
 
 
 def collect_durable(state_root: Path) -> dict[str, object] | None:
@@ -1675,6 +1755,9 @@ def snapshot() -> dict[str, object] | None:
     canaries = collect_canaries()
     if canaries is None:
         return None
+    injection = collect_injection_root()
+    if injection is None:
+        return None
 
     durable_checked = isinstance(durable, dict) and durable.get("status") == "available"
     domain_classifications = classify_domains(
@@ -1717,6 +1800,7 @@ def snapshot() -> dict[str, object] | None:
     document["dhcp"] = dhcp if isinstance(dhcp, dict) else {"status": "not_checked"}
     document["processes"] = processes
     document["canaries"] = canaries
+    document["injection_root"] = injection
     document["domain_classifications"] = domain_classifications
     document["link_classifications"] = link_classifications
     document["classification"] = classification_summary(document)

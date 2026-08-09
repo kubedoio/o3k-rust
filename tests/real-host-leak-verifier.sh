@@ -405,6 +405,92 @@ assert value["stale_artifact_detected"] is True, value
 assert any("o3k-aaaaaaaaaaaaaaaaaaaa" == o["identity"] for o in value["stale_objects"]), value
 PY
 
+# --- 5b. configured test injection root: entries are O3K-owned stale state
+#       (negative-stale fixture), empty sink is clean, absent sink is valid
+#       clean state, symlink sink fails closed --------------------------------
+INJECTION_ROOT="${WORK_DIR}/injections"
+mkdir -p "${INJECTION_ROOT}"
+O3K_REAL_HOST_MANAGED_INJECTION_ROOT="${INJECTION_ROOT}" collect "${WORK_DIR}/inj-base.json"
+python3 - "${WORK_DIR}/inj-base.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["injection_root"]["status"] == "available", value["injection_root"]
+assert value["injection_root"]["entries"] == [], value["injection_root"]
+PY
+mkdir -p "${INJECTION_ROOT}/o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee"
+printf 'stale instance state\n' >"${INJECTION_ROOT}/o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee/instance-state.json"
+O3K_REAL_HOST_MANAGED_INJECTION_ROOT="${INJECTION_ROOT}" collect "${WORK_DIR}/inj-after.json"
+python3 - "${WORK_DIR}/inj-after.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+entries = value["injection_root"]["entries"]
+assert any(
+    e["path"] == "o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee/instance-state.json"
+    and e["classification"] == "stale_owned"
+    for e in entries
+), entries
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/inj-base.json" --after "${WORK_DIR}/inj-after.json" \
+    --scope injection --expect-state-root present \
+    --out "${WORK_DIR}/inj-verdict.json" || true
+python3 - "${WORK_DIR}/inj-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "failed", value
+assert any(
+    e["kind"] == "injection_root"
+    and e["identity"] == "o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee/instance-state.json"
+    for e in value["owned_leaks"]
+), value["owned_leaks"]
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" negative-stale \
+    --baseline "${WORK_DIR}/inj-base.json" --after "${WORK_DIR}/inj-after.json" \
+    --expect-state-root present --out "${WORK_DIR}/inj-negative.json" || true
+python3 - "${WORK_DIR}/inj-negative.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["expected"] == "failed" and value["observed"] == "failed", value
+assert value["stale_artifact_detected"] is True, value
+assert any(
+    "o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee/instance-state.json" == o["identity"]
+    for o in value["stale_objects"]
+), value["stale_objects"]
+PY
+rm -rf "${INJECTION_ROOT}/o3k-11111111-aaaa-4ccc-8ddd-eeeeeeeeeeee"
+O3K_REAL_HOST_MANAGED_INJECTION_ROOT="${INJECTION_ROOT}" collect "${WORK_DIR}/inj-clean.json"
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/inj-base.json" --after "${WORK_DIR}/inj-clean.json" \
+    --scope injection-clean --expect-state-root present \
+    --out "${WORK_DIR}/inj-clean-verdict.json" || true
+python3 - "${WORK_DIR}/inj-clean-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+PY
+# An absent configured sink is valid clean state; a symlink inside the sink
+# fails closed (unavailable), never an apparently clean snapshot.
+O3K_REAL_HOST_MANAGED_INJECTION_ROOT="${WORK_DIR}/no-such-injections" collect "${WORK_DIR}/inj-absent.json"
+python3 - "${WORK_DIR}/inj-absent.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "available", value
+assert value["injection_root"]["status"] == "absent", value["injection_root"]
+PY
+mkdir -p "${WORK_DIR}/poison-injections"
+ln -s /etc/passwd "${WORK_DIR}/poison-injections/evil"
+if O3K_REAL_HOST_MANAGED_INJECTION_ROOT="${WORK_DIR}/poison-injections" \
+    PATH="${FAKE_BIN}:${PATH}" \
+    bash "${ROOT_DIR}/scripts/real-host-owned-inventory.sh" "${WORK_DIR}/inj-poison.json"; then
+    fail "symlink inside the injection root was accepted"
+fi
+python3 - "${WORK_DIR}/inj-poison.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "unavailable", value
+assert value["reason"] == "injection_root_unowned_path", value
+PY
+
 # --- 6. orphan TAP IS detected ---------------------------------------------
 O3K_FAKE_IP_OWNED=true collect "${WORK_DIR}/orphan-tap-after.json"
 python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \

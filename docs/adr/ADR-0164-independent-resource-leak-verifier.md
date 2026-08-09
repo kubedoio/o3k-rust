@@ -111,7 +111,13 @@ inventory per scope and aggregates per-scope verdicts:
   appearing or disappearing between snapshots.
 - `negative-stale` and `negative-foreign` verify that deliberately injected
   stale O3K artifacts and canary mutations respectively make the comparison
-  fail and are named in the diagnostic.
+  fail and are named in the diagnostic. They accept the same
+  `--expect-state-root` as `compare` (default `present`), so the clean-host
+  profile is exercisable. Stale artifacts are injected through the
+  `injection_root` section (`O3K_REAL_HOST_MANAGED_INJECTION_ROOT`), a
+  bounded O3K-owned test sink whose entries are always classified
+  `stale_owned`; the sink must exist before the baseline snapshot so the
+  section is symmetric across the pair.
 - `aggregate` produces the protected `resource-leak-result` artifact
   (schema_version 2, `artifact_type: "resource-leak-result"`); `passed`
   only when every scope verdict passed, the negatives detected their
