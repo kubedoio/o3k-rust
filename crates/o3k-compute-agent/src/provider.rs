@@ -12,7 +12,7 @@
 //! `o3k_provider::ComputeProvider` port.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -198,6 +198,24 @@ impl AgentComputeProvider {
             .list_resources_by_kind("compute_instance")
             .await
             .map_err(|_| ProviderError::Retryable)?;
+        // Ids of resources that durably reached a provider definition.
+        // Never-defined in-memory bindings (the create dispatch was accepted
+        // but no provider object was ever defined — issue #88 S3) have no
+        // durable provider reference to rebuild from; they are preserved
+        // below exactly while their resource is NOT durably defined (a
+        // failed, unknown-outcome, or already-Deleted create — the local
+        // reap-delete shape). Once a create durably succeeds, the
+        // never-defined entry is stale and is purged as before.
+        let defined_resource_ids: HashSet<Uuid> = resources
+            .iter()
+            .filter(|resource| {
+                !matches!(
+                    server_state_from_storage(&resource.observed_state),
+                    Ok(ServerState::Deleted)
+                ) && resource.provider_id.is_some()
+            })
+            .map(|resource| resource.id)
+            .collect();
         let mut instances = HashMap::new();
         let mut bindings = HashMap::new();
         for resource in resources {
@@ -253,9 +271,19 @@ impl AgentComputeProvider {
         state
             .instances
             .retain(|provider_id, _| instances.contains_key(provider_id));
-        state
-            .bindings
-            .retain(|provider_id, _| bindings.contains_key(provider_id));
+        state.bindings.retain(|key, binding| {
+            if bindings.contains_key(key) {
+                return true;
+            }
+            // A never-defined binding (no provider object ever defined)
+            // is preserved while its resource is durably present but not
+            // provider-defined — the reap delete (issue #88 S3) needs it
+            // to reach the agent that accepted the create. Once the
+            // resource is durably defined, the never-defined entry is
+            // stale and is purged.
+            !(binding.provider_resource_id.is_none()
+                && Uuid::parse_str(key).is_ok_and(|id| defined_resource_ids.contains(&id)))
+        });
         state.instances.extend(instances);
         state.bindings.extend(bindings);
         Ok(())
@@ -1357,21 +1385,44 @@ impl ComputeProvider for AgentComputeProvider {
         request: DeleteInstanceRequest,
     ) -> Result<Operation, ProviderError> {
         self.rehydrate().await?;
-        let binding = self
-            .state
-            .read()
-            .await
-            .bindings
-            .get(&request.provider_instance_id)
-            .cloned();
+        let binding = {
+            let state = self.state.read().await;
+            state
+                .bindings
+                .get(&request.provider_instance_id)
+                .cloned()
+                .or_else(|| {
+                    state
+                        .bindings
+                        .values()
+                        .find(|binding| binding.resource_id == request.provider_instance_id)
+                        .cloned()
+                })
+        };
         let binding = binding.ok_or(ProviderError::NotFound)?;
         let agent = self.selected_agent(&binding.agent_id).await?;
-        if agent.agent_epoch != binding.agent_epoch {
+        if binding.provider_resource_id.is_some() && agent.agent_epoch != binding.agent_epoch {
             return Err(ProviderError::StaleState);
         }
         // The command resource identity is the O3K server id, never the
         // provider (libvirt domain) name: the agent derives the domain from
         // the server id and the durable command store requires a UUID.
+        //
+        // A binding with no provider resource identity (the create dispatch
+        // was accepted but no domain was ever defined — issue #88 S3) has no
+        // provider object to fence, so the epoch fence above is skipped: the
+        // server id IS the fence, and the registry is authoritative for the
+        // agent's current epoch (every registration replaces the stored
+        // epoch, minted per connection — the #552 journal-evidence
+        // rationale). The reap of a crashed pre-mutation create therefore
+        // dispatches against the current agent instead of failing as
+        // StaleState forever. The wire dispatch additionally fences the
+        // command by the current registered epoch, and the binding's own
+        // agent id still resolves through `selected_agent`, so a binding
+        // owned by a DIFFERENT or unregistered agent is still rejected. A
+        // binding that HAS a provider resource identity keeps the strict
+        // epoch fence above: a real provider object must never be deleted
+        // through a stale binding.
         let command = build_lifecycle_command(
             LifecycleCommand::Delete,
             &agent.agent_id,
@@ -1803,6 +1854,222 @@ mod tests {
             binding.as_ref().map(|binding| binding.agent_epoch.as_str()),
             Some("epoch-1")
         );
+        Ok(())
+    }
+
+    /// Issue #88 S3 reap: the create was accepted by an agent that then
+    /// crashed (the in-memory binding keeps the pre-crash epoch) without ever
+    /// defining a provider object — the binding's `provider_resource_id` is
+    /// None. Deleting that never-defined resource must NOT reject on the
+    /// stale binding epoch: there is no provider object to fence, the server
+    /// id IS the fence, and the registry is authoritative for the agent's
+    /// current epoch. `delete_instance` must dispatch with the registry's
+    /// current epoch. The wire dispatch cannot complete in-process without a
+    /// live control stream, so the observable contract is a dispatch attempt
+    /// (`Retryable` — the registry accepted the command epoch and only the
+    /// stream was missing), never a stale-binding rejection. `StaleState` is
+    /// also exactly what the wire epoch fence produces for a command
+    /// carrying a stale epoch, so `Retryable` proves the dispatched command
+    /// carried the registry epoch.
+    #[tokio::test]
+    async fn delete_of_never_defined_binding_dispatches_with_registry_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let provider =
+            AgentComputeProvider::new(registry.clone(), Arc::new(TestResolvedCreateResolver));
+        let server_id = Uuid::now_v7();
+        seed_create_binding(&provider, server_id, "node-a", "epoch-1").await;
+        // The agent crashed and re-registered; the registry now stores the
+        // fresh per-connection epoch.
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let result = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: Uuid::now_v7(),
+                provider_instance_id: server_id.to_string(),
+                idempotency_key: "o3k:delete-reap:test".to_owned(),
+            })
+            .await;
+        match result {
+            Err(ProviderError::Retryable) => {}
+            other => {
+                return Err(format!(
+                    "a never-defined delete must dispatch against the current \
+                     agent, got {other:?}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The delete lookup mirrors the inspect fallback: when the direct
+    /// `provider_instance_id` key misses, a binding whose `resource_id`
+    /// matches is accepted. The create-dispatch binding is keyed by the
+    /// server id, so the reap caller hits directly; the fallback covers
+    /// bindings keyed by another identity.
+    #[tokio::test]
+    async fn delete_falls_back_to_binding_by_resource_id() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let provider =
+            AgentComputeProvider::new(registry.clone(), Arc::new(TestResolvedCreateResolver));
+        let server_id = Uuid::now_v7();
+        provider.state.write().await.bindings.insert(
+            "provider-key".to_owned(),
+            AgentBinding {
+                resource_id: server_id.to_string(),
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                provider_resource_id: None,
+            },
+        );
+        let result = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id: Uuid::now_v7(),
+                provider_instance_id: server_id.to_string(),
+                idempotency_key: "o3k:delete-reap:test".to_owned(),
+            })
+            .await;
+        match result {
+            Err(ProviderError::Retryable) => {}
+            other => {
+                return Err(format!(
+                    "a resource-id binding must resolve for the delete, got {other:?}"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    /// The epoch relaxation is fenced to the never-defined shape only: a
+    /// binding that HAS a provider resource identity keeps the strict fence,
+    /// so a stale binding epoch for a real provider object is still rejected
+    /// as `StaleState` — the registry can never silently re-anchor a delete
+    /// for a defined instance.
+    #[tokio::test]
+    async fn delete_of_defined_binding_still_fences_stale_epochs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let provider =
+            AgentComputeProvider::new(registry.clone(), Arc::new(TestResolvedCreateResolver));
+        let server_id = Uuid::now_v7();
+        seed_lifecycle_binding(
+            &provider,
+            "provider-instance-1",
+            &server_id.to_string(),
+            "node-a",
+            "epoch-1",
+        )
+        .await;
+        assert_eq!(
+            provider
+                .delete_instance(DeleteInstanceRequest {
+                    operation_id: Uuid::now_v7(),
+                    provider_instance_id: "provider-instance-1".to_owned(),
+                    idempotency_key: "o3k:delete-reap:test".to_owned(),
+                })
+                .await,
+            Err(ProviderError::StaleState),
+            "a defined binding must keep the strict epoch fence"
+        );
+        Ok(())
+    }
+
+    /// Issue #88 S3 reap, store-backed shape (the production composition):
+    /// `delete_instance` rehydrates its projection from the durable ledger
+    /// first, and the never-defined binding is keyed by the server id with no
+    /// durable provider reference to rebuild from. Rehydration must preserve
+    /// the in-memory never-defined binding while its resource is durably
+    /// present but NOT provider-defined (failed/unknown/Deleted creates) —
+    /// otherwise the reap delete resolves `NotFound` and the crashed agent's
+    /// config-drive media is never reaped. A never-defined binding for a
+    /// durably DEFINED resource (a create that succeeded later) stays stale
+    /// and is purged as today. Without the preservation, this delete resolves
+    /// `NotFound`; with it, the dispatch attempt (`Retryable`) proves the
+    /// binding survived rehydration.
+    #[tokio::test]
+    async fn rehydrate_preserves_never_defined_binding_for_reap_delete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn o3k_store::ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(TestResolvedCreateResolver),
+            Some(store.clone()),
+        );
+        let server_id = Uuid::now_v7();
+        seed_create_binding(&provider, server_id, "node-a", "epoch-1").await;
+        // The terminalized failed create: durable ERROR resource with no
+        // provider identity (the local-completion shape).
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: server_id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: "{}".to_owned(),
+                observed_state: "ERROR".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        // The local-completion branch durably records the deterministic
+        // delete operation before dispatching the reap; the durable
+        // agent-command record references it.
+        let operation_id = Uuid::now_v7();
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id: server_id,
+                kind: "compute_delete".to_owned(),
+                state: o3k_store::OperationState::Succeeded,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        let result = provider
+            .delete_instance(DeleteInstanceRequest {
+                operation_id,
+                provider_instance_id: server_id.to_string(),
+                idempotency_key: "o3k:delete-reap:test".to_owned(),
+            })
+            .await;
+        match result {
+            Err(ProviderError::Retryable) => {}
+            other => {
+                return Err(format!(
+                    "the store-backed reap delete must dispatch against the \
+                     current agent, got {other:?}"
+                )
+                .into());
+            }
+        }
         Ok(())
     }
 

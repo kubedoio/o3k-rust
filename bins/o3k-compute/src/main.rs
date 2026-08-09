@@ -62,6 +62,7 @@ struct DhcpRuntime {
     supervisor: Option<o3k_dhcp::DnsmasqSupervisor>,
     binary: PathBuf,
     interface: String,
+    root: PathBuf,
 }
 
 fn cleanup_config_drive_artifact(
@@ -92,17 +93,61 @@ fn reap_config_drive_artifacts(artifact_root: &std::path::Path, agent_id: &str, 
     }
 }
 
+/// Liveness probe for the orphan reap: true while the pid exists as a live
+/// process. A zombie (`/proc/<pid>/stat` state `Z`) has already terminated
+/// and counts as dead; an unreadable proc entry is dead as well. Linux-only
+/// by design: the reap is /proc-based and the project targets Linux.
+fn pid_is_alive(pid: i32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    !stat
+        .split_whitespace()
+        .nth(2)
+        .is_some_and(|state| state == "Z")
+}
+
+/// Sends one signal to a pid through the `kill` binary (always present on
+/// the supported hosts). Best-effort: the process may die between the
+/// ownership check and the signal.
+fn signal_pid(pid: i32, signal: &str) {
+    let _ = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status();
+}
+
+/// Ownership verification for the orphan reap: the process cmdline must
+/// contain the O3K dhcp root path (the supervisor always launches dnsmasq
+/// with `--conf-file=<root>/dnsmasq.conf`, so the root appears in the
+/// argv). The canonicalized variant is accepted too, for hosts where the
+/// agent and the spawned process disagree on symlinks. A read failure
+/// (permissions, pid reuse race) is an unverifiable pid, never ownership.
+fn cmdline_contains_dhcp_root(pid: i32, root: &std::path::Path) -> Result<bool, std::io::Error> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline"))?;
+    let cmdline = String::from_utf8_lossy(&raw);
+    if cmdline.contains(root.to_string_lossy().as_ref()) {
+        return Ok(true);
+    }
+    if let Ok(canonical) = std::fs::canonicalize(root) {
+        return Ok(cmdline.contains(canonical.to_string_lossy().as_ref()));
+    }
+    Ok(false)
+}
+
 impl DhcpRuntime {
     fn open(
         root: impl Into<PathBuf>,
         binary: impl Into<PathBuf>,
         interface: String,
     ) -> Result<Self, o3k_dhcp::DhcpError> {
+        let root = root.into();
         Ok(Self {
-            service: o3k_dhcp::DhcpService::open(root)?,
+            service: o3k_dhcp::DhcpService::open(root.clone())?,
             supervisor: None,
             binary: binary.into(),
             interface,
+            root,
         })
     }
 
@@ -263,6 +308,108 @@ impl DhcpRuntime {
                 .map_err(|_| AgentError::Protocol("DHCP restart failed".to_owned()))?,
         );
         Ok(())
+    }
+
+    /// Reaps an owned dnsmasq left behind by a crashed agent process (issue
+    /// #88 S3): the pre-crash agent started dnsmasq and died mid-create; the
+    /// process was reparented to init and kept running with zero durable
+    /// bindings, and the restarted agent's `start_after_restart` returns
+    /// early on empty bindings without ever stopping it. Invariant: dnsmasq
+    /// runs only while durable bindings exist — a zero-binding dnsmasq is
+    /// residue. With bindings present, the supervisor contract owns the live
+    /// process and nothing is touched. Each `dnsmasq-*.pid` pidfile is
+    /// verified by its process cmdline (it must contain the O3K dhcp root)
+    /// before the pid is signaled: SIGTERM, a bounded wait, SIGKILL only if
+    /// still alive, then the pidfile is removed. A pidfile whose process is
+    /// already gone is just removed. Unreadable or foreign pidfiles are
+    /// skipped with a warning (fail-open: the process inventory and
+    /// verifier catch residue, and the reap never crashes agent startup).
+    fn reap_orphaned_dnsmasq(&self) -> Result<(), AgentError> {
+        if self.service.bindings().next().is_some() {
+            return Ok(());
+        }
+        let entries = std::fs::read_dir(&self.root)
+            .map_err(|_| AgentError::Protocol("dhcp root is unreadable".to_owned()))?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("dnsmasq-") || !name.ends_with(".pid") {
+                continue;
+            }
+            self.reap_orphaned_dnsmasq_pidfile(&path);
+        }
+        Ok(())
+    }
+
+    fn reap_orphaned_dnsmasq_pidfile(&self, pidfile: &std::path::Path) {
+        let Ok(raw) = std::fs::read_to_string(pidfile) else {
+            tracing::warn!(
+                pidfile = %pidfile.display(),
+                "orphaned dnsmasq pidfile is unreadable; left for the inventory"
+            );
+            return;
+        };
+        let Ok(pid) = raw.trim().parse::<i32>() else {
+            tracing::warn!(
+                pidfile = %pidfile.display(),
+                "orphaned dnsmasq pidfile does not carry a pid; left for the inventory"
+            );
+            return;
+        };
+        if !pid_is_alive(pid) {
+            // The process is already gone; only the stale pidfile remains.
+            if let Err(error) = std::fs::remove_file(pidfile) {
+                tracing::warn!(
+                    pidfile = %pidfile.display(),
+                    error = %error,
+                    "stale dnsmasq pidfile removal failed"
+                );
+            }
+            return;
+        }
+        match cmdline_contains_dhcp_root(pid, &self.root) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    pid,
+                    pidfile = %pidfile.display(),
+                    "dnsmasq pidfile points at a foreign process; left for the inventory"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    pid,
+                    pidfile = %pidfile.display(),
+                    error = %error,
+                    "dnsmasq pidfile process is unverifiable; left for the inventory"
+                );
+                return;
+            }
+        }
+        signal_pid(pid, "TERM");
+        // Bounded wait for SIGTERM to take effect; SIGKILL only if the
+        // process is still alive after the window.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        while pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if pid_is_alive(pid) {
+            signal_pid(pid, "KILL");
+            let kill_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while pid_is_alive(pid) && std::time::Instant::now() < kill_deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+        if let Err(error) = std::fs::remove_file(pidfile) {
+            tracing::warn!(
+                pidfile = %pidfile.display(),
+                error = %error,
+                "orphaned dnsmasq pidfile removal failed"
+            );
+        }
     }
 }
 
@@ -1831,6 +1978,17 @@ fn reconcile_dhcp_on_startup(
         .map_err(|error| format!("DHCP reconciliation failed: {error}"))
 }
 
+/// Startup residue reap for a dnsmasq left behind by a crashed agent process
+/// (issue #88 S3): an owned dnsmasq with zero durable bindings is residue.
+/// Best-effort: a reap failure is logged and never takes the agent down —
+/// the process inventory and verifier catch residue separately.
+fn reap_orphaned_dnsmasq_on_startup(dhcp: &Arc<Mutex<DhcpRuntime>>) -> Result<(), String> {
+    dhcp.lock()
+        .map_err(|_| "DHCP runtime lock is poisoned".to_owned())?
+        .reap_orphaned_dnsmasq()
+        .map_err(|error| format!("orphaned dnsmasq reap failed: {error}"))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_from_env()?;
@@ -1880,6 +2038,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
         bridge_name,
     )?));
+    // Reap an owned dnsmasq left behind by a crashed agent process (issue
+    // #88 S3) before any restart reconciliation: dnsmasq runs only while
+    // durable bindings exist, so a zero-binding dnsmasq is residue. The reap
+    // is best-effort and never fatal — the process inventory and verifier
+    // catch residue separately.
+    if let Err(error) = reap_orphaned_dnsmasq_on_startup(&dhcp) {
+        tracing::warn!(
+            error = %error,
+            "the agent stays up; owned dnsmasq residue is caught by the inventory/verifier"
+        );
+    }
     // Reap network residue of instances whose domains provably do not exist
     // (issue #87 S3 rerun #5) before restarting DHCP for persisted bindings,
     // so stale bindings are removed first and dnsmasq is never started for
@@ -2237,6 +2406,145 @@ mod tests {
             1,
             "durable DHCP state must survive a failed startup reconciliation"
         );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Spawns a real, long-lived fake owned dnsmasq: a shell process whose
+    /// argv carries the O3K dhcp-root flags exactly like the supervisor's
+    /// `launch()` (`--conf-file=<root>/dnsmasq.conf --pid-file=<root>/<name>`)
+    /// so the ownership check passes. TERM runs a trap that kills the
+    /// background sleep first, so the reap (or the test cleanup) never
+    /// orphans a process.
+    #[cfg(unix)]
+    fn spawn_fake_owned_dnsmasq(
+        root: &std::path::Path,
+        pidfile: &str,
+    ) -> std::io::Result<std::process::Child> {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 300 & s=$!; trap 'kill $s; exit 0' TERM; wait $s")
+            .arg("dnsmasq")
+            .arg(format!("--conf-file={}/dnsmasq.conf", root.display()))
+            .arg(format!("--pid-file={}/{}", root.display(), pidfile))
+            .spawn()
+    }
+
+    /// Issue #88 S3: an agent that crashed after starting dnsmasq leaves the
+    /// process running (reparented to init) with zero durable bindings — the
+    /// restarted agent's `start_after_restart` returns early on empty
+    /// bindings and never stops it. The startup reap must kill exactly the
+    /// owned zero-binding dnsmasq and remove its pidfile.
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphaned_dnsmasq_kills_owned_zero_binding_process()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-reap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let mut owned = spawn_fake_owned_dnsmasq(&root, "dnsmasq-test.pid")?;
+        std::fs::write(root.join("dnsmasq-test.pid"), owned.id().to_string())?;
+        assert!(
+            pid_is_alive(owned.id() as i32),
+            "the fake dnsmasq must be running before the reap"
+        );
+
+        runtime.reap_orphaned_dnsmasq()?;
+
+        assert!(
+            owned.try_wait()?.is_some(),
+            "the owned zero-binding dnsmasq must be killed"
+        );
+        assert!(
+            !root.join("dnsmasq-test.pid").exists(),
+            "the reap must remove the pidfile"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The reap is fenced to the zero-binding shape: while durable bindings
+    /// exist, the supervisor contract owns the live process and nothing is
+    /// touched.
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphaned_dnsmasq_preserves_process_while_bindings_exist()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        runtime.service.configure(o3k_dhcp::DhcpConfig {
+            subnet: "192.0.2.0/24".to_owned(),
+            gateway: "192.0.2.1".parse()?,
+            dns: vec!["192.0.2.1".parse()?],
+            interface: "o3k-br0".to_owned(),
+            lease_seconds: 3600,
+        })?;
+        runtime.service.upsert_binding(o3k_dhcp::Binding {
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            address: "192.0.2.10".parse()?,
+        })?;
+        let mut owned = spawn_fake_owned_dnsmasq(&root, "dnsmasq-bound.pid")?;
+        std::fs::write(root.join("dnsmasq-bound.pid"), owned.id().to_string())?;
+
+        runtime.reap_orphaned_dnsmasq()?;
+
+        assert!(
+            pid_is_alive(owned.id() as i32),
+            "a dnsmasq with durable bindings must survive the reap"
+        );
+        signal_pid(owned.id() as i32, "TERM");
+        owned.wait()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A pidfile whose process is already gone is removed; a pidfile pointing
+    /// at a foreign process (cmdline without the O3K dhcp root) and a pidfile
+    /// with garbage content are skipped with a warning and left in place
+    /// (fail-open: the process inventory and verifier catch residue).
+    #[cfg(unix)]
+    #[test]
+    fn reap_orphaned_dnsmasq_removes_dead_and_skips_foreign_pidfiles()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-mixed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        // Dead: a pid of an already-exited process.
+        let mut dead = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()?;
+        let dead_pid = dead.id();
+        dead.wait()?;
+        std::fs::write(root.join("dnsmasq-dead.pid"), dead_pid.to_string())?;
+        // Foreign: a live process whose cmdline lacks the dhcp root.
+        let mut foreign = std::process::Command::new("sleep").arg("300").spawn()?;
+        std::fs::write(root.join("dnsmasq-foreign.pid"), foreign.id().to_string())?;
+        // Garbage: content that cannot be a pid.
+        std::fs::write(root.join("dnsmasq-garbage.pid"), "not-a-pid")?;
+
+        runtime.reap_orphaned_dnsmasq()?;
+
+        assert!(
+            !root.join("dnsmasq-dead.pid").exists(),
+            "a pidfile whose process is already gone must be removed"
+        );
+        assert!(
+            pid_is_alive(foreign.id() as i32),
+            "a foreign process must never be killed"
+        );
+        assert!(
+            root.join("dnsmasq-foreign.pid").exists(),
+            "a foreign pidfile must be left for the inventory"
+        );
+        assert!(
+            root.join("dnsmasq-garbage.pid").exists(),
+            "an unreadable pidfile must be left for the inventory"
+        );
+        foreign.kill()?;
+        foreign.wait()?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
