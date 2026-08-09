@@ -108,7 +108,14 @@ VALID_CLASSIFICATIONS = (
     # Canary records are foreign markers and carry their own token.
     "foreign",
 )
-EXTENDED_SECTIONS = ("managed_state", "durable", "dhcp", "processes", "canaries")
+EXTENDED_SECTIONS = (
+    "managed_state",
+    "durable",
+    "dhcp",
+    "processes",
+    "canaries",
+    "injection_root",
+)
 
 
 def redact_value(value):
@@ -400,20 +407,32 @@ def compare_snapshots(
                         "contract": entry.get("contract", ""),
                     })
 
-        # Managed-state entries: after-only stale/active entries are leaks;
-        # after-only expected-retained entries are listed for transparency;
-        # stale entries present in both snapshots are pre-existing residue.
+        # Managed-state entries (state root + test injection root): after-only
+        # stale/active entries are leaks; after-only expected-retained entries
+        # are listed for transparency; stale entries present in both snapshots
+        # are pre-existing residue.
+        def managed_entries(section: dict, kind: str) -> list[tuple[str, dict]]:
+            entries = []
+            for entry in section.get("entries", []):
+                if isinstance(entry, dict) and entry.get("path") is not None:
+                    tagged = dict(entry)
+                    tagged["_kind"] = kind
+                    entries.append((str(entry["path"]), tagged))
+            return entries
+
         baseline_managed = baseline.get("managed_state", {})
         after_managed = after.get("managed_state", {})
+        baseline_injection = baseline.get("injection_root", {})
+        after_injection = after.get("injection_root", {})
         baseline_paths = {
-            str(entry.get("path", ""))
-            for entry in baseline_managed.get("entries", [])
-            if isinstance(entry, dict)
+            path
+            for path, _entry in managed_entries(baseline_managed, "managed_state")
+            + managed_entries(baseline_injection, "injection_root")
         }
         after_entries = {
-            str(entry.get("path", "")): entry
-            for entry in after_managed.get("entries", [])
-            if isinstance(entry, dict)
+            path: entry
+            for path, entry in managed_entries(after_managed, "managed_state")
+            + managed_entries(after_injection, "injection_root")
         }
         retained_counts: dict[str, int] = {}
         retained_contracts: dict[str, dict] = {}
@@ -423,7 +442,7 @@ def compare_snapshots(
             if path in baseline_paths:
                 if classification == "stale_owned":
                     verdict["pre_existing"].append({
-                        "kind": "managed_state",
+                        "kind": entry.get("_kind", "managed_state"),
                         "identity": path,
                         "classification": classification,
                         "contract": contract,
@@ -431,7 +450,7 @@ def compare_snapshots(
                 continue
             if classification in ("stale_owned", "active_owned"):
                 leaks.append({
-                    "kind": "managed_state",
+                    "kind": entry.get("_kind", "managed_state"),
                     "identity": path,
                     "classification": classification,
                     "contract": contract,
@@ -671,7 +690,12 @@ def command_negative(args: argparse.Namespace, expected: str) -> int:
         write_json(args.out, result)
         return 1
     verdict = compare_snapshots(
-        baseline, after, f"negative-{expected}", "present", args.source_commit, args.runner
+        baseline,
+        after,
+        f"negative-{expected}",
+        args.expect_state_root,
+        args.source_commit,
+        args.runner,
     )
     stale_objects = []
     if expected == "stale":
@@ -914,6 +938,9 @@ def main() -> int:
         negative = subparsers.add_parser(name)
         negative.add_argument("--baseline", required=True)
         negative.add_argument("--after", required=True)
+        negative.add_argument(
+            "--expect-state-root", choices=("present", "absent"), default="present"
+        )
         negative.add_argument("--source-commit", default=None)
         negative.add_argument("--runner", default=None)
         negative.add_argument("--out", required=True)
