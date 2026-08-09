@@ -552,11 +552,115 @@ impl ArtifactStore {
         })
     }
 
+    /// Returns whether the incomplete-transfer part `id` can never be
+    /// resumed (issue #88 S5 supplementary): a part with no manifest —
+    /// [`Self::begin`] always writes the manifest before creating the part,
+    /// so nothing references it and a fresh `begin` for the same id would
+    /// fail on the `create_new` part open — or a part whose manifest is not
+    /// committed and whose offer has expired. An expired incomplete
+    /// transfer is never reported by [`Self::artifact_statuses`] and the
+    /// control-plane recovery fences its durable row as Expired, so it is
+    /// never resumed; re-drives mint fresh transfer ids. A NON-expired
+    /// incomplete part is kept: the control plane resumes the SAME transfer
+    /// id after reconnect and [`Self::begin`] continues the part.
+    fn part_is_orphan(&self, id: &str) -> Result<bool, ArtifactStoreError> {
+        let manifest_path = self.manifest_path(id)?;
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(ArtifactStoreError::UnownedPath);
+                }
+                let manifest = read_manifest(&manifest_path)?;
+                validate_offer_identity(&manifest.offer, &self.agent_id)?;
+                if manifest.state == proto::ArtifactTransferState::Committed as i32 {
+                    // `finish` renames the part to the content-addressed
+                    // final, so a committed transfer has no part by
+                    // construction; if one ever coexists, keep it — never
+                    // remove data a committed manifest could own.
+                    return Ok(false);
+                }
+                Ok(manifest.offer.expires_at_unix_ms <= crate::unix_ms())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(ArtifactStoreError::Storage(error)),
+        }
+    }
+
+    /// Removes every incomplete-transfer `.part` file that the protocol can
+    /// never resume (see [`ArtifactStore::part_is_orphan`]) and returns the
+    /// number removed. This is the restart-time reap: at startup no receipt
+    /// is in flight, and a part whose transfer is resumable is kept. Only
+    /// regular files inside the store root are touched; symlinked or
+    /// otherwise foreign entries fail closed with an error, and the caller
+    /// treats the reap as best-effort (the inventory catches residue).
+    pub fn reap_orphaned_parts(&self) -> Result<u64, ArtifactStoreError> {
+        self.reap_orphaned_parts_with_resource_filter(None)
+    }
+
+    /// Like [`ArtifactStore::reap_orphaned_parts`], scoped to the parts
+    /// whose manifest belongs to `resource_id` — the delete executor's
+    /// cleanup for a removed resource. A part without a manifest has no
+    /// resource identity and is left for the restart-time global reap.
+    pub fn reap_orphaned_parts_for_resource(
+        &self,
+        resource_id: &str,
+    ) -> Result<u64, ArtifactStoreError> {
+        if !valid_reference(resource_id) {
+            return Err(ArtifactStoreError::InvalidOffer);
+        }
+        self.reap_orphaned_parts_with_resource_filter(Some(resource_id))
+    }
+
+    fn reap_orphaned_parts_with_resource_filter(
+        &self,
+        resource_id: Option<&str>,
+    ) -> Result<u64, ArtifactStoreError> {
+        let mut removed = 0;
+        for entry in fs::read_dir(&self.root).map_err(ArtifactStoreError::Storage)? {
+            let entry = entry.map_err(ArtifactStoreError::Storage)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(id) = name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".part"))
+            else {
+                continue;
+            };
+            if !valid_reference(id) {
+                continue;
+            }
+            if let Some(expected) = resource_id {
+                // Scope by the manifest's resource identity; unmanifested
+                // parts cannot be attributed and stay for the global reap.
+                let manifest_path = self.manifest_path(id)?;
+                let metadata = match fs::symlink_metadata(&manifest_path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(ArtifactStoreError::Storage(error)),
+                };
+                if metadata.file_type().is_symlink() {
+                    return Err(ArtifactStoreError::UnownedPath);
+                }
+                let manifest = read_manifest(&manifest_path)?;
+                validate_offer_identity(&manifest.offer, &self.agent_id)?;
+                if manifest.offer.resource_id != expected {
+                    continue;
+                }
+            }
+            if self.part_is_orphan(id)? {
+                remove_owned_file(&entry.path())?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     fn manifest_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
         valid_reference(id)
             .then(|| self.root.join(format!(".{id}.manifest")))
             .ok_or(ArtifactStoreError::InvalidOffer)
     }
+
     fn part_path(&self, id: &str) -> Result<PathBuf, ArtifactStoreError> {
         valid_reference(id)
             .then(|| self.root.join(format!(".{id}.part")))
