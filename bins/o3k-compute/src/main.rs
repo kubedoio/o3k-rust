@@ -310,24 +310,22 @@ impl DhcpRuntime {
         Ok(())
     }
 
-    /// Reaps an owned dnsmasq left behind by a crashed agent process (issue
-    /// #88 S3): the pre-crash agent started dnsmasq and died mid-create; the
-    /// process was reparented to init and kept running with zero durable
-    /// bindings, and the restarted agent's `start_after_restart` returns
-    /// early on empty bindings without ever stopping it. Invariant: dnsmasq
-    /// runs only while durable bindings exist — a zero-binding dnsmasq is
-    /// residue. With bindings present, the supervisor contract owns the live
-    /// process and nothing is touched. Each `dnsmasq-*.pid` pidfile is
+    /// Reaps every owned dnsmasq left behind by a previous agent process
+    /// (issue #88 S3/S4): a crashed agent's dnsmasq was reparented to init
+    /// and keeps running unsupervized. Invariant: at startup the supervisor
+    /// is ALWAYS `None` (`DhcpRuntime::open` sets it; `start_after_restart`
+    /// creates it later), so ANY owned dnsmasq found at startup is a
+    /// leftover of a previous process — regardless of durable bindings. Live
+    /// bindings are re-served by `start_after_restart` AFTER this residue
+    /// cleanup (the caller's ordering), and the earlier stale-network reap
+    /// already removed stale bindings first. Each `dnsmasq-*.pid` pidfile is
     /// verified by its process cmdline (it must contain the O3K dhcp root)
     /// before the pid is signaled: SIGTERM, a bounded wait, SIGKILL only if
     /// still alive, then the pidfile is removed. A pidfile whose process is
     /// already gone is just removed. Unreadable or foreign pidfiles are
     /// skipped with a warning (fail-open: the process inventory and
     /// verifier catch residue, and the reap never crashes agent startup).
-    fn reap_orphaned_dnsmasq(&self) -> Result<(), AgentError> {
-        if self.service.bindings().next().is_some() {
-            return Ok(());
-        }
+    fn reap_owned_dnsmasq(&self) -> Result<(), AgentError> {
         let entries = std::fs::read_dir(&self.root)
             .map_err(|_| AgentError::Protocol("dhcp root is unreadable".to_owned()))?;
         for entry in entries.flatten() {
@@ -338,23 +336,23 @@ impl DhcpRuntime {
             if !name.starts_with("dnsmasq-") || !name.ends_with(".pid") {
                 continue;
             }
-            self.reap_orphaned_dnsmasq_pidfile(&path);
+            self.reap_owned_dnsmasq_pidfile(&path);
         }
         Ok(())
     }
 
-    fn reap_orphaned_dnsmasq_pidfile(&self, pidfile: &std::path::Path) {
+    fn reap_owned_dnsmasq_pidfile(&self, pidfile: &std::path::Path) {
         let Ok(raw) = std::fs::read_to_string(pidfile) else {
             tracing::warn!(
                 pidfile = %pidfile.display(),
-                "orphaned dnsmasq pidfile is unreadable; left for the inventory"
+                "owned dnsmasq pidfile is unreadable; left for the inventory"
             );
             return;
         };
         let Ok(pid) = raw.trim().parse::<i32>() else {
             tracing::warn!(
                 pidfile = %pidfile.display(),
-                "orphaned dnsmasq pidfile does not carry a pid; left for the inventory"
+                "owned dnsmasq pidfile does not carry a pid; left for the inventory"
             );
             return;
         };
@@ -407,7 +405,7 @@ impl DhcpRuntime {
             tracing::warn!(
                 pidfile = %pidfile.display(),
                 error = %error,
-                "orphaned dnsmasq pidfile removal failed"
+                "owned dnsmasq pidfile removal failed"
             );
         }
     }
@@ -2004,16 +2002,17 @@ fn reconcile_dhcp_on_startup(
 }
 
 /// Startup residue cleanup for crash residue (issue #87 S3 rerun #5 and
-/// issue #88 S3 rerun): the stale-network reap removes the persisted DHCP
-/// bindings and TAPs of instances whose domains provably do not exist, and
-/// the zero-binding orphaned-dnsmasq reap removes a dnsmasq left behind by a
-/// crashed agent. Ordering invariant: the stale-network reap MUST run first
-/// (a crashed create whose DHCP prep completed persists its binding, so the
-/// zero-binding gate would otherwise skip a genuinely orphaned dnsmasq),
-/// then the orphan reap, then live bindings get their supervisor in
-/// [`reconcile_dhcp_on_startup`]. Errors are logged and never fatal, so
-/// residue is retried on the next restart; startup is never blocked by an
-/// unreachable or unknown libvirt.
+/// issue #88 S3/S4 reruns): the stale-network reap removes the persisted
+/// DHCP bindings and TAPs of instances whose domains provably do not exist,
+/// and the owned-dnsmasq reap stops every owned dnsmasq left behind by a
+/// previous agent process. Ordering invariant: the stale-network reap MUST
+/// run first (a crashed create whose DHCP prep completed persists its
+/// binding, so the stale binding must not survive to be re-served), then
+/// the owned-dnsmasq reap (at startup the supervisor is always None, so
+/// every owned dnsmasq is a leftover regardless of bindings), then live
+/// bindings get a fresh supervisor in [`reconcile_dhcp_on_startup`]. Errors
+/// are logged and never fatal, so residue is retried on the next restart;
+/// startup is never blocked by an unreachable or unknown libvirt.
 async fn reap_startup_residue(
     network: &o3k_network::HostNetworkManager,
     dhcp: &Arc<Mutex<DhcpRuntime>>,
@@ -2022,12 +2021,12 @@ async fn reap_startup_residue(
     let stale_error = reap_stale_instance_networks(network, dhcp, presence)
         .await
         .err();
-    let orphan_error = dhcp
+    let reap_error = dhcp
         .lock()
         .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))
-        .and_then(|runtime| runtime.reap_orphaned_dnsmasq())
+        .and_then(|runtime| runtime.reap_owned_dnsmasq())
         .err();
-    match (stale_error, orphan_error) {
+    match (stale_error, reap_error) {
         (Some(error), _) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),
     }
@@ -2082,14 +2081,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
         bridge_name,
     )?));
-    // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3 rerun):
-    // the stale-network reap removes the persisted DHCP bindings and TAPs of
-    // instances whose domains provably do not exist FIRST, then the
-    // zero-binding orphaned-dnsmasq reap removes a dnsmasq left behind by a
-    // crashed agent (running the zero-binding gate before the binding
-    // removal would skip a genuinely orphaned process whose crash persisted
-    // its binding), then live bindings get their supervisor below. Errors
-    // are logged and retried on the next restart; startup is never blocked.
+    // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3/S4
+    // reruns): the stale-network reap removes the persisted DHCP bindings
+    // and TAPs of instances whose domains provably do not exist FIRST, then
+    // the owned-dnsmasq reap stops EVERY owned dnsmasq — at startup the
+    // supervisor is always None, so any owned dnsmasq is a leftover of a
+    // previous process regardless of bindings (a live-bound orphan would
+    // hold the DHCP socket and block the fresh supervisor). Live bindings
+    // then get their fresh supervisor below. Errors are logged and retried
+    // on the next restart; startup is never blocked.
     if let Err(error) = reap_startup_residue(&network, &dhcp, &libvirt).await {
         tracing::warn!(
             error = %error,
@@ -2467,13 +2467,13 @@ mod tests {
     }
 
     /// Issue #88 S3: an agent that crashed after starting dnsmasq leaves the
-    /// process running (reparented to init) with zero durable bindings — the
-    /// restarted agent's `start_after_restart` returns early on empty
-    /// bindings and never stops it. The startup reap must kill exactly the
-    /// owned zero-binding dnsmasq and remove its pidfile.
+    /// process running (reparented to init) with zero durable bindings. The
+    /// reap is ungated on bindings — at startup the supervisor is always
+    /// None, so any owned dnsmasq is a leftover — and must kill it and
+    /// remove its pidfile.
     #[cfg(unix)]
     #[test]
-    fn reap_orphaned_dnsmasq_kills_owned_zero_binding_process()
+    fn reap_owned_dnsmasq_kills_owned_zero_binding_process()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = env::temp_dir().join(format!("o3k-compute-dhcp-reap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2485,7 +2485,7 @@ mod tests {
             "the fake dnsmasq must be running before the reap"
         );
 
-        runtime.reap_orphaned_dnsmasq()?;
+        runtime.reap_owned_dnsmasq()?;
 
         assert!(
             owned.try_wait()?.is_some(),
@@ -2499,12 +2499,15 @@ mod tests {
         Ok(())
     }
 
-    /// The reap is fenced to the zero-binding shape: while durable bindings
-    /// exist, the supervisor contract owns the live process and nothing is
-    /// touched.
+    /// The reap is NOT gated on durable bindings (issue #88 S4 Window B): at
+    /// startup the supervisor is always None, so an owned dnsmasq is a
+    /// leftover of a previous process even when its binding is live — the
+    /// process must be killed and its pidfile removed while the durable
+    /// binding survives, so `start_after_restart` re-serves it with a fresh
+    /// supervisor afterward (asserted at the sequence level).
     #[cfg(unix)]
     #[test]
-    fn reap_orphaned_dnsmasq_preserves_process_while_bindings_exist()
+    fn reap_owned_dnsmasq_kills_owned_process_while_bindings_exist()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = env::temp_dir().join(format!("o3k-compute-dhcp-bound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2524,14 +2527,22 @@ mod tests {
         let mut owned = spawn_fake_owned_dnsmasq(&root, "dnsmasq-bound.pid")?;
         std::fs::write(root.join("dnsmasq-bound.pid"), owned.id().to_string())?;
 
-        runtime.reap_orphaned_dnsmasq()?;
+        runtime.reap_owned_dnsmasq()?;
 
         assert!(
-            pid_is_alive(owned.id() as i32),
-            "a dnsmasq with durable bindings must survive the reap"
+            owned.try_wait()?.is_some(),
+            "an owned dnsmasq must be killed at the reap level even while \
+             bindings exist — the startup supervisor is always None"
         );
-        signal_pid(owned.id() as i32, "TERM");
-        owned.wait()?;
+        assert!(
+            !root.join("dnsmasq-bound.pid").exists(),
+            "the reap must remove the pidfile"
+        );
+        assert_eq!(
+            runtime.service.bindings().count(),
+            1,
+            "the durable live binding must survive for start_after_restart to re-serve"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2542,7 +2553,7 @@ mod tests {
     /// (fail-open: the process inventory and verifier catch residue).
     #[cfg(unix)]
     #[test]
-    fn reap_orphaned_dnsmasq_removes_dead_and_skips_foreign_pidfiles()
+    fn reap_owned_dnsmasq_removes_dead_and_skips_foreign_pidfiles()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = env::temp_dir().join(format!("o3k-compute-dhcp-mixed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2561,7 +2572,7 @@ mod tests {
         // Garbage: content that cannot be a pid.
         std::fs::write(root.join("dnsmasq-garbage.pid"), "not-a-pid")?;
 
-        runtime.reap_orphaned_dnsmasq()?;
+        runtime.reap_owned_dnsmasq()?;
 
         assert!(
             !root.join("dnsmasq-dead.pid").exists(),
@@ -2716,12 +2727,15 @@ mod tests {
     }
 
     /// A binding whose instance is still present (the domain exists) is NOT
-    /// removed by the stale-network reap; the orphan reap then gates on the
-    /// live binding and must leave the running dnsmasq alone — live bindings
-    /// get their supervisor in `start_after_restart`.
+    /// removed by the stale-network reap, but the startup residue reap still
+    /// kills the owned dnsmasq: at startup the supervisor is always None, so
+    /// every owned dnsmasq is a leftover of a previous process regardless of
+    /// bindings (issue #88 S4 Window B — the live-bound orphan held the DHCP
+    /// socket and blocked the fresh supervisor). The durable live binding
+    /// survives and `start_after_restart` re-serves it afterward.
     #[cfg(unix)]
     #[tokio::test]
-    async fn startup_residue_preserves_dnsmasq_of_live_bound_instance()
+    async fn startup_residue_reaps_dnsmasq_of_live_bound_instance()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = env::temp_dir().join(format!("o3k-compute-startup-live-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -2731,8 +2745,14 @@ mod tests {
         reap_startup_residue(&network, &dhcp, &FakeDomainPresence { absent: false }).await?;
 
         assert!(
-            pid_is_alive(owned.id() as i32),
-            "a dnsmasq with a live binding must survive the startup sequence"
+            owned.try_wait()?.is_some(),
+            "the owned dnsmasq of a live-bound instance must be killed by the \
+             startup residue reap — the supervisor is None at startup, and \
+             start_after_restart re-serves the live binding afterward"
+        );
+        assert!(
+            !root.join("dhcp/dnsmasq-live.pid").exists(),
+            "the reap must remove the pidfile"
         );
         assert_eq!(
             dhcp.lock()
@@ -2741,10 +2761,8 @@ mod tests {
                 .bindings()
                 .count(),
             1,
-            "the live binding must survive the startup sequence"
+            "the live durable binding must survive for start_after_restart to re-serve"
         );
-        signal_pid(owned.id() as i32, "TERM");
-        owned.wait()?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
