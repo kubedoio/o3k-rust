@@ -1590,10 +1590,43 @@ where
                 )
                 .await;
         }
+        if instance.state == o3k_provider::InstanceState::Creating {
+            // The create is still in flight at the execution boundary; keep
+            // the Running wait with the observed projection.
+            self.store
+                .update_operation(
+                    operation_id,
+                    OperationState::Running,
+                    Some(&provider_operation_id),
+                    None,
+                    None,
+                )
+                .await?;
+            self.store
+                .update_resource(
+                    resource.id,
+                    resource.generation,
+                    &resource.desired_state,
+                    observed_state,
+                    resource.generation,
+                    Some(&provider_resource_id),
+                )
+                .await?;
+            self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
+            return Ok(OperationState::Running);
+        }
+        // A present instance in a settled non-Running state (the issue-87
+        // crash-between-define-and-start adoption: the domain was defined but
+        // never started, so the instance is observed Stopped) is a converged
+        // create: presence observation treats any present instance as success,
+        // so the adoption terminalizes Succeeded and the server is projected
+        // with its observed state (SHUTOFF) — never left Running without a
+        // transition path. `reconcile_once` short-circuits on Succeeded, so
+        // there is exactly one terminal transition.
         self.store
             .update_operation(
                 operation_id,
-                OperationState::Running,
+                OperationState::Succeeded,
                 Some(&provider_operation_id),
                 None,
                 None,
@@ -1609,8 +1642,8 @@ where
                 Some(&provider_resource_id),
             )
             .await?;
-        self.event(operation_id, resource.id, JournalEventKind::ProviderStarted);
-        Ok(OperationState::Running)
+        self.event(operation_id, resource.id, JournalEventKind::Succeeded);
+        Ok(OperationState::Succeeded)
     }
 
     async fn finish(
@@ -2606,6 +2639,122 @@ mod tests {
         assert_eq!(
             store.get_resource(resource.id).await?.observed_state,
             "ACTIVE"
+        );
+        assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    /// Wraps the stateful fake provider so every instance is observed in the
+    /// Stopped state, modeling the issue-87 crash-between-define-and-start
+    /// residue: on restart the domain exists (defined) but was never started,
+    /// so the adoption reconcile observes a present instance in SHUTOFF.
+    struct StoppedInstanceProvider {
+        inner: FakeComputeProvider,
+    }
+
+    impl StoppedInstanceProvider {
+        fn new(inner: FakeComputeProvider) -> Self {
+            Self { inner }
+        }
+
+        fn instance_count(&self) -> usize {
+            self.inner.instance_count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for StoppedInstanceProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            let mut instance = self.inner.get_instance(provider_instance_id).await?;
+            instance.state = o3k_provider::InstanceState::Stopped;
+            Ok(instance)
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
+    /// The issue-87 crash-between-define-and-start adoption: the provider
+    /// create succeeded and the domain exists, but the instance is observed
+    /// Stopped (defined, never started). Presence observation treats any
+    /// present instance as a converged create, so the adoption must reach the
+    /// terminal Succeeded state projecting SHUTOFF — never stay Running with
+    /// no transition path.
+    #[tokio::test]
+    async fn adopted_create_with_stopped_instance_converges_to_succeeded_shutoff()
+    -> Result<(), ReconcileError> {
+        let (_, store, provider) = journal("adopted-shutoff", 2).await?;
+        let provider = Arc::new(StoppedInstanceProvider::new(provider.as_ref().clone()));
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "SHUTOFF"
+        );
+        assert_eq!(provider.instance_count(), 1);
+        // Idempotent terminality: a second reconcile is a no-op and must
+        // never duplicate the create or regress the state.
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "SHUTOFF"
         );
         assert_eq!(provider.instance_count(), 1);
         Ok(())
