@@ -643,6 +643,15 @@ pub trait DurableStore: Send + Sync {
     async fn list_recoverable_artifact_transfers(
         &self,
     ) -> Result<Vec<ArtifactTransferRecord>, StoreError>;
+    /// Marks every artifact transfer whose owning operation has already
+    /// reached a terminal state (`succeeded`/`failed`, the reconciler's
+    /// terminal predicate) as `expired`, and returns the number of rows
+    /// expired. An operation can terminalize while its `offered`/`receiving`
+    /// handshake rows are still non-terminal, and no per-operation path ever
+    /// advances those rows again (issue #88). Idempotent and cheap: repeated
+    /// runs expire nothing, and `committed`/`rejected`/`expired` rows are
+    /// never touched.
+    async fn expire_transfers_of_terminal_operations(&self) -> Result<u64, StoreError>;
     async fn insert_image_overlay(
         &self,
         overlay: &ImageOverlayOwnershipRecord,
@@ -4039,6 +4048,10 @@ impl DurableStore for SqliteStore {
         &self,
     ) -> Result<Vec<ArtifactTransferRecord>, StoreError> {
         artifact_transfer::list_recoverable(&self.pool).await
+    }
+
+    async fn expire_transfers_of_terminal_operations(&self) -> Result<u64, StoreError> {
+        artifact_transfer::expire_transfers_of_terminal_operations(&self.pool).await
     }
 
     async fn insert_image_overlay(
