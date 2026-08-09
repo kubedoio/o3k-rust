@@ -93,6 +93,49 @@ fn reap_config_drive_artifacts(artifact_root: &std::path::Path, agent_id: &str, 
     }
 }
 
+/// Best-effort reaping of incomplete-transfer `.part` files that the
+/// protocol can never resume (issue #88 S5 supplementary): a part with no
+/// manifest or an expired incomplete transfer is an orphan (the control
+/// plane expires the abandoned transfer row and never resumes it; re-drives
+/// mint fresh transfer ids), while a non-expired incomplete transfer is
+/// resumed with the SAME transfer id after reconnect and its part is kept.
+/// The `resource_id` filter scopes the reap to one deleted resource; `None`
+/// reaps globally at startup. A failed cleanup is logged and never crashes
+/// startup or changes a delete outcome: the leak verifier catches residue
+/// separately.
+fn reap_orphaned_transfer_parts(root: &std::path::Path, agent_id: &str, resource_id: Option<&str>) {
+    let store = match ArtifactStore::open(root, agent_id) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "artifact store is unavailable; transfer-part reap skipped"
+            );
+            return;
+        }
+    };
+    let result = match resource_id {
+        Some(resource_id) => store.reap_orphaned_parts_for_resource(resource_id),
+        None => store.reap_orphaned_parts(),
+    };
+    match result {
+        Ok(removed) => {
+            tracing::debug!(
+                resource_id = ?resource_id,
+                removed,
+                "orphaned transfer-part reap completed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                resource_id = ?resource_id,
+                error = %error,
+                "owned transfer-part cleanup failed; the outcome is unaffected"
+            );
+        }
+    }
+}
+
 /// Liveness probe for the orphan reap: true while the pid exists as a live
 /// process. A zombie (`/proc/<pid>/stat` state `Z`) has already terminated
 /// and counts as dead; an unreadable proc entry is dead as well. Linux-only
@@ -1073,6 +1116,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                             &command.agent_id,
                             &command.resource_id,
                         );
+                        reap_orphaned_transfer_parts(
+                            &self.artifact_root,
+                            &command.agent_id,
+                            Some(&command.resource_id),
+                        );
                         cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                         return success("domain already absent", proto::ResourceState::Deleted);
                     }
@@ -1099,6 +1147,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     &self.artifact_root,
                     &command.agent_id,
                     &command.resource_id,
+                );
+                reap_orphaned_transfer_parts(
+                    &self.artifact_root,
+                    &command.agent_id,
+                    Some(&command.resource_id),
                 );
                 cleanup_console_log(&self.artifact_root, &command.resource_id)?;
                 success("domain deleted", proto::ResourceState::Deleted)
@@ -2096,6 +2149,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "startup residue reap failed; retried on the next restart"
         );
     }
+    // Reap incomplete-transfer `.part` files that can never be resumed
+    // (issue #88 S5 supplementary): a crashed agent's part survives its
+    // restart and the resource delete (the delete arm reaps config-drive
+    // artifacts only), and the control plane expires the abandoned transfer
+    // row (#571) without ever resuming it. The rule mirrors
+    // `artifact_statuses`: a part with no manifest or an expired incomplete
+    // transfer is an orphan; a non-expired incomplete transfer is resumed
+    // with the SAME transfer id after reconnect and its part is kept.
+    // Best-effort and never fatal; the inventory catches residue.
+    reap_orphaned_transfer_parts(&artifact_root, &agent_id, None);
     // A DHCP that cannot start at boot (missing capabilities, a port
     // conflict, the host's own dnsmasq on 127.0.0.1:53, ...) must not take
     // the agent down: the failure is logged, the agent stays up, and DHCP
@@ -3193,6 +3256,210 @@ mod tests {
             root.join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.iso")
                 .exists(),
             "nothing may be deleted while the ownership unit is unverified"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    fn unix_ms_now() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Begins an incomplete transfer and receives one chunk, leaving the
+    /// store exactly as a crash mid-receipt does: a Receiving manifest plus
+    /// a `.part` carrying the content. Returns the transfer id.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_incomplete_transfer(
+        root: &std::path::Path,
+        resource_id: &str,
+        artifact_id: &str,
+        kind: proto::ArtifactKind,
+        format: &str,
+        content: &[u8],
+        sha256: &str,
+        expires_at_unix_ms: i64,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let store = ArtifactStore::open(root, "agent-1")?;
+        let transfer_id = format!("transfer-{resource_id}-{artifact_id}");
+        let offer = proto::ArtifactOffer {
+            transfer_id: transfer_id.clone(),
+            command_id: format!("command-{resource_id}"),
+            operation_id: format!("operation-{resource_id}"),
+            resource_id: resource_id.to_owned(),
+            agent_id: "agent-1".to_owned(),
+            artifact_id: artifact_id.to_owned(),
+            kind: kind as i32,
+            sha256: sha256.to_owned(),
+            size_bytes: content.len() as u64,
+            format: format.to_owned(),
+            chunk_size_bytes: 4,
+            chunk_count: content.len().div_ceil(4) as u32,
+            expires_at_unix_ms,
+        };
+        store.begin(&offer)?;
+        store.accept_chunk(
+            &offer,
+            &proto::ArtifactChunk {
+                transfer_id: offer.transfer_id.clone(),
+                chunk_index: 0,
+                offset_bytes: 0,
+                data: content.to_vec(),
+                chunk_sha256: sha256.to_owned(),
+            },
+        )?;
+        Ok(transfer_id)
+    }
+
+    /// Issue #88 S5 supplementary: an agent killed mid artifact-transfer
+    /// receipt leaves its `.{id}.part` behind; the control plane expires the
+    /// abandoned transfer row (#571) and never resumes it, so the part is
+    /// orphaned. The startup reap must remove exactly the unresumable parts:
+    /// a part with no manifest (`begin` always writes the manifest before
+    /// creating the part) and a part whose manifest is not committed and
+    /// whose offer has expired. Parts of NON-expired incomplete transfers
+    /// are kept — the control plane resumes the SAME transfer id after
+    /// reconnect and `begin` continues the part — and committed manifests
+    /// with their content-addressed finals are never touched.
+    #[test]
+    fn startup_reap_removes_only_unresumable_transfer_parts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-part-reap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Committed transfer: manifest + content-addressed final, no part.
+        let committed = commit_artifact(
+            &root,
+            "resource-c",
+            "image-c",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"1111",
+            "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
+        )?;
+        // Non-expired incomplete transfer: resumable after reconnect.
+        let live = begin_incomplete_transfer(
+            &root,
+            "resource-l",
+            "image-l",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"2222",
+            "edee29f882543b956620b26d0ee0e7e950399b1c4222f5de05e06425b4c995e9",
+            unix_ms_now() + 60_000,
+        )?;
+        // Expired incomplete transfer: never resumed, the S5 shape.
+        let expired = begin_incomplete_transfer(
+            &root,
+            "resource-e",
+            "image-e",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"3333",
+            "318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69",
+            unix_ms_now() + 100,
+        )?;
+        // Part with no manifest: nothing references it.
+        std::fs::write(root.join(".orphan-1.part"), b"orphan")?;
+        // Let the near-future offer expire before the reap runs.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        reap_orphaned_transfer_parts(&root, "agent-1", None);
+
+        assert!(
+            !root.join(format!(".{expired}.part")).exists(),
+            "the part of an expired incomplete transfer must be removed"
+        );
+        assert!(
+            !root.join(".orphan-1.part").exists(),
+            "a part with no manifest must be removed"
+        );
+        assert!(
+            root.join(format!(".{live}.part")).exists(),
+            "the part of a non-expired incomplete transfer must be kept: the \
+             protocol resumes the same transfer id after reconnect"
+        );
+        assert!(
+            root.join(format!(".{committed}.manifest")).exists(),
+            "the committed manifest must be untouched"
+        );
+        assert!(
+            root.join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.qcow2")
+                .exists(),
+            "the committed content-addressed final must be untouched"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The delete executor's transfer-part reaping seam: the resource-scoped
+    /// reap removes exactly the deleted resource's unresumable parts and
+    /// preserves every other resource's parts (live and orphaned — those
+    /// belong to the restart-time global reap) and all manifests.
+    #[test]
+    fn delete_scoped_part_reap_removes_only_the_resources_orphans()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-part-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // resource-a: an expired incomplete transfer (the S5 shape, to be
+        // deleted).
+        let deleted = begin_incomplete_transfer(
+            &root,
+            "resource-a",
+            "image-a",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"4444",
+            "79f06f8fde333461739f220090a23cb2a79f6d714bee100d0e4b4af249294619",
+            unix_ms_now() + 100,
+        )?;
+        // resource-b: a live (resumable) incomplete transfer.
+        let preserved_live = begin_incomplete_transfer(
+            &root,
+            "resource-b",
+            "image-b",
+            proto::ArtifactKind::ImageBase,
+            "qcow2",
+            b"5555",
+            "c1f330d0aff31c1c87403f1e4347bcc21aff7c179908723535f2b31723702525",
+            unix_ms_now() + 60_000,
+        )?;
+        // resource-b: a committed transfer.
+        let preserved_committed = commit_artifact(
+            &root,
+            "resource-b",
+            "config-b",
+            proto::ArtifactKind::ConfigDriveIso,
+            "iso",
+            b"1111",
+            "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
+        )?;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        reap_orphaned_transfer_parts(&root, "agent-1", Some("resource-a"));
+
+        assert!(
+            !root.join(format!(".{deleted}.part")).exists(),
+            "the deleted resource's unresumable part must be removed"
+        );
+        assert!(
+            root.join(format!(".{deleted}.manifest")).exists(),
+            "manifests are never removed by the part reap"
+        );
+        assert!(
+            root.join(format!(".{preserved_live}.part")).exists(),
+            "another resource's live part must be preserved"
+        );
+        assert!(
+            root.join(format!(".{preserved_committed}.manifest"))
+                .exists(),
+            "another resource's committed manifest must be preserved"
+        );
+        assert!(
+            root.join("0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c.iso")
+                .exists(),
+            "another resource's committed final must be preserved"
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
