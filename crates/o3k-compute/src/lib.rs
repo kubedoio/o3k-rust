@@ -1446,9 +1446,18 @@ impl ComputeService {
         let Ok(operation) = self.store.get_operation(request.operation_id).await else {
             return;
         };
+        // Issue #88 S5 rerun: a create whose transfer dispatch was rejected
+        // mid-flight (agent killed during the handshake) is marked Retryable
+        // by retry_or_fail; the scheduled retry must actually fire, or the
+        // operation stays Retryable forever, the API delete 409s against it,
+        // and every owned residue is held. Re-drive Retryable exactly like
+        // Pending and UnknownOutcome — the retry budget in retry_or_fail
+        // still bounds it (attempts >= max_attempts terminalizes Failed).
         let re_drive = matches!(
             operation.state,
-            o3k_store::OperationState::Pending | o3k_store::OperationState::UnknownOutcome
+            o3k_store::OperationState::Pending
+                | o3k_store::OperationState::UnknownOutcome
+                | o3k_store::OperationState::Retryable
         ) || (operation.state == o3k_store::OperationState::Running
             && operation.provider_operation_id.is_none());
         if !re_drive {
@@ -3847,6 +3856,49 @@ mod tests {
         assert_eq!(
             store.get_artifact_transfer("t-offered").await?.state,
             o3k_store::ArtifactTransferState::Expired
+        );
+        Ok(())
+    }
+
+    /// Issue #88 S5 rerun: an operation marked `Retryable` by `retry_or_fail`
+    /// (the live shape: a create whose artifact-transfer dispatch was
+    /// rejected mid-flight when the agent was killed during the handshake)
+    /// must be re-driven by the create-convergence sweep. Before the fix the
+    /// re-drive gate skipped Retryable, so the scheduled retry never fired:
+    /// the operation stayed Retryable forever, the API delete 409'd against
+    /// it, and every owned residue (op row, command, allocation, config-drive
+    /// media, transfer part) was held. The retry budget in `retry_or_fail`
+    /// still bounds the re-drive (attempts >= max_attempts terminalizes
+    /// Failed).
+    #[tokio::test]
+    async fn create_convergence_re_drives_retryable_operations()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let (service, store, request) =
+            crash_before_dispatch_fixture("retryable-re-drive", fake).await?;
+        store
+            .update_operation(
+                request.operation_id,
+                o3k_store::OperationState::Retryable,
+                None,
+                Some("retryable"),
+                None,
+            )
+            .await?;
+        service.drive_all_create_convergence().await?;
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_ne!(
+            operation.state,
+            o3k_store::OperationState::Retryable,
+            "a Retryable create must be re-driven by the convergence sweep"
+        );
+        assert!(
+            matches!(
+                operation.state,
+                o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
+            ),
+            "the re-driven Retryable create must reach a terminal state, got {:?}",
+            operation.state
         );
         Ok(())
     }
