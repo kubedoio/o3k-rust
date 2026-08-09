@@ -288,15 +288,19 @@ impl DhcpRuntime {
             added.push(attachment.port_id.clone());
         }
         if let Some(supervisor) = self.supervisor.as_mut() {
-            self.service
-                .reload(supervisor)
-                .map_err(|_| AgentError::Protocol("DHCP reload failed".to_owned()))?;
+            self.service.reload(supervisor).map_err(|_| {
+                // Issue #88 C6a (DEV-1): a failed reload/start must roll
+                // back the durable bindings of the ports added by this
+                // apply, or a later restart re-serves them for a
+                // never-created instance (bridge + owned dnsmasq leak).
+                let _ = self.remove_ports(&added);
+                AgentError::Protocol("DHCP reload failed".to_owned())
+            })?;
         } else {
-            self.supervisor = Some(
-                self.service
-                    .start(&self.binary)
-                    .map_err(|_| AgentError::Protocol("DHCP start failed".to_owned()))?,
-            );
+            self.supervisor = Some(self.service.start(&self.binary).map_err(|_| {
+                let _ = self.remove_ports(&added);
+                AgentError::Protocol("DHCP start failed".to_owned())
+            })?);
         }
         Ok(added)
     }
@@ -2418,6 +2422,121 @@ mod tests {
             network_attachment("port-2", "198.51.100.2", "198.51.100.0/29", "198.51.100.1"),
         ];
         assert!(runtime.validate(&attachments).is_err());
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Issue #88 C6a (DEV-1 stale-binding deviation): a create whose DHCP
+    /// start fails (the injected `O3K_COMPUTE_DHCP_BINARY` is missing) must
+    /// roll back the durable bindings of the ports it added BEFORE the
+    /// failed start. Leaving them behind means a later agent restart
+    /// re-serves them (#570 live-bindings re-serve), re-creates the bridge,
+    /// and spawns an owned dnsmasq for a deleted port — the real-host
+    /// observed leak.
+    #[test]
+    fn failed_dhcp_start_rolls_back_durable_bindings() -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let attachments = vec![network_attachment(
+            "port-1",
+            "192.0.2.10",
+            "192.0.2.0/24",
+            "192.0.2.1",
+        )];
+
+        assert!(
+            runtime.apply(&attachments).is_err(),
+            "the DHCP start must fail with the injected missing binary"
+        );
+
+        assert_eq!(
+            runtime.service.bindings().count(),
+            0,
+            "a failed DHCP start must roll back the durable bindings of the added ports"
+        );
+        assert!(
+            runtime.supervisor.is_none(),
+            "no supervisor may survive a failed DHCP start"
+        );
+        // A later restart must not re-serve the rolled-back port.
+        assert!(
+            runtime.service.binding("port-1").is_none(),
+            "the rolled-back port must have no durable binding"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The delete path's DHCP cleanup removes exactly the deleted port's
+    /// durable binding and leaves other ports' bindings untouched (the
+    /// supervisor is stopped only when the last binding is gone).
+    #[test]
+    fn delete_cleanup_removes_only_the_ports_durable_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        runtime.service.configure(o3k_dhcp::DhcpConfig {
+            subnet: "192.0.2.0/24".to_owned(),
+            gateway: "192.0.2.1".parse()?,
+            dns: vec!["192.0.2.1".parse()?],
+            interface: "o3k-br0".to_owned(),
+            lease_seconds: 3600,
+        })?;
+        for (port_id, address, mac) in [
+            ("port-1", "192.0.2.10", "02:00:00:00:00:01"),
+            ("port-2", "192.0.2.11", "02:00:00:00:00:02"),
+        ] {
+            runtime.service.upsert_binding(o3k_dhcp::Binding {
+                port_id: port_id.to_owned(),
+                mac: mac.to_owned(),
+                address: address.parse()?,
+            })?;
+        }
+
+        runtime.remove_ports(&["port-1".to_owned()])?;
+
+        assert!(
+            runtime.service.binding("port-1").is_none(),
+            "the deleted port's durable binding must be removed"
+        );
+        assert!(
+            runtime.service.binding("port-2").is_some(),
+            "another port's live binding must survive the delete"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Binding rollback/delete is idempotent: removing an already-absent
+    /// binding is a no-op, and repeated rollbacks are safe.
+    #[test]
+    fn dhcp_binding_rollback_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        runtime.service.configure(o3k_dhcp::DhcpConfig {
+            subnet: "192.0.2.0/24".to_owned(),
+            gateway: "192.0.2.1".parse()?,
+            dns: vec!["192.0.2.1".parse()?],
+            interface: "o3k-br0".to_owned(),
+            lease_seconds: 3600,
+        })?;
+        runtime.service.upsert_binding(o3k_dhcp::Binding {
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+            address: "192.0.2.10".parse()?,
+        })?;
+
+        runtime.remove_ports(&["port-1".to_owned(), "port-absent".to_owned()])?;
+        runtime.remove_ports(&["port-1".to_owned()])?;
+
+        assert_eq!(
+            runtime.service.bindings().count(),
+            0,
+            "removing an absent binding must be a no-op"
+        );
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
