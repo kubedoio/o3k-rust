@@ -22,7 +22,10 @@ pathlib.Path(sys.argv[3]).write_text(
     encoding="utf-8",
 )
 pathlib.Path(sys.argv[4]).write_text(
-    source.replace("blocked: real host evidence", "release-ready: true"),
+    source.replace(
+        "every required real-host artifact and independent human decision is recorded",
+        "every required real-host artifact and independent human decision is recorded; release-ready: true",
+    ),
     encoding="utf-8",
 )
 pathlib.Path(sys.argv[5]).write_text(
@@ -35,8 +38,8 @@ pathlib.Path(sys.argv[6]).write_text(
 )
 pathlib.Path(sys.argv[7]).write_text(
     source.replace(
-        "host-gated: real CirrOS/libvirt measurements",
-        "release-ready: true; host-gated: real CirrOS/libvirt measurements",
+        "host-gated: protected environment",
+        "release-ready: true; host-gated: protected environment",
         1,
     ),
     encoding="utf-8",

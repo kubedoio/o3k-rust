@@ -92,7 +92,13 @@ if [[ $PURGE -eq 1 ]]; then
   # state: purge removes it (issue #90). The rule is inert on hosts whose
   # libvirtd uses auth_unix_rw = "none" (Ubuntu 24.04) and is scoped to the
   # o3k user only, so removing it restores the host's default posture.
-  rm -f -- /etc/polkit-1/rules.d/50-o3k-libvirt.rules
+  # install.sh only applies the rule when EUID == 0; mirror that guard so a
+  # sandboxed non-root purge (packaging tests) never touches host paths.
+  if [[ $EUID -eq 0 ]]; then
+    rm -f -- /etc/polkit-1/rules.d/50-o3k-libvirt.rules
+  else
+    echo "skipping /etc/polkit-1/rules.d/50-o3k-libvirt.rules removal (not root)" >&2
+  fi
 fi
 
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then

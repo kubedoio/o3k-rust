@@ -10,7 +10,8 @@ APIs, public standards, public client behavior, project ADRs/specifications,
 and independently produced black-box evidence. It is not a source-code port of
 another O3K implementation.
 
-> **Status:** pre-alpha. No production-readiness, full OpenStack parity,
+> **Status:** alpha — O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab alpha.
+> No production-readiness, full OpenStack parity,
 > PostgreSQL support, HA, or fixed footprint claim is made yet.
 
 ## Quickstart (from source)
@@ -294,7 +295,7 @@ See [AGENTS.md](AGENTS.md), [LLM development](docs/LLM_DEVELOPMENT.md), and
 
 ## Current release direction
 
-The first public alpha remains the native ephemeral-root TestLab profile. It
+O3K v0.2.0-alpha.1 is the Rust-native OpenStack-compatible libvirt TestLab alpha. It
 must prove a complete OpenStack CLI lifecycle through O3K-owned identity,
 image, network, placement, compute, `o3k-compute`, and libvirt/QEMU.
 

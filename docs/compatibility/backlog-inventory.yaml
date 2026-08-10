@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "format": "json-compatible-yaml-1.2",
-  "inventory_version": "0.1.0",
+  "inventory_version": "0.2.0-alpha.1",
   "title": "O3K Rust compatibility backlog inventory by user journey",
   "purpose": "Machine-readable candidate-behavior inventory for future OpenStack-compatible work, grouped by client/user journey (SPEC-0025 'Compatibility expansion after the first vertical slice'). Inventory only: a candidate is not implemented, advertised, or supported because it appears here, and route counts in this file are never progress or release percentages (ADR-0004).",
   "profile": "native-rust-testlab",
