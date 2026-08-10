@@ -13,7 +13,10 @@ run `987654344` completed resource cleanup without leaving its run bridge.
 These artifacts are useful
 diagnostics, but neither is a complete passing lifecycle, so no host-bound row
 is marked closed here.  The pre-existing libvirt domain `fcanary88` remained
-unchanged.
+unchanged.  The current diagnostic host also still contains `o3k-br0` and
+`o3k-b87654346`; their current O3K ownership cannot be proven from surviving
+ledgers, so they are deliberately preserved and the host is not a clean
+recertification boundary.  They must not be removed by name alone.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
