@@ -3675,6 +3675,20 @@ fn artifact_offer_is_current(
     Ok(())
 }
 
+fn artifact_offers_have_same_transfer_identity(
+    existing: &proto::ArtifactOffer,
+    incoming: &proto::ArtifactOffer,
+) -> bool {
+    let mut existing = existing.clone();
+    let mut incoming = incoming.clone();
+    // A retried offer may carry a refreshed command deadline.  The transfer
+    // identity and all content/command bindings must remain unchanged; the
+    // expiry is the only intentionally mutable field.
+    existing.expires_at_unix_ms = 0;
+    incoming.expires_at_unix_ms = 0;
+    existing == incoming
+}
+
 async fn send_artifact_ack(
     tx: &mpsc::Sender<proto::ControlRequest>,
     offer: &proto::ArtifactOffer,
@@ -3745,7 +3759,7 @@ async fn handle_artifact_response(
                 return Err(error);
             }
             if let Some(existing) = offers.get(&offer.transfer_id)
-                && existing != &offer
+                && !artifact_offers_have_same_transfer_identity(existing, &offer)
             {
                 reject_artifact(tx, &offer, agent_id, agent_epoch).await?;
                 return Err(AgentError::Protocol(
@@ -5725,6 +5739,66 @@ mod tests {
         );
         assert_eq!(committed.contiguous_bytes, data.len() as u64);
         assert!(store.resolve(&offer).is_ok());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retried_artifact_offer_may_refresh_expiry_but_not_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("o3k-agent-artifact-retry-{}", Uuid::now_v7()));
+        let store = ArtifactStore::open(&root, "node")?;
+        let (offer, _) = test_artifact_offer("node");
+        let (tx, mut receiver) = mpsc::channel(4);
+        let mut offers = HashMap::new();
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(offer.clone()),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let _ = next_artifact_ack(&mut receiver).await?;
+
+        let mut refreshed = offer.clone();
+        refreshed.expires_at_unix_ms = offer.expires_at_unix_ms.saturating_add(60_000);
+        handle_artifact_response(
+            proto::control_response::Body::ArtifactOffer(refreshed),
+            &store,
+            &mut offers,
+            &tx,
+            "node",
+            "epoch-1",
+        )
+        .await?;
+        let retry_ack = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            retry_ack.state,
+            proto::ArtifactTransferState::Offered as i32
+        );
+
+        let mut conflicting = offer;
+        conflicting.sha256 = "f".repeat(64);
+        assert!(
+            handle_artifact_response(
+                proto::control_response::Body::ArtifactOffer(conflicting),
+                &store,
+                &mut offers,
+                &tx,
+                "node",
+                "epoch-1",
+            )
+            .await
+            .is_err()
+        );
+        let rejected = next_artifact_ack(&mut receiver).await?;
+        assert_eq!(
+            rejected.state,
+            proto::ArtifactTransferState::Rejected as i32
+        );
         fs::remove_dir_all(root)?;
         Ok(())
     }

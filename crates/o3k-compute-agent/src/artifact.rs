@@ -827,6 +827,13 @@ fn same_offer(
     left: &proto::ArtifactOffer,
     right: &proto::ArtifactOffer,
 ) -> Result<(), ArtifactStoreError> {
+    let mut left = left.clone();
+    let mut right = right.clone();
+    // Retries may refresh the command deadline.  Content, command, resource,
+    // and agent identity remain immutable for a transfer ID; expiry is only an
+    // admission/replay fence and must not turn a safe retry into a conflict.
+    left.expires_at_unix_ms = 0;
+    right.expires_at_unix_ms = 0;
     (left == right)
         .then_some(())
         .ok_or(ArtifactStoreError::Conflict)
