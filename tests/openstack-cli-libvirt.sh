@@ -31,7 +31,16 @@ CLEANUP_SUBNET_STATUS=
 CLEANUP_PORT_STATUS=
 CLEANUP_FLAVOR_STATUS=
 CLEANUP_SERVER_STATUS=
-SERVER_NAME=o3k-testlab-server
+RESOURCE_SUFFIX="${O3K_TESTLAB_RESOURCE_SUFFIX:-}"
+if [[ -n "${RESOURCE_SUFFIX}" && ! "${RESOURCE_SUFFIX}" =~ ^[A-Za-z0-9-]+$ ]]; then
+    echo "O3K_TESTLAB_RESOURCE_SUFFIX contains unsafe characters" >&2
+    exit 2
+fi
+name_with_suffix() {
+    local base="$1"
+    [[ -n "${RESOURCE_SUFFIX}" ]] && printf '%s-%s' "$base" "$RESOURCE_SUFFIX" || printf '%s' "$base"
+}
+SERVER_NAME="$(name_with_suffix o3k-testlab-server)"
 EXPECTED_FIXED_IP=192.0.2.2
 CONFIG_DRIVE_ENABLED="${O3K_TESTLAB_CONFIG_DRIVE:-true}"
 case "${CONFIG_DRIVE_ENABLED}" in
@@ -490,7 +499,7 @@ IMAGE_ID="$(openstack image create o3k-testlab-image --file "${IMAGE_PATH}" --di
 CREATED_IMAGE_ID="${IMAGE_ID}"
 CLEANUP_IMAGE_STATUS=pending
 KEYPAIR_PUBLIC_KEY="${DATA_DIR}/o3k-testlab-keypair.pub"
-KEYPAIR_NAME=o3k-testlab-keypair
+KEYPAIR_NAME="$(name_with_suffix o3k-testlab-keypair)"
 ssh-keygen -q -t ed25519 -N '' -C o3k-testlab -f "${DATA_DIR}/o3k-testlab-keypair" >/dev/null
 chmod 0600 "${DATA_DIR}/o3k-testlab-keypair"
 chmod 0644 "${KEYPAIR_PUBLIC_KEY}"
@@ -498,16 +507,16 @@ openstack keypair create --public-key "${KEYPAIR_PUBLIC_KEY}" "${KEYPAIR_NAME}" 
 KEYPAIR_ID="${KEYPAIR_NAME}"
 CREATED_KEYPAIR_ID="${KEYPAIR_ID}"
 CLEANUP_KEYPAIR_STATUS=pending
-NETWORK_ID="$(openstack network create o3k-testlab-network -f value -c id)"
+NETWORK_ID="$(openstack network create "$(name_with_suffix o3k-testlab-network)" -f value -c id)"
 CREATED_NETWORK_ID="${NETWORK_ID}"
 CLEANUP_NETWORK_STATUS=pending
-SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 o3k-testlab-subnet -f value -c id)"
+SUBNET_ID="$(openstack subnet create --network "${NETWORK_ID}" --subnet-range 192.0.2.0/29 "$(name_with_suffix o3k-testlab-subnet)" -f value -c id)"
 CREATED_SUBNET_ID="${SUBNET_ID}"
 CLEANUP_SUBNET_STATUS=pending
-PORT_ID="$(openstack port create --network "${NETWORK_ID}" o3k-testlab-port -f value -c id)"
+PORT_ID="$(openstack port create --network "${NETWORK_ID}" "$(name_with_suffix o3k-testlab-port)" -f value -c id)"
 CREATED_PORT_ID="${PORT_ID}"
 CLEANUP_PORT_STATUS=pending
-FLAVOR_ID="$(openstack flavor create o3k-testlab-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
+FLAVOR_ID="$(openstack flavor create "$(name_with_suffix o3k-testlab-flavor)" --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
 SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "port-id=${PORT_ID}" "${SERVER_NAME}" -f value -c id)"
