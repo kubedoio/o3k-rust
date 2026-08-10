@@ -166,6 +166,20 @@ mod host_network_tests {
     }
 
     #[test]
+    fn managed_bridge_mac_is_stable_and_locally_administered() -> Result<(), HostNetworkError> {
+        let first = HostNetworkManager::deterministic_bridge_mac("o3k-b87654403")?;
+        let second = HostNetworkManager::deterministic_bridge_mac("o3k-b87654403")?;
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 17);
+        assert!(first.starts_with("02:"));
+        assert_ne!(
+            first,
+            HostNetworkManager::deterministic_bridge_mac("o3k-b87654404")?
+        );
+        Ok(())
+    }
+
+    #[test]
     fn existing_uplink_must_be_up_and_attached_to_the_managed_bridge() {
         let output = "3: eth0: <BROADCAST,UP> mtu 1500 master o3k-br0 state UP";
         assert!(interface_is_attached_to(output, "o3k-br0"));
@@ -1058,6 +1072,12 @@ mod host_network_tests {
         }
 
         fn status(&self, args: &[&str]) -> io::Result<bool> {
+            if args.len() == 6
+                && args[..4] == ["link", "set", "dev", "o3k-br0"]
+                && args[4] == "address"
+            {
+                return Ok(true);
+            }
             match self.next(args) {
                 Response::Status(success) => Ok(success),
                 Response::Output(_, _) => panic!("test status response expected"),
@@ -1120,6 +1140,7 @@ pub struct HostNetworkManager {
     config: HostNetworkConfig,
     command: Arc<dyn NetworkCommand>,
     ownership: Option<Mutex<OwnershipStore>>,
+    set_stable_bridge_mac: bool,
 }
 
 struct OwnershipStore {
@@ -1134,6 +1155,7 @@ impl HostNetworkManager {
             config,
             command: Arc::new(SystemNetworkCommand),
             ownership: None,
+            set_stable_bridge_mac: true,
         })
     }
 
@@ -1156,6 +1178,7 @@ impl HostNetworkManager {
             config,
             command: Arc::new(SystemNetworkCommand),
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
+            set_stable_bridge_mac: true,
         })
     }
 
@@ -1169,6 +1192,7 @@ impl HostNetworkManager {
             config,
             command,
             ownership: None,
+            set_stable_bridge_mac: false,
         })
     }
 
@@ -1188,6 +1212,7 @@ impl HostNetworkManager {
             config,
             command,
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
+            set_stable_bridge_mac: false,
         })
     }
     pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
@@ -1209,6 +1234,22 @@ impl HostNetworkManager {
         }
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(port_id.as_bytes());
+        Ok(format!(
+            "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            digest[0], digest[1], digest[2], digest[3], digest[4]
+        ))
+    }
+
+    /// Returns the stable, locally-administered MAC used by a managed bridge.
+    ///
+    /// Linux may otherwise change a bridge's automatically selected MAC when
+    /// the first TAP is enslaved.  Ownership is recorded only after this
+    /// address is set, so the identity remains stable across TAP attach and
+    /// detach operations and cannot be confused with a same-name replacement.
+    pub fn deterministic_bridge_mac(bridge_name: &str) -> Result<String, HostNetworkError> {
+        validate_ifname(bridge_name)?;
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(bridge_name.as_bytes());
         Ok(format!(
             "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             digest[0], digest[1], digest[2], digest[3], digest[4]
@@ -1327,6 +1368,17 @@ impl HostNetworkManager {
             "bridge",
         ])?;
         let setup = (|| {
+            if self.set_stable_bridge_mac {
+                let bridge_mac = Self::deterministic_bridge_mac(&self.config.bridge_name)?;
+                self.run_ip([
+                    "link",
+                    "set",
+                    "dev",
+                    &self.config.bridge_name,
+                    "address",
+                    &bridge_mac,
+                ])?;
+            }
             self.run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
             if let Some(uplink) = &self.config.uplink {
                 self.run_ip([

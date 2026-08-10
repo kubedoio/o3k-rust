@@ -10,6 +10,11 @@ exposed a separate create-operation conflict, and run `987654343` reproduced a
 TAP-ownership/DHCP rollback failure while leaving the shared `o3k-br0` bridge
 present.  The disposable bootstrap now uses a validated per-run bridge name;
 run `987654344` completed resource cleanup without leaving its run bridge.
+Fresh candidate-bound run `987654403` exposed Linux bridge-MAC drift after
+TAP preparation: the live bridge no longer matched the identity recorded at
+creation, so the agent correctly failed closed.  The network manager now
+assigns a stable locally-administered bridge MAC before recording ownership;
+a fresh host run after this fix is still required.
 These artifacts are useful
 diagnostics, but neither is a complete passing lifecycle, so no host-bound row
 is marked closed here.  The pre-existing libvirt domain `fcanary88` remained
