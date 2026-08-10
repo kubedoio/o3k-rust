@@ -9,6 +9,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-real-cinder-guards.XXXXXX")"
 trap 'rm -rf -- "${WORK_DIR}"' EXIT
 
+# Name prefixes are not ownership proofs.  Keep the external-service runner
+# from regressing to a host-wide domain/link sweep during failure cleanup.
+python3 - "${ROOT_DIR}/scripts/real-cinder-testbed-runner.sh" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+assert "grep '^o3k-'" not in text
+assert 'grep -E \'^o3k-\'' not in text
+PY
+
 ARTIFACT_DIR="${WORK_DIR}/artifacts"
 STATE_BASE="${WORK_DIR}/state"
 mkdir -p "${ARTIFACT_DIR}" "${STATE_BASE}"

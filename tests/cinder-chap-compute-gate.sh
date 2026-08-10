@@ -83,16 +83,13 @@ COMPUTE_HEALTH_PORT=18095
 cleanup() {
   set +e
   echo "==> Cleaning up run-owned resources..."
-  # Run-owned bridges and TAP interfaces (o3k-br* and o3ktap-*)
-  for iface in $(ip -o link show 2>/dev/null | grep -oE 'o3k(br|tap)[a-zA-Z0-9-]*' | sort -u) \
-               $(ip -o link show 2>/dev/null | grep -oE 'o3k-br[a-zA-Z0-9]*' | sort -u); do
-    ip link del "${iface}" >/dev/null 2>&1
-  done
-  # Run-owned libvirt domains
-  for domain in $(virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^o3k-' || true); do
-    virsh -c qemu:///system destroy "${domain}" >/dev/null 2>&1
-    virsh -c qemu:///system undefine "${domain}" >/dev/null 2>&1
-  done
+  # Never sweep host links or domains by an O3K-looking name.  Destructive
+  # cleanup requires the exact run-owned identity and provider ownership
+  # proof; otherwise preserve the resource for operator reconciliation.
+  if [ -n "${DOMAIN_NAME:-}" ]; then
+    virsh -c qemu:///system destroy "${DOMAIN_NAME}" >/dev/null 2>&1
+    virsh -c qemu:///system undefine "${DOMAIN_NAME}" >/dev/null 2>&1
+  fi
   # Run-owned iSCSI nodes and sessions
   iscsiadm -m node -T "${TARGET_IQN:-}" -o delete 2>/dev/null || true
   iscsiadm -m node -T "${TARGET_IQN:-}" --logout 2>/dev/null || true
@@ -144,18 +141,12 @@ done
 for u in $(tgtadm --lld iscsi --op show --mode account 2>/dev/null | grep -oE 'account: [a-zA-Z0-9._-]+' | awk '{print $2}' | grep '^o3k-' || true); do
   tgtadm --lld iscsi --op delete --mode account --user "${u}" >/dev/null 2>&1 || true
 done
-# Remove stale run-owned libvirt domains, iSCSI sessions/nodes, and O3K links
-# from an aborted prior run so a retry starts from a clean host.
-for d in $(virsh -c qemu:///system list --all --name 2>/dev/null | grep -E '^o3k-' || true); do
-  virsh -c qemu:///system destroy "${d}" >/dev/null 2>&1 || true
-  virsh -c qemu:///system undefine "${d}" >/dev/null 2>&1 || true
-done
+# Do not remove stale domains or links by name prefix.  No ownership proof is
+# available before this run provisions its exact identities, so preserve any
+# pre-existing resource and let the protected host guard report it.
 for n in $(iscsiadm -m node 2>/dev/null | grep -oE 'iqn\.[0-9a-zA-Z.:-]*o3k[0-9a-zA-Z.:-]*' || true); do
   iscsiadm -m node -T "${n}" --logout >/dev/null 2>&1 || true
   iscsiadm -m node -o delete -T "${n}" >/dev/null 2>&1 || true
-done
-for iface in $(ip -o link show 2>/dev/null | grep -oE 'o3k[a-zA-Z0-9-]*' | sort -u); do
-  ip link del "${iface}" >/dev/null 2>&1 || true
 done
 truncate -s 64M "${BACKING_FILE}"
 tgtadm --lld iscsi --op new --mode target --tid "${TARGET_TID}" -T "${TARGET_IQN}"
