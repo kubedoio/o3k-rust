@@ -1276,7 +1276,11 @@ mod tests {
         ] {
             let mode = fs::metadata(directory)?.permissions().mode();
             assert_eq!(mode & 0o777, 0o710);
-            assert_ne!(mode & 0o2000, 0, "cache directory must preserve kvm group inheritance");
+            assert_ne!(
+                mode & 0o2000,
+                0,
+                "cache directory must preserve kvm group inheritance"
+            );
         }
         fs::remove_dir_all(cache_path)?;
         Ok(())
