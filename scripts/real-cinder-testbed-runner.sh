@@ -416,8 +416,10 @@ configure_iscsi_compute_access() {
   }
   local path
   : > "${ISCSI_ACL_BACKUP}"
-  for path in /etc/iscsi /etc/iscsi/nodes /etc/iscsi/iscsid.conf \
-              /run/lock/iscsi /run/lock/iscsi/lock; do
+  for path in /etc/iscsi /etc/iscsi/nodes /etc/iscsi/ifaces \
+              /etc/iscsi/send_targets /etc/iscsi/iscsid.conf \
+              /etc/iscsi/initiatorname.iscsi /run/lock/iscsi \
+              /run/lock/iscsi/lock; do
     [ -e "${path}" ] || continue
     getfacl -p "${path}" >> "${ISCSI_ACL_BACKUP}"
   done
@@ -426,7 +428,11 @@ configure_iscsi_compute_access() {
   setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rx" /etc/iscsi
   setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
     /etc/iscsi/nodes
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rx" /etc/iscsi/ifaces
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /etc/iscsi/send_targets
   setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:r" /etc/iscsi/iscsid.conf
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:r" /etc/iscsi/initiatorname.iscsi
   setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
     /run/lock/iscsi
   if [ -e /run/lock/iscsi/lock ]; then
@@ -434,7 +440,7 @@ configure_iscsi_compute_access() {
   fi
   cat > "${EVIDENCE_DIR}/iscsi-privilege-boundary.txt" <<EOF
 account=${O3K_COMPUTE_ACCOUNT}
-access_paths=/etc/iscsi/iscsid.conf,/etc/iscsi/nodes,/run/lock/iscsi
+access_paths=/etc/iscsi/iscsid.conf,/etc/iscsi/initiatorname.iscsi,/etc/iscsi/ifaces,/etc/iscsi/nodes,/etc/iscsi/send_targets,/run/lock/iscsi
 network_capabilities=net_admin,net_bind_service,net_raw
 acl_backup=${ISCSI_ACL_BACKUP}
 EOF
@@ -558,7 +564,7 @@ volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
 volume_group = ${VG_NAME}
 target_protocol = iscsi
 target_helper = tgtadm
-iscsi_ip_address = 127.0.0.1
+target_ip_address = 127.0.0.1
 volume_clear = none
 # The volume service is launched from the pinned venv as root (no systemd
 # cinder account). Use sudo directly for LVM commands instead of the
@@ -738,7 +744,7 @@ emit_failure_diagnostics() {
   } > "${EVIDENCE_DIR}/failure-host-state.log" 2>&1
   {
     echo "== non-secret Cinder backend configuration =="
-    grep -E '^(volumes_dir|volume_group|volume_driver|target_helper|target_protocol|iscsi_ip_address|iscsi_target_prefix|iscsi_write_cache|volume_clear|root_helper|chap_authentication|enabled_backends|control_exchange|osapi_volume_listen)' "${CONF}" 2>&1 || true
+    grep -E '^(volumes_dir|volume_group|volume_driver|target_helper|target_protocol|target_ip_address|iscsi_ip_address|iscsi_target_prefix|iscsi_write_cache|volume_clear|root_helper|chap_authentication|enabled_backends|control_exchange|osapi_volume_listen)' "${CONF}" 2>&1 || true
   } > "${EVIDENCE_DIR}/failure-cinder-config.log" 2>&1
   {
     echo "== run-owned Cinder volume, attachment, and provider-location state =="

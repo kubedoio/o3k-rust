@@ -1843,9 +1843,22 @@ fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
 fn read_hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
-        .map(|value| value.trim().to_owned())
+        .and_then(|value| normalized_hostname(&value))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "o3k-compute".to_owned())
+}
+
+fn normalized_hostname(value: &str) -> Option<String> {
+    let value =
+        value.trim_matches(|character: char| character == '\0' || character.is_whitespace());
+    if value.is_empty()
+        || value.len() > 253
+        || value.chars().any(|character| character.is_control())
+    {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 fn read_first_ip() -> String {
@@ -2387,6 +2400,16 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_normalization_discards_nul_padding_and_bounds_identity() {
+        assert_eq!(
+            normalized_hostname("compute-agent\0\0\0\n"),
+            Some("compute-agent".to_owned())
+        );
+        assert!(normalized_hostname(&"x".repeat(254)).is_none());
+        assert!(normalized_hostname("compute\0agent").is_none());
+    }
 
     #[test]
     fn test_fault_pause_guard_accepts_only_positive_numeric_durations() {

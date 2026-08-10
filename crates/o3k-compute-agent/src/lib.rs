@@ -90,10 +90,15 @@ const ADMINISTRATIVE_STATE_FILE_EXTENSION: &str = "state";
 const COMMAND_JOURNAL_FILE_EXTENSION: &str = "commands";
 const COMMAND_JOURNAL_TEMP_EXTENSION: &str = "commands.tmp";
 const COMMAND_JOURNAL_MAGIC: &[u8] = b"O3KCMDJ1";
-const COMMAND_JOURNAL_VERSION: u8 = 1;
+const LEGACY_COMMAND_JOURNAL_VERSION: u8 = 1;
+const COMMAND_JOURNAL_VERSION: u8 = 2;
 const MAX_COMMAND_JOURNAL_ENTRIES: usize = 4096;
 const MAX_COMMAND_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_REDACTED_RESULT_BYTES: usize = 4096;
+// Keep the journal field within the same hard bound as one authenticated wire
+// message. The real connector contains only bounded text, but the journal
+// must reject any future expansion instead of allowing unbounded local state.
+const MAX_BLOCK_DEVICE_RESULT_BYTES: usize = MAX_MESSAGE_SIZE;
 const ARTIFACT_STORE_FILE_EXTENSION: &str = "artifacts";
 pub(crate) const ARTIFACT_TRANSFER_CAPABILITY: &str = "artifact_transfer";
 
@@ -700,7 +705,6 @@ impl NodeRegistry {
     ) -> Result<o3k_provider::AgentObservation, AgentError> {
         let mut events = self.subscribe_events();
         let agent_id = command.agent_id.clone();
-        let agent_epoch = command.agent_epoch.clone();
         let resource_id = command.resource_id.clone();
         let operation_id = command.operation_id.clone();
         let action = command_action_name(&command);
@@ -721,7 +725,6 @@ impl NodeRegistry {
                 match events.recv().await {
                     Ok(ProviderAgentEvent::Observation(observation))
                         if observation.agent_id == agent_id
-                            && observation.agent_epoch == agent_epoch
                             // The boundary converts identities to canonical
                             // UUIDs; O3K-built commands always carry canonical
                             // lowercase forms, so the round-trip comparison is
@@ -730,7 +733,25 @@ impl NodeRegistry {
                             && observation.resource_id.to_string() == resource_id
                             && observation.operation_id.to_string() == operation_id =>
                     {
-                        return Ok(*observation);
+                        // A command may finish after the original control
+                        // stream is replaced.  The agent journal then replays
+                        // the terminal observation under the new epoch.  The
+                        // registry is the authority for which epoch is live:
+                        // accept only that current epoch, never merely any
+                        // observation with matching operation identities.
+                        let current_epoch =
+                            self.snapshot(&agent_id).await.map(|node| node.agent_epoch);
+                        if current_epoch.as_deref() == Some(observation.agent_epoch.as_str()) {
+                            return Ok(*observation);
+                        }
+                        warn!(
+                            agent_id = %observation.agent_id,
+                            observation_epoch = %observation.agent_epoch,
+                            current_epoch = ?current_epoch,
+                            operation_id = %observation.operation_id,
+                            resource_id = %observation.resource_id,
+                            "ignored observation from a replaced agent epoch while waiting"
+                        );
                     }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(count)) => {
@@ -2863,6 +2884,19 @@ fn encode_execution_result(
         }
         None => bytes.push(0),
     }
+    match &result.block_device {
+        Some(block_device) => {
+            let encoded = block_device.encode_to_vec();
+            if encoded.len() > MAX_BLOCK_DEVICE_RESULT_BYTES {
+                return Err(AgentError::Protocol(
+                    "command journal block-device result exceeds its bound".to_owned(),
+                ));
+            }
+            bytes.push(1);
+            push_bytes(bytes, &encoded)?;
+        }
+        None => bytes.push(0),
+    }
     Ok(())
 }
 
@@ -2962,9 +2996,16 @@ fn decode_journal(
         ));
     }
     let mut reader = JournalReader::new(bytes);
-    if reader.take(COMMAND_JOURNAL_MAGIC.len())? != COMMAND_JOURNAL_MAGIC
-        || reader.u8()? != COMMAND_JOURNAL_VERSION
-    {
+    if reader.take(COMMAND_JOURNAL_MAGIC.len())? != COMMAND_JOURNAL_MAGIC {
+        return Err(AgentError::Protocol(
+            "command journal header is invalid".to_owned(),
+        ));
+    }
+    let version = reader.u8()?;
+    if !matches!(
+        version,
+        LEGACY_COMMAND_JOURNAL_VERSION | COMMAND_JOURNAL_VERSION
+    ) {
         return Err(AgentError::Protocol(
             "command journal header is invalid".to_owned(),
         ));
@@ -3012,7 +3053,10 @@ fn decode_journal(
             ));
         }
         let result = if record_reader.u8()? == 1 {
-            Some(decode_execution_result(&mut record_reader)?)
+            Some(decode_execution_result(
+                &mut record_reader,
+                version >= COMMAND_JOURNAL_VERSION,
+            )?)
         } else {
             None
         };
@@ -3054,6 +3098,7 @@ fn decode_journal(
 
 fn decode_execution_result(
     reader: &mut JournalReader<'_>,
+    has_block_device: bool,
 ) -> Result<CommandExecutionResult, AgentError> {
     let result = CommandExecutionResult {
         state: reader.i32()?,
@@ -3078,9 +3123,18 @@ fn decode_execution_result(
         } else {
             None
         },
-        // Block-device observations are not persisted in the journal; the
-        // control plane must re-observe after an agent restart.
-        block_device: None,
+        block_device: if has_block_device && reader.u8()? == 1 {
+            let encoded = reader.bytes(MAX_BLOCK_DEVICE_RESULT_BYTES)?;
+            Some(
+                proto::BlockDeviceObservation::decode(encoded.as_slice()).map_err(|_| {
+                    AgentError::Protocol(
+                        "command journal block-device result is invalid".to_owned(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        },
     };
     validate_execution_result(&result)?;
     Ok(result)
@@ -4632,6 +4686,75 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn command_observation_wait_accepts_current_epoch_replay_after_reconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch-1")).await?;
+        let (old_sender, mut old_receiver) = mpsc::channel(1);
+        registry
+            .attach_connection("node", "epoch-1", old_sender)
+            .await?;
+        let operation_id = "33333333-3333-3333-3333-333333333333";
+        let resource_id = "44444444-4444-4444-4444-444444444444";
+        let command = build_lifecycle_command(
+            LifecycleCommand::Inspect,
+            "node",
+            "epoch-1",
+            operation_id,
+            resource_id,
+        )?;
+        let waiting = {
+            let registry = registry.clone();
+            tokio::spawn(async move {
+                registry
+                    .dispatch_command_and_wait(command, Duration::from_secs(5))
+                    .await
+            })
+        };
+        let _dispatched = old_receiver.recv().await.ok_or("dispatched command")??;
+
+        // The old stream is replaced before its terminal journal replay is
+        // observed. Its evidence must remain fenced even though the command
+        // identities match.
+        registry.register(&register("node", "epoch-2")).await?;
+        let (new_sender, _new_receiver) = mpsc::channel(1);
+        registry
+            .attach_connection("node", "epoch-2", new_sender)
+            .await?;
+        let operation_uuid = Uuid::parse_str(operation_id)?;
+        let resource_uuid = Uuid::parse_str(resource_id)?;
+        let observation = |epoch: &str| o3k_provider::AgentObservation {
+            agent_id: "node".to_owned(),
+            agent_epoch: epoch.to_owned(),
+            resource_id: resource_uuid,
+            provider_resource_id: None,
+            operation_id: operation_uuid,
+            state: o3k_provider::InstanceState::Creating,
+            operation_state: o3k_provider::AgentOperationState::Succeeded,
+            observation_sequence: 1,
+            observed_at_unix_ms: 0,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        };
+        registry.publish_event(ProviderAgentEvent::Observation(Box::new(observation(
+            "epoch-1",
+        ))));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished(), "stale epoch completed the waiter");
+
+        registry.publish_event(ProviderAgentEvent::Observation(Box::new(observation(
+            "epoch-2",
+        ))));
+        let accepted = waiting.await??;
+        assert_eq!(accepted.agent_epoch, "epoch-2");
+        Ok(())
+    }
+
     #[test]
     fn command_action_names_are_stable_for_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
         for (action, expected) in [
@@ -5440,6 +5563,57 @@ mod tests {
             .as_ref()
             .ok_or_else(|| AgentError::Protocol("terminal result is missing".to_owned()))?;
         assert_eq!(result.provider_resource_id, "fake-provider-1");
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    #[test]
+    fn command_journal_round_trips_block_device_observations() -> Result<(), AgentError> {
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-journal-block-device-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let command = fake_create_command()?;
+        let key = journal_key("node", &command.operation_id);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+        assert!(matches!(
+            journal.accept(&command)?,
+            JournalDecision::New { .. }
+        ));
+        let mut result = fake_success(
+            "fake-provider-1".to_owned(),
+            proto::ResourceState::Running as i32,
+        );
+        result.block_device = Some(proto::BlockDeviceObservation {
+            volume_id: "volume-1".to_owned(),
+            attachment_id: "attachment-1".to_owned(),
+            driver_volume_type: "iscsi".to_owned(),
+            device_path: "/dev/vdb".to_owned(),
+            host_path: "/dev/sdb".to_owned(),
+            attached: true,
+            found: true,
+            initiator: "iqn.1993-08.org.debian:01:o3k".to_owned(),
+            host_name: "compute-host".to_owned(),
+            ip_address: "192.0.2.10".to_owned(),
+            iscsi_logged_in: true,
+        });
+        journal.complete(&key, result)?;
+        drop(journal);
+
+        let reopened = CommandJournal::open(&identity, "node")?;
+        let saved = reopened
+            .entries
+            .get(&key)
+            .and_then(|entry| entry.result.as_ref())
+            .and_then(|result| result.block_device.as_ref())
+            .ok_or_else(|| {
+                AgentError::Protocol("block-device journal result was not restored".to_owned())
+            })?;
+        assert_eq!(saved.volume_id, "volume-1");
+        assert_eq!(saved.host_path, "/dev/sdb");
+        assert!(saved.attached);
         fs::remove_file(path).map_err(AgentError::IdentityStore)?;
         Ok(())
     }
