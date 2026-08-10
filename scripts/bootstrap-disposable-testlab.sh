@@ -318,6 +318,7 @@ install -d -m 0700 "$PID_ROOT"
 [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state already exists"
 sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0755 \
   "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
+sudo -n chmod 0755 "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
 sudo -n install -d -o "$(id -u "$SERVICE_ACCOUNT")" -g "$(id -g "$SERVICE_ACCOUNT")" -m 0700 \
   "$STATE_ROOT/data"
 sudo -n install -d -o "$(id -u "$COMPUTE_ACCOUNT")" -g "$(id -g "$COMPUTE_ACCOUNT")" -m 0700 \
@@ -371,6 +372,7 @@ install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
+sudo -n chmod 0755 "$STATE_ROOT"
 sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/compute-data/agent-id"
 AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
   || fail "cannot read generated agent fingerprint"
@@ -481,8 +483,12 @@ sudo -n setpriv --reuid="$(id -u "$COMPUTE_ACCOUNT")" \
   || fail "o3k-compute ambient CAP_NET_ADMIN capability is unavailable"
 sudo -n ip link delete "$network_probe_name" \
   || fail "ambient CAP_NET_ADMIN probe link cleanup failed"
-sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
-  || fail "o3k service account cannot traverse the run state root"
+if ! sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env"; then
+  sudo -n stat -c 'state-root=%U:%G:%a:%n env=%U:%G:%a:%n' \
+    "$STATE_ROOT" "$STATE_ROOT/o3kd.env" 2>/dev/null || true
+  sudo -n namei -l "$STATE_ROOT/o3kd.env" 2>/dev/null || true
+  fail "o3k service account cannot traverse the run state root"
+fi
 
 start_service() {
   local name="$1" account="$2" env_file="$3" binary="$4" log_file="$5" pid_file="$6"
