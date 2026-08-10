@@ -289,4 +289,18 @@ if ! grep -Fq 'chmod 0750 "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not enforce config-dir group traversal mode" >&2
   exit 1
 fi
+# ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute
+# agent publishes Placement DISK_GB capacity from the operator's
+# O3K_COMPUTE_MAX_DISK_GB declaration and defaults to 0 (the provider is
+# Unavailable, every create 409s) when unset; the packaged libvirt install
+# must declare the capacity so a clean install can schedule the E2E flavor
+# (--disk 10), and must preserve an operator-pre-set value.
+if ! grep -Fq 'O3K_COMPUTE_MAX_DISK_GB=10' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not declare compute-agent disk capacity" >&2
+  exit 1
+fi
+if ! grep -Fq '^O3K_COMPUTE_MAX_DISK_GB=' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not preserve an operator-pre-set capacity value" >&2
+  exit 1
+fi
 echo "packaging safety tests passed"
