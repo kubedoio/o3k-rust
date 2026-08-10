@@ -117,6 +117,8 @@ DATA_DIR="${STATE_ROOT}/data"
 EVIDENCE_DIR="${STATE_ROOT}/evidence-$(date +%s)"
 VENV_DIR="${STATE_ROOT}/venv"
 LOOP_FILE="${DATA_DIR}/${VG_NAME}.img"
+O3K_SERVICE_ACCOUNT="${O3K_SERVICE_ACCOUNT:-o3k}"
+O3K_COMPUTE_ACCOUNT="${O3K_COMPUTE_ACCOUNT:-o3k-compute}"
 mkdir -p "${EVIDENCE_DIR}" "${DATA_DIR}"
 
 # Cinder TgtAdm target driver contract: cinder writes tgt-admin persistence
@@ -282,6 +284,34 @@ bash "${REPO_ROOT}/packaging/bootstrap-certs.sh" --output-dir "${TLS_PARENT}/tls
 TLS_DIR="${TLS_PARENT}/tls"
 install -m 0640 "${TLS_DIR}/agent-id" "${DATA_DIR}/agent-id"
 AUTHORIZED_FINGERPRINT="$(cat "${TLS_DIR}/agent-fingerprint")"
+
+# Run the two O3K processes under their installed service identities.  The
+# compute image cache is intentionally group-traversable by libvirt/qemu, but
+# remains inaccessible to the control-plane account.  Starting both daemons
+# as root would turn the host DAC policy into a false positive and leaves
+# qemu unable to read files created with root's primary group.
+getent passwd "${O3K_SERVICE_ACCOUNT}" >/dev/null \
+  || { echo "ERROR: missing ${O3K_SERVICE_ACCOUNT} service account"; exit 1; }
+getent passwd "${O3K_COMPUTE_ACCOUNT}" >/dev/null \
+  || { echo "ERROR: missing ${O3K_COMPUTE_ACCOUNT} compute account"; exit 1; }
+id -nG "${O3K_COMPUTE_ACCOUNT}" | tr ' ' '\n' | grep -Fqx kvm \
+  || { echo "ERROR: ${O3K_COMPUTE_ACCOUNT} is not a kvm member"; exit 1; }
+O3K_DATA_DIR="${DATA_DIR}/o3k"
+COMPUTE_DATA_DIR="${DATA_DIR}/compute"
+install -d -o "${O3K_SERVICE_ACCOUNT}" -g "${O3K_SERVICE_ACCOUNT}" -m 0700 \
+  "${O3K_DATA_DIR}"
+install -d -o "${O3K_COMPUTE_ACCOUNT}" -g kvm -m 2710 \
+  "${COMPUTE_DATA_DIR}"
+install -m 0640 -o "${O3K_COMPUTE_ACCOUNT}" -g kvm \
+  "${TLS_DIR}/agent-id" "${COMPUTE_DATA_DIR}/agent-id"
+chown "${O3K_SERVICE_ACCOUNT}:${O3K_SERVICE_ACCOUNT}" "${TLS_DIR}/server-key.pem"
+chmod 0640 "${TLS_DIR}/server-key.pem"
+chown "${O3K_COMPUTE_ACCOUNT}:kvm" "${TLS_DIR}/agent-key.pem" "${TLS_DIR}/agent-id"
+chmod 0640 "${TLS_DIR}/agent-key.pem" "${TLS_DIR}/agent-id"
+chmod 0644 "${TLS_DIR}/ca.pem" "${TLS_DIR}/agent.pem" \
+  "${TLS_DIR}/server.pem" "${TLS_DIR}/agent-fingerprint"
+chgrp kvm "${TLS_PARENT}" "${TLS_DIR}"
+chmod 0751 "${TLS_PARENT}" "${TLS_DIR}"
 
 echo "==> Installing Cinder 28.0.0 and visible dependencies (pinned venv)..."
 export DEBIAN_FRONTEND=noninteractive
@@ -539,7 +569,7 @@ echo "==> Starting O3K control plane with durable hosted-service identity and ag
 CONTROL_PORT=50051
 COMPUTE_HEALTH_PORT=18091
 export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
-export O3K_DATA_DIR="${DATA_DIR}/o3k"
+export O3K_DATA_DIR="${O3K_DATA_DIR}"
 export O3K_PROVIDER="agent"
 export O3K_LOG_FORMAT="json"
 export O3K_BOOTSTRAP_PASSWORD="${O3K_PW}"
@@ -551,12 +581,12 @@ export O3K_COMPUTE_SERVER_CERTIFICATE="${TLS_DIR}/server.pem"
 export O3K_COMPUTE_SERVER_PRIVATE_KEY="${TLS_DIR}/server-key.pem"
 export O3K_COMPUTE_CLIENT_CA="${TLS_DIR}/ca.pem"
 export O3K_COMPUTE_AUTHORIZED_AGENTS="compute-agent=${AUTHORIZED_FINGERPRINT}"
-"${O3KD_BIN}" > "${EVIDENCE_DIR}/o3kd.log" 2>&1 &
+runuser -u "${O3K_SERVICE_ACCOUNT}" -- "${O3KD_BIN}" > "${EVIDENCE_DIR}/o3kd.log" 2>&1 &
 O3KD_PID=$!
 
 echo "==> Starting the real o3k-compute agent (libvirt + iSCSI)..."
 cat > "${STATE_ROOT}/o3k-compute.env" <<EOF
-O3K_COMPUTE_DATA_DIR=${DATA_DIR}
+O3K_COMPUTE_DATA_DIR=${COMPUTE_DATA_DIR}
 O3K_COMPUTE_CONTROL_ENDPOINT=https://127.0.0.1:${CONTROL_PORT}
 O3K_COMPUTE_SERVER_NAME=o3k-control-plane
 O3K_COMPUTE_HOST_LABEL=o3k-testlab
@@ -566,7 +596,11 @@ O3K_COMPUTE_MAX_DISK_GB=10
 RUST_LOG=info
 EOF
 set -a; . "${STATE_ROOT}/o3k-compute.env"; set +a
-"${O3K_COMPUTE_BIN}" > "${EVIDENCE_DIR}/o3k-compute.log" 2>&1 &
+setpriv --reuid="$(id -u "${O3K_COMPUTE_ACCOUNT}")" \
+  --regid="$(id -g "${O3K_COMPUTE_ACCOUNT}")" --init-groups \
+  --inh-caps=+net_admin,+net_bind_service,+net_raw \
+  --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
+  "${O3K_COMPUTE_BIN}" > "${EVIDENCE_DIR}/o3k-compute.log" 2>&1 &
 COMPUTE_PID=$!
 
 # ------------------------------------------------------------------------------

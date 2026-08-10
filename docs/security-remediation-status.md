@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `acc2f11` and must not be
+This status is bound to the remediation branch tip and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
@@ -34,8 +34,8 @@ capabilities.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
-| ASR-001 | in-progress | Attachment routes are profile-gated, authenticated, and project-scoped; negative API tests pass. A fresh Flamingo hosted-profile attempt on 2026-08-10 reached the external Cinder setup but stopped during MariaDB migration because this host's protected `/tmp` mode `0700` prevented MariaDB temporary-table creation; no hosted compatibility claim is made | Fresh successful external-Cinder/hosted-profile evidence |
-| ASR-002 | in-progress | Attachment repository lookups include project/server ownership; cross-project tests pass. The fresh hosted-profile attempt was environment-blocked before the attachment workflow and therefore supplies no cross-project evidence | Fresh successful hosted-profile evidence |
+| ASR-001 | in-progress | Attachment routes are profile-gated, authenticated, and project-scoped; negative API tests pass. Fresh Flamingo runs reached real Cinder, created a real LVM-backed volume, and booted a real server, but the hosted attach phase remains blocked by an unknown connector outcome/503; no hosted compatibility claim is made | Fresh successful external-Cinder/hosted-profile attachment evidence |
+| ASR-002 | in-progress | Attachment repository lookups include project/server ownership; cross-project tests pass. The fresh hosted run reached attachment reservation but timed out before producing valid cross-project isolation evidence | Fresh successful hosted-profile isolation evidence |
 | ASR-003 | closed | The rejected-candidate failure mode was tenant-controlled qcow2 dependency access; source `acc2f11` run `1786389106` drove absolute `/etc/hostname`, relative escape, nested chain, file-protocol, external-data, and HTTP-protocol variants through the real agent create path. Every create failed before materialization, cleanup passed, no target sentinel hash appeared in variant outputs, no O3K domain/link remained, and the HTTP canary recorded zero requests; evidence: `/var/tmp/o3k-real-host-evidence-1786389106/asr-003-004-evidence.txt` | None for remediation; candidate-bound recertification remains separate |
 | ASR-004 | closed | Source `acc2f11` run `1786389106` records all hostile image creates rejected with no `qemu-img` invocation in the compute log, zero post-run helper children, and zero residual owned resources. The installed-host actual-child capability capture records `CapEff=0`, `NoNewPrivs=1`, and no decoded capabilities; bounded timeout/output/resource behavior is covered by the current portable suite and `run_qemu_img` limits; capability artifact: `/tmp/o3k-real-host-evidence-1786388000/dac-evidence.txt` | None for remediation; candidate-bound recertification remains separate |
 | ASR-005 | in-progress | Portable mode/secret tests plus final-source host artifacts `/tmp/o3k-real-host-evidence-1786388000/dac-evidence.txt` and `/tmp/o3k-real-host-evidence-1786388400/config-drive-dac-evidence.txt` observe DB/WAL/SHM, config-drive media, ownership manifests, and temporary publication files at restrictive modes; unrelated `ubuntu` reads are denied | Fresh SIGKILL publication/restart proof and explicit user-data/vendor-data admission/readback evidence |
