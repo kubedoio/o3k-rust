@@ -378,6 +378,16 @@ if grep -Fq 'rm -f -- /etc/systemd/system/o3kd.service' "$ROOT_DIR/packaging/uni
   echo "uninstall does not content-fence fixed system files" >&2
   exit 1
 fi
+purge_inspection_line="$(grep -n 'assert_no_owned_host_state || exit 2' "$ROOT_DIR/packaging/uninstall.sh" | head -n1 | cut -d: -f1)"
+purge_systemd_line="$(grep -n 'systemctl disable --now o3kd.service' "$ROOT_DIR/packaging/uninstall.sh" | head -n1 | cut -d: -f1)"
+[[ -n "$purge_inspection_line" && -n "$purge_systemd_line" && "$purge_inspection_line" -lt "$purge_systemd_line" ]] \
+  || { echo "purge does not inspect host state before service mutation" >&2; exit 1; }
+for required_guard in 'refusing purge while O3K-owned libvirt domain exists' \
+  'refusing purge while O3K-owned network link exists' \
+  'refusing purge while O3K DHCP process exists'; do
+  grep -Fq "$required_guard" "$ROOT_DIR/packaging/uninstall.sh" \
+    || { echo "purge host-state guard is missing: $required_guard" >&2; exit 1; }
+done
 
 # The libvirt profile must not share private keys between the control-plane
 # and host-execution identities. This is an executable DAC regression rather

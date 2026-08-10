@@ -81,6 +81,119 @@ if [[ $PURGE -eq 1 ]]; then
     fi
   done
 fi
+
+assert_no_owned_host_state() {
+  local compute_service=false
+  if printf '%s\n' "${MANIFEST_FILES[@]}" | grep -Fqx 'share/o3k/o3k-compute.service'; then
+    compute_service=true
+  fi
+  local compute_root="$DATA_DIR/compute"
+
+  if [[ "$compute_service" == true ]]; then
+    command -v virsh >/dev/null 2>&1 || {
+      echo "refusing purge: libvirt inspection tool is unavailable" >&2
+      return 1
+    }
+    virsh -c qemu:///system uri >/dev/null 2>&1 || {
+      echo "refusing purge: libvirt state could not be inspected" >&2
+      return 1
+    }
+    while IFS= read -r domain; do
+      [[ -n "$domain" ]] || continue
+      local xml
+      xml="$(virsh -c qemu:///system dumpxml "$domain" 2>/dev/null)" || {
+        echo "refusing purge: domain inspection failed for $domain" >&2
+        return 1
+      }
+      if grep -Fq 'managed_by="o3k-compute"' <<<"$xml" \
+        && grep -Fq '<o3k:domain' <<<"$xml"; then
+        echo "refusing purge while O3K-owned libvirt domain exists: $domain" >&2
+        return 1
+      fi
+    done < <(virsh -c qemu:///system list --all --name 2>/dev/null) || {
+      echo "refusing purge: libvirt domain listing failed" >&2
+      return 1
+    }
+
+    local network_manifest="$compute_root/network/ownership.json"
+    if [[ -e "$network_manifest" ]]; then
+      [[ -f "$network_manifest" && ! -L "$network_manifest" ]] || {
+        echo "refusing purge: network ownership manifest is unsafe" >&2
+        return 1
+      }
+      command -v python3 >/dev/null 2>&1 || {
+        echo "refusing purge: cannot inspect network ownership manifest" >&2
+        return 1
+      }
+      local network_names
+      network_names="$(python3 - "$network_manifest" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    manifest = json.load(stream)
+bridge = manifest.get("bridge") or {}
+if bridge.get("created_by_o3k") and bridge.get("name"):
+    print(bridge["name"])
+for name, record in (manifest.get("taps") or {}).items():
+    if record.get("created_by_o3k") and name:
+        print(name)
+PY
+      )" || {
+        echo "refusing purge: network ownership manifest is corrupt" >&2
+        return 1
+      }
+      if [[ -n "$network_names" ]]; then
+        command -v ip >/dev/null 2>&1 || {
+          echo "refusing purge: network inspection tool is unavailable" >&2
+          return 1
+        }
+        local links
+        links="$(ip -o link show 2>/dev/null)" || {
+          echo "refusing purge: network state could not be inspected" >&2
+          return 1
+        }
+        while IFS= read -r name; do
+          [[ -n "$name" ]] || continue
+          if grep -Eq "^[0-9]+: ${name}(@[^:]+)?:" <<<"$links"; then
+            echo "refusing purge while O3K-owned network link exists: $name" >&2
+            return 1
+          fi
+        done <<<"$network_names"
+      fi
+    fi
+
+    local dhcp_root="$compute_root/dhcp"
+    if [[ -d "$dhcp_root" && ! -L "$dhcp_root" ]]; then
+      while IFS= read -r pidfile; do
+        [[ -n "$pidfile" ]] || continue
+        local pid raw cmdline
+        raw="$(<"$pidfile")" || return 1
+        [[ "$raw" =~ ^[0-9]+$ ]] || {
+          echo "refusing purge: malformed DHCP pidfile $pidfile" >&2
+          return 1
+        }
+        pid="$raw"
+        if kill -0 "$pid" 2>/dev/null; then
+          cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" || {
+            echo "refusing purge: DHCP process identity is unreadable" >&2
+            return 1
+          }
+          if [[ "$cmdline" == *"$dhcp_root"* ]]; then
+            echo "refusing purge while O3K DHCP process exists: $pid" >&2
+            return 1
+          fi
+          echo "refusing purge: DHCP pidfile points to an unverified live process: $pid" >&2
+          return 1
+        fi
+      done < <(find "$dhcp_root" -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print)
+    elif [[ -e "$dhcp_root" ]]; then
+      echo "refusing purge: DHCP state root is unsafe" >&2
+      return 1
+    fi
+  fi
+}
+if [[ $PURGE -eq 1 ]]; then
+  assert_no_owned_host_state || exit 2
+fi
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3kd.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
