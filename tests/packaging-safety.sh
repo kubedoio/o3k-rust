@@ -303,4 +303,19 @@ if ! grep -Fq '^O3K_COMPUTE_MAX_DISK_GB=' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not preserve an operator-pre-set capacity value" >&2
   exit 1
 fi
+# Defect 6 (issue #90, clean Debian 12): libvirtd defaults to
+# auth_unix_rw = "polkit" and org.libvirt.unix.manage requires
+# auth_admin_keep, which the session-less o3k service account cannot satisfy
+# (no polkit agent available) — the agent publishes zeroed capabilities and
+# every create 409s. The packaged install must apply the policykit-1 rule
+# granting ONLY user o3k the manage action (inert on hosts with an active
+# auth_unix_rw = "none", e.g. Ubuntu 24.04).
+if ! grep -Fq 'install -m 0644 "$ROOT_DIR/packaging/50-o3k-libvirt.rules" /etc/polkit-1/rules.d/50-o3k-libvirt.rules' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not apply the libvirt polkit rule" >&2
+  exit 1
+fi
+if ! grep -Fq 'org.libvirt.unix.manage" && subject.user === "o3k"' "$ROOT_DIR/packaging/50-o3k-libvirt.rules"; then
+  echo "packaged polkit rule does not grant org.libvirt.unix.manage to o3k" >&2
+  exit 1
+fi
 echo "packaging safety tests passed"

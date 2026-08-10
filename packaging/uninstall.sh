@@ -88,6 +88,11 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
 fi
 if [[ $PURGE -eq 1 ]]; then
   for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do [[ -e "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; [[ -f "$path/.o3k-owned" ]] && rm -f -- "$path/.o3k-owned"; rmdir "$path" 2>/dev/null || true; done
+  # The libvirt-profile polkit rule applied by install.sh is O3K-applied
+  # state: purge removes it (issue #90). The rule is inert on hosts whose
+  # libvirtd uses auth_unix_rw = "none" (Ubuntu 24.04) and is scoped to the
+  # o3k user only, so removing it restores the host's default posture.
+  rm -f -- /etc/polkit-1/rules.d/50-o3k-libvirt.rules
 fi
 
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
