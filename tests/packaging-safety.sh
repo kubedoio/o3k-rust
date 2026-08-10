@@ -275,4 +275,18 @@ if grep -Fq -- '--listen-addr' "$ROOT_DIR/packaging/o3kd.service"; then
   echo "o3kd.service hardcodes --listen-addr" >&2
   exit 1
 fi
+# The o3k service account (o3kd.service / o3k-compute.service) reads the TLS
+# material at runtime; bootstrap-certs.sh creates the config dir as root:root
+# 0750, so install.sh must grant o3k group traversal on $CONFIG_DIR itself or
+# the mTLS control plane dies with AgentError::TlsMaterial. The env files
+# stay root-owned 0600 (systemd reads them as root), so only the TLS files
+# (0640 root:o3k) become o3k-readable.
+if ! grep -Fq 'chgrp o3k "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not grant the o3k service account config-dir traversal" >&2
+  exit 1
+fi
+if ! grep -Fq 'chmod 0750 "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not enforce config-dir group traversal mode" >&2
+  exit 1
+fi
 echo "packaging safety tests passed"
