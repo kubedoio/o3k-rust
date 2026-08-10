@@ -312,6 +312,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `registry.persist_pending_command`, which requires this store to be
     // wired before the registry is shared.
     let registry = o3k_compute_agent::NodeRegistry::default().with_store(store.clone());
+    // The console-log consumer keeps its own durable liveness handle: the
+    // `store` arc itself is moved into the compute service below.
+    let console_store: Arc<dyn o3k_store::DurableStore> = store.clone();
     let placement_repository: Arc<dyn o3k_store::PlacementRepository> = store.clone();
     let placement = o3k_placement::PlacementLedger::open(
         config.data_dir.join("placement"),
@@ -430,8 +433,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let event_task = compute_service.spawn_agent_event_consumer(Arc::new(registry.clone()));
-    let console_event_task =
-        spawn_console_event_consumer(registry.clone(), console_service.clone());
+    let console_event_task = spawn_console_event_consumer(
+        registry.subscribe_events(),
+        console_service.clone(),
+        console_store.clone(),
+    );
     let attachment_reconciler = compute_service.spawn_attachment_reconciler(5);
     let create_convergence_reconciler = compute_service.spawn_create_convergence_reconciler(5);
     let lifecycle_convergence_reconciler =
@@ -722,16 +728,66 @@ async fn run_agent_inspect_probe(
 }
 
 fn spawn_console_event_consumer(
-    registry: o3k_compute_agent::NodeRegistry,
+    mut events: tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent>,
     console: o3k_console::ConsoleService,
+    store: Arc<dyn o3k_store::DurableStore>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut events = registry.subscribe_events();
     tokio::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(o3k_provider::AgentEvent::Observation(observation))
                     if !observation.console_log_bytes.is_empty() =>
                 {
+                    // Liveness guard (issue #89, defect 4): after a crash the
+                    // agent re-delivers committed journal observations. For a
+                    // server whose delete already completed, the delete path's
+                    // `console.cleanup` removed the console log, so writing
+                    // the replayed bytes would resurrect owned host state that
+                    // must stay absent. The delete projection keeps a DELETED
+                    // tombstone (the row is never removed), so a durable read
+                    // decides: only a present, decodable, non-Deleted resource
+                    // may receive console bytes. Anything else is stale replay
+                    // evidence and is skipped.
+                    let resource_is_live = match store.get_resource(observation.resource_id).await {
+                        Ok(resource) => {
+                            match o3k_store::server_state_from_storage(&resource.observed_state) {
+                                Ok(o3k_domain::ServerState::Deleted) => {
+                                    tracing::debug!(
+                                        resource_id = %observation.resource_id,
+                                        "skipping console observation for deleted resource"
+                                    );
+                                    false
+                                }
+                                Ok(_) => true,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        resource_id = %observation.resource_id,
+                                        "skipping console observation for resource with corrupt state"
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        Err(o3k_store::StoreError::ResourceNotFound) => {
+                            tracing::debug!(
+                                resource_id = %observation.resource_id,
+                                "skipping console observation for absent resource"
+                            );
+                            false
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                resource_id = %observation.resource_id,
+                                "skipping console observation: resource liveness could not be verified"
+                            );
+                            false
+                        }
+                    };
+                    if !resource_is_live {
+                        continue;
+                    }
                     if let Err(error) = console.write_chunk(
                         observation.resource_id,
                         observation.console_log_offset,
@@ -833,6 +889,93 @@ mod tests {
             Some("/tmp/valid-output.json"),
             Some("/tmp/valid-resource-file")
         ));
+    }
+
+    #[tokio::test]
+    async fn console_observation_rejects_stale_replay_for_deleted_or_absent_resource()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-console-guard-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let store_handle: Arc<dyn o3k_store::DurableStore> = store.clone();
+        let console = o3k_console::ConsoleService::open(root.join("console"))?;
+
+        let live_id = Uuid::now_v7();
+        let deleted_id = Uuid::now_v7();
+        let absent_id = Uuid::now_v7();
+        let record = |id: Uuid, observed_state: &str| o3k_store::ResourceRecord {
+            id,
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 1,
+            desired_state: "{}".to_owned(),
+            observed_state: observed_state.to_owned(),
+            provider_id: None,
+        };
+        store_handle
+            .insert_resource(&record(live_id, "ACTIVE"))
+            .await?;
+        // The delete projection keeps a DELETED tombstone (issue #89, defect
+        // 4: a crash + journal replay must not resurrect the console log).
+        store_handle
+            .insert_resource(&record(deleted_id, "DELETED"))
+            .await?;
+
+        let (sender, receiver) = tokio::sync::broadcast::channel(16);
+        let task = super::spawn_console_event_consumer(receiver, console.clone(), store_handle);
+        let observation = |resource_id: Uuid, bytes: &[u8]| {
+            o3k_provider::AgentEvent::Observation(Box::new(o3k_provider::AgentObservation {
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                resource_id,
+                provider_resource_id: None,
+                state: o3k_provider::InstanceState::Running,
+                operation_id: Uuid::now_v7(),
+                operation_state: o3k_provider::AgentOperationState::Succeeded,
+                observation_sequence: 1,
+                observed_at_unix_ms: 0,
+                redacted_message: None,
+                console_log_bytes: bytes.to_vec(),
+                console_log_offset: 0,
+                console_log_complete: true,
+                console_log_truncated: false,
+                block_device: None,
+            }))
+        };
+        sender.send(observation(deleted_id, b"stale delete replay"))?;
+        sender.send(observation(absent_id, b"stale absent replay"))?;
+        sender.send(observation(live_id, b"live boot"))?;
+        drop(sender);
+        task.await?;
+
+        assert!(
+            matches!(
+                console.read(deleted_id),
+                Err(o3k_console::ConsoleError::NotFound)
+            ),
+            "deleted resource console replay must not write the console log"
+        );
+        assert!(
+            matches!(
+                console.read(absent_id),
+                Err(o3k_console::ConsoleError::NotFound)
+            ),
+            "absent resource console replay must not write the console log"
+        );
+        assert_eq!(
+            console.read(live_id)?,
+            b"live boot",
+            "live resource console observation must still be written"
+        );
+
+        drop(console);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
     }
 
     #[tokio::test]
