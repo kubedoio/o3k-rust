@@ -29,6 +29,7 @@ AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
 CONTROL_PORT="${O3K_TESTLAB_CONTROL_PORT:-18551}"
 COMPUTE_HEALTH_PORT="${O3K_TESTLAB_COMPUTE_HEALTH_PORT:-19100}"
 O3K_PROVIDER="${O3K_PROVIDER:-fake}"
+BRIDGE_NAME="${O3K_COMPUTE_BRIDGE_NAME:-o3k-b${RUN_ID: -8}}"
 case "${O3K_PROVIDER}" in
   fake|agent) ;;
   *) echo "disposable TestLab bootstrap failed: unsupported provider ${O3K_PROVIDER}" >&2; exit 1 ;;
@@ -176,6 +177,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
+[[ "$BRIDGE_NAME" =~ ^[A-Za-z0-9_-]{1,15}$ ]] || fail "invalid compute bridge name"
 for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd setpriv nohup; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
@@ -411,6 +413,7 @@ O3K_COMPUTE_SERVER_NAME=o3k-control-plane
 O3K_COMPUTE_HOST_LABEL=o3k-testlab
 O3K_COMPUTE_TLS_DIR=$(printf '%q' "$STATE_ROOT/tls")
 O3K_COMPUTE_HEALTH_ADDR=$(printf '%q' "127.0.0.1:${COMPUTE_HEALTH_PORT}")
+O3K_COMPUTE_BRIDGE_NAME=$(printf '%q' "$BRIDGE_NAME")
 O3K_COMPUTE_MAX_DISK_GB=10
 # The compute daemon reads RUST_LOG directly. Keep the default at warn and let
 # protected runs opt into scoped info filters via O3K_COMPUTE_LOG_FILTER.

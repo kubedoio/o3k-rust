@@ -27,6 +27,8 @@ assert 'agent-id.artifacts' in bootstrap
 assert '--ambient-caps=+net_admin' in bootstrap
 assert '--init-groups' in bootstrap
 assert 'nohup bash -c' in bootstrap
+assert 'O3K_COMPUTE_BRIDGE_NAME' in bootstrap
+assert 'o3k-b${RUN_ID: -8}' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
 assert 'SupplementaryGroups' not in bootstrap
 assert '.o3k-supplementary-groups-added' in bootstrap
