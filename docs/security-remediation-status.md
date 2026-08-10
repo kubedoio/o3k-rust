@@ -18,10 +18,11 @@ a fresh host run after this fix is still required.
 These artifacts are useful
 diagnostics, but neither is a complete passing lifecycle, so no host-bound row
 is marked closed here.  The pre-existing libvirt domain `fcanary88` remained
-unchanged.  The current diagnostic host also still contains `o3k-br0` and
-`o3k-b87654346`; their current O3K ownership cannot be proven from surviving
-ledgers, so they are deliberately preserved and the host is not a clean
-recertification boundary.  They must not be removed by name alone.
+unchanged.  The current diagnostic host also contains the preserved
+`o3k-b87654403` bridge from candidate-bound run `987654403`; its live identity
+does not match the surviving manifest, so current O3K ownership cannot be
+proven.  It is deliberately preserved and the host is not yet a clean
+recertification boundary.  It must not be removed by name alone.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
