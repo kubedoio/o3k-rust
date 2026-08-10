@@ -1048,7 +1048,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 };
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 self.adapter
-                    .start(name.clone())
+                    .start_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 let inspection = self
@@ -1072,7 +1072,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 // confirm the guest is actually inactive before projecting
                 // the stopped state.
                 self.adapter
-                    .force_stop(name.clone())
+                    .force_stop_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 let inspection = self
@@ -1091,11 +1091,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 // without ACPI handling (CirrOS) never react to an ACPI
                 // reboot request.
                 self.adapter
-                    .force_stop(name.clone())
+                    .force_stop_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 self.adapter
-                    .start(name.clone())
+                    .start_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 let inspection = self
@@ -1134,12 +1134,12 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 verify_owned_domain(&inspection, &command.resource_id)?;
                 if inspection.active {
                     self.adapter
-                        .force_stop(name.clone())
+                        .force_stop_owned(name.clone(), command.resource_id.clone())
                         .await
                         .map_err(agent_error)?;
                 }
                 self.adapter
-                    .undefine(name.clone())
+                    .undefine_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
                 cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
