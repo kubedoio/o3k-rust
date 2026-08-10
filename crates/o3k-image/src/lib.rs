@@ -746,7 +746,6 @@ where
         "--no-new-privs",
         "--ambient-caps=-all",
         "--inh-caps=-all",
-        "--bounding-set=-all",
         "--reset-env",
         "--",
     ]);
