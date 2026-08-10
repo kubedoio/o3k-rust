@@ -6,7 +6,9 @@ candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
 creation, and cleanup with every created resource verified absent.  Run
 `987654340` failed only the console boot-marker assertion; run `987654341`
-exposed a separate create-operation conflict.  These artifacts are useful
+exposed a separate create-operation conflict, and run `987654343` reproduced a
+TAP-ownership/DHCP rollback failure while leaving the managed `o3k-br0` bridge
+present.  These artifacts are useful
 diagnostics, but neither is a complete passing lifecycle, so no host-bound row
 is marked closed here.  The pre-existing libvirt domain `fcanary88` remained
 unchanged.
@@ -23,7 +25,7 @@ unchanged.
 | ASR-008 | implemented-portable | Console tail reads are bounded by request and snapshot limits | Fresh sparse/growing-log host evidence |
 | ASR-009 | in-progress | `o3kd`/`o3k-compute` have separate users, state, units, and polkit authority | Fresh Ubuntu/Debian install proof |
 | ASR-010 | implemented-portable | Every agent lifecycle mutation uses ownership-fenced libvirt handles; same-name replacement tests pass | Fresh libvirt failure/replacement proof |
-| ASR-011 | implemented-portable | Network cleanup revalidates live ownership and preserves foreign replacement links | Fresh host link canaries |
+| ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; run `987654343` reproduced TAP-ownership/DHCP rollback residue with `o3k-br0` left present | Fresh host link canaries and a fix for recurrent rollback residue |
 | ASR-012 | implemented-portable | Reset/purge preserve ledgers and fail closed on active/foreign host state | Fresh install/uninstall/purge host suite |
 | ASR-013 | implemented-portable | dnsmasq cleanup acquires pidfd before identity validation and signals only the stable handle; process tests pass | Fresh Linux pid-reuse stress proof |
 | ASR-014 | implemented-portable | Agent evidence is bound to command/resource/agent identity | Fresh process/agent reconnect evidence |
