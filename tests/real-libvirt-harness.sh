@@ -32,6 +32,10 @@ cat >"${MOCK_BIN}/openstack" <<'SH'
 set -Eeuo pipefail
 state_file="${O3K_MOCK_STATE:?}"
 resource_state="${O3K_MOCK_RESOURCE_STATE:?}"
+# Deterministic valid UUID for the mocked server identity. The public CLI
+# harness validates that the returned server ID is a real UUID, so the mock
+# must never emit a placeholder like "server-id".
+server_uuid="00000000-0000-0000-0000-000000000001"
 case "$*" in
   token\ issue*) exit 0;;
   image\ create*) echo image-id; : >"${resource_state}/image-id";;
@@ -52,7 +56,7 @@ case "$*" in
   image\ delete*|keypair\ delete*|network\ delete*|subnet\ delete*|port\ delete*|flavor\ delete*)
     rm -f -- "${resource_state}/${3}"
     ;;
-  server\ create*) : >"${state_file}"; echo server-id;;
+  server\ create*) : >"${state_file}"; echo "${server_uuid}";;
   server\ stop*) echo SHUTOFF >"${resource_state}/server-status";;
   server\ start*) echo ACTIVE >"${resource_state}/server-status";;
   server\ reboot*) echo ACTIVE >"${resource_state}/server-status";;
@@ -65,11 +69,11 @@ case "$*" in
       cat "${resource_state}/server-status" 2>/dev/null || echo ACTIVE
       exit 0
     fi
-    echo '{"id":"server-id","name":"o3k-testlab-server","status":"ACTIVE","config_drive":true,"addresses":{"o3k-testlab-network":[{"addr":"192.0.2.2"}]}}'
+    echo "{\"id\":\"${server_uuid}\",\"name\":\"o3k-testlab-server\",\"status\":\"ACTIVE\",\"config_drive\":true,\"addresses\":{\"o3k-testlab-network\":[{\"addr\":\"192.0.2.2\"}]}}"
     ;;
   server\ list*)
     if [[ -e "${state_file}" ]]; then
-      echo '[{"id":"server-id","name":"o3k-testlab-server"}]'
+      echo "[{\"id\":\"${server_uuid}\",\"name\":\"o3k-testlab-server\"}]"
     else
       echo '[]'
     fi
@@ -100,6 +104,7 @@ assert result["artifact_type"] == "openstack-cli-e2e"
 assert result["status"] == "passed"
 assert result["public_api_only"] is True
 assert result["cleanup"]["status"] == "passed"
+assert result["resources"]["server_id"] == "00000000-0000-0000-0000-000000000001"
 assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}}
 assert set(result["lifecycle"]) == {"create", "show", "list", "stop", "start", "reboot", "console", "delete"}
 assert all(result["lifecycle"].values())
