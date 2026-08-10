@@ -41,6 +41,17 @@ and read both back from `openstack/latest` (`user_data` 39 bytes and
 public console API; the largest response was 26,873 bytes and the API process
 remained bounded.  The run's owned OpenStack, libvirt, and network resources
 were removed and the stale-state guard reported an empty inventory.
+Fresh run `1786401002` then killed the running non-root compute process,
+observed its health boundary disappear, restarted it with the same durable
+state, observed authenticated command observations replay on reconnect, and
+completed another public CirrOS lifecycle with all owned resources cleaned.
+Fresh run `1786401003` paused a real create after libvirt define, restarted
+libvirtd asynchronously, and issued delete while the create was paused.  The
+first delete was rejected with the expected current-operation conflict; after
+create completion the retry converged to absence.  A foreign same-name domain
+digest was unchanged before/after (`cc24140437ae576bb17dbc16ddc92411e6bf829dbe1ae32825d487671a45141d`) and the stale-state guard was empty.  This is useful
+pass-after recovery evidence but does not reproduce the historical accepted
+delete command stranded in #575, so ASR-017 remains open.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
@@ -57,10 +68,10 @@ were removed and the stale-state guard reported an empty inventory.
 | ASR-011 | closed | Source `acc2f11` run `1786389110` pre-created a foreign same-name bridge `o3k-canary11` in `DOWN` state; the real agent create failed closed with `existing TAP interface is not owned by the requested O3K network`, cleanup passed, and before/after `ip -d link` digests were identical. The complete stable-MAC lifecycle pass is recorded by run `1786387900`; canary evidence: `/var/tmp/o3k-real-host-evidence-1786389110/asr-011-evidence.txt` | None for remediation; candidate-bound recertification remains separate |
 | ASR-012 | closed | Source `acc2f11` real-host hostile-image creates in run `1786389106` failed after network/port preparation and each cleanup verified image/keypair/network/subnet/port/flavor absence with zero owned links; the same run records zero O3K domains/links after all failures. Fresh `TMPDIR=/var/tmp bash tests/packaging-safety.sh` also exercised reset, uninstall, purge, foreign state, and ownership-ledger refusal paths; output is preserved in `/var/tmp/o3k-real-host-evidence-1786389106/packaging-safety.log` | None for remediation; candidate-bound recertification remains separate |
 | ASR-013 | implemented-portable | dnsmasq cleanup acquires pidfd before identity validation and signals only the stable handle; process tests pass | Fresh Linux pid-reuse stress proof |
-| ASR-014 | in-progress | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity; run `987654346` committed both transfers without the prior offer-conflict disconnect | Fresh process/agent reconnect evidence and a complete lifecycle run |
+| ASR-014 | closed | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity; run `987654346` committed both transfers without the prior offer-conflict disconnect. Fresh disposable run `1786401002` killed the running non-root compute process, observed its health endpoint disappear, restarted it with the same durable journal, observed replayed command observations on reconnect, and then passed a complete public CirrOS lifecycle with owned-resource cleanup | None for remediation; candidate-bound recertification remains separate |
 | ASR-015 | implemented-portable | Epoch fencing and durable command replay tests pass | Fresh reconnect/crash host evidence |
 | ASR-016 | implemented-portable | Monotonic observation and concurrent store tests pass | Fresh multi-process concurrency evidence |
-| ASR-017 | in-progress | Historical fail-before evidence is preserved in #575: libvirtd restart during mid-define left an accepted delete permanently unknown/stranded. Source `acc2f11` pass-after run `1786389004` paused create after define, restarted libvirtd with exit 0, completed create/stop/start/reboot/delete, verified every public resource absent, and observed no owned O3K domain or link; it does not yet reproduce the exact stale-accepted-delete re-drive, so the row remains open | Fresh exact stale-accepted-delete re-drive after libvirtd restart |
+| ASR-017 | in-progress | Historical fail-before evidence is preserved in #575: libvirtd restart during mid-define left an accepted delete permanently unknown/stranded. Source `acc2f11` pass-after run `1786389004` paused create after define, restarted libvirtd with exit 0, completed create/stop/start/reboot/delete, verified every public resource absent, and observed no owned O3K domain or link. Fresh run `1786401003` performed the tighter asynchronous-restart attempt: delete during the pause returned the expected current-operation 409, then a retry after create completion converged to absence; the foreign-domain digest remained unchanged and cleanup was empty. It still does not reproduce an accepted stale delete being re-driven, so the row remains open | Fresh exact stale-accepted-delete re-drive after libvirtd restart |
 | ASR-018 | implemented-portable | Placement intent/commit/restart reconciliation tests pass | Fresh crash-failpoint host proof |
 | ASR-019 | closed | Source `acc2f11` host run `TMPDIR=/var/tmp bash tests/packaging-safety.sh` passed the symlinked certificate output canary and all installer/uninstaller ownership checks; preserved output: `/var/tmp/o3k-real-host-evidence-1786389106/packaging-safety.log` | None for remediation; candidate-bound recertification remains separate |
 | ASR-020 | closed | `tests/human-review-package.sh` passed on source `61f4308`: pending/approved/rejected artifacts validate truthfully, rejected approval booleans are not required, malformed safeguards are rejected, and `--require-approved` rejects non-approved artifacts | None for validator remediation; human approval is intentionally not created here |
