@@ -106,13 +106,23 @@ printf '%064d\n' 0 >"$TLS_DIR/agent-fingerprint"
 printf 'compute-agent\n' >"$TLS_DIR/agent-id"
 
 LIBVIRT_PREFIX="$WORK_DIR/libvirt-prefix"
-CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
-  --profile libvirt --noninteractive \
-  --prefix "$LIBVIRT_PREFIX" --data-dir "$WORK_DIR/libvirt-data" \
-  --config-dir "$WORK_DIR/libvirt-config" --log-dir "$WORK_DIR/libvirt-log"
-
-cmp -s "$BUNDLE_DIR/bin/o3kd" "$LIBVIRT_PREFIX/bin/o3kd"
-cmp -s "$BUNDLE_DIR/bin/o3k-compute" "$LIBVIRT_PREFIX/bin/o3k-compute"
-[[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
+if id o3k >/dev/null 2>&1 && id -nG o3k | tr ' ' '\n' | grep -Eq '^(libvirt|kvm)$'; then
+  if CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+      --profile libvirt --noninteractive \
+      --prefix "$LIBVIRT_PREFIX" --data-dir "$WORK_DIR/libvirt-data" \
+      --config-dir "$WORK_DIR/libvirt-config" --log-dir "$WORK_DIR/libvirt-log"; then
+    echo "libvirt bundle installer reused a privileged control account" >&2
+    exit 1
+  fi
+  echo "libvirt bundle install correctly refused a privileged control-account reuse"
+else
+  CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR/packaging/install.sh" \
+    --profile libvirt --noninteractive \
+    --prefix "$LIBVIRT_PREFIX" --data-dir "$WORK_DIR/libvirt-data" \
+    --config-dir "$WORK_DIR/libvirt-config" --log-dir "$WORK_DIR/libvirt-log"
+  cmp -s "$BUNDLE_DIR/bin/o3kd" "$LIBVIRT_PREFIX/bin/o3kd"
+  cmp -s "$BUNDLE_DIR/bin/o3k-compute" "$LIBVIRT_PREFIX/bin/o3k-compute"
+  [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
+fi
 
 echo "release bundle installer test passed"
