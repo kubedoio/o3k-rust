@@ -48,6 +48,8 @@ assert '"$uid" == o3k || "$uid" == o3k-compute' in cleanup
 assert 'assert_no_owned_host_state()' in cleanup
 assert 'refusing to discard state while O3K-owned libvirt domain exists' in cleanup
 assert 'refusing to discard state while O3K-owned network link exists' in cleanup
+assert 'STATE_ROOT/compute-data/network/ownership.json' in cleanup
+assert 'STATE_ROOT/compute-data/dhcp' in cleanup
 assert 'refusing to discard state while O3K DHCP process exists' in cleanup
 assert cleanup.index('assert_no_owned_host_state || exit 1') < cleanup.index('sudo -n rm -rf -- "$STATE_ROOT"')
 ready_start = bootstrap.index('wait_for_o3kd_ready() {')

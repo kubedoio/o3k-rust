@@ -185,7 +185,10 @@ assert_no_owned_host_state() {
   done < <(sudo -n virsh -c qemu:///system list --all --name 2>/dev/null) \
     || { echo "cleanup: libvirt domain listing failed" >&2; return 1; }
 
-  local manifest="$STATE_ROOT/data/network/ownership.json"
+  # Host network ownership belongs to the compute service's private state,
+  # not the control-plane data directory.  Checking the latter silently
+  # discarded the only ledger that could authorize safe cleanup.
+  local manifest="$STATE_ROOT/compute-data/network/ownership.json"
   if [[ -e "$manifest" ]]; then
     [[ -f "$manifest" && ! -L "$manifest" ]] || { echo "cleanup: network ownership manifest is unsafe" >&2; return 1; }
     command -v python3 >/dev/null 2>&1 || { echo "cleanup: cannot inspect network ownership manifest" >&2; return 1; }
@@ -214,7 +217,7 @@ PY
     fi
   fi
 
-  local dhcp_root="$STATE_ROOT/data/dhcp"
+  local dhcp_root="$STATE_ROOT/compute-data/dhcp"
   if [[ -d "$dhcp_root" && ! -L "$dhcp_root" ]]; then
     while IFS= read -r pidfile; do
       [[ -n "$pidfile" ]] || continue
