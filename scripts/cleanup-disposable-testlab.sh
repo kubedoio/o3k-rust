@@ -217,6 +217,21 @@ PY
     fi
   fi
 
+  # If a crash happened before the network ledger was persisted, the
+  # deterministic disposable bridge name is still a conservative fence.  Do
+  # not discard the run state while that link exists: without the ledger there
+  # is no proof that deleting it would be safe.
+  local expected_bridge="${O3K_COMPUTE_BRIDGE_NAME:-o3k-b${RUN_ID: -8}}"
+  if [[ "$expected_bridge" =~ ^[A-Za-z0-9_-]{1,15}$ ]] && command -v ip >/dev/null 2>&1; then
+    local links
+    links="$(sudo -n ip -o link show 2>/dev/null)" \
+      || { echo "cleanup: network state could not be inspected" >&2; return 1; }
+    if grep -Eq "^[0-9]+: ${expected_bridge}(@[^:]+)?[:]" <<<"$links"; then
+      echo "cleanup: refusing to discard state while disposable bridge exists: $expected_bridge" >&2
+      return 1
+    fi
+  fi
+
   local dhcp_root="$STATE_ROOT/compute-data/dhcp"
   if [[ -d "$dhcp_root" && ! -L "$dhcp_root" ]]; then
     while IFS= read -r pidfile; do
