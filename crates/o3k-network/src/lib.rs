@@ -806,6 +806,10 @@ mod host_network_tests {
             Response::status(true),
             Response::status(true),
             Response::status(true),
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ),
             Response::status(true),
             Response::output(
                 true,
@@ -879,6 +883,59 @@ mod host_network_tests {
         ));
         assert_eq!(command.calls().len(), 2);
         fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn cleanup_preserves_same_name_foreign_bridge_replacement() -> Result<(), HostNetworkError> {
+        let root = std::env::temp_dir().join(format!("o3k-network-replaced-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(|_| HostNetworkError::CommandFailed)?;
+        let gateway = GatewaySpec {
+            address: "192.0.2.1"
+                .parse()
+                .map_err(|_| HostNetworkError::InvalidConfiguration)?,
+            prefix_len: 24,
+        };
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                identity: Some("2".to_owned()),
+                gateway: Some(GatewayOwnership {
+                    address: gateway.address,
+                    prefix_len: gateway.prefix_len,
+                }),
+            }),
+            taps: BTreeMap::new(),
+        };
+        fs::write(
+            root.join("ownership.json"),
+            serde_json::to_vec(&manifest).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+        let command = FakeNetworkCommand::new([Response::output(
+            true,
+            "3: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+        )]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        assert!(matches!(
+            manager.remove_gateway(gateway),
+            Err(HostNetworkError::ForeignInterface)
+        ));
+        assert!(
+            command
+                .calls()
+                .iter()
+                .all(|args| args.as_slice() != ["addr", "del", "192.0.2.1/24", "dev", "o3k-br0"])
+        );
         Ok(())
     }
 
@@ -1209,6 +1266,9 @@ impl HostNetworkManager {
         if recorded != gateway {
             return Err(HostNetworkError::OwnershipConflict);
         }
+        if !self.bridge_is_owned_live()? {
+            return Err(HostNetworkError::ForeignInterface);
+        }
         let address = format!("{}/{}", gateway.address, gateway.prefix_len);
         self.run_ip(["addr", "del", &address, "dev", &self.config.bridge_name])?;
         self.clear_gateway_ownership()
@@ -1225,7 +1285,10 @@ impl HostNetworkManager {
         if self.link_exists(&self.config.bridge_name) {
             let output =
                 self.command_output(["-d", "link", "show", "dev", &self.config.bridge_name])?;
-            if !output.success || !interface_output_is_bridge(&output.stdout) {
+            if !output.success
+                || !interface_output_is_bridge(&output.stdout)
+                || !self.bridge_is_owned_output(&output)
+            {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.run_ip(["link", "del", "dev", &self.config.bridge_name])?;
