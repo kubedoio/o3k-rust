@@ -22,14 +22,15 @@ assert 'o3k-disposable-account-v1' in bootstrap
 assert 'protobuf-compiler' in bootstrap
 assert 'O3K_REAL_HOST_COMPUTE_BINARY' in bootstrap
 assert 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin' in bootstrap
-assert 'chgrp kvm' in bootstrap
+assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
 assert 'agent-id.artifacts' in bootstrap
 assert '--ambient-caps=+net_admin' in bootstrap
 assert '--init-groups' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
 assert 'SupplementaryGroups' not in bootstrap
 assert '.o3k-supplementary-groups-added' in bootstrap
-assert 'usermod --append --groups' in bootstrap
+assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
+assert 'usermod --append --groups "$group" o3k\n' not in bootstrap
 assert 'gpasswd --delete o3k' in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
@@ -55,7 +56,7 @@ assert workflow.count('scripts/bootstrap-disposable-testlab.sh') == 1
 assert workflow.count('scripts/cleanup-disposable-testlab.sh') == 1
 PY
 
-tmp_root="$(mktemp -d /tmp/o3k-disposable-bootstrap-test.XXXXXX)"
+tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/o3k-disposable-bootstrap-test.XXXXXX")"
 trap 'rm -rf -- "$tmp_root"' EXIT
 chmod 0755 "$tmp_root"
 run_id=local-991
@@ -86,6 +87,18 @@ RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" \
 
 [[ ! -e "$state" && ! -e "$pid_root" && ! -e "$venv" && ! -e "$image" && ! -e "$image.o3k-owned" ]]
 ! sudo -n kill -0 "$service_pid" 2>/dev/null
+
+# The split-account bootstrap uses a root-owned, traversable run root so
+# neither daemon owns the other daemon's state.  Cleanup must still recognize
+# and remove that explicitly marked O3K-owned root.
+mkdir -p "$state"
+printf 'o3k-disposable-testlab-v1\ncommit=test\nrun=%s\n' "$run_id" >"$state/.o3k-run-owned"
+printf 'o3k-owned-v1 path=%s\n' "$state" >"$state/.o3k-owned"
+sudo chown -R root:root "$state"
+sudo chmod 0755 "$state"
+RUNNER_TEMP="$tmp_root" GITHUB_RUN_ID="$run_id" O3K_TESTLAB_STATE_ROOT="$state" \
+  O3K_TESTLAB_PID_ROOT="$pid_root" bash "$CLEANUP"
+[[ ! -e "$state" ]]
 
 mkdir -p "$state"
 printf 'foreign-state\n' >"$state/.o3k-run-owned"
