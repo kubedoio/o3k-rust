@@ -152,21 +152,22 @@ failure_cleanup() {
     [[ -z "$COMPUTE_PID" ]] || stop_owned_process "$COMPUTE_PID" o3k-compute || cleanup_failed=true
     [[ -z "$O3KD_PID" ]] || stop_owned_process "$O3KD_PID" o3kd || cleanup_failed=true
     if [[ "$cleanup_failed" == false ]]; then
-      remove_added_supplementary_groups 2>/dev/null || true
-      if [[ -d "$STATE_ROOT" && ! -L "$STATE_ROOT" \
-        && -f "$STATE_ROOT/.o3k-run-owned" && ! -L "$STATE_ROOT/.o3k-run-owned" ]] \
-        && sudo -n grep -Fqx 'o3k-disposable-testlab-v1' "$STATE_ROOT/.o3k-run-owned" 2>/dev/null; then
-        sudo -n rm -rf -- "$STATE_ROOT" 2>/dev/null || true
+      # Reuse the fail-closed cleanup path.  In particular, do not discard
+      # the ownership ledger until libvirt, network, and DHCP state have
+      # been inspected; a startup failure can still leave host resources.
+      if [[ -x "$ROOT_DIR/scripts/cleanup-disposable-testlab.sh" ]]; then
+        RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$RUN_ID" \
+          O3K_TESTLAB_STATE_ROOT="$STATE_ROOT" O3K_TESTLAB_PID_ROOT="$PID_ROOT" \
+          O3K_REAL_HOST_INVENTORY_ROOT="$INVENTORY_ROOT" \
+          O3K_OPENSTACK_VENV="$OPENSTACK_VENV" O3K_TESTLAB_IMAGE_PATH="$IMAGE_PATH" \
+          bash "$ROOT_DIR/scripts/cleanup-disposable-testlab.sh" 2>/dev/null || cleanup_failed=true
+      else
+        cleanup_failed=true
       fi
-      rm -rf -- "$PID_ROOT" 2>/dev/null || true
-      if [[ -d "$INVENTORY_ROOT" && ! -L "$INVENTORY_ROOT" ]] \
-        && grep -Fqx 'o3k-disposable-inventory-v1' "$INVENTORY_ROOT/.o3k-inventory-owned" 2>/dev/null; then
-        rm -rf -- "$INVENTORY_ROOT" 2>/dev/null || true
-      fi
-      remove_created_identity 2>/dev/null || true
     else
       echo "disposable TestLab cleanup incomplete; preserving owned state for retry" >&2
     fi
+    [[ "$cleanup_failed" == false ]] || echo "disposable TestLab cleanup incomplete; preserving owned state for retry" >&2
   fi
   exit "$status"
 }

@@ -32,12 +32,20 @@ assert '.o3k-supplementary-groups-added' in bootstrap
 assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
 assert 'usermod --append --groups "$group" o3k\n' not in bootstrap
 assert 'gpasswd --delete o3k' in bootstrap
+assert 'cleanup-disposable-testlab.sh' in bootstrap
+assert 'ownership ledger until libvirt, network, and DHCP state have' in bootstrap
+assert 'sudo -n rm -rf -- "$STATE_ROOT"' not in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
 assert 'ps -o user:32=' in bootstrap
 assert 'ps -o user:32=' in cleanup
 assert '"$uid" == o3k || "$uid" == o3k-compute' in cleanup
+assert 'assert_no_owned_host_state()' in cleanup
+assert 'refusing to discard state while O3K-owned libvirt domain exists' in cleanup
+assert 'refusing to discard state while O3K-owned network link exists' in cleanup
+assert 'refusing to discard state while O3K DHCP process exists' in cleanup
+assert cleanup.index('assert_no_owned_host_state || exit 1') < cleanup.index('sudo -n rm -rf -- "$STATE_ROOT"')
 ready_start = bootstrap.index('wait_for_o3kd_ready() {')
 ready_end = bootstrap.index('\n}', ready_start)
 ready_block = bootstrap[ready_start:ready_end]

@@ -165,6 +165,77 @@ stop_owned_process() {
   echo "cleanup: service did not stop" >&2
   return 1
 }
+
+# Never discard the run ledger while host resources may still exist.  The
+# ledger is the only durable record allowing a later retry to identify and
+# clean those resources safely.
+assert_no_owned_host_state() {
+  [[ -x "$STATE_ROOT/bin/o3k-compute" ]] || return 0
+  command -v virsh >/dev/null 2>&1 || { echo "cleanup: libvirt inspection tool is unavailable" >&2; return 1; }
+  sudo -n virsh -c qemu:///system uri >/dev/null 2>&1 \
+    || { echo "cleanup: libvirt state could not be inspected" >&2; return 1; }
+  while IFS= read -r domain; do
+    [[ -n "$domain" ]] || continue
+    xml="$(sudo -n virsh -c qemu:///system dumpxml "$domain" 2>/dev/null)" \
+      || { echo "cleanup: domain inspection failed for $domain" >&2; return 1; }
+    if grep -Fq 'managed_by="o3k-compute"' <<<"$xml" && grep -Fq '<o3k:domain' <<<"$xml"; then
+      echo "cleanup: refusing to discard state while O3K-owned libvirt domain exists: $domain" >&2
+      return 1
+    fi
+  done < <(sudo -n virsh -c qemu:///system list --all --name 2>/dev/null) \
+    || { echo "cleanup: libvirt domain listing failed" >&2; return 1; }
+
+  local manifest="$STATE_ROOT/data/network/ownership.json"
+  if [[ -e "$manifest" ]]; then
+    [[ -f "$manifest" && ! -L "$manifest" ]] || { echo "cleanup: network ownership manifest is unsafe" >&2; return 1; }
+    command -v python3 >/dev/null 2>&1 || { echo "cleanup: cannot inspect network ownership manifest" >&2; return 1; }
+    local names
+    names="$(python3 - "$manifest" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    manifest = json.load(stream)
+bridge = manifest.get("bridge") or {}
+if bridge.get("created_by_o3k") and bridge.get("name"):
+    print(bridge["name"])
+for name, record in (manifest.get("taps") or {}).items():
+    if record.get("created_by_o3k") and name:
+        print(name)
+PY
+    )" || { echo "cleanup: network ownership manifest is corrupt" >&2; return 1; }
+    if [[ -n "$names" ]]; then
+      command -v ip >/dev/null 2>&1 || { echo "cleanup: network inspection tool is unavailable" >&2; return 1; }
+      local links
+      links="$(sudo -n ip -o link show 2>/dev/null)" || { echo "cleanup: network state could not be inspected" >&2; return 1; }
+      while IFS= read -r name; do
+        [[ -n "$name" ]] || continue
+        grep -Eq "^[0-9]+: ${name}(@[^:]+)?:" <<<"$links" \
+          && { echo "cleanup: refusing to discard state while O3K-owned network link exists: $name" >&2; return 1; }
+      done <<<"$names"
+    fi
+  fi
+
+  local dhcp_root="$STATE_ROOT/data/dhcp"
+  if [[ -d "$dhcp_root" && ! -L "$dhcp_root" ]]; then
+    while IFS= read -r pidfile; do
+      [[ -n "$pidfile" ]] || continue
+      local pid raw cmdline
+      raw="$(sudo -n cat "$pidfile" 2>/dev/null)" || return 1
+      [[ "$raw" =~ ^[0-9]+$ ]] || { echo "cleanup: malformed DHCP pidfile $pidfile" >&2; return 1; }
+      pid="$raw"
+      if sudo -n kill -0 "$pid" 2>/dev/null; then
+        cmdline="$(sudo -n tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)" \
+          || { echo "cleanup: DHCP process identity is unreadable" >&2; return 1; }
+        [[ "$cmdline" == *"$dhcp_root"* ]] \
+          || { echo "cleanup: DHCP pidfile points to an unverified live process: $pid" >&2; return 1; }
+        echo "cleanup: refusing to discard state while O3K DHCP process exists: $pid" >&2
+        return 1
+      fi
+    done < <(find "$dhcp_root" -maxdepth 1 -type f -name 'dnsmasq-*.pid' -print)
+  elif [[ -e "$dhcp_root" ]]; then
+    echo "cleanup: DHCP state root is unsafe" >&2
+    return 1
+  fi
+}
 for pid_file in "$PID_ROOT/o3kd.pid" "$PID_ROOT/o3k-compute.pid"; do
   if [[ -f "$pid_file" ]]; then
     IFS='|' read -r pid start_ticks uid binary extra <"$pid_file"
@@ -192,6 +263,7 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 [[ "$alive" == false ]] || { echo "cleanup: service did not stop" >&2; exit 1; }
+assert_no_owned_host_state || exit 1
 remove_added_supplementary_groups || exit 1
 if [[ "$account_created" == true || "$group_created" == true ]]; then
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
