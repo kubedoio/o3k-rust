@@ -1105,11 +1105,15 @@ impl SqliteStore {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))
                 .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
         }
+        #[cfg(unix)]
+        restrict_sqlite_sidecars(path)?;
         let url = format!("sqlite://{}", path.display());
         let store = Self::connect(&url).await?;
         #[cfg(unix)]
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        #[cfg(unix)]
+        restrict_sqlite_sidecars(path)?;
         Ok(store)
     }
 
@@ -6553,6 +6557,28 @@ pub async fn run_placement_repository_conformance<S: PlacementRepository>(
     Ok(())
 }
 
+#[cfg(unix)]
+fn restrict_sqlite_sidecars(path: &Path) -> Result<(), StoreError> {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+        let Ok(metadata) = fs::symlink_metadata(&sidecar) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            return Err(StoreError::Database(sqlx::Error::Configuration(
+                format!(
+                    "SQLite sidecar is not a regular file: {}",
+                    sidecar.display()
+                )
+                .into(),
+            )));
+        }
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600))
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7488,6 +7514,19 @@ mod tests {
         let path = PathBuf::from(format!("/tmp/o3k-store-wal-{}.sqlite", Uuid::now_v7()));
         let store = SqliteStore::connect_file(&path).await?;
         assert_eq!(store.journal_mode().await?, "wal");
+
+        for suffix in ["", "-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{}", path.display(), suffix));
+            if sidecar.exists() {
+                #[cfg(unix)]
+                assert_eq!(
+                    fs::symlink_metadata(&sidecar)?.permissions().mode() & 0o777,
+                    0o600,
+                    "SQLite sensitive file must not be world-readable: {}",
+                    sidecar.display()
+                );
+            }
+        }
 
         let health = store.database_health().await?;
         assert_eq!(health.status, "ok");
