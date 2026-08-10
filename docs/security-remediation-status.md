@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `79a7915` and must not be
+This status is bound to the remediation branch at `4660bda` and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes; `libvirtd` is inactive in the current
 environment, so no host-bound row is marked closed here.
@@ -11,7 +11,7 @@ environment, so no host-bound row is marked closed here.
 | ASR-002 | implemented-portable | Attachment repository lookups include project/server ownership; cross-project tests pass | Fresh hosted-profile evidence |
 | ASR-003 | implemented-portable | Backing-chain and external-data rejection occurs before helper invocation; adversarial tests pass | Fresh real `qemu-img` proof |
 | ASR-004 | implemented-portable | Helper limits, bounded output, and capability stripping are tested | Fresh installed-host capability/resource proof |
-| ASR-005 | in-progress | Restrictive modes and separate state roots are packaged and portable checks pass | Fresh Ubuntu/Debian DAC proof |
+| ASR-005 | in-progress | Restrictive modes and separate state roots are packaged; SQLite, WAL, and SHM are explicitly forced to `0600`, verified by unit and fresh-host bootstrap checks | Fresh Ubuntu/Debian DAC proof |
 | ASR-006 | implemented-portable | Admission limits and restart/symlink-safe config-drive cleanup tests pass | Fresh host kill/restart evidence |
 | ASR-007 | in-progress | Managed-root regular-file console checks and bounded reads are tested | Fresh installed-host capability and DAC proof |
 | ASR-008 | implemented-portable | Console tail reads are bounded by request and snapshot limits | Fresh sparse/growing-log host evidence |
