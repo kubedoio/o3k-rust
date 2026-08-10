@@ -18,6 +18,14 @@ text = Path(sys.argv[1]).read_text(encoding="utf-8")
 assert "grep '^o3k-'" not in text
 assert 'grep -E \'^o3k-\'' not in text
 PY
+python3 - "${ROOT_DIR}/tests/cinder-chap-compute-gate.sh" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+assert "grep -E \"^Target\"" not in text
+assert "grep -oE 'account: [a-zA-Z0-9._-]+'" not in text
+assert "grep -oE 'iqn\\.[0-9a-zA-Z.:-]*o3k" not in text
+PY
 
 ARTIFACT_DIR="${WORK_DIR}/artifacts"
 STATE_BASE="${WORK_DIR}/state"

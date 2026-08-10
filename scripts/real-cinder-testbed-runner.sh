@@ -837,12 +837,10 @@ PY
 # the next run. Only O3K-owned target names and run-VG-backed files are
 # touched.
 remove_run_owned_tgt_state() {
-  while IFS= read -r tid; do
-    [ -n "${tid}" ] || continue
-    tgtadm --lld iscsi --op delete --mode target --tid "${tid}" 2>/dev/null && \
-      echo "    removed run-owned iSCSI target ${tid}" || true
-  done < <(tgtadm --lld iscsi --op show --mode target 2>/dev/null \
-      | sed -n 's/^Target \([0-9]*\): iqn.2010-10.org.openstack:volume-.*/\1/p' || true)
+  # Never delete targets by the generic Cinder volume IQN prefix: those
+  # targets may belong to another service or operator. The external Cinder
+  # service owns target lifecycle; this runner only removes persistence files
+  # whose backing-store names prove they belong to this run's VG.
   while IFS= read -r pf; do
     [ -n "${pf}" ] || continue
     rm -f "${pf}" && echo "    removed run-owned persistence file $(basename "${pf}")" || true
@@ -860,14 +858,8 @@ cleanup_early() {
   # public delete path and the compute provider's metadata-fenced cleanup are
   # the only permitted domain destruction paths; an unproven orphan is left
   # for bounded operator reconciliation.
-  # Run-owned iSCSI sessions from a partially completed attach: log out only
-  # O3K-owned iSCSI node records (iqn.2010-10.org.openstack:volume-*).
-  while IFS= read -r iqn; do
-    [ -n "${iqn}" ] || continue
-    iscsiadm -m node -T "${iqn}" --logout 2>/dev/null || true
-    iscsiadm -m node -T "${iqn}" --op delete 2>/dev/null || true
-    echo "    removed run-owned iSCSI node ${iqn}"
-  done < <(iscsiadm -m node 2>/dev/null | awk '{print $2}' | grep '^iqn.2010-10.org.openstack:volume-' || true)
+  # Do not sweep iSCSI nodes by the generic volume IQN prefix. Without a
+  # durable run-owned identity, preserving the node is safer than guessing.
   kill -TERM "${COMPUTE_PID:-}" 2>/dev/null || true
   wait "${COMPUTE_PID:-}" 2>/dev/null || true
   kill -TERM "${O3KD_PID:-}" 2>/dev/null || true

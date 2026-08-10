@@ -87,8 +87,12 @@ cleanup() {
   # cleanup requires the exact run-owned identity and provider ownership
   # proof; otherwise preserve the resource for operator reconciliation.
   if [ -n "${DOMAIN_NAME:-}" ]; then
-    virsh -c qemu:///system destroy "${DOMAIN_NAME}" >/dev/null 2>&1
-    virsh -c qemu:///system undefine "${DOMAIN_NAME}" >/dev/null 2>&1
+    domain_xml="$(virsh -c qemu:///system dumpxml "${DOMAIN_NAME}" 2>/dev/null || true)"
+    if printf '%s\n' "$domain_xml" | grep -Fq "server_id=\"${SERVER_ID:-}\"" \
+      && printf '%s\n' "$domain_xml" | grep -Fq 'managed_by="o3k-compute"'; then
+      virsh -c qemu:///system destroy "${DOMAIN_NAME}" >/dev/null 2>&1
+      virsh -c qemu:///system undefine "${DOMAIN_NAME}" >/dev/null 2>&1
+    fi
   fi
   # Run-owned iSCSI nodes and sessions
   iscsiadm -m node -T "${TARGET_IQN:-}" -o delete 2>/dev/null || true
@@ -134,20 +138,11 @@ BACKING_FILE="${DATA_DIR}/backing.img"
 # Run-unique CHAP account so concurrent or stale runs never collide.
 CHAP_USER="o3k-chap-$(openssl rand -hex 4)"
 CHAP_PASSWORD="$(openssl rand -hex 16)"
-# Remove stale run-owned tgt targets and CHAP accounts before provisioning.
-for t in $(tgtadm --lld iscsi --op show --mode target 2>/dev/null | grep -E "^Target" | awk '{print $2}' || true); do
-  tgtadm --lld iscsi --op delete --mode target --tid "${t}" >/dev/null 2>&1 || true
-done
-for u in $(tgtadm --lld iscsi --op show --mode account 2>/dev/null | grep -oE 'account: [a-zA-Z0-9._-]+' | awk '{print $2}' | grep '^o3k-' || true); do
-  tgtadm --lld iscsi --op delete --mode account --user "${u}" >/dev/null 2>&1 || true
-done
+# Do not remove stale targets or accounts by a generic identifier prefix.
+# Provisioning fails closed if the exact run identity is unavailable.
 # Do not remove stale domains or links by name prefix.  No ownership proof is
 # available before this run provisions its exact identities, so preserve any
 # pre-existing resource and let the protected host guard report it.
-for n in $(iscsiadm -m node 2>/dev/null | grep -oE 'iqn\.[0-9a-zA-Z.:-]*o3k[0-9a-zA-Z.:-]*' || true); do
-  iscsiadm -m node -T "${n}" --logout >/dev/null 2>&1 || true
-  iscsiadm -m node -o delete -T "${n}" >/dev/null 2>&1 || true
-done
 truncate -s 64M "${BACKING_FILE}"
 tgtadm --lld iscsi --op new --mode target --tid "${TARGET_TID}" -T "${TARGET_IQN}"
 tgtadm --lld iscsi --op new --mode logicalunit --tid "${TARGET_TID}" --lun 1 -b "${BACKING_FILE}"
