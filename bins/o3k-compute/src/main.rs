@@ -1,6 +1,5 @@
 use std::{
     env,
-    io::{Read, Seek, SeekFrom},
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -665,39 +664,6 @@ fn cleanup_console_log(
     }
 }
 
-/// Read a bounded snapshot from the descriptor opened before libvirt defines
-/// the domain. Libvirt may replace the path and change its ownership while
-/// attaching the file sink, but the already-open descriptor remains valid for
-/// the compute boundary and avoids reopening a root-owned file.
-fn read_open_console_tail(
-    file: &mut std::fs::File,
-    max_bytes: usize,
-    wait: Duration,
-) -> Result<Vec<u8>, AgentError> {
-    if max_bytes == 0 {
-        return Err(AgentError::Protocol("console bound is invalid".to_owned()));
-    }
-    let deadline = std::time::Instant::now() + wait;
-    loop {
-        file.seek(SeekFrom::End(0))
-            .map_err(|error| AgentError::Protocol(format!("console log seek failed: {error}")))?;
-        let end = file.stream_position().map_err(|error| {
-            AgentError::Protocol(format!("console log position failed: {error}"))
-        })?;
-        let start = end.saturating_sub(max_bytes as u64);
-        file.seek(SeekFrom::Start(start))
-            .map_err(|error| AgentError::Protocol(format!("console log seek failed: {error}")))?;
-        let mut bytes = Vec::with_capacity((end - start) as usize);
-        file.take(max_bytes as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|error| AgentError::Protocol(format!("console log read failed: {error}")))?;
-        if !bytes.is_empty() || std::time::Instant::now() >= deadline {
-            return Ok(bytes);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 fn prepare_network(
     command: &proto::Command,
     network: &o3k_network::HostNetworkManager,
@@ -1357,9 +1323,8 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         )),
                     ));
                 }
-                let mut console_file = match std::fs::OpenOptions::new()
+                let console_file = match std::fs::OpenOptions::new()
                     .create(true)
-                    .read(true)
                     .append(true)
                     .open(&console_path)
                 {
@@ -1441,7 +1406,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     ));
                 }
                 test_fault_pause_ms("after-start", "O3K_TEST_FAULT_PAUSE_AFTER_START_MS");
-                let inspection = match self.adapter.inspect(definition_name).await {
+                let inspection = match self.adapter.inspect(definition_name.clone()).await {
                     Ok(value) => value,
                     Err(error) => {
                         let error = match self
@@ -1488,16 +1453,15 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         error,
                     ));
                 }
-                let console_log = match read_open_console_tail(
-                    &mut console_file,
-                    o3k_console::MAX_CONSOLE_BYTES,
-                    // The guest may take several seconds to begin emitting
-                    // serial output on a cold KVM host. Keep the observation
-                    // bounded while retaining the descriptor across that
-                    // startup window; later API reads use the control-plane
-                    // cache rather than reopening libvirt's root-owned sink.
-                    Duration::from_secs(30),
-                ) {
+                let console_log = match self
+                    .adapter
+                    .read_console(
+                        definition_name,
+                        o3k_console::MAX_CONSOLE_BYTES,
+                        command.resource_id.clone(),
+                    )
+                    .await
+                {
                     Ok(bytes) if !bytes.is_empty() => Some(ConsoleLogResult {
                         truncated: bytes.len() == o3k_console::MAX_CONSOLE_BYTES,
                         complete: bytes.len() < o3k_console::MAX_CONSOLE_BYTES,
