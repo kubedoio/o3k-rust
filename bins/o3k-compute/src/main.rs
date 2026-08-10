@@ -1897,6 +1897,16 @@ fn collect_host_connector() -> Result<o3k_provider::ConnectorInfo, AgentError> {
     })
 }
 
+fn iscsiadm_command() -> std::process::Command {
+    if std::env::var_os("O3K_ISCSIADM_SUDO").is_some_and(|value| value == "1") {
+        let mut command = std::process::Command::new("sudo");
+        command.args(["--non-interactive", "--", "/usr/sbin/iscsiadm"]);
+        command
+    } else {
+        std::process::Command::new("iscsiadm")
+    }
+}
+
 /// Logs into the iSCSI target and returns the observed host device path. A
 /// missing iscsiadm is an explicit unsupported-connector failure; a successful
 /// login without an observed device is an unknown outcome. The node record is
@@ -1918,13 +1928,13 @@ fn iscsi_login(
     // The node record must exist before CHAP settings can be applied. Show
     // the node first (os-brick tolerates "no records found") and create the
     // record only when it is absent.
-    let node_show = std::process::Command::new("iscsiadm")
+    let node_show = iscsiadm_command()
         .args(["--mode", "node", "-T", target_iqn, "-p", target_portal])
         .output();
     match node_show {
         Ok(output) if output.status.success() => {}
         Ok(_) | Err(_) => {
-            let node_new = std::process::Command::new("iscsiadm")
+            let node_new = iscsiadm_command()
                 .args([
                     "--mode",
                     "node",
@@ -1956,7 +1966,7 @@ fn iscsi_login(
     if let Some((username, password)) = chap_auth {
         // Apply CHAP to the node session before login. Credentials are passed
         // as arguments and never logged or echoed into errors.
-        let update = std::process::Command::new("iscsiadm")
+        let update = iscsiadm_command()
             .args([
                 "--mode",
                 "node",
@@ -1991,7 +2001,7 @@ fn iscsi_login(
             }
         }
     }
-    let login = std::process::Command::new("iscsiadm")
+    let login = iscsiadm_command()
         .args([
             "--mode",
             "node",
@@ -2013,7 +2023,7 @@ fn iscsi_login(
                 .find_map(|line| line.split("with session").nth(1))
                 .map(|value| value.trim().to_owned());
             for _ in 0..10 {
-                let device = std::process::Command::new("iscsiadm")
+                let device = iscsiadm_command()
                     .args(["--mode", "session", "-P", "3"])
                     .output()
                     .ok()
@@ -2088,7 +2098,7 @@ fn discover_iscsi_device(session_output: &str, target_iqn: &str) -> Option<Strin
 
 fn iscsi_logout(target_iqn: &str, target_portal: &str) -> Result<(), AgentError> {
     let _ = target_portal;
-    let logout = std::process::Command::new("iscsiadm")
+    let logout = iscsiadm_command()
         .args(["--mode", "node", "-T", target_iqn, "--logout"])
         .output();
     match logout {

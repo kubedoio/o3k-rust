@@ -133,6 +133,8 @@ TGT_CONF_BACKUP="${STATE_ROOT}/tgt-targets.conf.orig"
 TGT_CONF_MODIFIED=0
 ISCSI_ACL_BACKUP="${STATE_ROOT}/iscsi-acl.before"
 ISCSI_ACL_MODIFIED=0
+ISCSI_SUDOERS_PATH="/etc/sudoers.d/o3k-cinder-${RUN_SLUG}"
+ISCSI_SUDOERS_CREATED=0
 MYSQL_TMP_DIR="${DATA_DIR}/mysql-tmp"
 MYSQL_TMP_CONF="/etc/mysql/mariadb.conf.d/99-o3k-${RUN_SLUG}.cnf"
 MYSQL_TMP_CONF_CREATED=0
@@ -142,6 +144,13 @@ restore_iscsi_compute_access() {
     setfacl --restore="${ISCSI_ACL_BACKUP}" 2>/dev/null || \
       echo "WARNING: unable to restore iSCSI ACLs from ${ISCSI_ACL_BACKUP}" >&2
     ISCSI_ACL_MODIFIED=0
+  fi
+}
+
+restore_iscsi_sudo_policy() {
+  if [ "${ISCSI_SUDOERS_CREATED:-0}" = "1" ]; then
+    rm -f -- "${ISCSI_SUDOERS_PATH}"
+    ISCSI_SUDOERS_CREATED=0
   fi
 }
 
@@ -173,6 +182,7 @@ early_failure_cleanup() {
   # that is removed below, so ordering matters.
   restore_tgtd_config 2>/dev/null || true
   restore_iscsi_compute_access 2>/dev/null || true
+  restore_iscsi_sudo_policy 2>/dev/null || true
   restore_mysql_tmpdir 2>/dev/null || true
   # The database, message-bus, and loop/LVM resources are created before the
   # full service cleanup trap is installed. Remove only this run's exact
@@ -448,6 +458,43 @@ EOF
 echo "==> Granting reversible non-root iSCSI control-path access..."
 configure_iscsi_compute_access
 
+# Debian open-iscsi requires root for the login control path even when the
+# node database and lock files have been ACL-scoped.  The external-Cinder
+# testbed therefore grants only this disposable compute account permission to
+# execute the exact host iscsiadm binary through a run-owned sudoers file. The
+# compute process remains non-root; the policy is syntax-checked, recorded,
+# and removed on every cleanup path. This is a hosted-testbed prerequisite,
+# not an installed native-profile privilege claim.
+configure_iscsi_sudo_policy() {
+  command -v sudo >/dev/null 2>&1 || {
+    echo "ERROR: sudo is required for the non-root hosted iSCSI boundary" >&2
+    return 1
+  }
+  command -v visudo >/dev/null 2>&1 || {
+    echo "ERROR: visudo is required to validate the hosted iSCSI policy" >&2
+    return 1
+  }
+  if [ -e "${ISCSI_SUDOERS_PATH}" ]; then
+    echo "ERROR: run-owned iSCSI sudoers path already exists: ${ISCSI_SUDOERS_PATH}" >&2
+    return 1
+  fi
+  install -m 0440 /dev/null "${ISCSI_SUDOERS_PATH}"
+  ISCSI_SUDOERS_CREATED=1
+  printf '%s ALL=(root) NOPASSWD: /usr/sbin/iscsiadm\n' \
+    "${O3K_COMPUTE_ACCOUNT}" > "${ISCSI_SUDOERS_PATH}"
+  visudo -cf "${ISCSI_SUDOERS_PATH}" >/dev/null
+  cat > "${EVIDENCE_DIR}/iscsi-privilege-boundary.txt" <<EOF
+account=${O3K_COMPUTE_ACCOUNT}
+compute_process_uid=non-root
+privileged_operation=/usr/sbin/iscsiadm
+authorization=sudoers-run-owned-exact-binary
+policy_path=${ISCSI_SUDOERS_PATH}
+restored_after_run=true
+EOF
+}
+echo "==> Installing the reversible hosted iSCSI privilege boundary..."
+configure_iscsi_sudo_policy
+
 # tgt-admin (used by cinder.privsep.targets.tgt) parses only
 # /etc/tgt/targets.conf on every invocation; tgtd itself does not need a
 # restart for tgt-admin-created targets. The include is appended idempotently
@@ -689,6 +736,7 @@ O3K_COMPUTE_HOST_LABEL=o3k-testlab
 O3K_COMPUTE_TLS_DIR=${TLS_DIR}
 O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:${COMPUTE_HEALTH_PORT}
 O3K_COMPUTE_MAX_DISK_GB=10
+O3K_ISCSIADM_SUDO=1
 RUST_LOG=info
 EOF
 set -a; . "${STATE_ROOT}/o3k-compute.env"; set +a
@@ -1000,6 +1048,7 @@ cleanup_early() {
   kill -TERM "${CINDER_API_PID:-}" "${CINDER_SCHED_PID:-}" "${CINDER_VOL_PID:-}" 2>/dev/null || true
   remove_run_owned_tgt_state
   restore_iscsi_compute_access
+  restore_iscsi_sudo_policy
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
@@ -1664,6 +1713,7 @@ cleanup_run_owned() {
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
   restore_tgtd_config
+  restore_iscsi_sudo_policy
 }
 
 verify_clean() {
@@ -1701,15 +1751,6 @@ echo "==> Cleaning up run-owned host resources..."
 trap - EXIT
 cleanup_run_owned
 
-if [ "${KEEP}" != "--keep" ]; then
-  rm -rf "${STATE_ROOT}"
-else
-  # Preserve evidence for the post-run guard, but remove bulky non-evidence
-  # state (venv, data, tls). The guard discovers evidence.yaml under the state
-  # root and reads foreign-state-after.json from the evidence directory.
-  rm -rf "${VENV_DIR}" "${DATA_DIR}" "${TLS_PARENT}"
-fi
-
 echo "==> Recording post-cleanup foreign-state verification..."
 write_foreign_state_after
 python3 - "${INVENTORY_AFTER}" <<'PY'
@@ -1719,4 +1760,8 @@ assert after["cleanup_status"] == "passed", after
 assert after["foreign_unchanged"] is True, after
 assert after["tgt"]["targets_conf_restored"] is True, after
 PY
+# Keep only the bounded evidence directory so the post-run guard and reviewers
+# can inspect the foreign-state inventory after cleanup. Disposable services,
+# databases, loop images, certificates, and virtual environments are removed.
+rm -rf "${VENV_DIR}" "${DATA_DIR}" "${TLS_PARENT}"
 echo "==> Cleanup complete: zero run-owned resources remain."
