@@ -175,16 +175,21 @@ fn cmdline_contains_dhcp_root(pid: i32, root: &std::path::Path) -> Result<bool, 
 /// Opens a race-resistant Linux process handle after ownership verification.
 /// Signals are sent through the pidfd, never through the reusable numeric PID.
 fn open_owned_pidfd(pid: i32, root: &std::path::Path) -> Result<OwnedFd, std::io::Error> {
-    if !cmdline_contains_dhcp_root(pid, root)? {
+    let pid = Pid::from_raw(pid).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid process id")
+    })?;
+    // Acquire the stable process handle before inspecting /proc.  Checking
+    // cmdline first leaves a PID-reuse window in which the verified process
+    // can exit and the numeric PID can be assigned to a foreign process
+    // before pidfd_open(), causing a signal to target the replacement.
+    let pidfd = pidfd_open(pid, PidfdFlags::empty()).map_err(std::io::Error::from)?;
+    if !cmdline_contains_dhcp_root(pid.as_raw(), root)? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "process command line is not O3K-owned",
         ));
     }
-    let pid = Pid::from_raw(pid).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid process id")
-    })?;
-    pidfd_open(pid, PidfdFlags::empty()).map_err(Into::into)
+    Ok(pidfd)
 }
 
 impl DhcpRuntime {
