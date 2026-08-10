@@ -21,6 +21,9 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const QEMU_IMG_TIMEOUT: Duration = Duration::from_secs(30);
 const QEMU_IMG_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
+const QEMU_IMG_MAX_ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
+const QEMU_IMG_MAX_PROCESSES: u64 = 32;
+const QEMU_IMG_MAX_OPEN_FILES: u64 = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -731,6 +734,13 @@ where
             "setpriv is required to sandbox qemu-img",
         ));
     }
+    let prlimit = Path::new("/usr/bin/prlimit");
+    if !prlimit.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "prlimit is required to bound qemu-img resources",
+        ));
+    }
     let mut command = Command::new(setpriv);
     command.args([
         "--no-new-privs",
@@ -739,6 +749,13 @@ where
         "--bounding-set=-all",
         "--reset-env",
         "--",
+    ]);
+    command.arg(prlimit);
+    command.args([
+        format!("--as={QEMU_IMG_MAX_ADDRESS_SPACE_BYTES}"),
+        format!("--nproc={QEMU_IMG_MAX_PROCESSES}"),
+        format!("--nofile={QEMU_IMG_MAX_OPEN_FILES}"),
+        "--".to_owned(),
     ]);
     command.arg(qemu_img);
     command.args(args);
@@ -1641,6 +1658,41 @@ esac
             Err(ImageError::FormatVerificationFailed)
         ));
         assert!(!path.join("base").join(format!("{checksum}.qcow2")).exists());
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qemu_img_helper_receives_resource_limits() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root("qemu-resource-limits");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        let limits = path.join("limits.txt");
+        fs::write(
+            &fake_qemu,
+            format!(
+                "#!/bin/sh\nawk '/Max address space|Max processes|Max open files/ {{print}}' /proc/self/limits > '{}'\nprintf '{{\"format\":\"qcow2\"}}\\n'\n",
+                limits.display()
+            ),
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+        let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
+        let content = b"resource-limited-qcow2";
+        let checksum = format!("{:x}", Sha256::digest(content));
+        let result = cache.cache_base(&checksum, "qcow2", content);
+        assert!(
+            result.is_ok(),
+            "qemu-img resource-limit probe failed: {result:?}"
+        );
+        let limits = fs::read_to_string(limits)?;
+        assert!(limits.contains("Max address space         1073741824"));
+        assert!(limits.contains("Max processes             32"));
+        assert!(limits.contains("Max open files            128"));
         fs::remove_dir_all(path)?;
         Ok(())
     }

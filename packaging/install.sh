@@ -99,6 +99,14 @@ if [[ $EUID -eq 0 ]]; then
       echo "refusing to reuse an unrelated o3k account" >&2
       exit 2
     }
+    if [[ "$PROFILE" == libvirt ]]; then
+      while read -r group; do
+        [[ -z "$group" || "$group" == o3k ]] || {
+          echo "refusing to reuse o3k account with unexpected group: $group" >&2
+          exit 2
+        }
+      done < <(id -nG o3k | tr ' ' '\n')
+    fi
   else
     useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
   fi
@@ -114,6 +122,15 @@ if [[ $EUID -eq 0 ]]; then
         echo "refusing to reuse an unrelated o3k-compute account" >&2
         exit 2
       }
+      while read -r group; do
+        case "$group" in
+          ""|o3k-compute|libvirt|kvm) ;;
+          *)
+            echo "refusing to reuse o3k-compute account with unexpected group: $group" >&2
+            exit 2
+            ;;
+        esac
+      done < <(id -nG o3k-compute | tr ' ' '\n')
     else
       useradd --system --gid o3k-compute --home-dir /var/lib/o3k/compute --shell /usr/sbin/nologin o3k-compute
     fi

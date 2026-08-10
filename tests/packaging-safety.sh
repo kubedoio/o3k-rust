@@ -313,6 +313,10 @@ if ! grep -Fq 'refusing to reuse o3k account with host-execution groups' "$ROOT_
   echo "installer does not reject unsafe reuse of a privileged control account" >&2
   exit 1
 fi
+if ! grep -Fq 'refusing to reuse o3k-compute account with unexpected group' "$ROOT_DIR/packaging/install.sh"; then
+  echo "installer does not reject unexpected compute-account groups" >&2
+  exit 1
+fi
 # The control-plane o3k account and separate o3k-compute account read the TLS
 # material at runtime; install.sh makes the non-secret directory traversal
 # explicit while keeping env files root-owned 0600. Private keys must be

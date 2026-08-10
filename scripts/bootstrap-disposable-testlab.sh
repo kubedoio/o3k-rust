@@ -299,12 +299,19 @@ read -r ACCOUNT_CREATED GROUP_CREATED COMPUTE_ACCOUNT_CREATED COMPUTE_GROUP_CREA
 control_record="$(getent passwd "$SERVICE_ACCOUNT" || true)"
 [[ "$control_record" == *":/usr/sbin/nologin" ]] \
   || fail "existing o3k account has an unsafe shell posture"
-if id -nG "$SERVICE_ACCOUNT" | tr ' ' '\n' | grep -Eq '^(libvirt|kvm)$'; then
-  fail "existing o3k account already has host-execution groups"
-fi
+while read -r group; do
+  [[ -z "$group" || "$group" == "$SERVICE_ACCOUNT" ]] \
+    || fail "existing o3k account has an unexpected group: $group"
+done < <(id -nG "$SERVICE_ACCOUNT" | tr ' ' '\n')
 compute_record="$(getent passwd "$COMPUTE_ACCOUNT" || true)"
 [[ "$compute_record" == *":/usr/sbin/nologin" ]] \
   || fail "existing o3k-compute account has an unsafe shell posture"
+while read -r group; do
+  case "$group" in
+    ""|"$COMPUTE_ACCOUNT"|libvirt|kvm) ;;
+    *) fail "existing o3k-compute account has an unexpected group: $group" ;;
+  esac
+done < <(id -nG "$COMPUTE_ACCOUNT" | tr ' ' '\n')
 
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
