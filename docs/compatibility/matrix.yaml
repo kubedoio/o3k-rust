@@ -1,5 +1,5 @@
 schema_version: 2
-matrix_version: 0.1.0-alpha.0
+matrix_version: 0.2.0-alpha.1
 source_accessed: 2026-07-30
 profile: testlab-alpha
 target_manifest: ../../compatibility/openstack-targets.yaml
