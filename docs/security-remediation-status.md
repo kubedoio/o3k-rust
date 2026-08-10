@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `0547abd` and must not be
+This status is bound to the remediation branch at `3024edb` and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
