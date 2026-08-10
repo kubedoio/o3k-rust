@@ -22,6 +22,7 @@ else
   STATE_ROOT="${SERVICE_STATE_BASE}/${RUN_ID}"
 fi
 SERVICE_ACCOUNT=o3k
+COMPUTE_ACCOUNT=o3k-compute
 ACCOUNT_LOCK=/run/lock/o3k-testlab-account.lock
 APT_LOCK=/run/lock/o3k-testlab-apt.lock
 AUTH_PORT="${O3K_TESTLAB_PORT:-18080}"
@@ -39,6 +40,8 @@ O3KD_READY=false
 COMPUTE_READY=false
 ACCOUNT_CREATED=false
 GROUP_CREATED=false
+COMPUTE_ACCOUNT_CREATED=false
+COMPUTE_GROUP_CREATED=false
 SUPPLEMENTARY_GROUPS_ADDED=false
 FAIL_REASON=bootstrap_failed
 
@@ -62,9 +65,9 @@ process_uid() {
 }
 
 process_record_matches() {
-  local pid="$1" start_ticks="$2" uid="$3" binary="$4"
-  [[ "$uid" == "$SERVICE_ACCOUNT" ]] \
-    && [[ "$(process_uid "$pid")" == "$SERVICE_ACCOUNT" ]] \
+  local pid="$1" start_ticks="$2" uid="$3" binary="$4" account="$5"
+  [[ "$uid" == "$account" ]] \
+    && [[ "$(process_uid "$pid")" == "$account" ]] \
     && [[ "$(process_start_ticks "$pid")" == "$start_ticks" ]] \
     && process_matches "$pid" "$binary"
 }
@@ -86,13 +89,17 @@ stop_owned_process() {
 }
 
 remove_created_identity() {
-  [[ "$ACCOUNT_CREATED" == true || "$GROUP_CREATED" == true ]] || return 0
+  [[ "$ACCOUNT_CREATED" == true || "$GROUP_CREATED" == true \
+    || "$COMPUTE_ACCOUNT_CREATED" == true || "$COMPUTE_GROUP_CREATED" == true ]] || return 0
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     set -euo pipefail
     pgrep -u o3k >/dev/null 2>&1 && exit 42 || true
+    pgrep -u o3k-compute >/dev/null 2>&1 && exit 42 || true
     if [[ "$1" == true ]] && id o3k >/dev/null 2>&1; then userdel o3k; fi
     if [[ "$2" == true ]] && getent group o3k >/dev/null 2>&1; then groupdel o3k; fi
-  ' _ "$ACCOUNT_CREATED" "$GROUP_CREATED"
+    if [[ "$3" == true ]] && id o3k-compute >/dev/null 2>&1; then userdel o3k-compute; fi
+    if [[ "$4" == true ]] && getent group o3k-compute >/dev/null 2>&1; then groupdel o3k-compute; fi
+  ' _ "$ACCOUNT_CREATED" "$GROUP_CREATED" "$COMPUTE_ACCOUNT_CREATED" "$COMPUTE_GROUP_CREATED"
 }
 
 remove_added_supplementary_groups() {
@@ -104,8 +111,8 @@ remove_added_supplementary_groups() {
       [[ -n "$group" ]] || continue
       getent group "$group" >/dev/null 2>&1 || continue
       id o3k >/dev/null 2>&1 || continue
-      if id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
-        gpasswd --delete o3k "$group" >/dev/null
+      if id -nG o3k-compute | tr " " "\n" | grep -Fqx "$group"; then
+        gpasswd --delete o3k-compute "$group" >/dev/null
       fi
     done <"$1"
   ' _ "$STATE_ROOT/.o3k-supplementary-groups-added"
@@ -225,8 +232,8 @@ if [[ -e "$STATE_ROOT" ]]; then
     && "$O3KD_START" =~ ^[0-9]+$ && "$COMPUTE_START" =~ ^[0-9]+$ \
     && "$O3KD_BINARY" == o3kd && "$COMPUTE_BINARY" == o3k-compute ]] \
     || fail "existing run state has an invalid process identity"
-  process_record_matches "$O3KD_PID" "$O3KD_START" "$O3KD_UID" o3kd \
-    && process_record_matches "$COMPUTE_PID" "$COMPUTE_START" "$COMPUTE_UID" o3k-compute \
+  process_record_matches "$O3KD_PID" "$O3KD_START" "$O3KD_UID" o3kd "$SERVICE_ACCOUNT" \
+    && process_record_matches "$COMPUTE_PID" "$COMPUTE_START" "$COMPUTE_UID" o3k-compute "$COMPUTE_ACCOUNT" \
     && sudo -n kill -0 "$O3KD_PID" 2>/dev/null && sudo -n kill -0 "$COMPUTE_PID" 2>/dev/null \
     || fail "existing run state services are not running"
   REUSE=true
@@ -263,6 +270,8 @@ account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
   set -euo pipefail
   group_created=false
   account_created=false
+  compute_group_created=false
+  compute_account_created=false
   if ! getent group o3k >/dev/null 2>&1; then
     groupadd --system o3k
     group_created=true
@@ -272,16 +281,40 @@ account_state="$(sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
       --shell /usr/sbin/nologin o3k
     account_created=true
   fi
-  printf "%s %s\\n" "$account_created" "$group_created"
+  if ! getent group o3k-compute >/dev/null 2>&1; then
+    groupadd --system o3k-compute
+    compute_group_created=true
+  fi
+  if ! id o3k-compute >/dev/null 2>&1; then
+    useradd --system --no-create-home --gid o3k-compute --home-dir "$1/compute" \
+      --shell /usr/sbin/nologin o3k-compute
+    compute_account_created=true
+  fi
+  printf "%s %s %s %s\\n" "$account_created" "$group_created" \
+    "$compute_account_created" "$compute_group_created"
 ' _ "$STATE_ROOT/home")" || fail "cannot provision packaged o3k service account"
-read -r ACCOUNT_CREATED GROUP_CREATED <<<"$account_state"
+read -r ACCOUNT_CREATED GROUP_CREATED COMPUTE_ACCOUNT_CREATED COMPUTE_GROUP_CREATED <<<"$account_state"
 [[ "$(id -u "$SERVICE_ACCOUNT")" != 0 ]] || fail "o3k service account is root"
+[[ "$(id -u "$COMPUTE_ACCOUNT")" != 0 ]] || fail "o3k-compute service account is root"
+control_record="$(getent passwd "$SERVICE_ACCOUNT" || true)"
+[[ "$control_record" == *":/usr/sbin/nologin" ]] \
+  || fail "existing o3k account has an unsafe shell posture"
+if id -nG "$SERVICE_ACCOUNT" | tr ' ' '\n' | grep -Eq '^(libvirt|kvm)$'; then
+  fail "existing o3k account already has host-execution groups"
+fi
+compute_record="$(getent passwd "$COMPUTE_ACCOUNT" || true)"
+[[ "$compute_record" == *":/usr/sbin/nologin" ]] \
+  || fail "existing o3k-compute account has an unsafe shell posture"
 
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
 [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state already exists"
-sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0700 \
-  "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/data" "$STATE_ROOT/log" "$STATE_ROOT/tls"
+sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0755 \
+  "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
+sudo -n install -d -o "$(id -u "$SERVICE_ACCOUNT")" -g "$(id -g "$SERVICE_ACCOUNT")" -m 0700 \
+  "$STATE_ROOT/data"
+sudo -n install -d -o "$(id -u "$COMPUTE_ACCOUNT")" -g "$(id -g "$COMPUTE_ACCOUNT")" -m 0700 \
+  "$STATE_ROOT/compute-data"
 printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" >"$STATE_ROOT/.o3k-run-owned"
 chmod 0600 "$STATE_ROOT/.o3k-run-owned"
 printf 'o3k-owned-v1 path=%s\n' "$STATE_ROOT" >"$STATE_ROOT/.o3k-owned"
@@ -304,8 +337,8 @@ sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
   : >"$1"
   chmod 0600 "$1"
   for group in libvirt kvm; do
-    if ! id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
-      usermod --append --groups "$group" o3k
+    if ! id -nG o3k-compute | tr " " "\n" | grep -Fqx "$group"; then
+      usermod --append --groups "$group" o3k-compute
       printf "%s\n" "$group" >>"$1"
     fi
   done
@@ -331,7 +364,7 @@ install -m 0755 "$ROOT_DIR/target/release/o3kd" "$STATE_ROOT/bin/o3kd"
 install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$STATE_ROOT/bin/o3k-compute"
 sudo -n bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$STATE_ROOT/tls" \
   --server-name o3k-control-plane --agent-id compute-agent
-sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/data/agent-id"
+sudo -n install -m 0640 "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/compute-data/agent-id"
 AUTHORIZED_FINGERPRINT="$(sudo -n cat "$STATE_ROOT/tls/agent-fingerprint")" \
   || fail "cannot read generated agent fingerprint"
 
@@ -360,7 +393,7 @@ O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
 O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(printf '%q' "$AUTHORIZED_FINGERPRINT")
 EOF
 cat >"$compute_env_tmp" <<EOF
-O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
+O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/compute-data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")
 O3K_COMPUTE_SERVER_NAME=o3k-control-plane
 O3K_COMPUTE_HOST_LABEL=o3k-testlab
@@ -406,13 +439,24 @@ fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
 mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
 mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
-sudo -n chown -R "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT"
-# libvirt's qemu process runs under the KVM group. Keep the run root and data
-# directory non-world-traversable, but grant that group traversal to the
-# artifact store and read access only to committed image/ISO files.
-sudo -n chgrp kvm "$STATE_ROOT" "$STATE_ROOT/data"
-sudo -n chmod 0710 "$STATE_ROOT" "$STATE_ROOT/data"
-sudo -n install -d -o "$SERVICE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/data/agent-id.artifacts"
+sudo -n chown "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password"
+sudo -n chown "$COMPUTE_ACCOUNT:$COMPUTE_ACCOUNT" "$STATE_ROOT/o3k-compute.env"
+sudo -n chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password" "$STATE_ROOT/o3k-compute.env"
+sudo -n chgrp root "$STATE_ROOT/tls"
+sudo -n chmod 0755 "$STATE_ROOT/tls"
+for file in ca.pem server.pem agent.pem agent-id agent-fingerprint; do
+  sudo -n chgrp root "$STATE_ROOT/tls/$file"
+  sudo -n chmod 0644 "$STATE_ROOT/tls/$file"
+done
+sudo -n chgrp "$SERVICE_ACCOUNT" "$STATE_ROOT/tls/server-key.pem"
+sudo -n chmod 0640 "$STATE_ROOT/tls/server-key.pem"
+sudo -n chgrp "$COMPUTE_ACCOUNT" "$STATE_ROOT/tls/agent-key.pem"
+sudo -n chmod 0640 "$STATE_ROOT/tls/agent-key.pem"
+sudo -n install -m 0640 -o "$COMPUTE_ACCOUNT" -g "$COMPUTE_ACCOUNT" \
+  "$STATE_ROOT/tls/agent-id" "$STATE_ROOT/compute-data/agent-id"
+sudo -n install -d -o "$COMPUTE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/compute-data/agent-id.artifacts"
+sudo -n install -m 0600 -o "$SERVICE_ACCOUNT" -g "$SERVICE_ACCOUNT" /dev/null "$STATE_ROOT/log/o3kd.log"
+sudo -n install -m 0600 -o "$COMPUTE_ACCOUNT" -g "$COMPUTE_ACCOUNT" /dev/null "$STATE_ROOT/log/o3k-compute.log"
 # Host-network realization (TAP, bridge, gateway, and DHCP setup) is owned by
 # the dedicated compute service. Validate the ambient-capability launch path
 # before starting it, using a run-unique temporary link and deleting only that
@@ -422,8 +466,8 @@ sudo -n install -d -o "$SERVICE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/data/agent-
 # socket on UDP/67 needs the former, serving DHCP (raw socket) needs the
 # latter (proven by the issue-87 re-probe capability matrix on dnsmasq 2.90).
 network_probe_name="o3k-cp-${RUN_ID:0:8}"
-sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
-  --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
+sudo -n setpriv --reuid="$(id -u "$COMPUTE_ACCOUNT")" \
+  --regid="$(id -g "$COMPUTE_ACCOUNT")" --init-groups \
   --inh-caps=+net_admin,+net_bind_service,+net_raw \
   --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
   ip link add name "$network_probe_name" type dummy \
@@ -434,7 +478,7 @@ sudo -n -u "$SERVICE_ACCOUNT" -- test -r "$STATE_ROOT/o3kd.env" \
   || fail "o3k service account cannot traverse the run state root"
 
 start_service() {
-  local name="$1" env_file="$2" binary="$3" log_file="$4" pid_file="$5"
+  local name="$1" account="$2" env_file="$3" binary="$4" log_file="$5" pid_file="$6"
   local supervisor child candidate
   if [[ "$name" == o3k-compute ]]; then
     # CAP_NET_ADMIN must be ambient so helper processes such as ip(8) and
@@ -442,14 +486,14 @@ start_service() {
     # so the spawned dnsmasq can bind UDP/67 and serve DHCP (issue-87 re-probe
     # matrix). setpriv applies all of them before dropping to the dedicated
     # service account; no daemon runs as root.
-    sudo -n setpriv --reuid="$(id -u "$SERVICE_ACCOUNT")" \
-      --regid="$(id -g "$SERVICE_ACCOUNT")" --init-groups \
+    sudo -n setpriv --reuid="$(id -u "$account")" \
+      --regid="$(id -g "$account")" --init-groups \
       --inh-caps=+net_admin,+net_bind_service,+net_raw \
       --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
       bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   else
-    sudo -n -u "$SERVICE_ACCOUNT" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+    sudo -n -u "$account" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   fi
   supervisor=$!
@@ -460,7 +504,7 @@ start_service() {
         child="$candidate"
         break
       fi
-    done < <(sudo -n pgrep -u "$SERVICE_ACCOUNT" -x "$(basename "$binary")" 2>/dev/null || true)
+    done < <(sudo -n pgrep -u "$account" -x "$(basename "$binary")" 2>/dev/null || true)
     [[ -n "$child" ]] && break
     sudo -n kill -0 "$supervisor" 2>/dev/null || break
     sleep 0.1
@@ -471,7 +515,7 @@ start_service() {
   fi
   start_ticks="$(process_start_ticks "$child")"
   uid="$(process_uid "$child")"
-  [[ "$start_ticks" =~ ^[0-9]+$ && "$uid" == "$SERVICE_ACCOUNT" ]] \
+  [[ "$start_ticks" =~ ^[0-9]+$ && "$uid" == "$account" ]] \
     || fail "$name did not expose a valid service identity"
   printf '%s|%s|%s|%s\n' "$child" "$start_ticks" "$uid" "$(basename "$binary")" >"$pid_file"
   if [[ "$name" == o3kd ]]; then O3KD_PID="$child"; else COMPUTE_PID="$child"; fi
@@ -497,7 +541,7 @@ wait_for_o3kd_ready() {
 }
 
 start_compute() {
-  start_service o3k-compute "$STATE_ROOT/o3k-compute.env" "$STATE_ROOT/bin/o3k-compute" \
+  start_service o3k-compute "$COMPUTE_ACCOUNT" "$STATE_ROOT/o3k-compute.env" "$STATE_ROOT/bin/o3k-compute" \
     "$STATE_ROOT/log/o3k-compute.log" "$PID_ROOT/o3k-compute.pid"
 }
 
@@ -513,7 +557,7 @@ wait_for_compute_ready() {
   COMPUTE_READY=true
 }
 
-start_service o3kd "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
+start_service o3kd "$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/bin/o3kd" "$STATE_ROOT/log/o3kd.log" "$PID_ROOT/o3kd.pid"
 wait_for_o3kd_health
 if [[ "$O3K_PROVIDER" == agent ]]; then
   start_compute
@@ -566,6 +610,7 @@ fi
 printf 'O3K_REAL_HOST_COMPUTE_BINARY=%s\n' "$STATE_ROOT/bin/o3k-compute" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin\n' >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_REAL_HOST_COMPUTE_ACCOUNT=%s\n' "$COMPUTE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"

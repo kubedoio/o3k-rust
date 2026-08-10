@@ -305,7 +305,7 @@ if ! grep -Fq $'User=o3k-compute' "$ROOT_DIR/packaging/o3k-compute.service" || !
   echo "compute service does not use a separate identity and state root" >&2
   exit 1
 fi
-if [[ "$(grep -Fc 'SupplementaryGroups=' "$ROOT_DIR/packaging/o3k-compute.service")" -ne 1 ]] || ! grep -Fq 'SupplementaryGroups=libvirt kvm o3k' "$ROOT_DIR/packaging/o3k-compute.service"; then
+if [[ "$(grep -Fc 'SupplementaryGroups=' "$ROOT_DIR/packaging/o3k-compute.service")" -ne 1 ]] || ! grep -Fq 'SupplementaryGroups=libvirt kvm' "$ROOT_DIR/packaging/o3k-compute.service"; then
   echo "compute service has an ambiguous or incomplete supplementary group boundary" >&2
   exit 1
 fi
@@ -314,17 +314,17 @@ if ! grep -Fq 'refusing to reuse o3k account with host-execution groups' "$ROOT_
   exit 1
 fi
 # The control-plane o3k account and separate o3k-compute account read the TLS
-# material at runtime; bootstrap-certs.sh creates the config dir as root:root
-# 0750, so install.sh must grant o3k group traversal on $CONFIG_DIR itself or
-# the mTLS control plane dies with AgentError::TlsMaterial. The env files
-# stay root-owned 0600 (systemd reads them as root), so only the TLS files
-# (0640 root:o3k) become readable by the compute account through its o3k group.
-if ! grep -Fq 'chgrp o3k "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
-  echo "install.sh does not grant the o3k service account config-dir traversal" >&2
+# material at runtime; install.sh makes the non-secret directory traversal
+# explicit while keeping env files root-owned 0600. Private keys must be
+# separately scoped to their service identities.
+if ! grep -Fq 'chgrp root "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not establish root ownership for config traversal" >&2
   exit 1
 fi
-if ! grep -Fq 'chmod 0750 "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
-  echo "install.sh does not enforce config-dir group traversal mode" >&2
+if ! grep -Fq 'chmod 0755 "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq 'chgrp o3k-compute "$TLS_DIR/$file"' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq 'chgrp o3k "$TLS_DIR/$file"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh does not enforce split TLS private-key ownership" >&2
   exit 1
 fi
 # ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute
@@ -362,5 +362,39 @@ if grep -Fq 'rm -f -- /etc/systemd/system/o3kd.service' "$ROOT_DIR/packaging/uni
   || ! grep -Fq 'remove_owned_system_file' "$ROOT_DIR/packaging/uninstall.sh"; then
   echo "uninstall does not content-fence fixed system files" >&2
   exit 1
+fi
+
+# The libvirt profile must not share private keys between the control-plane
+# and host-execution identities. This is an executable DAC regression rather
+# than a source-shape assertion: the compute account must be denied the
+# server key, and o3kd must be denied the agent key.
+if [[ "$EUID" -eq 0 ]] && id o3k >/dev/null 2>&1 && id o3k-compute >/dev/null 2>&1 \
+  && command -v setpriv >/dev/null 2>&1; then
+  chgrp o3k "$WORK_DIR"
+  chmod 0755 "$WORK_DIR"
+  tls_boundary="$WORK_DIR/tls-boundary"
+  install -d -o root -g root -m 0755 "$tls_boundary"
+  printf 'server-private-sentinel\n' >"$tls_boundary/server-key.pem"
+  printf 'agent-private-sentinel\n' >"$tls_boundary/agent-key.pem"
+  chown root:o3k "$tls_boundary/server-key.pem"
+  chmod 0640 "$tls_boundary/server-key.pem"
+  chown root:o3k-compute "$tls_boundary/agent-key.pem"
+  chmod 0640 "$tls_boundary/agent-key.pem"
+  if setpriv --reuid="$(id -u o3k-compute)" --regid="$(id -g o3k-compute)" \
+      --clear-groups -- cat "$tls_boundary/server-key.pem" >/dev/null 2>&1; then
+    echo "compute identity can read the control-plane private key" >&2
+    exit 1
+  fi
+  if setpriv --reuid="$(id -u o3k)" --regid="$(id -g o3k)" \
+      --clear-groups -- cat "$tls_boundary/agent-key.pem" >/dev/null 2>&1; then
+    echo "control-plane identity can read the compute private key" >&2
+    exit 1
+  fi
+  setpriv --reuid="$(id -u o3k)" --regid="$(id -g o3k)" \
+    --clear-groups -- cat "$tls_boundary/server-key.pem" >/dev/null 2>&1 \
+    || { echo "control-plane identity cannot read its server private key" >&2; exit 1; }
+  setpriv --reuid="$(id -u o3k-compute)" --regid="$(id -g o3k-compute)" \
+    --clear-groups -- cat "$tls_boundary/agent-key.pem" >/dev/null 2>&1 \
+    || { echo "compute identity cannot read its agent private key" >&2; exit 1; }
 fi
 echo "packaging safety tests passed"

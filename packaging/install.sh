@@ -117,7 +117,6 @@ if [[ $EUID -eq 0 ]]; then
     else
       useradd --system --gid o3k-compute --home-dir /var/lib/o3k/compute --shell /usr/sbin/nologin o3k-compute
     fi
-    usermod --append --groups o3k o3k-compute
   fi
   RUN_USER=o3k
 else RUN_USER="$(id -un)"; fi
@@ -238,17 +237,35 @@ if [[ "$PROFILE" == libvirt ]]; then
     [[ -s "$TLS_DIR/$file" ]] || { echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2; exit 2; }
   done
   if [[ $EUID -eq 0 ]]; then
-    # o3kd.service / o3k-compute.service read the TLS material as user o3k;
-    # bootstrap-certs.sh creates the config dir as root:root 0750, so grant
-    # o3k group traversal on the parent itself (the mode is unchanged — 0750
-    # already grants group r-x; the group is the missing piece). The env
-    # files stay root-owned 0600 and are read by systemd as root, so only
-    # the TLS files (0640 root:o3k) become readable by the service account.
-    chgrp o3k "$CONFIG_DIR"
-    chmod 0750 "$CONFIG_DIR"
-    chgrp o3k "$TLS_DIR" "$TLS_DIR"/*
-    chmod 0750 "$TLS_DIR"
-    chmod 0640 "$TLS_DIR"/*
+    # bootstrap-certs.sh creates the config dir as root:root 0750. The
+    # directory and public certificates are non-secret and readable by both
+    # identities; private keys remain
+    # separately scoped: o3kd receives only the server key, while
+    # o3k-compute receives only the agent key. The shared CA and public
+    # certificates are readable by both identities; env files stay root-owned
+    # 0600 and are read by systemd as root.
+    chgrp root "$CONFIG_DIR"
+    chmod 0755 "$CONFIG_DIR"
+    chgrp root "$TLS_DIR"
+    chmod 0755 "$TLS_DIR"
+    for file in ca.pem server.pem server-key.pem; do
+      if [[ "$file" == server-key.pem ]]; then
+        chgrp o3k "$TLS_DIR/$file"
+        chmod 0640 "$TLS_DIR/$file"
+      else
+        chgrp root "$TLS_DIR/$file"
+        chmod 0644 "$TLS_DIR/$file"
+      fi
+    done
+    for file in agent.pem agent-key.pem agent-id agent-fingerprint; do
+      if [[ "$file" == agent-key.pem ]]; then
+        chgrp o3k-compute "$TLS_DIR/$file"
+        chmod 0640 "$TLS_DIR/$file"
+      else
+        chgrp root "$TLS_DIR/$file"
+        chmod 0644 "$TLS_DIR/$file"
+      fi
+    done
   fi
   if [[ ! -e "$CONFIG_DIR/o3k-compute.env" ]]; then
     umask 077
