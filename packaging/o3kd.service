@@ -8,7 +8,12 @@ Type=simple
 User=o3k
 Group=o3k
 EnvironmentFile=-/etc/o3k/o3kd.env
-ExecStart=/usr/local/bin/o3kd --listen-addr 127.0.0.1:8080 --data-dir /var/lib/o3k --log-filter info
+# No listen-address flag: o3kd's documented default is 127.0.0.1:8080
+# (crates/o3k-config/src/lib.rs DEFAULT_LISTEN_ADDR, docs/CONFIGURATION.md),
+# and O3K_LISTEN_ADDR from /etc/o3k/o3kd.env must be able to change it — the
+# packaged libvirt profile sets 127.0.0.1:18080 there, matching the
+# disposable-testlab path.
+ExecStart=/usr/local/bin/o3kd --data-dir /var/lib/o3k --log-filter info
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true

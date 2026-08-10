@@ -22,7 +22,12 @@ Schema versions
     whole snapshot fails closed (``status: unavailable`` with a named reason).
     A root that does not exist records ``managed_state.status: "absent"``
     (valid clean state) while the remaining sections still fail closed when
-    their sources are missing.
+    their sources are missing. Managed state lives under ``<root>/data`` in
+    the disposable-testlab layout and directly under ``<root>`` in the
+    installed layout (the installer passes the state root itself as
+    ``--data-dir``); the collector probes ``data/`` when present and walks
+    the root otherwise, and `collect_durable` finds the ledger in both
+    places.
   - ``O3K_REAL_HOST_PID_ROOT`` enables `processes` (pidfile verification and
     unmanaged-daemon detection under the state root).
   - ``O3K_REAL_HOST_CANARIES`` enables `canaries` (path to a small JSON
@@ -104,7 +109,9 @@ recorded as `stale_owned` — that is exactly what the verifier exists for.
     instance exists or the ownership manifest records it; otherwise
     `stale_owned` (`cleanup_if_unused` removes the unused bridge,
     `bins/o3k-compute/src/main.rs`).
-- managed-state files (relative to the state root's ``data/``):
+- managed-state files (relative to the walked data root — the state root's
+  ``data/`` in the testlab layout, the state root itself in the installed
+  layout):
   - `config-drive/<uuid>.iso`, `<uuid>/` directory, and
     `<uuid>.iso.o3k-iso-ownership.json` for a live instance ->
     `active_owned`; for a terminally-deleted instance -> `stale_owned`:
@@ -545,7 +552,15 @@ def decode_artifact_manifest(data: bytes) -> dict[str, object] | None:
 
 
 def collect_managed_state(state_root: Path) -> dict[str, object] | None:
-    """Inventory the managed `data/` subtree under the state root.
+    """Inventory the managed state under the state root.
+
+    The disposable-testlab layout keeps managed state under
+    ``<state_root>/data``; the installed layout uses ``<state_root>`` itself
+    as the data dir (the installer passes it directly as ``--data-dir``), so
+    ``data/`` is probed when present and the root is walked otherwise. The
+    walk skips the durable ledger (``o3k.sqlite`` and its WAL/SHM, covered by
+    the `durable` section) and, in the root layout, env/tls/log files that
+    live alongside the managed data.
 
     A configured root that does not exist is valid clean-host state
     (`status: "absent"`); the durable and dhcp sections still fail closed
@@ -555,13 +570,11 @@ def collect_managed_state(state_root: Path) -> dict[str, object] | None:
     if not state_root.is_dir():
         return {"status": "absent", "reason": "state_root_missing"}
     data_dir = state_root / "data"
-    if not data_dir.is_dir():
-        LAST_FAILURE_REASON = "managed_state_data_dir_missing"
-        return None
+    walk_root = data_dir if data_dir.is_dir() else state_root
     entries: list[dict[str, object]] = []
     total_bytes = 0
     try:
-        walker = [data_dir]
+        walker = [walk_root]
         while walker:
             directory = walker.pop()
             try:
@@ -573,12 +586,22 @@ def collect_managed_state(state_root: Path) -> dict[str, object] | None:
                 LAST_FAILURE_REASON = "managed_state_unreadable_dir"
                 return None
             for path in children:
-                relative = str(path.relative_to(data_dir))
+                relative = str(path.relative_to(walk_root))
                 if relative in ("o3k.sqlite", "o3k.sqlite-wal", "o3k.sqlite-shm"):
                     # The durable ledger is covered by the `durable` section
                     # (read-only sqlite3); WAL churn would otherwise break
                     # snapshot stability and hashing a live ledger adds no
                     # verifier value.
+                    continue
+                if "/" not in relative and (
+                    relative.endswith(".env")
+                    or relative.endswith(".log")
+                    or relative in ("tls", "log", "bin")
+                ):
+                    # Root-layout non-managed files: installer env files, the
+                    # TLS store, and log output sit next to the data dir in
+                    # the installed layout and never inside the testlab
+                    # data/ subtree.
                     continue
                 try:
                     stat = path.lstat()
@@ -852,12 +875,18 @@ def collect_injection_root() -> dict[str, object] | None:
 
 
 def collect_durable(state_root: Path) -> dict[str, object] | None:
-    """Read-only sqlite3 inventory of the durable ledger with real predicates."""
+    """Read-only sqlite3 inventory of the durable ledger with real predicates.
+
+    The ledger lives under ``<state_root>/data`` in the testlab layout and
+    directly under ``<state_root>`` in the installed layout; both are probed.
+    """
     global LAST_FAILURE_REASON
     if command(("sqlite3", "--version")) is None:
         LAST_FAILURE_REASON = "tool_unavailable:sqlite3"
         return None
     database = state_root / "data" / "o3k.sqlite"
+    if not database.is_file():
+        database = state_root / "o3k.sqlite"
     if not database.is_file():
         LAST_FAILURE_REASON = "durable_database_missing"
         return None

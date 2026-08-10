@@ -14,10 +14,13 @@ therefore use its safe default, `fake`, on a clean installation.
 
 ## Decision
 
-When creating the libvirt daemon environment, write `O3K_PROVIDER=libvirt`
-alongside the profile's TLS and compute-agent settings. Existing environment
-files are preserved so an operator's explicit configuration is not silently
-overwritten.
+When creating the libvirt daemon environment, write `O3K_PROVIDER=agent`
+alongside the profile's TLS and compute-agent settings. ADR-0086 blocks the
+direct-libvirt provider at daemon startup (`DirectLibvirtProviderUnavailable`
+is deliberate), so the packaged real-libvirt profile runs the local compute
+agent (`o3k-compute.service`) and the daemon selects it with
+`O3K_PROVIDER=agent`. Existing environment files are preserved so an
+operator's explicit configuration is not silently overwritten.
 
 ## Consequences
 

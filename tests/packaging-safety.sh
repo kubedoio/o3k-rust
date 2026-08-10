@@ -132,6 +132,13 @@ bash "$ROOT_DIR/packaging/install.sh" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
 grep -Fqx "o3k-installed-v1 prefix=$WORK_DIR/prefix" "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 grep -Fqx 'bin/o3kd' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+# The fake profile keeps the configuration default: the generated daemon env
+# must not override O3K_PROVIDER (config default `fake`,
+# crates/o3k-config/src/lib.rs).
+if grep -q '^O3K_PROVIDER=' "$WORK_DIR/config/o3kd.env"; then
+  echo "fake-profile env unexpectedly overrides O3K_PROVIDER" >&2
+  exit 1
+fi
 
 # Uninstall must apply the same path boundary as install. A dot component
 # resolving to the installed prefix must be rejected before any helper or
@@ -247,5 +254,25 @@ grep -q 'DNS:o3k-control-plane' <(openssl x509 -in "$TLS_DIR/server.pem" -noout 
 grep -q 'URI:urn:o3k:compute:agent:compute-agent' <(openssl x509 -in "$TLS_DIR/agent.pem" -noout -text)
 [[ "$(wc -c <"$TLS_DIR/agent-fingerprint")" -ge 64 ]]
 
-grep -Fq '"O3K_PROVIDER=libvirt"' "$ROOT_DIR/packaging/install.sh"
+# The packaged real-libvirt profile runs the local agent provider
+# (O3K_PROVIDER=agent, driven by o3k-compute.service): ADR-0086
+# (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) blocks the direct libvirt
+# provider at daemon startup (ConfigError::DirectLibvirtProviderUnavailable),
+# so install.sh must select the agent provider and never write
+# O3K_PROVIDER=libvirt into the daemon env.
+if ! grep -Fq '"O3K_PROVIDER=agent"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh libvirt profile does not select the agent provider" >&2
+  exit 1
+fi
+if grep -Fq '"O3K_PROVIDER=libvirt"' "$ROOT_DIR/packaging/install.sh"; then
+  echo "install.sh still writes the startup-blocked direct-libvirt provider" >&2
+  exit 1
+fi
+# The daemon unit must not hardcode --listen-addr: it would override
+# O3K_LISTEN_ADDR from /etc/o3k/o3kd.env and can conflict with other local
+# services (the packaged libvirt profile sets 127.0.0.1:18080 in the env).
+if grep -Fq -- '--listen-addr' "$ROOT_DIR/packaging/o3kd.service"; then
+  echo "o3kd.service hardcodes --listen-addr" >&2
+  exit 1
+fi
 echo "packaging safety tests passed"
