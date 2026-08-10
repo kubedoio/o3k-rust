@@ -176,7 +176,7 @@ trap failure_cleanup EXIT
 [[ "$RUN_ID" =~ ^[0-9]+$|^local-[0-9]+$ ]] || fail "invalid workflow run id"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || fail "invalid source commit"
 [[ "$AUTH_PORT" =~ ^[0-9]+$ && "$CONTROL_PORT" =~ ^[0-9]+$ && "$COMPUTE_HEALTH_PORT" =~ ^[0-9]+$ ]] || fail "invalid service port"
-for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd setpriv; do
+for command in cargo openssl python3 curl sudo getent id pgrep ss flock stat readlink realpath timeout ps usermod gpasswd setpriv nohup; do
   command -v "$command" >/dev/null 2>&1 || fail "$command is unavailable"
 done
 sudo -n true 2>/dev/null || fail "passwordless sudo is required"
@@ -506,10 +506,10 @@ start_service() {
       --regid="$(id -g "$account")" --init-groups \
       --inh-caps=+net_admin,+net_bind_service,+net_raw \
       --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
-      bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+      nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   else
-    sudo -n -u "$account" -- bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
+    sudo -n -u "$account" -- nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
       "$env_file" "$binary" "$log_file" &
   fi
   supervisor=$!

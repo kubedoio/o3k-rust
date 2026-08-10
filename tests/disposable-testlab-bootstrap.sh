@@ -26,6 +26,7 @@ assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
 assert 'agent-id.artifacts' in bootstrap
 assert '--ambient-caps=+net_admin' in bootstrap
 assert '--init-groups' in bootstrap
+assert 'nohup bash -c' in bootstrap
 assert 'SERVICE_STATE_BASE=/var/lib/o3k-testlab' in bootstrap
 assert 'SupplementaryGroups' not in bootstrap
 assert '.o3k-supplementary-groups-added' in bootstrap
