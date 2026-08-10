@@ -26,6 +26,11 @@ recertification is still required.  Final-source host run `1786387900` on
 `29de383` passed the complete public CirrOS lifecycle, including console boot
 marker, restart/reconciliation, delete, and zero owned-resource residue; the
 managed console sink was observed as `o3k-compute:kvm` mode `0660`.
+The installed-style DAC/identity artifact for source `57cbe35` is
+`/tmp/o3k-real-host-evidence-1786388000/dac-evidence.txt`; it records separate
+service identities, cross-account state denial, the intended libvirt/polkit
+boundary, and a sandboxed qemu-img child with `NoNewPrivs=1` and zero effective
+capabilities.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
@@ -37,7 +42,7 @@ managed console sink was observed as `o3k-compute:kvm` mode `0660`.
 | ASR-006 | implemented-portable | Admission limits and restart/symlink-safe config-drive cleanup tests pass | Fresh host kill/restart evidence |
 | ASR-007 | closed | `29de383` host run `1786387900` used a non-root `o3k-compute` capability probe and observed the managed console sink as `o3k-compute:kvm` mode `0660`; the complete CirrOS console lifecycle passed; portable foreign-path/special-file and bounded-read tests pass | None for remediation; candidate-bound recertification remains separate |
 | ASR-008 | in-progress | `29de383` host run `1786387900` passed real CirrOS console capture with a 28,985-byte managed sink and portable sparse/special-file bounds; the live console API remained bounded | Fresh host sparse/growing-log adversarial evidence |
-| ASR-009 | in-progress | `o3kd`/`o3k-compute` have separate users, state, units, and polkit authority | Fresh Ubuntu/Debian install proof |
+| ASR-009 | closed | Source `57cbe35` artifact `/tmp/o3k-real-host-evidence-1786388000/dac-evidence.txt`: `o3kd` and `o3k-compute` use separate UIDs and private state; control DB/WAL/SHM are `0600`; cross-account reads are denied; `o3kd` cannot access `qemu:///system` while compute can; TLS keys are account-scoped; the qemu-img child has `NoNewPrivs=1` and zero effective capabilities | None for remediation; clean-install recertification remains separate |
 | ASR-010 | implemented-portable | Every agent lifecycle mutation uses ownership-fenced libvirt handles; same-name replacement tests pass | Fresh libvirt failure/replacement proof |
 | ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; `5c65db9` gives disposable runs a validated per-run bridge, `3024edb` pins its MAC before TAP attachment, and run `987654406` removed its owned bridge without touching the foreign domain | Fresh host link canaries and a complete lifecycle run after the bridge-isolation fix |
 | ASR-012 | in-progress | Reset/purge preserve ledgers and fail closed on active/foreign host state; `9f412e4` corrects the compute-owned network/DHCP ledger path, `02a294f` fences missing-ledger deterministic bridges, and `0547abd` exports custom bridge identity to cleanup | Fresh failed-create cleanup proving owned bridge/DHCP residue is detected and safely resolved |
