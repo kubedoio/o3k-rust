@@ -16,6 +16,11 @@ also requires a row for every issue in #94's closure chain (#76–#84 and
 #86–#94); PR #85 is tracked as a prerequisite in the issue, not as a closure
 row. This is a source-document completeness check, not host evidence.
 
+Closure-chain rows keep their closure-evidence marker as `pending` until
+program closure: individual issue closures and their evidence artifacts are
+recorded in each row's evidence prose and in the issues themselves, while the
+marker flips only when the program closes.
+
 | Issue | Scope | Repository state | Real-host evidence |
 |---:|---|---|---|
 | #36 | libvirt/KVM direction | merged | pending |
@@ -48,5 +53,45 @@ row. This is a source-document completeness check, not host evidence.
 | #83 | libvirt lifecycle and observed Nova state | repository observed-state projection and agent observation-state propagation now also enforce live agent epoch plus durable per-resource observation sequence ordering; ADR-0091/0119/0144 and regression coverage reject delayed state regressions while successful command observations carry explicit resource state | blocked until agent-backed lifecycle dispatch, real Nova/guest lifecycle evidence, restart/failure recovery, and trusted real-host artifact exist; no host acceptance claimed; closure evidence: pending |
 | #84 | libvirt serial console and Nova console-log | repository console ownership fence, private bounded storage, explicit oversized/non-regular rejection, successful-delete console cleanup, registered-agent durable-cache fallback, and direct durable-cache routing for nonzero offsets complete; ADR-0092/0110/0126/0047/0143/0145 and regression coverage require matching O3K domain metadata, preserve artifacts on failed deletion, make repeated cleanup safe, and retain bounded console output across agent-stream loss | blocked until actual CirrOS output, bounded restart persistence on a real host, cross-project CLI isolation, deletion evidence, and trusted real-host console artifact exist; no host acceptance claimed; closure evidence: pending |
 | #86 | complete real CirrOS OpenStack CLI acceptance | repository-owned keypair import/list/show/delete and cleanup passed in protected run 30717871057 on runner-2404; the harness still requires redacted initial and post-reboot ACTIVE/fixed-IP/config-drive evidence plus a console marker and uses direct `OS_*` configuration without generated credential YAML; ADR-0093 and stateful no-op/special-character regression coverage added | blocked until flavor discovery and subsequent real CirrOS ACTIVE/config-drive/console/restart/leak evidence pass; no host acceptance claimed; closure evidence: pending |
-| #87 | real-host failure injection and unknown-outcome recovery | repository action-recovery boundary complete; ADR-0094, deterministic timeout and partial-create recovery, fingerprinted duplicate replay, durable accepted/running and terminal-failure recovery transitions, observation-based lifecycle convergence tests, and per-scenario evidence-shape validation added | host-gated: all required crash, timeout, duplicate, partial-completion, corruption, disk-full, cleanup, and aggregate `failure-recovery.json` scenarios still require the protected self-hosted runner; no host acceptance claimed; closure evidence: pending |
-| #88 | real-host resource leak and foreign-state guard | repository race-safe inventory boundary complete; ADR-0095, stable two-read snapshots, atomic redacted inventory publication, public-CLI keypair inventory, validated O3K-owned network-link inventory, foreign-state digests, and `resource-leak-result.json` output added | | executed and closed at 519517e5bd217b08ba1b5e6957f996040fd8fbac on the trusted KVM/libvirt host (nkudo-vm1): the independent verifier (inventory schema v3, compare/negative/aggregate, ADR-0164) ran around the normal CirrOS E2E and the complete #87 failure-injection suite (19 gate scenarios + supplementary artifact-replay + agent-kill variant, 22/22 verdicts passed, zero owned leaks / inconsistencies / foreign changes); stale-artifact and foreign-mutation negatives detected as expected; aggregate target/real-host-workflow-artifacts/resource-leak-result.json reports status: passed; closure evidence: resource-leak-result.json (issue #88 closed) |
+| #87 | real-host failure injection and unknown-outcome recovery | repository action-recovery boundary complete; ADR-0094, deterministic timeout and partial-create recovery, fingerprinted duplicate replay, durable accepted/running and terminal-failure recovery transitions, observation-based lifecycle convergence tests, and per-scenario evidence-shape validation added | executed on the trusted KVM/libvirt host (nkudo-vm1) against 8e532ea: all required crash, timeout, duplicate, partial-completion, corruption, disk-full, cleanup, and aggregate scenarios executed with injections observed and recovery verified, 19/19 gate scenarios passed (issue #87 closed); aggregate failure-recovery.json reports status: passed; closure evidence: pending |
+| #88 | real-host resource leak and foreign-state guard | repository race-safe inventory boundary complete; ADR-0095, stable two-read snapshots, atomic redacted inventory publication, public-CLI keypair inventory, validated O3K-owned network-link inventory, foreign-state digests, and `resource-leak-result.json` output added | executed and closed at 519517e5bd217b08ba1b5e6957f996040fd8fbac on the trusted KVM/libvirt host (nkudo-vm1): the independent verifier (inventory schema v3, compare/negative/aggregate, ADR-0164) ran around the normal CirrOS E2E and the complete #87 failure-injection suite (19 gate scenarios + supplementary artifact-replay + agent-kill variant, 22/22 verdicts passed, zero owned leaks / inconsistencies / foreign changes); stale-artifact and foreign-mutation negatives detected as expected; aggregate target/real-host-workflow-artifacts/resource-leak-result.json reports status: passed (issue #88 closed); closure evidence: pending |
+| #89 | clean Ubuntu install and full TestLab lifecycle | repository clean-install tooling merged (provider selection, config-dir traversal, compute disk capacity, polkit rule, install/reset/uninstall/purge paths); portable packaging tests cover path and ownership safety | executed on the trusted KVM/libvirt host (nkudo-vm1) from a clean Ubuntu 24.04: install from release-candidate instructions, bootstrap, full real CirrOS E2E, failure/recovery smoke, reset, reinstall, E2E rerun, uninstall, purge; target/real-host-workflow-artifacts/clean-ubuntu/clean-ubuntu-install.json reports status: passed (issue #89 closed); closure evidence: pending |
+| #90 | clean Debian install and full TestLab lifecycle | same clean-install tooling as #89 | executed on the trusted KVM/libvirt host (nkudo-vm1) from a clean Debian 12 (bookworm): install from release-candidate instructions, bootstrap, full real CirrOS E2E, failure/recovery smoke, reset, reinstall, E2E rerun, uninstall, purge; target/real-host-workflow-artifacts/clean-debian/clean-debian-install.json reports status: passed (issue #90 closed); closure evidence: pending |
+| #91 | measure real libvirt TestLab footprint and lifecycle latency | repository benchmark tooling merged with summary-to-raw canonical binding (raw_sha256) and release-gate eligibility checks | executed on the trusted KVM/libvirt host (nkudo-vm1): binary/bundle size, startup/readiness, RSS/CPU, token/API latency, upload/cache/overlay, scheduling/dispatch, guest boot, restart/reconciliation, lifecycle, cleanup, and repeated growth/leak behavior measured; target/real-host-workflow-artifacts/benchmark/real-libvirt-benchmark.json reports status: measured with release_eligible: true (issue #91 closed); closure evidence: pending |
+| #92 | human architecture and security review of the libvirt alpha | review package contract and validator merged (ADR-0099, packaging/validate-human-review.sh); candidate package regenerated for the frozen release candidate commit | blocked until a real non-LLM reviewer approves the candidate package (reviewer.is_implementing_agent must be false; reviewed_commit must equal the frozen candidate commit; findings carry severity and disposition; destructive-cleanup and foreign-state safeguards require explicit approval); package: target/real-host-workflow-artifacts/human-review/HUMAN-REVIEW-PACKAGE.md; closure evidence: pending |
+| #93 | pass the release gate and publish v0.2.0-alpha.1 | release gate tooling merged (packaging/release-gate.sh with schema-bound E2E evidence and the human-review gate); verdicts recorded at target/real-host-workflow-artifacts/release-gate.json | blocked: release gate reports blocked with the human review (issue #92) as the only missing input; no release-ready claim is made; tag creation remains an explicit operator action after status: ready; closure evidence: pending |
+
+## Decision log
+
+- ADR-0100 (program closure and provenance tracker) establishes this tracker
+  and its closure chain.
+- ADR-0099 (human architecture/security review evidence package) requires a
+  real non-LLM reviewer with `is_implementing_agent: false`.
+- ADR-0164 (independent real-host leak and foreign-state verifier) provides
+  the #88 resource-leak evidence.
+- issue #93 owns release-gate execution and publication; readiness is decided
+  by `packaging/release-gate.sh`, not by this document.
+- Closure-chain rows keep the marker `closure evidence: pending` until program
+  closure; issue closures and their evidence artifacts are recorded in each
+  row's evidence prose.
+
+## Evidence required to close the program
+
+- real CirrOS libvirt E2E:
+  `target/real-host-workflow-artifacts/leak-final-e2e/openstack-cli-result.json`
+  (accepted by the release gate).
+- failure/recovery matrix:
+  `target/real-host-workflow-artifacts/failure-recovery.json` (status: passed).
+- resource-leak/foreign-state verifier:
+  `target/real-host-workflow-artifacts/resource-leak-result.json`
+  (status: passed).
+- clean Ubuntu install:
+  `target/real-host-workflow-artifacts/clean-ubuntu/clean-ubuntu-install.json`
+  (status: passed).
+- clean Debian install:
+  `target/real-host-workflow-artifacts/clean-debian/clean-debian-install.json`
+  (status: passed).
+- benchmark:
+  `target/real-host-workflow-artifacts/benchmark/real-libvirt-benchmark.json`
+  plus canonical raw (status: measured).
+- human architecture/security review: pending (issue #92).
