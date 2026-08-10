@@ -44,6 +44,8 @@ The host-local `o3k-compute` agent accepts `O3K_COMPUTE_MAX_DISK_GB` as an
 explicit, operator-declared Placement disk-capacity bound. Its default is
 `0`, which intentionally keeps the agent unschedulable until the operator
 provides a trusted value; disk format support is not capacity evidence.
+The packaged libvirt profile installs with `O3K_COMPUTE_MAX_DISK_GB=10`
+(`packaging/install.sh`); tune it per host before scheduling larger flavors.
 
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`, or
 `agent`. The `agent` provider requires complete compute TLS configuration and

@@ -213,6 +213,17 @@ if [[ "$PROFILE" == libvirt ]]; then
     printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
+  # ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute
+  # agent publishes Placement disk capacity from the operator's bounded
+  # O3K_COMPUTE_MAX_DISK_GB declaration and is intentionally unschedulable
+  # (DISK_GB total=0) while it is unset. The packaged install declares 10 GB
+  # per host — the E2E flavor needs 10 — and operators tune per host via
+  # docs/CONFIGURATION.md; an operator-pre-set value is preserved.
+  if ! grep -q '^O3K_COMPUTE_MAX_DISK_GB=' "$CONFIG_DIR/o3k-compute.env"; then
+    umask 077
+    printf 'O3K_COMPUTE_MAX_DISK_GB=10\n' >>"$CONFIG_DIR/o3k-compute.env"
+    chmod 0600 "$CONFIG_DIR/o3k-compute.env"
+  fi
   # ADR-0086 (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) deliberately
   # blocks the direct libvirt provider at daemon startup
   # (ConfigError::DirectLibvirtProviderUnavailable); the packaged real-libvirt
