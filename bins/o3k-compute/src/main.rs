@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_compute_agent::{
@@ -1304,10 +1307,9 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         )),
                     ));
                 }
-                if let Err(error) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&console_path)
+                #[cfg(unix)]
+                if let Err(error) =
+                    std::fs::set_permissions(console_root, std::fs::Permissions::from_mode(0o2710))
                 {
                     return definitive_failure(return_after_create_rollback(
                         &self.network,
@@ -1316,7 +1318,45 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         &self.image_materializer,
                         &self.artifact_root,
                         &command.resource_id,
-                        AgentError::Protocol(format!("console log could not be created: {error}")),
+                        AgentError::Protocol(format!(
+                            "console log root permissions could not be set: {error}"
+                        )),
+                    ));
+                }
+                let console_file = match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&console_path)
+                {
+                    Ok(file) => file,
+                    Err(error) => {
+                        return definitive_failure(return_after_create_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            &self.image_materializer,
+                            &self.artifact_root,
+                            &command.resource_id,
+                            AgentError::Protocol(format!(
+                                "console log could not be created: {error}"
+                            )),
+                        ));
+                    }
+                };
+                #[cfg(unix)]
+                if let Err(error) =
+                    console_file.set_permissions(std::fs::Permissions::from_mode(0o660))
+                {
+                    return definitive_failure(return_after_create_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        &self.image_materializer,
+                        &self.artifact_root,
+                        &command.resource_id,
+                        AgentError::Protocol(format!(
+                            "console log permissions could not be set: {error}"
+                        )),
                     ));
                 }
                 if let Err(error) = self
