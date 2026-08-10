@@ -1767,9 +1767,12 @@ esac
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn qcow2_header_dependencies_are_rejected_before_helper_invocation()
     -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
         let path = root("qcow2-header-dependencies");
         fs::create_dir_all(&path)?;
         for (name, offset, incompatible, rejected) in [
@@ -1790,6 +1793,30 @@ esac
                 "unexpected dependency decision for {name}"
             );
         }
+        let marker = path.join("helper-invoked");
+        let fake_qemu = path.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            format!(
+                "#!/bin/sh\nprintf invoked > '{}'\nprintf '{{\\\"format\\\":\\\"qcow2\\\"}}\\n'\n",
+                marker.display()
+            ),
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+        let cache = ImageCache::open_with_qemu_img(&path.join("cache"), 1024, &fake_qemu)?;
+        let mut hostile = vec![0_u8; 104];
+        hostile[..4].copy_from_slice(b"QFI\xfb");
+        hostile[4..8].copy_from_slice(&3_u32.to_be_bytes());
+        hostile[8..16].copy_from_slice(&4096_u64.to_be_bytes());
+        let checksum = format!("{:x}", Sha256::digest(&hostile));
+        assert!(matches!(
+            cache.cache_base(&checksum, "qcow2", &hostile),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        assert!(
+            !marker.exists(),
+            "qemu-img was invoked before header rejection"
+        );
         Ok(())
     }
 
