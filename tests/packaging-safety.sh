@@ -309,6 +309,10 @@ if [[ "$(grep -Fc 'SupplementaryGroups=' "$ROOT_DIR/packaging/o3k-compute.servic
   echo "compute service has an ambiguous or incomplete supplementary group boundary" >&2
   exit 1
 fi
+if ! grep -Fq 'refusing to reuse o3k account with host-execution groups' "$ROOT_DIR/packaging/install.sh"; then
+  echo "installer does not reject unsafe reuse of a privileged control account" >&2
+  exit 1
+fi
 # The control-plane o3k account and separate o3k-compute account read the TLS
 # material at runtime; bootstrap-certs.sh creates the config dir as root:root
 # 0750, so install.sh must grant o3k group traversal on $CONFIG_DIR itself or

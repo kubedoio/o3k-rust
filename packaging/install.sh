@@ -103,6 +103,10 @@ if [[ $EUID -eq 0 ]]; then
     useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
   fi
   if [[ "$PROFILE" == libvirt ]]; then
+    if id -nG o3k | tr ' ' '\n' | grep -Eq '^(libvirt|kvm)$'; then
+      echo "refusing to reuse o3k account with host-execution groups" >&2
+      exit 2
+    fi
     getent group o3k-compute >/dev/null || groupadd --system o3k-compute
     if id o3k-compute >/dev/null 2>&1; then
       compute_record="$(getent passwd o3k-compute || true)"
