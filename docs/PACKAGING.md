@@ -17,7 +17,11 @@ systemd hardening. For an unprivileged test installation, pass explicit
 `--prefix`, `--data-dir`, `--config-dir`, and `--log-dir` paths.
 
 `packaging/make-release.sh [version] [profile]` builds a versioned fake or
-libvirt bundle with a manifest and SHA-256 checksum. The libvirt profile also
+libvirt bundle with a manifest and SHA-256 checksum. Release binaries are
+built on the Debian 12 (bookworm, glibc 2.36) baseline with
+`scripts/build-release-binaries-debian12.sh` and passed to the bundler via
+`O3K_RELEASE_BINARIES_DIR` (see `docs/RELEASE.md` for the build-baseline
+requirement and commands). The libvirt profile also
 ships `o3k-compute`, preflight/diagnostics, certificate bootstrap, and the
 release gate. Release artifacts are not claims of CellHV support; the CellHV
 profile remains separately environment-gated.
