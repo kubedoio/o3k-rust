@@ -547,7 +547,12 @@ fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => {
             #[cfg(unix)]
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            // Libvirt's qemu process must traverse the managed cache to read
+            // an owned overlay, but group members must not list or write it.
+            // The compute service installs this subtree with the kvm group;
+            // 0710 grants traversal only and leaves file read policy to the
+            // individual artifact modes.
+            fs::set_permissions(path, fs::Permissions::from_mode(0o710))
                 .map_err(ImageError::Storage)?;
             Ok(())
         }
@@ -555,7 +560,7 @@ fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(path).map_err(ImageError::Storage)?;
             #[cfg(unix)]
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            fs::set_permissions(path, fs::Permissions::from_mode(0o710))
                 .map_err(ImageError::Storage)?;
             Ok(())
         }
@@ -1254,6 +1259,24 @@ mod tests {
         assert_eq!(fs::read(&published)?, content);
         assert_eq!(cache.cache_base_path(&checksum, "raw", &source)?, published);
         fs::remove_dir_all(path)?;
+        fs::remove_dir_all(cache_path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_cache_directories_allow_libvirt_traversal_only()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cache_path = root("cache-directory-permissions");
+        let _cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
+        for directory in [
+            cache_path.clone(),
+            cache_path.join("base"),
+            cache_path.join("overlays"),
+        ] {
+            let mode = fs::metadata(directory)?.permissions().mode() & 0o777;
+            assert_eq!(mode, 0o710);
+        }
         fs::remove_dir_all(cache_path)?;
         Ok(())
     }

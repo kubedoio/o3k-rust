@@ -323,7 +323,7 @@ sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0755 \
 sudo -n chmod 0755 "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
 sudo -n install -d -o "$(id -u "$SERVICE_ACCOUNT")" -g "$(id -g "$SERVICE_ACCOUNT")" -m 0700 \
   "$STATE_ROOT/data"
-sudo -n install -d -o "$(id -u "$COMPUTE_ACCOUNT")" -g "$(id -g "$COMPUTE_ACCOUNT")" -m 0700 \
+sudo -n install -d -o "$(id -u "$COMPUTE_ACCOUNT")" -g kvm -m 2710 \
   "$STATE_ROOT/compute-data"
 printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" >"$STATE_ROOT/.o3k-run-owned"
 chmod 0600 "$STATE_ROOT/.o3k-run-owned"
