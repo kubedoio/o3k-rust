@@ -519,7 +519,15 @@ CLEANUP_PORT_STATUS=pending
 FLAVOR_ID="$(openstack flavor create "$(name_with_suffix o3k-testlab-flavor)" --ram 512 --disk 10 --vcpus 1 -f value -c id)"
 CREATED_FLAVOR_ID="${FLAVOR_ID}"
 CLEANUP_FLAVOR_STATUS=pending
-SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "port-id=${PORT_ID}" "${SERVER_NAME}" -f value -c id)"
+# The public CLI's value formatter may include a leading/trailing blank line
+# when a provider emits progress diagnostics.  Normalize only the UUID field
+# before using it as a path/resource identity; never pass surrounding output
+# through as an identifier.
+SERVER_ID="$(openstack server create --wait --image "${IMAGE_ID}" --flavor "${FLAVOR_ID}" --key-name "${KEYPAIR_NAME}" "${CONFIG_DRIVE_ARGS[@]}" --nic "port-id=${PORT_ID}" "${SERVER_NAME}" -f value -c id | tr -d '[:space:]')"
+[[ "${SERVER_ID}" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+    echo "OpenStack CLI returned an invalid server UUID" >&2
+    exit 1
+}
 CREATED_SERVER_ID="${SERVER_ID}"
 CLEANUP_SERVER_STATUS=pending
 if [[ -n "${O3K_AGENT_INSPECT_PROBE_RESOURCE_FILE:-}" ]]; then
