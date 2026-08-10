@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `3024edb` and must not be
+This status is bound to the remediation branch at `0dda944` and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
@@ -13,16 +13,16 @@ run `987654344` completed resource cleanup without leaving its run bridge.
 Fresh candidate-bound run `987654403` exposed Linux bridge-MAC drift after
 TAP preparation: the live bridge no longer matched the identity recorded at
 creation, so the agent correctly failed closed.  The network manager now
-assigns a stable locally-administered bridge MAC before recording ownership;
-a fresh host run after this fix is still required.
-These artifacts are useful
-diagnostics, but neither is a complete passing lifecycle, so no host-bound row
-is marked closed here.  The pre-existing libvirt domain `fcanary88` remained
-unchanged.  The current diagnostic host also contains the preserved
-`o3k-b87654403` bridge from candidate-bound run `987654403`; its live identity
-does not match the surviving manifest, so current O3K ownership cannot be
-proven.  It is deliberately preserved and the host is not yet a clean
-recertification boundary.  It must not be removed by name alone.
+assigns a stable locally-administered bridge MAC before recording ownership.
+Fresh run `987654406` created a guest with that stable identity and completed
+owned-resource cleanup; its lifecycle artifact still failed because the
+CirrOS console produced no boot marker.  The pre-existing libvirt domain
+`fcanary88` remained unchanged.  The stale `o3k-b87654403` bridge was removed
+only after ownership-specific link-down and `brctl delbr` instructions.  The
+post-run inventory for `987654406` has no O3K domains, links, or OpenStack
+resources and retains the foreign domain.  These are diagnostic results, not
+a complete passing lifecycle or release approval; clean-boundary
+recertification is still required.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
@@ -36,7 +36,7 @@ recertification boundary.  It must not be removed by name alone.
 | ASR-008 | implemented-portable | Console tail reads are bounded by request and snapshot limits | Fresh sparse/growing-log host evidence |
 | ASR-009 | in-progress | `o3kd`/`o3k-compute` have separate users, state, units, and polkit authority | Fresh Ubuntu/Debian install proof |
 | ASR-010 | implemented-portable | Every agent lifecycle mutation uses ownership-fenced libvirt handles; same-name replacement tests pass | Fresh libvirt failure/replacement proof |
-| ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; `5c65db9` gives disposable runs a validated per-run bridge, and run `987654344` removed its run bridge cleanly | Fresh host link canaries and a complete lifecycle run after the bridge-isolation fix |
+| ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; `5c65db9` gives disposable runs a validated per-run bridge, `3024edb` pins its MAC before TAP attachment, and run `987654406` removed its owned bridge without touching the foreign domain | Fresh host link canaries and a complete lifecycle run after the bridge-isolation fix |
 | ASR-012 | in-progress | Reset/purge preserve ledgers and fail closed on active/foreign host state; `9f412e4` corrects the compute-owned network/DHCP ledger path, `02a294f` fences missing-ledger deterministic bridges, and `0547abd` exports custom bridge identity to cleanup | Fresh failed-create cleanup proving owned bridge/DHCP residue is detected and safely resolved |
 | ASR-013 | implemented-portable | dnsmasq cleanup acquires pidfd before identity validation and signals only the stable handle; process tests pass | Fresh Linux pid-reuse stress proof |
 | ASR-014 | in-progress | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity; run `987654346` committed both transfers without the prior offer-conflict disconnect | Fresh process/agent reconnect evidence and a complete lifecycle run |
