@@ -436,6 +436,13 @@ impl ComputeService {
         self.provider.clone()
     }
 
+    /// Reports whether the explicitly configured external-Cinder attachment
+    /// provider enables the hosted attachment API profile.
+    #[must_use]
+    pub fn cinder_configured(&self) -> bool {
+        self.attachments.cinder_configured()
+    }
+
     /// Applies a live authenticated agent result through the durable journal.
     /// The control-plane event consumer owns subscription and retry policy.
     pub async fn apply_agent_update(
@@ -3060,6 +3067,24 @@ mod tests {
             .begin_create("project-a", &request)
             .await
             .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Succeeded,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         let update = AgentOperationUpdate {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -3157,6 +3182,24 @@ mod tests {
             .begin_create("project-a", &request)
             .await
             .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Succeeded,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         service
             .store
             .attach_server_keypair(request.o3k_server_id, keypair.id)
@@ -3526,7 +3569,7 @@ mod tests {
             format!("o3k:inspect-create:{}", request.operation_id).as_bytes(),
         );
         let update = AgentOperationUpdate {
-            agent_id: "agent-1".to_owned(),
+            agent_id: "node-a".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
             operation_sequence: 1,
             operation_id: inspect_operation_id,
@@ -3541,7 +3584,7 @@ mod tests {
             o3k_store::OperationState::Succeeded
         );
         let observation = AgentObservation {
-            agent_id: "agent-1".to_owned(),
+            agent_id: "node-a".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
             resource_id: request.o3k_server_id,
             provider_resource_id: Some(instance_id),
@@ -5064,6 +5107,24 @@ mod tests {
             .begin_create("project-a", &request)
             .await
             .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Succeeded,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         let failed = AgentOperationUpdate {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -5346,6 +5407,24 @@ mod tests {
             .begin_create("project-a", &request)
             .await
             .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Succeeded,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         let observation = AgentObservation {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),

@@ -182,7 +182,6 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         ));
     }
     let name = stable_domain_name(&spec.metadata.server_id);
-    let console_path = console_log_path(&spec.image_id, &name)?;
     let m = &spec.metadata;
     let config_drive = spec.config_drive_image.as_ref().map(|image| {
             format!(
@@ -202,7 +201,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         );
     }
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><controller type=\"scsi\" index=\"0\" model=\"virtio-scsi\" /><controller type=\"pci\" index=\"1\" model=\"pci-bridge\" /><serial type=\"file\"><source path=\"{}\" /><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"file\"><source path=\"{}\" /><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><controller type=\"scsi\" index=\"0\" model=\"virtio-scsi\" /><controller type=\"pci\" index=\"1\" model=\"pci-bridge\" /><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -213,8 +212,6 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         m.generation,
         xml_escape(&m.operation_id),
         xml_escape(&m.managed_by),
-        xml_escape(&console_path),
-        xml_escape(&console_path),
         xml_escape(&spec.image_id),
         config_drive,
         network_interfaces
@@ -1167,19 +1164,9 @@ fn backend_read_console(
     validate_console_ownership(name, &xml, expected_server_id).inspect_err(|error| {
         tracing::warn!(%error, domain = %name, "libvirt read_console ownership rejected");
     })?;
-    if let Some(path) = console_file_path_from_xml(&xml).inspect_err(|error| {
-        tracing::warn!(%error, domain = %name, "libvirt read_console durable path rejected");
-    })? {
-        let bytes = read_console_file_tail(&path, max_bytes, std::time::Duration::from_secs(3))
-            .inspect_err(|error| {
-                tracing::warn!(%error, domain = %name, "libvirt read_console durable read failed");
-            })?;
-        tracing::info!(domain = %name, bytes = bytes.len(), "libvirt read_console durable end");
-        return Ok(bytes);
-    }
     tracing::info!(
         domain = %name,
-        "libvirt read_console has no durable file source; using console stream"
+        "libvirt read_console uses the bounded console stream; durable file paths are never opened"
     );
     let stream = Stream::new(&connection, virt::sys::VIR_STREAM_NONBLOCK).map_err(|_| {
         LibvirtError::new(
@@ -1221,6 +1208,7 @@ fn backend_read_console(
 ///
 /// Returns `Ok(None)` when the domain has no `<console type="file">` source,
 /// in which case the caller falls back to the libvirt console stream.
+#[cfg(test)]
 fn console_file_path_from_xml(xml: &str) -> Result<Option<std::path::PathBuf>, LibvirtError> {
     let Some(console) = xml
         .split("<console type=\"file\">")
@@ -1266,6 +1254,7 @@ fn console_file_path_from_xml(xml: &str) -> Result<Option<std::path::PathBuf>, L
 /// empty snapshot. Every other I/O error (for example insufficient
 /// permissions) is a hard failure so a permission problem is never mistaken
 /// for an empty console.
+#[cfg(test)]
 fn read_console_file_tail(
     path: &Path,
     max_bytes: usize,
@@ -1408,6 +1397,10 @@ fn owned_metadata(
     Ok(metadata)
 }
 
+fn rollback_domain_is_owned(inspection: &DomainInspection, server_id: &str) -> bool {
+    owned_metadata(inspection, Some(server_id)).is_ok()
+}
+
 #[async_trait::async_trait]
 impl o3k_provider::ComputeProvider for LibvirtProvider {
     async fn capabilities(
@@ -1453,7 +1446,16 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             .await
             .map_err(provider_error)?;
         if let Err(error) = self.adapter.start(definition.name.clone()).await {
-            let _ = self.adapter.undefine(definition.name.clone()).await;
+            // Start may fail after libvirt has accepted the definition.  A
+            // foreign same-name replacement can race this rollback, so never
+            // undefine by name alone.  Re-inspect the current XML and preserve
+            // the domain if ownership cannot be proven at this exact moment.
+            let expected_server_id = request.o3k_server_id.to_string();
+            if let Ok(inspection) = self.adapter.inspect(definition.name.clone()).await
+                && rollback_domain_is_owned(&inspection, &expected_server_id)
+            {
+                let _ = self.adapter.undefine(definition.name.clone()).await;
+            }
             return Err(provider_error(error));
         }
         self.operation(request.operation_id, Some(definition.name))
@@ -1621,9 +1623,9 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.xml.contains("project&amp;1"));
         assert!(
-            first.xml.contains("<console type=\"file\">")
-                && first.xml.contains("<serial type=\"file\">")
-                && first.xml.contains("/console/o3k-")
+            first.xml.contains("<console type=\"pty\">")
+                && first.xml.contains("<serial type=\"pty\">")
+                && !first.xml.contains("/console/o3k-")
         );
         assert_eq!(
             discover_domain_xml(&first.name, &first.xml),
@@ -1882,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn console_file_path_from_xml_extracts_validated_durable_path() -> Result<(), LibvirtError> {
+    fn pty_console_xml_has_no_durable_file_path() -> Result<(), LibvirtError> {
         let spec = DomainSpec {
             metadata: DomainMetadata {
                 server_id: "console-server".to_owned(),
@@ -1899,7 +1901,7 @@ mod tests {
         };
         let xml = build_domain_xml(&spec)?.xml;
         let path = console_file_path_from_xml(&xml)?;
-        assert!(path.is_some_and(|path| path.is_absolute()));
+        assert!(path.is_none());
         Ok(())
     }
 
@@ -2085,6 +2087,8 @@ mod tests {
             owned_metadata(&owned, Some("different-server")),
             Err(o3k_provider::ProviderError::NotFound)
         );
+        assert!(!rollback_domain_is_owned(&foreign, "server-guard"));
+        assert!(rollback_domain_is_owned(&owned, "server-guard"));
         Ok(())
     }
 

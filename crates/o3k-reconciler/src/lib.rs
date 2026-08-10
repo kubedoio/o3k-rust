@@ -109,6 +109,13 @@ struct AgentEvidenceFence {
     provider_resource_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservationEvidenceFence {
+    agent_id: String,
+    agent_epoch: String,
+    sequence: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvidenceDisposition {
     New,
@@ -122,6 +129,7 @@ pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     max_attempts: u8,
     events: Arc<Mutex<Vec<JournalEvent>>>,
     agent_evidence: Arc<Mutex<HashMap<Uuid, AgentEvidenceFence>>>,
+    observation_evidence: Arc<Mutex<HashMap<Uuid, ObservationEvidenceFence>>>,
     /// Optional node registry used to resolve the agent's *current* registered
     /// epoch. When present it is authoritative for evidence fencing: the
     /// fence rejects evidence minted under any other epoch (a dead/stale
@@ -140,6 +148,7 @@ impl<S: ?Sized, P: ?Sized> Clone for OperationJournal<S, P> {
             max_attempts: self.max_attempts,
             events: self.events.clone(),
             agent_evidence: self.agent_evidence.clone(),
+            observation_evidence: self.observation_evidence.clone(),
             agent_registry: self.agent_registry.clone(),
         }
     }
@@ -157,6 +166,7 @@ where
             max_attempts: max_attempts.max(1),
             events: Arc::new(Mutex::new(Vec::new())),
             agent_evidence: Arc::new(Mutex::new(HashMap::new())),
+            observation_evidence: Arc::new(Mutex::new(HashMap::new())),
             agent_registry: None,
         }
     }
@@ -248,6 +258,69 @@ where
         }
     }
 
+    /// Observations are terminal evidence for a durable command, not a free
+    /// standing state update.  Keep their sequence fence separate from command
+    /// acceptance/update sequences: both may legitimately start at one.
+    async fn fence_agent_observation(
+        &self,
+        operation_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+        sequence: u64,
+    ) -> Result<EvidenceDisposition, ReconcileError> {
+        if agent_id.trim().is_empty()
+            || agent_epoch.trim().is_empty()
+            || sequence == 0
+            || !valid_agent_reference(agent_id)
+            || !valid_agent_reference(agent_epoch)
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        if let Some(registry) = &self.agent_registry {
+            match registry.snapshot(agent_id).await {
+                Some(node) if node.agent_epoch == agent_epoch => {}
+                Some(_) => return Err(ReconcileError::StaleAgentEvidence),
+                None => return Err(ReconcileError::StaleAgentEvidence),
+            }
+        }
+        let mut evidence = self
+            .observation_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        match evidence.get(&operation_id) {
+            None => {
+                evidence.insert(
+                    operation_id,
+                    ObservationEvidenceFence {
+                        agent_id: agent_id.to_owned(),
+                        agent_epoch: agent_epoch.to_owned(),
+                        sequence,
+                    },
+                );
+                Ok(EvidenceDisposition::New)
+            }
+            Some(previous) if previous.agent_id != agent_id => Err(ReconcileError::InvalidIntent),
+            Some(previous) if previous.agent_epoch != agent_epoch => {
+                // A fresh epoch is allowed only when the registry above says
+                // it is the current connection for the same durable agent.
+                if self.agent_registry.is_none() {
+                    return Err(ReconcileError::InvalidIntent);
+                }
+                evidence.insert(
+                    operation_id,
+                    ObservationEvidenceFence {
+                        agent_id: agent_id.to_owned(),
+                        agent_epoch: agent_epoch.to_owned(),
+                        sequence,
+                    },
+                );
+                Ok(EvidenceDisposition::New)
+            }
+            Some(previous) if sequence < previous.sequence => Ok(EvidenceDisposition::Stale),
+            Some(_) => Ok(EvidenceDisposition::Duplicate),
+        }
+    }
+
     pub fn events(&self) -> Vec<JournalEvent> {
         self.events
             .lock()
@@ -324,6 +397,14 @@ where
     ) -> Result<OperationState, ReconcileError> {
         let operation = self.store.get_operation(update.operation_id).await?;
         if operation.resource_id != update.resource_id {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let command = self
+            .store
+            .get_agent_command_by_operation(update.operation_id)
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        if command.agent_id != update.agent_id || command.resource_id != update.resource_id {
             return Err(ReconcileError::InvalidIntent);
         }
         let disposition = self
@@ -455,6 +536,14 @@ where
         accepted: &AgentCommandAccepted,
     ) -> Result<OperationState, ReconcileError> {
         let operation = self.store.get_operation(accepted.operation_id).await?;
+        let command = self
+            .store
+            .get_agent_command(&accepted.command_id)
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        if command.operation_id != accepted.operation_id || command.agent_id != accepted.agent_id {
+            return Err(ReconcileError::InvalidIntent);
+        }
         let disposition = self
             .fence_agent_evidence(
                 accepted.operation_id,
@@ -517,6 +606,20 @@ where
             );
             return Err(ReconcileError::InvalidIntent);
         }
+        // The operation row alone is not an authorization grant: bind the
+        // observation to the durable command that was assigned to this agent
+        // and resource.  This prevents any authenticated agent from claiming
+        // a successful observation for another agent's operation.
+        let command = self
+            .store
+            .get_agent_command_by_operation(observation.operation_id)
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        if command.agent_id != observation.agent_id
+            || command.resource_id != observation.resource_id
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
         if observation.operation_state != AgentOperationState::Succeeded {
             tracing::debug!(
                 operation_id=%observation.operation_id,
@@ -524,6 +627,17 @@ where
                 "apply_agent_observation: operation_state is not Succeeded"
             );
             return Err(ReconcileError::InvalidIntent);
+        }
+        let disposition = self
+            .fence_agent_observation(
+                observation.operation_id,
+                &observation.agent_id,
+                &observation.agent_epoch,
+                observation.observation_sequence,
+            )
+            .await?;
+        if disposition != EvidenceDisposition::New {
+            return Ok(());
         }
         let observed_state = server_state_to_storage(ServerState::from(observation.state));
         let resource = self.store.get_resource(observation.resource_id).await?;
@@ -1360,6 +1474,33 @@ where
         // validates the identity instead of rejecting an empty id; an empty
         // id keeps the inspection keyed on the server's durable identity.
         let known_provider_resource_id = self.provider_resource_id_for(&resource).await?;
+        // Presence inspection is itself a durable agent command.  Persist its
+        // assignment before dispatch so a terminal observation cannot arrive
+        // for an unbound operation after a control-plane crash.
+        if self
+            .store
+            .get_agent_command_by_operation(inspect_operation_id)
+            .await
+            .is_err()
+        {
+            self.store
+                .insert_agent_command(&o3k_store::AgentCommandRecord {
+                    command_id: format!("o3k-inspect-command-{inspect_operation_id}"),
+                    idempotency_key: idempotency_key.clone(),
+                    operation_id: inspect_operation_id,
+                    resource_id: resource.id,
+                    agent_id: provider_id.to_owned(),
+                    agent_epoch: "dispatch".to_owned(),
+                    payload_fingerprint_sha256: "0".repeat(64),
+                    payload: Vec::new(),
+                    state: o3k_store::AgentCommandState::Pending,
+                    accepted_sequence: 0,
+                    last_sequence: 0,
+                    provider_operation_id: None,
+                    provider_resource_id: None,
+                })
+                .await?;
+        }
         let result = self
             .provider
             .inspect_instance(
@@ -1871,6 +2012,52 @@ mod tests {
         ))
     }
 
+    async fn bind_observation_command(
+        store: &TestStore,
+        operation_id: Uuid,
+        resource_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Result<(), ReconcileError> {
+        bind_command(
+            store,
+            format!("observation-command-{operation_id}"),
+            operation_id,
+            resource_id,
+            agent_id,
+            agent_epoch,
+        )
+        .await
+    }
+
+    async fn bind_command(
+        store: &TestStore,
+        command_id: String,
+        operation_id: Uuid,
+        resource_id: Uuid,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Result<(), ReconcileError> {
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id,
+                idempotency_key: format!("observation-{operation_id}"),
+                operation_id,
+                resource_id,
+                agent_id: agent_id.to_owned(),
+                agent_epoch: agent_epoch.to_owned(),
+                payload_fingerprint_sha256: "f".repeat(64),
+                payload: Vec::new(),
+                state: AgentCommandState::Succeeded,
+                accepted_sequence: 1,
+                last_sequence: 1,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Minimal in-memory node registry used to simulate agent registration and
     /// re-registration. A re-registration replaces the stored epoch, mirroring
     /// `NodeRegistry::register` in o3k-compute-agent.
@@ -2070,6 +2257,15 @@ mod tests {
         let (journal, store, _) = journal("agent-create-failed", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            format!("command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let update = failed_update(
             &operation_id.to_string(),
             &request.o3k_server_id.to_string(),
@@ -2134,6 +2330,15 @@ mod tests {
         let (journal, store, _) = journal("agent-failed-reason", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            format!("command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let update = failed_update(
             &operation_id.to_string(),
             &request.o3k_server_id.to_string(),
@@ -2161,6 +2366,15 @@ mod tests {
         let (journal, store, _) = journal("agent-success", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            format!("command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let update = AgentOperationUpdate {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -2202,6 +2416,15 @@ mod tests {
         let (journal, store, _) = journal("agent-evidence-fence", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            format!("command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-a",
+            "epoch-a",
+        )
+        .await?;
         let succeeded = AgentOperationUpdate {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-a".to_owned(),
@@ -2259,6 +2482,15 @@ mod tests {
         let (journal, store, _) = journal("agent-fence-no-registry", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            "command-1".to_owned(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-a",
+            "epoch-a",
+        )
+        .await?;
         let accepted = AgentCommandAccepted {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-a".to_owned(),
@@ -2303,6 +2535,15 @@ mod tests {
 
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            "command-1".to_owned(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-a",
+            "epoch-b",
+        )
+        .await?;
         let accepted = AgentCommandAccepted {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-a".to_owned(),
@@ -2369,6 +2610,15 @@ mod tests {
 
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            "command-1".to_owned(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-a",
+            "epoch-b",
+        )
+        .await?;
         let accepted = AgentCommandAccepted {
             agent_id: "agent-a".to_owned(),
             agent_epoch: "epoch-b".to_owned(),
@@ -2426,6 +2676,14 @@ mod tests {
         let (journal, store, _) = journal("agent-observation", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &store,
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let observation = AgentObservation {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -2460,6 +2718,14 @@ mod tests {
         let (journal, store, _) = journal("agent-observation-order", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &store,
+            operation_id,
+            request.o3k_server_id,
+            "compute-1",
+            "epoch-1",
+        )
+        .await?;
         let active = AgentObservation {
             agent_id: "compute-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -2525,6 +2791,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_observation_rejects_agent_not_bound_to_durable_command()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-observation-binding", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        bind_observation_command(
+            &store,
+            operation_id,
+            request.o3k_server_id,
+            "agent-a",
+            "epoch-a",
+        )
+        .await?;
+        let observation = AgentObservation {
+            agent_id: "agent-b".to_owned(),
+            agent_epoch: "epoch-b".to_owned(),
+            resource_id: request.o3k_server_id,
+            provider_resource_id: Some("foreign-domain".to_owned()),
+            state: o3k_provider::InstanceState::Running,
+            operation_id,
+            operation_state: AgentOperationState::Succeeded,
+            observation_sequence: 1,
+            observed_at_unix_ms: 0,
+            redacted_message: None,
+            console_log_bytes: Vec::new(),
+            console_log_offset: 0,
+            console_log_complete: false,
+            console_log_truncated: false,
+            block_device: None,
+        };
+        assert!(matches!(
+            journal.apply_agent_observation(&observation).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "REQUESTED"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn agent_failure_persists_the_contract_redacted_provider_reason()
     -> Result<(), ReconcileError> {
         // Contract: the agent redacts secrets and connection information
@@ -2533,6 +2844,15 @@ mod tests {
         let (journal, store, _) = journal("agent-failure", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            format!("command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let update = failed_update(
             &operation_id.to_string(),
             &request.o3k_server_id.to_string(),
@@ -2558,6 +2878,15 @@ mod tests {
         let (journal, store, _) = journal("agent-acceptance", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
+        bind_command(
+            &store,
+            "command-1".to_owned(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
         let accepted = AgentCommandAccepted {
             agent_id: "agent-1".to_owned(),
             agent_epoch: "epoch-1".to_owned(),
@@ -3834,6 +4163,7 @@ mod tests {
         journal
             .begin_lifecycle(resource.id, operation_id, LifecycleAction::Reboot)
             .await?;
+        bind_observation_command(&store, operation_id, resource.id, "agent-1", "epoch-1").await?;
         assert_eq!(
             journal.reconcile_lifecycle_once(operation_id).await?,
             OperationState::UnknownOutcome

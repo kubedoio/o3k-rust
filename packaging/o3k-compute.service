@@ -5,26 +5,26 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=o3k
-Group=o3k
-SupplementaryGroups=libvirt kvm
+User=o3k-compute
+Group=o3k-compute
+SupplementaryGroups=libvirt kvm o3k
 EnvironmentFile=-/etc/o3k/o3k-compute.env
 ExecStart=/usr/local/bin/o3k-compute
 Restart=on-failure
 NoNewPrivileges=true
+UMask=0077
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/o3k /var/log/o3k
+ReadWritePaths=/var/lib/o3k/compute /var/log/o3k
 # Ambient caps for the host-network + DHCP work, matching the testlab launch
 # (scripts/bootstrap-disposable-testlab.sh): CAP_NET_ADMIN for TAP/bridge/
-# gateway setup, CAP_DAC_READ_SEARCH for libvirtd-owned root:root 0600 console
-# logs, and CAP_NET_BIND_SERVICE + CAP_NET_RAW so the spawned dnsmasq can bind
+# gateway setup, and CAP_NET_BIND_SERVICE + CAP_NET_RAW so the spawned dnsmasq can bind
 # UDP/67 and serve DHCP (issue-87 re-probe matrix, dnsmasq 2.90). Ambient so
 # helper processes (ip, dnsmasq) retain them across exec; NoNewPrivileges does
 # not restrict ambient capabilities.
-AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_NET_BIND_SERVICE CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

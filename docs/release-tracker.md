@@ -7,7 +7,11 @@ program_status: blocked
 closure_decision: pending
 -->
 
-This file is the source-controlled status record for issue #54. A merged PR
+This file is the source-controlled status record for issue #54. The frozen
+candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5 was rejected by the
+independent AI architecture/security review recorded on issue #92 and is
+permanently ineligible for release. Remediation is in progress; no public
+alpha has been released. A merged PR
 means the scoped implementation and repository gates passed; it does not mean
 the real-libvirt acceptance evidence exists. The tracker contract is checked
 by `packaging/validate-program-tracker.sh`; it must remain blocked and pending
@@ -58,8 +62,8 @@ marker flips only when the program closes.
 | #89 | clean Ubuntu install and full TestLab lifecycle | repository clean-install tooling merged (provider selection, config-dir traversal, compute disk capacity, polkit rule, install/reset/uninstall/purge paths); portable packaging tests cover path and ownership safety | executed on the trusted KVM/libvirt host (nkudo-vm1) from a clean Ubuntu 24.04: install from release-candidate instructions, bootstrap, full real CirrOS E2E, failure/recovery smoke, reset, reinstall, E2E rerun, uninstall, purge; target/real-host-workflow-artifacts/clean-ubuntu/clean-ubuntu-install.json reports status: passed (issue #89 closed); closure evidence: pending |
 | #90 | clean Debian install and full TestLab lifecycle | same clean-install tooling as #89 | executed on the trusted KVM/libvirt host (nkudo-vm1) from a clean Debian 12 (bookworm): install from release-candidate instructions, bootstrap, full real CirrOS E2E, failure/recovery smoke, reset, reinstall, E2E rerun, uninstall, purge; target/real-host-workflow-artifacts/clean-debian/clean-debian-install.json reports status: passed (issue #90 closed); closure evidence: pending |
 | #91 | measure real libvirt TestLab footprint and lifecycle latency | repository benchmark tooling merged with summary-to-raw canonical binding (raw_sha256) and release-gate eligibility checks | executed on the trusted KVM/libvirt host (nkudo-vm1): binary/bundle size, startup/readiness, RSS/CPU, token/API latency, upload/cache/overlay, scheduling/dispatch, guest boot, restart/reconciliation, lifecycle, cleanup, and repeated growth/leak behavior measured; target/real-host-workflow-artifacts/benchmark/real-libvirt-benchmark.json reports status: measured with release_eligible: true (issue #91 closed); closure evidence: pending |
-| #92 | human architecture and security review of the libvirt alpha | review package contract and validator merged (ADR-0099, packaging/validate-human-review.sh); candidate package regenerated for the frozen release candidate commit | blocked until a real non-LLM reviewer approves the candidate package (reviewer.is_implementing_agent must be false; reviewed_commit must equal the frozen candidate commit; findings carry severity and disposition; destructive-cleanup and foreign-state safeguards require explicit approval); package: target/real-host-workflow-artifacts/human-review/HUMAN-REVIEW-PACKAGE.md; closure evidence: pending |
-| #93 | pass the release gate and publish v0.2.0-alpha.1 | release gate tooling merged (packaging/release-gate.sh with schema-bound E2E evidence and the human-review gate); verdicts recorded at target/real-host-workflow-artifacts/release-gate.json | blocked: release gate reports blocked with the human review (issue #92) as the only missing input; no release-ready claim is made; tag creation remains an explicit operator action after status: ready; closure evidence: pending |
+| #92 | human architecture and security review of the libvirt alpha | rejected candidate review recorded; ASR-001…021 remediation matrix and workstream issues #588, #589, #590 published; no AI review is human approval | blocked: a new exact-candidate review by a real non-LLM reviewer is required after ASR remediation; closure evidence: pending |
+| #93 | pass the release gate and publish v0.2.0-alpha.1 | release gate now explicitly rejects historical candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5; remediation is in progress and no public alpha is released | blocked: no release-ready claim; all runtime ASRs and fresh candidate-bound evidence remain required; closure evidence: pending |
 
 ## Decision log
 

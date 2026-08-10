@@ -17,10 +17,15 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 pub const MAX_USER_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_METADATA_BYTES: usize = 64 * 1024;
 pub const MAX_NETWORK_DATA_BYTES: usize = 64 * 1024;
 pub const MAX_VENDOR_DATA_BYTES: usize = 64 * 1024;
+pub const MAX_SSH_PUBLIC_KEY_BYTES: usize = 16 * 1024;
+pub const MAX_INPUT_BYTES: usize = 128 * 1024;
 pub const MAX_ISO_BYTES: usize = 64 * 1024 * 1024;
 const MANIFEST_NAME: &str = "o3k-ownership.json";
 const MANAGED_BY: &str = "o3k-config-drive";
@@ -162,7 +167,18 @@ pub struct ConfigDriveStore {
 impl ConfigDriveStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConfigDriveError> {
         let root = root.into();
-        fs::create_dir_all(&root).map_err(ConfigDriveError::Storage)?;
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => return Err(ConfigDriveError::UnownedPath),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir_all(&root).map_err(ConfigDriveError::Storage)?;
+            }
+            Err(error) => return Err(ConfigDriveError::Storage(error)),
+        }
+        #[cfg(unix)]
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .map_err(ConfigDriveError::Storage)?;
+        reap_abandoned_publication_artifacts(&root)?;
         Ok(Self { root })
     }
 
@@ -286,6 +302,48 @@ fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+fn reap_abandoned_publication_artifacts(root: &Path) -> Result<(), ConfigDriveError> {
+    let entries = fs::read_dir(root).map_err(ConfigDriveError::Storage)?;
+    for entry in entries {
+        let entry = entry.map_err(ConfigDriveError::Storage)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !is_publication_temporary_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(ConfigDriveError::Storage)?;
+        if metadata.file_type().is_symlink() {
+            // A matching symlink is not O3K-owned residue. Preserve it and
+            // never follow it during restart cleanup.
+            continue;
+        }
+        if metadata.is_dir() {
+            fs::remove_dir_all(path).map_err(ConfigDriveError::Storage)?;
+        } else if metadata.is_file() {
+            fs::remove_file(path).map_err(ConfigDriveError::Storage)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_publication_temporary_name(name: &str) -> bool {
+    let Some(value) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((prefix, suffix)) = value
+        .split_once("-tmp-")
+        .or_else(|| value.split_once("-old-"))
+    else {
+        return false;
+    };
+    let instance = prefix
+        .strip_suffix(".iso-manifest")
+        .or_else(|| prefix.strip_suffix(".iso"))
+        .unwrap_or(prefix);
+    Uuid::parse_str(instance).is_ok() && Uuid::parse_str(suffix).is_ok()
+}
+
 pub fn generate(
     root: impl AsRef<Path>,
     input: &ConfigDriveInput,
@@ -319,6 +377,9 @@ fn generate_at(
     let directory = root.join(&input.instance_id);
     let temporary = root.join(format!(".{}-tmp-{}", input.instance_id, Uuid::now_v7()));
     fs::create_dir_all(&temporary).map_err(ConfigDriveError::Storage)?;
+    #[cfg(unix)]
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))
+        .map_err(ConfigDriveError::Storage)?;
     let preparation = (|| {
         write(
             &temporary.join("openstack/latest/meta_data.json"),
@@ -480,6 +541,9 @@ pub fn materialize_iso_with_runner(
         runner
             .run(&program, &args)
             .map_err(ConfigDriveError::ToolFailed)?;
+        #[cfg(unix)]
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))
+            .map_err(ConfigDriveError::Storage)?;
         let artifact_fingerprint = verify_regular_file_digest(&temporary)?;
         let manifest = IsoOwnershipManifest {
             schema_version: 1,
@@ -496,6 +560,9 @@ pub fn materialize_iso_with_runner(
         let bytes =
             serde_json::to_vec_pretty(&manifest).map_err(ConfigDriveError::Serialization)?;
         fs::write(&temporary_manifest, bytes).map_err(ConfigDriveError::Storage)?;
+        #[cfg(unix)]
+        fs::set_permissions(&temporary_manifest, fs::Permissions::from_mode(0o600))
+            .map_err(ConfigDriveError::Storage)?;
         let verified = validate_owned_iso(
             &temporary,
             &temporary_manifest,
@@ -849,7 +916,7 @@ fn valid_instance_id(value: &str) -> bool {
         && !value.starts_with('.')
 }
 
-fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
+pub fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
     if !valid_instance_id(&input.instance_id)
         || input.hostname.is_empty()
         || input.hostname.len() > 255
@@ -863,9 +930,11 @@ fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
     {
         return Err(ConfigDriveError::InvalidInput);
     }
-    if input.user_data.len() > MAX_USER_DATA_BYTES {
-        return Err(ConfigDriveError::UserDataTooLarge);
-    }
+    validate_input_bounds(
+        &input.ssh_public_key,
+        &input.user_data,
+        input.vendor_data.as_deref(),
+    )?;
     let encoded = serde_json::to_vec(&input.metadata).map_err(ConfigDriveError::Serialization)?;
     if encoded.len() > MAX_METADATA_BYTES {
         return Err(ConfigDriveError::MetadataTooLarge);
@@ -885,11 +954,45 @@ fn validate(input: &ConfigDriveInput) -> Result<(), ConfigDriveError> {
     Ok(())
 }
 
+/// Validates the secret-bearing request fields before a compute operation is
+/// persisted. This is intentionally independent of generated metadata and
+/// network data so the API can reject oversized input at admission time.
+pub fn validate_input_bounds(
+    ssh_public_key: &str,
+    user_data: &[u8],
+    vendor_data: Option<&[u8]>,
+) -> Result<(), ConfigDriveError> {
+    if user_data.len() > MAX_USER_DATA_BYTES {
+        return Err(ConfigDriveError::UserDataTooLarge);
+    }
+    if ssh_public_key.len() > MAX_SSH_PUBLIC_KEY_BYTES {
+        return Err(ConfigDriveError::InvalidInput);
+    }
+    if vendor_data.is_some_and(|data| data.len() > MAX_VENDOR_DATA_BYTES) {
+        return Err(ConfigDriveError::VendorDataTooLarge);
+    }
+    let total = user_data
+        .len()
+        .saturating_add(vendor_data.map_or(0, <[u8]>::len))
+        .saturating_add(ssh_public_key.len());
+    if total > MAX_INPUT_BYTES {
+        return Err(ConfigDriveError::InvalidInput);
+    }
+    Ok(())
+}
+
 fn write(path: &Path, content: &[u8]) -> Result<(), ConfigDriveError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(ConfigDriveError::Storage)?;
+        #[cfg(unix)]
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(ConfigDriveError::Storage)?;
     }
-    fs::write(path, content).map_err(ConfigDriveError::Storage)
+    fs::write(path, content).map_err(ConfigDriveError::Storage)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(ConfigDriveError::Storage)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -974,6 +1077,25 @@ mod tests {
         let bytes = fs::read(first.directory.join("openstack/latest/user_data"))
             .map_err(ConfigDriveError::Storage)?;
         assert_eq!(bytes, input().user_data);
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::metadata(first.directory.join("openstack/latest/user_data"))
+                    .map_err(ConfigDriveError::Storage)?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(&first.directory)
+                    .map_err(ConfigDriveError::Storage)?
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         let second = store.generate(&input())?;
         assert_eq!(first.fingerprint_sha256, second.fingerprint_sha256);
         store.cleanup("instance-1")?;
@@ -1008,6 +1130,73 @@ mod tests {
             generate(std::env::temp_dir(), &value),
             Err(ConfigDriveError::VendorDataTooLarge)
         ));
+        assert!(matches!(
+            validate_input_bounds(&"k".repeat(MAX_SSH_PUBLIC_KEY_BYTES + 1), &[], None),
+            Err(ConfigDriveError::InvalidInput)
+        ));
+        assert!(matches!(
+            validate_input_bounds(
+                "ssh-ed25519 key",
+                &vec![b'x'; MAX_USER_DATA_BYTES],
+                Some(&vec![b'y'; MAX_VENDOR_DATA_BYTES])
+            ),
+            Err(ConfigDriveError::InvalidInput)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symlinked_root() -> Result<(), ConfigDriveError> {
+        use std::os::unix::fs::symlink;
+        let parent = test_root("symlink-root");
+        fs::create_dir_all(&parent).map_err(ConfigDriveError::Storage)?;
+        let target = parent.join("target");
+        fs::create_dir_all(&target).map_err(ConfigDriveError::Storage)?;
+        let root = parent.join("root");
+        symlink(&target, &root).map_err(ConfigDriveError::Storage)?;
+        assert!(matches!(
+            ConfigDriveStore::open(&root),
+            Err(ConfigDriveError::UnownedPath)
+        ));
+        assert!(
+            target
+                .read_dir()
+                .map_err(ConfigDriveError::Storage)?
+                .next()
+                .is_none()
+        );
+        fs::remove_dir_all(parent).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_reaps_only_fenced_publication_residue() -> Result<(), ConfigDriveError> {
+        use std::os::unix::fs::symlink;
+        let parent = test_root("publication-restart-reap");
+        fs::create_dir_all(&parent).map_err(ConfigDriveError::Storage)?;
+        let instance = Uuid::now_v7();
+        let stale_dir = parent.join(format!(".{instance}-tmp-{}", Uuid::now_v7()));
+        fs::create_dir_all(&stale_dir).map_err(ConfigDriveError::Storage)?;
+        fs::write(stale_dir.join("user_data"), b"secret residue")
+            .map_err(ConfigDriveError::Storage)?;
+        let stale_iso = parent.join(format!(".{instance}.iso-old-{}", Uuid::now_v7()));
+        fs::write(&stale_iso, b"iso residue").map_err(ConfigDriveError::Storage)?;
+        let foreign = parent.join(".foreign.tmp-user");
+        fs::write(&foreign, b"keep").map_err(ConfigDriveError::Storage)?;
+        let symlink_target = parent.join("foreign-target");
+        fs::create_dir_all(&symlink_target).map_err(ConfigDriveError::Storage)?;
+        let symlinked = parent.join(format!(".{instance}-tmp-{}", Uuid::now_v7()));
+        symlink(&symlink_target, &symlinked).map_err(ConfigDriveError::Storage)?;
+
+        let _store = ConfigDriveStore::open(&parent)?;
+        assert!(!stale_dir.exists());
+        assert!(!stale_iso.exists());
+        assert!(foreign.exists());
+        assert!(symlinked.is_symlink());
+        assert!(symlink_target.exists());
+        fs::remove_dir_all(parent).map_err(ConfigDriveError::Storage)?;
+        Ok(())
     }
 
     #[test]

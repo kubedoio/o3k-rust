@@ -236,6 +236,7 @@ entries:
 
   - service: compute
     operation: server_volume_attachments_list
+    profiles: [openstack-service-testbed]
     api_version: nova-v2.1
     microversion: "2.89"
     public_sources:
@@ -246,6 +247,7 @@ entries:
       - Microversion 2.89 is accepted only for this GET operation while the advertised Nova maximum stays 2.1; every other 2.89 request is rejected with 406 and the version discovery document stays version/min_version = 2.1.
       - At 2.89 the response emits the upstream 2.89 field set and omits the legacy id field; the 2.1 response shape is unchanged.
       - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
+      - The route is registered only when the explicitly configured external-Cinder profile enables attachment support; it is absent from native-rust-testlab.
     executable_tests:
       - crates/o3k-api/tests/gate_c_nova_callback.rs::list_at_289_emits_exact_fields_without_legacy_id
       - crates/o3k-api/tests/gate_c_nova_callback.rs::show_at_289_resolves_volume_id_like_cinder_does
@@ -254,6 +256,7 @@ entries:
     status: implemented
   - service: compute
     operation: server_volume_attachments_show
+    profiles: [openstack-service-testbed]
     api_version: nova-v2.1
     microversion: "2.89"
     public_sources:
@@ -265,6 +268,7 @@ entries:
       - At 2.89 the response emits the upstream 2.89 field set and omits the legacy id field; the 2.1 response shape is unchanged.
       - At 2.89 the final path segment resolves as the volume id, the O3K attachment id, or the Cinder attachment id (cinder_attachment_id) scoped to the server; anything else is 404 and project isolation is unchanged.
       - The narrow profile exists for the external Cinder 28 attachment-delete guard (bug #2004555); it is not general Nova 2.89 support.
+      - The route is registered only when the explicitly configured external-Cinder profile enables attachment support; it is absent from native-rust-testlab.
     executable_tests:
       - crates/o3k-api/tests/gate_c_nova_callback.rs::show_at_289_resolves_volume_id_like_cinder_does
       - crates/o3k-api/tests/gate_c_nova_callback.rs::project_isolation_is_preserved_at_289

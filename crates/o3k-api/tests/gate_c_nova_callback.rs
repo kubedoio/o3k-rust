@@ -21,6 +21,7 @@ use axum::{
 };
 use o3k_api::AppState;
 use o3k_compute::ComputeService;
+use o3k_identity::testkit::test_service;
 use o3k_provider::FakeComputeProvider;
 use o3k_store::{DurableStore, VolumeAttachmentRecord, testkit::TestStore};
 use serde_json::Value;
@@ -28,12 +29,167 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
-fn build_app(store: Arc<TestStore>) -> axum::Router {
+async fn build_app(
+    store: Arc<TestStore>,
+) -> Result<(axum::Router, String), Box<dyn std::error::Error>> {
+    let provider = Arc::new(FakeComputeProvider::new());
+    let compute = ComputeService::new(store, provider);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let state = AppState::new()
+        .with_identity(identity)
+        .with_compute(compute)
+        .with_volume_attachments_enabled(true);
+    state.set_ready(true);
+    let app = o3k_api::router_with_state(state);
+    let auth = serde_json::json!({
+        "auth": {
+            "identity": {"methods": ["password"], "password": {"user": {"name": "admin", "password": "password"}}},
+            "scope": {"project": {"name": "admin"}}
+        }
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header("content-type", "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("missing token")?
+        .to_str()?
+        .to_owned();
+    Ok((app, token))
+}
+
+#[tokio::test]
+async fn native_profile_does_not_expose_attachment_routes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let server_id = Uuid::now_v7();
+    seed_server_and_attachment(
+        &store,
+        server_id,
+        Uuid::now_v7(),
+        "cinder-att-native-disabled",
+    )
+    .await?;
     let provider = Arc::new(FakeComputeProvider::new());
     let compute = ComputeService::new(store, provider);
     let state = AppState::new().with_compute(compute);
     state.set_ready(true);
-    o3k_api::router_with_state(state)
+    let app = o3k_api::router_with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
+                ))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn attachment_routes_require_authentication_and_project_scope()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(o3k_store::testkit::open_memory().await?);
+    let server_id = Uuid::now_v7();
+    let attachment_id =
+        seed_server_and_attachment(&store, server_id, Uuid::now_v7(), "cinder-att-auth").await?;
+    let provider = Arc::new(FakeComputeProvider::new());
+    let compute = ComputeService::new(store, provider);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let state = AppState::new()
+        .with_identity(identity)
+        .with_compute(compute)
+        .with_volume_attachments_enabled(true);
+    state.set_ready(true);
+    let app = o3k_api::router_with_state(state);
+    let base = format!(
+        "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
+    );
+    let requests = [
+        Request::builder()
+            .method(Method::GET)
+            .uri(&base)
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("{base}/{attachment_id}"))
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("{base}/{attachment_id}"))
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::POST)
+            .uri(&base)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"volumeAttachment":{"volumeId":Uuid::now_v7().to_string()}})
+                    .to_string(),
+            ))?,
+    ];
+    for request in requests {
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    let invalid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(&base)
+                .header("x-auth-token", "invalid-token")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+
+    let auth = serde_json::json!({
+        "auth": {
+            "identity": {"methods": ["password"], "password": {"user": {"name": "admin", "password": "password"}}},
+            "scope": {"project": {"name": "admin"}}
+        }
+    });
+    let token_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header("content-type", "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("missing token")?
+        .to_str()?
+        .to_owned();
+    let wrong_project = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/v2.1/project-other/servers/{server_id}/os-volume_attachments"
+                ))
+                .header("x-auth-token", token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(wrong_project.status(), StatusCode::NOT_FOUND);
+    Ok(())
 }
 
 async fn seed_server_and_attachment(
@@ -48,7 +204,7 @@ async fn seed_server_and_attachment(
     let request = o3k_provider::CreateInstanceRequest {
         operation_id: Uuid::now_v7(),
         o3k_server_id: server_id,
-        project_id: "project-gate-c".to_owned(),
+        project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
         name: "gate-c-server".to_owned(),
         vcpus: 1,
         memory_mib: 512,
@@ -67,7 +223,7 @@ async fn seed_server_and_attachment(
         .insert_resource(&o3k_store::ResourceRecord {
             id: server_id,
             kind: "compute_instance".to_owned(),
-            project_id: "project-gate-c".to_owned(),
+            project_id: "eba29e2d-53de-461d-ae91-ede7402713cb".to_owned(),
             generation: 1,
             observed_generation: 1,
             desired_state: serde_json::to_string(&request)?,
@@ -189,10 +345,12 @@ async fn get_with_microversion(
     app: &axum::Router,
     uri: String,
     version: &str,
+    token: &str,
 ) -> Result<(StatusCode, Value), Box<dyn std::error::Error>> {
     let req = Request::builder()
         .method(Method::GET)
         .uri(uri)
+        .header("x-auth-token", token)
         .header("OpenStack-API-Version", format!("compute {version}"))
         .body(Body::empty())?;
     let resp = app.clone().oneshot(req).await?;
@@ -213,12 +371,15 @@ async fn list_at_289_emits_exact_fields_without_legacy_id() -> Result<(), Box<dy
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
-    let app = build_app(store);
+    let (app, token) = build_app(store).await?;
 
     let (status, value) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments"),
+        format!(
+            "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
+        ),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -245,13 +406,14 @@ async fn show_at_289_resolves_volume_id_like_cinder_does() -> Result<(), Box<dyn
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
-    let app = build_app(store);
+    let (app, token) = build_app(store).await?;
 
     // Cinder calls get_server_volume(server_id, volume_id) at 2.89.
     let (status, value) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments/{volume_id}"),
+        format!("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments/{volume_id}"),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -260,8 +422,9 @@ async fn show_at_289_resolves_volume_id_like_cinder_does() -> Result<(), Box<dyn
     // The Cinder attachment id also resolves.
     let (status, value) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments/cinder-att-0001"),
+        format!("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments/cinder-att-0001"),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::OK, "{value}");
@@ -270,8 +433,9 @@ async fn show_at_289_resolves_volume_id_like_cinder_does() -> Result<(), Box<dyn
     // Unknown id at 2.89 is 404.
     let (status, _) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments/missing"),
+        format!("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments/missing"),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -284,12 +448,15 @@ async fn list_and_show_at_21_keep_the_legacy_id() -> Result<(), Box<dyn std::err
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
-    let app = build_app(store);
+    let (app, token) = build_app(store).await?;
 
     let (status, value) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments"),
+        format!(
+            "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
+        ),
         "2.1",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
@@ -300,8 +467,9 @@ async fn list_and_show_at_21_keep_the_legacy_id() -> Result<(), Box<dyn std::err
 
     let (status, value) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments/{volume_id}"),
+        format!("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments/{volume_id}"),
         "2.1",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
@@ -316,13 +484,13 @@ async fn non_get_289_attachment_requests_are_rejected_with_406()
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
-    let app = build_app(store);
+    let (app, _token) = build_app(store).await?;
 
     // POST attach at 2.89 must be 406 (the 2.89 profile is GET-only).
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!(
-            "/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments"
+            "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
         ))
         .header("OpenStack-API-Version", "compute 2.89")
         .header(header::CONTENT_TYPE, "application/json")
@@ -334,7 +502,7 @@ async fn non_get_289_attachment_requests_are_rejected_with_406()
     let req = Request::builder()
         .method(Method::DELETE)
         .uri(format!(
-            "/v2.1/project-gate-c/servers/{server_id}/os-volume_attachments/cinder-att-0001"
+            "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments/cinder-att-0001"
         ))
         .header("OpenStack-API-Version", "compute 2.89")
         .body(Body::empty())?;
@@ -346,13 +514,14 @@ async fn non_get_289_attachment_requests_are_rejected_with_406()
 #[tokio::test]
 async fn unrelated_289_requests_are_rejected_with_406() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(o3k_store::testkit::open_memory().await?);
-    let app = build_app(store);
+    let (app, token) = build_app(store).await?;
     let server_id = Uuid::now_v7();
 
     let (status, _) = get_with_microversion(
         &app,
-        format!("/v2.1/project-gate-c/servers/{server_id}"),
+        format!("/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}"),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
@@ -362,7 +531,7 @@ async fn unrelated_289_requests_are_rejected_with_406() -> Result<(), Box<dyn st
 #[tokio::test]
 async fn discovery_document_stays_at_21() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(o3k_store::testkit::open_memory().await?);
-    let app = build_app(store);
+    let (app, _token) = build_app(store).await?;
     let req = Request::builder()
         .method(Method::GET)
         .uri("/v2.1")
@@ -382,12 +551,13 @@ async fn project_isolation_is_preserved_at_289() -> Result<(), Box<dyn std::erro
     let server_id = Uuid::now_v7();
     let volume_id = Uuid::now_v7();
     seed_server_and_attachment(&store, server_id, volume_id, "cinder-att-0001").await?;
-    let app = build_app(store);
+    let (app, token) = build_app(store).await?;
 
     let (status, _) = get_with_microversion(
         &app,
         format!("/v2.1/project-other/servers/{server_id}/os-volume_attachments"),
         "2.89",
+        &token,
     )
     .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);

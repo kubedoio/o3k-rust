@@ -93,7 +93,28 @@ if [[ "$PROFILE" == libvirt ]]; then
 fi
 if [[ $EUID -eq 0 ]]; then
   getent group o3k >/dev/null || groupadd --system o3k
-  id o3k >/dev/null 2>&1 || useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
+  if id o3k >/dev/null 2>&1; then
+    control_record="$(getent passwd o3k || true)"
+    [[ "$control_record" == *":/var/lib/o3k:/usr/sbin/nologin" ]] || {
+      echo "refusing to reuse an unrelated o3k account" >&2
+      exit 2
+    }
+  else
+    useradd --system --gid o3k --home-dir /var/lib/o3k --shell /usr/sbin/nologin o3k
+  fi
+  if [[ "$PROFILE" == libvirt ]]; then
+    getent group o3k-compute >/dev/null || groupadd --system o3k-compute
+    if id o3k-compute >/dev/null 2>&1; then
+      compute_record="$(getent passwd o3k-compute || true)"
+      [[ "$compute_record" == *":/var/lib/o3k/compute:/usr/sbin/nologin" ]] || {
+        echo "refusing to reuse an unrelated o3k-compute account" >&2
+        exit 2
+      }
+    else
+      useradd --system --gid o3k-compute --home-dir /var/lib/o3k/compute --shell /usr/sbin/nologin o3k-compute
+    fi
+    usermod --append --groups o3k o3k-compute
+  fi
   RUN_USER=o3k
 else RUN_USER="$(id -un)"; fi
 
@@ -152,7 +173,23 @@ install_owned_file() {
   fi
   install -m "$mode" "$source" "$destination"
 }
+install_owned_system_file() {
+  local source="$1" destination="$2" mode="$3"
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    [[ -f "$destination" && ! -L "$destination" && -r "$destination" ]] || {
+      echo "refusing to overwrite foreign system file: $destination" >&2
+      exit 2
+    }
+    cmp -s "$source" "$destination" || {
+      echo "refusing to overwrite foreign system file: $destination" >&2
+      exit 2
+    }
+  fi
+  install -m "$mode" "$source" "$destination"
+}
+COMPUTE_DATA_DIR="$DATA_DIR/compute"
 for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do mark_owned_dir "$path"; done
+if [[ "$PROFILE" == libvirt ]]; then mark_owned_dir "$COMPUTE_DATA_DIR"; fi
 INSTALLED_FILES=(
   bin/o3kd
   share/o3k/o3kd.service
@@ -173,7 +210,8 @@ install_owned_file "$ROOT_DIR/scripts/generate-passwords.sh" \
 if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644
-  INSTALLED_FILES+=(bin/o3k-compute share/o3k/o3k-compute.service)
+  install_owned_file "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$PREFIX/share/o3k/50-o3k-libvirt.rules" share/o3k/50-o3k-libvirt.rules 0644
+  INSTALLED_FILES+=(bin/o3k-compute share/o3k/o3k-compute.service share/o3k/50-o3k-libvirt.rules)
 fi
 MANIFEST_TEMP="$INSTALL_MANIFEST.tmp-$$"
 {
@@ -210,7 +248,7 @@ if [[ "$PROFILE" == libvirt ]]; then
   fi
   if [[ ! -e "$CONFIG_DIR/o3k-compute.env" ]]; then
     umask 077
-    printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"
+    printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$COMPUTE_DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
   # ADR-0146 (docs/adr/ADR-0146-agent-inventory-publication.md): the compute
@@ -236,7 +274,8 @@ if [[ "$PROFILE" == libvirt ]]; then
     # rule is inert. polkitd reloads rules on change; the guarded reload
     # makes it deterministic.
     install -d -m 0755 /etc/polkit-1/rules.d
-    install -m 0644 "$ROOT_DIR/packaging/50-o3k-libvirt.rules" /etc/polkit-1/rules.d/50-o3k-libvirt.rules
+    install_owned_system_file "$ROOT_DIR/packaging/50-o3k-libvirt.rules" \
+      /etc/polkit-1/rules.d/50-o3k-libvirt.rules 0644
     systemctl reload polkitd 2>/dev/null || systemctl reload polkit 2>/dev/null || true
   fi
   # ADR-0086 (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) deliberately
@@ -260,9 +299,18 @@ if [[ "$PROFILE" == libvirt ]]; then
   install -m 0640 "$TLS_DIR/agent-id" "$DATA_DIR/agent-id"
 fi
 if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
-  chown -R o3k:o3k "$DATA_DIR" "$LOG_DIR"
-  install -m 0644 "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service
-  if [[ "$PROFILE" == libvirt ]]; then install -m 0644 "$ROOT_DIR/packaging/o3k-compute.service" /etc/systemd/system/o3k-compute.service; fi
+  chown -R o3k:o3k-compute "$DATA_DIR"
+  chown -R o3k:o3k "$LOG_DIR"
+  chmod 0710 "$DATA_DIR"
+  find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
+  find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
+  chown -R o3k-compute:o3k-compute "$COMPUTE_DATA_DIR"
+  chmod 0750 "$COMPUTE_DATA_DIR"
+  install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
+  if [[ "$PROFILE" == libvirt ]]; then
+    install_owned_system_file "$ROOT_DIR/packaging/o3k-compute.service" \
+      /etc/systemd/system/o3k-compute.service 0644
+  fi
   systemctl daemon-reload
   systemctl enable --now o3kd.service
   if [[ "$PROFILE" == libvirt ]]; then systemctl enable --now o3k-compute.service; fi

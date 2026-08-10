@@ -107,9 +107,21 @@ else:
     if not isinstance(approvals, dict):
         errors.append("approvals must be an object")
     else:
-        for field in ("release_blocking_findings", "destructive_cleanup"):
-            if approvals.get(field) is not True:
-                errors.append(f"approvals.{field} must be true")
+        for field in (
+            "release_blocking_findings",
+            "destructive_cleanup",
+            "foreign_state_safeguards",
+        ):
+            if field not in approvals or not isinstance(approvals[field], bool):
+                errors.append(f"approvals.{field} must be a boolean")
+        if status == "approved":
+            for field in (
+                "release_blocking_findings",
+                "destructive_cleanup",
+                "foreign_state_safeguards",
+            ):
+                if approvals.get(field) is not True:
+                    errors.append(f"approvals.{field} must be true for an approved review")
     risks = value.get("unresolved_risks")
     if not isinstance(risks, list) or not all(isinstance(item, str) and item.strip() for item in risks):
         errors.append("unresolved_risks must be a list of strings")

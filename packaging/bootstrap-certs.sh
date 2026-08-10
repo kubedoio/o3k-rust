@@ -18,6 +18,22 @@ done
 [[ "$SERVER_NAME" =~ ^[A-Za-z0-9.-]+$ ]] || { echo "server name contains unsupported characters" >&2; exit 2; }
 [[ "$AGENT_ID" =~ ^[A-Za-z0-9._-]+$ && ${#AGENT_ID} -le 128 ]] || { echo "agent id contains unsupported characters" >&2; exit 2; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required" >&2; exit 1; }
+validate_no_symlink_path() {
+  local path="$1" current=/ component
+  while IFS= read -r component; do
+    [[ -n "$component" ]] || continue
+    case "$component" in
+      .|..) echo "output directory contains an unsafe path component: $path" >&2; exit 2;;
+    esac
+    current="$current/$component"
+    [[ ! -L "$current" ]] || { echo "refusing symlink certificate path: $path" >&2; exit 2; }
+  done < <(tr '/' '\n' <<< "${path#/}")
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    echo "certificate output path is not a directory: $path" >&2
+    exit 2
+  fi
+}
+validate_no_symlink_path "$OUTPUT_DIR"
 [[ $FORCE -eq 1 || ! -e "$OUTPUT_DIR/ca.pem" ]] || { echo "certificates already exist; use --force to replace" >&2; exit 2; }
 PARENT_DIR="$(dirname "$OUTPUT_DIR")"
 install -d -m 0750 "$PARENT_DIR"

@@ -14,6 +14,10 @@ use o3k_compute_agent::{
 };
 use o3k_libvirt::{ErrorCategory, LibvirtAdapter, LibvirtConfig, stable_domain_name};
 use o3k_provider_contract::compute_proto as proto;
+use rustix::{
+    fd::OwnedFd,
+    process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal},
+};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -150,16 +154,6 @@ fn pid_is_alive(pid: i32) -> bool {
         .is_some_and(|state| state == "Z")
 }
 
-/// Sends one signal to a pid through the `kill` binary (always present on
-/// the supported hosts). Best-effort: the process may die between the
-/// ownership check and the signal.
-fn signal_pid(pid: i32, signal: &str) {
-    let _ = std::process::Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(pid.to_string())
-        .status();
-}
-
 /// Ownership verification for the orphan reap: the process cmdline must
 /// contain the O3K dhcp root path (the supervisor always launches dnsmasq
 /// with `--conf-file=<root>/dnsmasq.conf`, so the root appears in the
@@ -176,6 +170,21 @@ fn cmdline_contains_dhcp_root(pid: i32, root: &std::path::Path) -> Result<bool, 
         return Ok(cmdline.contains(canonical.to_string_lossy().as_ref()));
     }
     Ok(false)
+}
+
+/// Opens a race-resistant Linux process handle after ownership verification.
+/// Signals are sent through the pidfd, never through the reusable numeric PID.
+fn open_owned_pidfd(pid: i32, root: &std::path::Path) -> Result<OwnedFd, std::io::Error> {
+    if !cmdline_contains_dhcp_root(pid, root)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "process command line is not O3K-owned",
+        ));
+    }
+    let pid = Pid::from_raw(pid).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid process id")
+    })?;
+    pidfd_open(pid, PidfdFlags::empty()).map_err(Into::into)
 }
 
 impl DhcpRuntime {
@@ -367,7 +376,7 @@ impl DhcpRuntime {
     /// cleanup (the caller's ordering), and the earlier stale-network reap
     /// already removed stale bindings first. Each `dnsmasq-*.pid` pidfile is
     /// verified by its process cmdline (it must contain the O3K dhcp root)
-    /// before the pid is signaled: SIGTERM, a bounded wait, SIGKILL only if
+    /// before a pidfd is opened: SIGTERM, a bounded wait, SIGKILL only if
     /// still alive, then the pidfile is removed. A pidfile whose process is
     /// already gone is just removed. Unreadable or foreign pidfiles are
     /// skipped with a warning (fail-open: the process inventory and
@@ -414,27 +423,19 @@ impl DhcpRuntime {
             }
             return;
         }
-        match cmdline_contains_dhcp_root(pid, &self.root) {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::warn!(
-                    pid,
-                    pidfile = %pidfile.display(),
-                    "dnsmasq pidfile points at a foreign process; left for the inventory"
-                );
-                return;
-            }
+        let pidfd = match open_owned_pidfd(pid, &self.root) {
+            Ok(pidfd) => pidfd,
             Err(error) => {
                 tracing::warn!(
                     pid,
                     pidfile = %pidfile.display(),
                     error = %error,
-                    "dnsmasq pidfile process is unverifiable; left for the inventory"
+                    "dnsmasq pidfile process is foreign or lacks pidfd support; left for the inventory"
                 );
                 return;
             }
-        }
-        signal_pid(pid, "TERM");
+        };
+        let _ = pidfd_send_signal(&pidfd, Signal::Term);
         // Bounded wait for SIGTERM to take effect; SIGKILL only if the
         // process is still alive after the window.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
@@ -442,7 +443,7 @@ impl DhcpRuntime {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if pid_is_alive(pid) {
-            signal_pid(pid, "KILL");
+            let _ = pidfd_send_signal(&pidfd, Signal::Kill);
             let kill_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
             while pid_is_alive(pid) && std::time::Instant::now() < kill_deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -2584,6 +2585,7 @@ mod tests {
                     name: "o3k-br0".to_owned(),
                     uplink: None,
                     created_by_o3k: true,
+                    identity: None,
                     gateway: Some(o3k_network::GatewayOwnership {
                         address: "203.0.113.1".parse()?,
                         prefix_len: 24,

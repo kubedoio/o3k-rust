@@ -3,7 +3,10 @@ status_kind: authoritative-current-state
 source_commit: 519517e5bd217b08ba1b5e6957f996040fd8fbac
 updated_at: 2026-08-10T00:00:00Z
 release_context: >-
-  The first native alpha candidate is v0.2.0-alpha.1. docs/release-tracker.md
+  The first native alpha candidate v0.2.0-alpha.1 at
+  952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and permanently
+  ineligible for release. Remediation is in progress and no public alpha has
+  been released. docs/release-tracker.md
   remains the authoritative release gate: issue #93 owns release-gate
   execution and publication, issue #94 owns the closure chain, and the
   tracker contract stays blocked until the required evidence and human

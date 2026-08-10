@@ -49,6 +49,12 @@ import sys
 import time
 
 DEFAULT_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+# Historical candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5 was
+# independently rejected by issue #92.  It must remain ineligible even if a
+# caller supplies matching historical evidence from a checkout at that SHA.
+REJECTED_SOURCE_COMMITS = {
+    "952dcf9c4a1ae958996e4ae9444763e5524eddc5",
+}
 max_age_text = os.environ.get(
     "O3K_RELEASE_EVIDENCE_MAX_AGE_SECONDS",
     str(DEFAULT_MAX_AGE_SECONDS),
@@ -87,6 +93,10 @@ if not source_commit:
     errors.append("source_commit: value was not supplied")
 elif not re.fullmatch(r"[0-9a-f]{40}", source_commit):
     errors.append("source_commit: must be a 40-character lowercase commit SHA")
+elif source_commit in REJECTED_SOURCE_COMMITS:
+    errors.append(
+        "source_commit: historical candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and ineligible"
+    )
 else:
     try:
         checkout_commit = subprocess.run(

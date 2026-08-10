@@ -35,9 +35,15 @@ for path in "$DATA_DIR" "$LOG_DIR"; do
     exit 2
   fi
 done
+for path in "$DATA_DIR" "$LOG_DIR"; do
+  [[ -d "$path" ]] || continue
+  if find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit | grep -q .; then
+    echo "refusing reset of non-empty state root with unclassified entries: $path" >&2
+    exit 2
+  fi
+done
 if command -v systemctl >/dev/null 2>&1; then
   systemctl stop o3k-compute.service 2>/dev/null || true
   systemctl stop o3kd.service 2>/dev/null || true
 fi
-for path in "$DATA_DIR" "$LOG_DIR"; do [[ -d "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; done
 echo "reset O3K-owned state under $DATA_DIR and $LOG_DIR; credentials were preserved"

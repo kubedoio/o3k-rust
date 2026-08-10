@@ -191,6 +191,14 @@ for unsafe_reset_path in "$WORK_DIR/reset-parent/data" "$WORK_DIR/reset-final"; 
 done
 PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
   bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/data" --log-dir "$WORK_DIR/log"
+printf 'foreign reset state\n' >"$WORK_DIR/data/foreign-canary"
+if PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
+    bash "$ROOT_DIR/packaging/reset.sh" --yes --data-dir "$WORK_DIR/data" --log-dir "$WORK_DIR/log"; then
+  echo "reset accepted unclassified foreign state" >&2
+  exit 1
+fi
+[[ -f "$WORK_DIR/data/foreign-canary" ]]
+rm -f -- "$WORK_DIR/data/foreign-canary"
 grep -Fqx 'stop o3k-compute.service' "$WORK_DIR/systemctl.log"
 grep -Fqx 'stop o3kd.service' "$WORK_DIR/systemctl.log"
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/log/.o3k-owned" ]]
@@ -237,10 +245,28 @@ bash "$ROOT_DIR/packaging/install.sh" \
   --profile fake --noninteractive --binary "$BINARY" \
   --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
   --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"
+printf 'foreign state\n' >"$WORK_DIR/purge-data/foreign-canary"
+if bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
+  --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
+  --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"; then
+  echo "purge removed or accepted unclassified foreign state" >&2
+  exit 1
+fi
+[[ -f "$WORK_DIR/purge-data/foreign-canary" ]]
+rm -f -- "$WORK_DIR/purge-data/foreign-canary"
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
   --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"
 [[ ! -e "$WORK_DIR/purge-data" && ! -e "$WORK_DIR/purge-config" && ! -e "$WORK_DIR/purge-log" ]]
+
+mkdir -p "$WORK_DIR/foreign-cert-target"
+ln -s "$WORK_DIR/foreign-cert-target" "$WORK_DIR/foreign-cert-link"
+if bash "$ROOT_DIR/packaging/bootstrap-certs.sh" --output-dir "$WORK_DIR/foreign-cert-link/tls" \
+    --server-name o3k-control-plane --agent-id compute-agent; then
+  echo "certificate bootstrap followed a symlinked output path" >&2
+  exit 1
+fi
+[[ -z "$(find "$WORK_DIR/foreign-cert-target" -mindepth 1 -print -quit)" ]]
 
 TLS_DIR="$WORK_DIR/certs-root/tls"
 bash "$ROOT_DIR/packaging/bootstrap-certs.sh" \
@@ -275,12 +301,20 @@ if grep -Fq -- '--listen-addr' "$ROOT_DIR/packaging/o3kd.service"; then
   echo "o3kd.service hardcodes --listen-addr" >&2
   exit 1
 fi
-# The o3k service account (o3kd.service / o3k-compute.service) reads the TLS
+if ! grep -Fq $'User=o3k-compute' "$ROOT_DIR/packaging/o3k-compute.service" || ! grep -Fq '/var/lib/o3k/compute' "$ROOT_DIR/packaging/o3k-compute.service"; then
+  echo "compute service does not use a separate identity and state root" >&2
+  exit 1
+fi
+if [[ "$(grep -Fc 'SupplementaryGroups=' "$ROOT_DIR/packaging/o3k-compute.service")" -ne 1 ]] || ! grep -Fq 'SupplementaryGroups=libvirt kvm o3k' "$ROOT_DIR/packaging/o3k-compute.service"; then
+  echo "compute service has an ambiguous or incomplete supplementary group boundary" >&2
+  exit 1
+fi
+# The control-plane o3k account and separate o3k-compute account read the TLS
 # material at runtime; bootstrap-certs.sh creates the config dir as root:root
 # 0750, so install.sh must grant o3k group traversal on $CONFIG_DIR itself or
 # the mTLS control plane dies with AgentError::TlsMaterial. The env files
 # stay root-owned 0600 (systemd reads them as root), so only the TLS files
-# (0640 root:o3k) become o3k-readable.
+# (0640 root:o3k) become readable by the compute account through its o3k group.
 if ! grep -Fq 'chgrp o3k "$CONFIG_DIR"' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not grant the o3k service account config-dir traversal" >&2
   exit 1
@@ -310,12 +344,19 @@ fi
 # every create 409s. The packaged install must apply the policykit-1 rule
 # granting ONLY user o3k the manage action (inert on hosts with an active
 # auth_unix_rw = "none", e.g. Ubuntu 24.04).
-if ! grep -Fq 'install -m 0644 "$ROOT_DIR/packaging/50-o3k-libvirt.rules" /etc/polkit-1/rules.d/50-o3k-libvirt.rules' "$ROOT_DIR/packaging/install.sh"; then
+if ! grep -Fq 'install_owned_system_file "$ROOT_DIR/packaging/50-o3k-libvirt.rules"' "$ROOT_DIR/packaging/install.sh" \
+  || ! grep -Fq '/etc/polkit-1/rules.d/50-o3k-libvirt.rules 0644' "$ROOT_DIR/packaging/install.sh"; then
   echo "install.sh does not apply the libvirt polkit rule" >&2
   exit 1
 fi
-if ! grep -Fq 'org.libvirt.unix.manage" && subject.user === "o3k"' "$ROOT_DIR/packaging/50-o3k-libvirt.rules"; then
-  echo "packaged polkit rule does not grant org.libvirt.unix.manage to o3k" >&2
+if ! grep -Fq 'org.libvirt.unix.manage" && subject.user === "o3k-compute"' "$ROOT_DIR/packaging/50-o3k-libvirt.rules"; then
+  echo "packaged polkit rule does not grant org.libvirt.unix.manage to o3k-compute" >&2
+  exit 1
+fi
+if grep -Fq 'rm -f -- /etc/systemd/system/o3kd.service' "$ROOT_DIR/packaging/uninstall.sh" \
+  || grep -Fq 'rm -f -- /etc/polkit-1/rules.d/50-o3k-libvirt.rules' "$ROOT_DIR/packaging/uninstall.sh" \
+  || ! grep -Fq 'remove_owned_system_file' "$ROOT_DIR/packaging/uninstall.sh"; then
+  echo "uninstall does not content-fence fixed system files" >&2
   exit 1
 fi
 echo "packaging safety tests passed"

@@ -72,7 +72,7 @@ artifacts = {
             "Installer/reset/uninstall/runner",
         ],
         "findings": [{"id": "SEC-001", "severity": "low", "disposition": "fixed"}],
-        "approvals": {"release_blocking_findings": True, "destructive_cleanup": True},
+        "approvals": {"release_blocking_findings": True, "destructive_cleanup": True, "foreign_state_safeguards": True},
         "unresolved_risks": ["Real-host evidence is still required."],
     },
 }
@@ -93,6 +93,31 @@ cp "${ARTIFACT_DIR}/e2e.json" "${ARTIFACT_DIR}/e2e.pristine.json"
 
 HUMAN_REVIEW="${ARTIFACT_DIR}/human-review.json"
 OUTPUT="${ARTIFACT_DIR}/valid-release.json"
+
+# The remediation work starts from the permanently rejected historical
+# checkout. Until these changes are committed at a new SHA, the release gate
+# must reject this test's otherwise-valid fixture before any ready-path
+# assertions can run. Once HEAD moves, the complete ready-path suite below is
+# exercised normally.
+if [[ "${SOURCE_COMMIT}" == "952dcf9c4a1ae958996e4ae9444763e5524eddc5" ]]; then
+    if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+        --e2e "${ARTIFACT_DIR}/e2e.json" \
+        --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
+        --install-debian "${ARTIFACT_DIR}/debian.json" \
+        --recovery "${ARTIFACT_DIR}/recovery.json" \
+        --benchmark "${ARTIFACT_DIR}/benchmark.json" \
+        --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
+        --human-review "${HUMAN_REVIEW}" \
+        --source-commit "${SOURCE_COMMIT}" \
+        --output "${OUTPUT}"; then
+        echo "release gate accepted the permanently rejected historical candidate" >&2
+        exit 1
+    fi
+    grep -q 'historical candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and ineligible' "${OUTPUT}"
+    echo "release gate historical-candidate rejection test passed"
+    exit 0
+fi
+
 bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --e2e "${ARTIFACT_DIR}/e2e.json" \
     --install-ubuntu "${ARTIFACT_DIR}/ubuntu.json" \
@@ -216,6 +241,15 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
 fi
 grep -q 'source_commit: must match the repository checkout HEAD' \
     "${ARTIFACT_DIR}/wrong-source-commit.json"
+
+if bash "${ROOT_DIR}/packaging/release-gate.sh" \
+    "${GATE_ARGS[@]}" --source-commit "952dcf9c4a1ae958996e4ae9444763e5524eddc5" \
+    --output "${ARTIFACT_DIR}/rejected-historical-candidate.json"; then
+    echo "release gate accepted the permanently rejected historical candidate" >&2
+    exit 1
+fi
+grep -q 'historical candidate 952dcf9c4a1ae958996e4ae9444763e5524eddc5 is rejected and ineligible' \
+    "${ARTIFACT_DIR}/rejected-historical-candidate.json"
 
 cp "${ARTIFACT_DIR}/recovery.json" "${ARTIFACT_DIR}/recovery-missing-evidence.json"
 python3 - "${ARTIFACT_DIR}/recovery-missing-evidence.json" <<'PY'

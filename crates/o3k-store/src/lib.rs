@@ -18,6 +18,9 @@ use sqlx::{
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 mod artifact_transfer;
 mod server_state;
 
@@ -812,6 +815,12 @@ pub trait VolumeAttachmentRepository: Send + Sync {
         &self,
         volume_id: Uuid,
     ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
+
+    async fn get_volume_attachment_by_volume_for_server(
+        &self,
+        volume_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError>;
     async fn get_volume_attachment_by_idempotency(
         &self,
         idempotency_key: &str,
@@ -1076,9 +1085,32 @@ impl SqliteStore {
                 path: parent.to_owned(),
                 source,
             })?;
+            #[cfg(unix)]
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
+                StoreError::CreateDataDirectory {
+                    path: parent.to_owned(),
+                    source,
+                }
+            })?;
+        }
+        #[cfg(unix)]
+        if path.exists() {
+            let metadata = fs::symlink_metadata(path)
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                return Err(StoreError::Database(sqlx::Error::Configuration(
+                    "database path is not a regular file".into(),
+                )));
+            }
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
         }
         let url = format!("sqlite://{}", path.display());
-        Self::connect(&url).await
+        let store = Self::connect(&url).await?;
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|source| StoreError::Database(sqlx::Error::Io(source)))?;
+        Ok(store)
     }
 
     pub async fn journal_mode(&self) -> Result<String, StoreError> {
@@ -1408,6 +1440,22 @@ impl SqliteStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(StoreError::Database)?;
+        row.map(|r| Self::volume_attachment_from_row(&r))
+            .transpose()
+    }
+
+    pub async fn get_volume_attachment_by_volume_for_server(
+        &self,
+        volume_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        let row =
+            sqlx::query("SELECT * FROM volume_attachments WHERE volume_id = ? AND server_id = ?")
+                .bind(volume_id.to_string())
+                .bind(server_id.to_string())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(StoreError::Database)?;
         row.map(|r| Self::volume_attachment_from_row(&r))
             .transpose()
     }
@@ -4558,6 +4606,15 @@ impl VolumeAttachmentRepository for SqliteStore {
         self.get_volume_attachment_by_volume(volume_id).await
     }
 
+    async fn get_volume_attachment_by_volume_for_server(
+        &self,
+        volume_id: Uuid,
+        server_id: Uuid,
+    ) -> Result<Option<VolumeAttachmentRecord>, StoreError> {
+        self.get_volume_attachment_by_volume_for_server(volume_id, server_id)
+            .await
+    }
+
     async fn get_volume_attachment_by_idempotency(
         &self,
         idempotency_key: &str,
@@ -5316,6 +5373,22 @@ pub async fn run_volume_attachment_repository_conformance<
                 "conformance attachment missing by volume".to_owned()
             ))?,
         attachment
+    );
+    assert_eq!(
+        store
+            .get_volume_attachment_by_volume_for_server(attachment.volume_id, attachment.server_id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "conformance attachment missing by scoped volume".to_owned()
+            ))?,
+        attachment
+    );
+    assert!(
+        store
+            .get_volume_attachment_by_volume_for_server(attachment.volume_id, Uuid::now_v7(),)
+            .await?
+            .is_none(),
+        "volume id lookup must not cross server ownership"
     );
     assert_eq!(
         store

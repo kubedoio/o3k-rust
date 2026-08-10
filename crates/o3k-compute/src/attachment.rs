@@ -142,7 +142,7 @@ impl AttachmentOrchestrator {
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
         if let Some(existing) = self
             .store
-            .get_volume_attachment_by_volume(volume_id)
+            .get_volume_attachment_by_volume_for_server(volume_id, server_id)
             .await?
         {
             // Idempotent duplicate attach: never create a second attachment or

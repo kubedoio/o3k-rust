@@ -16,6 +16,7 @@ EnvironmentFile=-/etc/o3k/o3kd.env
 ExecStart=/usr/local/bin/o3kd --data-dir /var/lib/o3k --log-filter info
 Restart=on-failure
 NoNewPrivileges=true
+UMask=0077
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
@@ -23,4 +24,3 @@ ReadWritePaths=/var/lib/o3k /var/log/o3k
 
 [Install]
 WantedBy=multi-user.target
-

@@ -18,6 +18,17 @@ struct DaemonCreateResolver {
     config_drive: o3k_config_drive::ConfigDriveStore,
 }
 
+fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
+    let mut ids = resources
+        .iter()
+        .filter(|resource| resource.observed_state != "DELETED")
+        .map(|resource| resource.id.to_string())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Projects terminal compute outcomes into the durable port binding state of
 /// the network control plane. Wired only for the agent provider profile,
 /// where the resolver records binding intent at create dispatch.
@@ -322,6 +333,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await
     .map_err(|error| format!("open Placement ledger: {error}"))?;
+    let durable_compute_resources = store.list_resources_by_kind("compute_instance").await?;
+    let consumer_ids = placement_consumer_ids(&durable_compute_resources);
+    let reconciliation = placement
+        .reconcile_consumers(&consumer_ids)
+        .await
+        .map_err(|error| format!("reconcile Placement consumers: {error}"))?;
+    if !reconciliation.orphaned_allocations.is_empty()
+        || !reconciliation.abandoned_intents.is_empty()
+    {
+        info!(
+            orphaned_allocations = reconciliation.orphaned_allocations.len(),
+            abandoned_intents = reconciliation.abandoned_intents.len(),
+            "reconciled Placement state against durable compute resources"
+        );
+    }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
@@ -486,6 +512,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     let inspect_compute_service = compute_service.clone();
+    let volume_attachments_enabled = compute_service.cinder_configured();
     let state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
@@ -493,6 +520,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_network(network_service)
             .with_console(console_service.clone())
             .with_agent_registry(registry.clone())
+            .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     } else {
         o3k_api::AppState::new()
@@ -500,6 +528,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_network(network_service)
             .with_console(console_service)
             .with_agent_registry(registry.clone())
+            .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
     state.set_ready(compute_ready);
@@ -855,7 +884,7 @@ async fn shutdown_signal(state: o3k_api::AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonCreateResolver, NetworkBindingProjector};
+    use super::{DaemonCreateResolver, NetworkBindingProjector, placement_consumer_ids};
     use o3k_compute::PortBindingProjector;
     use std::net::Ipv4Addr;
     use std::path::Path;
@@ -873,6 +902,35 @@ mod tests {
             .ok_or_else(|| "instance directory should have a parent".to_owned())?;
         assert_eq!(output, parent.join(format!("{server_id}.iso")));
         Ok(())
+    }
+
+    #[test]
+    fn placement_startup_consumer_set_is_live_sorted_and_deduplicated() {
+        let live = Uuid::now_v7();
+        let deleted = Uuid::now_v7();
+        let resources = vec![
+            o3k_store::ResourceRecord {
+                id: deleted,
+                kind: "compute_instance".to_owned(),
+                project_id: "p".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: String::new(),
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            },
+            o3k_store::ResourceRecord {
+                id: live,
+                kind: "compute_instance".to_owned(),
+                project_id: "p".to_owned(),
+                generation: 1,
+                observed_generation: 1,
+                desired_state: String::new(),
+                observed_state: "ACTIVE".to_owned(),
+                provider_id: None,
+            },
+        ];
+        assert_eq!(placement_consumer_ids(&resources), vec![live.to_string()]);
     }
 
     #[test]

@@ -1,13 +1,13 @@
 // O3K packaged libvirt profile (issue #90, defect 6): Debian 12 libvirtd
 // defaults to auth_unix_rw = "polkit" and org.libvirt.unix.manage requires
-// auth_admin_keep, which the session-less o3k service account cannot satisfy
+// auth_admin_keep, which the session-less compute service account cannot satisfy
 // ("no polkit agent available"); the compute agent then publishes zeroed
-// capabilities and every server create 409s. This rule grants ONLY the o3k
+// capabilities and every server create 409s. This rule grants ONLY the o3k-compute
 // service account the manage action on the libvirt unix socket. On hosts
 // with an active auth_unix_rw = "none" (Ubuntu 24.04) polkit is never
 // consulted and this rule is inert.
 polkit.addRule(function (action, subject) {
-    if (action.id === "org.libvirt.unix.manage" && subject.user === "o3k") {
+    if (action.id === "org.libvirt.unix.manage" && subject.user === "o3k-compute") {
         return polkit.Result.YES;
     }
 });

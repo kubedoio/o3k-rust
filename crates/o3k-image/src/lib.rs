@@ -2,7 +2,10 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
 };
 
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
@@ -11,8 +14,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+const QEMU_IMG_TIMEOUT: Duration = Duration::from_secs(30);
+const QEMU_IMG_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -376,17 +384,24 @@ impl ImageCache {
             .and_then(|name| name.to_str())
             .and_then(|name| name.rsplit_once('.').map(|(_, format)| format))
             .ok_or(ImageError::InvalidPath)?;
-        let status = std::process::Command::new(&self.qemu_img)
-            .args(["create", "-f", "qcow2", "-b"])
-            .arg(base)
-            .args(["-F", backing_format])
-            .arg(&temporary)
-            .status()
-            .map_err(|_| {
-                let _ = fs::remove_file(&temporary);
-                ImageError::OverlayFailed
-            })?;
-        if !status.success() {
+        let output = run_qemu_img(
+            &self.qemu_img,
+            [
+                "create",
+                "-f",
+                "qcow2",
+                "-b",
+                base.to_str().ok_or(ImageError::InvalidPath)?,
+                "-F",
+                backing_format,
+                temporary.to_str().ok_or(ImageError::InvalidPath)?,
+            ],
+        )
+        .map_err(|_| {
+            let _ = fs::remove_file(&temporary);
+            ImageError::OverlayFailed
+        })?;
+        if !output.status.success() {
             let _ = fs::remove_file(&temporary);
             return Err(ImageError::OverlayFailed);
         }
@@ -470,13 +485,16 @@ impl ImageCache {
         if target == current {
             return Ok(());
         }
-        let status = std::process::Command::new(&self.qemu_img)
-            .args(["resize"])
-            .arg(overlay)
-            .arg(target.to_string())
-            .status()
-            .map_err(|_| ImageError::OverlayFailed)?;
-        if !status.success() || overlay_virtual_size(&self.qemu_img, overlay)? < target {
+        let output = run_qemu_img(
+            &self.qemu_img,
+            [
+                "resize",
+                overlay.to_str().ok_or(ImageError::InvalidPath)?,
+                &target.to_string(),
+            ],
+        )
+        .map_err(|_| ImageError::OverlayFailed)?;
+        if !output.status.success() || overlay_virtual_size(&self.qemu_img, overlay)? < target {
             return Err(ImageError::OverlayFailed);
         }
         Ok(())
@@ -524,10 +542,19 @@ fn validate_verified_base(
 
 fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .map_err(ImageError::Storage)?;
+            Ok(())
+        }
         Ok(_) => Err(ImageError::InvalidPath),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(ImageError::Storage)
+            fs::create_dir_all(path).map_err(ImageError::Storage)?;
+            #[cfg(unix)]
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .map_err(ImageError::Storage)?;
+            Ok(())
         }
         Err(error) => Err(ImageError::Storage(error)),
     }
@@ -589,11 +616,15 @@ fn is_upload_temporary(name: &str) -> bool {
 
 fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), ImageError> {
     let expected_base = fs::canonicalize(base).map_err(|_| ImageError::OverlayFailed)?;
-    let output = std::process::Command::new(qemu_img)
-        .args(["info", "--output=json"])
-        .arg(overlay)
-        .output()
-        .map_err(|_| ImageError::OverlayFailed)?;
+    let output = run_qemu_img(
+        qemu_img,
+        [
+            "info",
+            "--output=json",
+            overlay.to_str().ok_or(ImageError::OverlayFailed)?,
+        ],
+    )
+    .map_err(|_| ImageError::OverlayFailed)?;
     if !output.status.success() {
         return Err(ImageError::OverlayFailed);
     }
@@ -628,11 +659,15 @@ fn verify_overlay(qemu_img: &Path, overlay: &Path, base: &Path) -> Result<(), Im
 }
 
 fn overlay_virtual_size(qemu_img: &Path, overlay: &Path) -> Result<u64, ImageError> {
-    let output = std::process::Command::new(qemu_img)
-        .args(["info", "--output=json"])
-        .arg(overlay)
-        .output()
-        .map_err(|_| ImageError::OverlayFailed)?;
+    let output = run_qemu_img(
+        qemu_img,
+        [
+            "info",
+            "--output=json",
+            overlay.to_str().ok_or(ImageError::OverlayFailed)?,
+        ],
+    )
+    .map_err(|_| ImageError::OverlayFailed)?;
     if !output.status.success() {
         return Err(ImageError::OverlayFailed);
     }
@@ -647,11 +682,15 @@ fn overlay_virtual_size(qemu_img: &Path, overlay: &Path) -> Result<u64, ImageErr
 }
 
 fn verify_image_format(qemu_img: &Path, image: &Path, expected: &str) -> Result<(), ImageError> {
-    let output = std::process::Command::new(qemu_img)
-        .args(["info", "--output=json"])
-        .arg(image)
-        .output()
-        .map_err(|_| ImageError::FormatVerificationFailed)?;
+    let output = run_qemu_img(
+        qemu_img,
+        [
+            "info",
+            "--output=json",
+            image.to_str().ok_or(ImageError::FormatVerificationFailed)?,
+        ],
+    )
+    .map_err(|_| ImageError::FormatVerificationFailed)?;
     if !output.status.success() {
         return Err(ImageError::FormatVerificationFailed);
     }
@@ -660,7 +699,99 @@ fn verify_image_format(qemu_img: &Path, image: &Path, expected: &str) -> Result<
     if info.get("format").and_then(serde_json::Value::as_str) != Some(expected) {
         return Err(ImageError::FormatVerificationFailed);
     }
+    // Uploaded qcow2 bytes must be self-contained.  A backing reference (or
+    // an external data file) would make later libvirt/qemu access depend on a
+    // host path or protocol controlled by the uploader, and a nested chain
+    // would evade the managed cache's ownership and digest checks.
+    if expected == "qcow2"
+        && [
+            "backing-filename",
+            "full-backing-filename",
+            "backing-filename-format",
+            "data-file",
+            "data-file-raw",
+        ]
+        .iter()
+        .any(|field| info.get(field).is_some_and(|value| !value.is_null()))
+    {
+        return Err(ImageError::FormatVerificationFailed);
+    }
     Ok(())
+}
+
+fn run_qemu_img<'a, I>(qemu_img: &Path, args: I) -> io::Result<Output>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let args = args.into_iter().collect::<Vec<_>>();
+    let setpriv = Path::new("/usr/bin/setpriv");
+    if !setpriv.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "setpriv is required to sandbox qemu-img",
+        ));
+    }
+    let mut command = Command::new(setpriv);
+    command.args([
+        "--no-new-privs",
+        "--ambient-caps=-all",
+        "--inh-caps=-all",
+        "--bounding-set=-all",
+        "--reset-env",
+        "--",
+    ]);
+    command.arg(qemu_img);
+    command.args(args);
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("qemu-img stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("qemu-img stderr was not piped"))?;
+    let stdout_reader = thread::spawn(move || read_bounded_output(stdout));
+    let stderr_reader = thread::spawn(move || read_bounded_output(stderr));
+    let deadline = Instant::now() + QEMU_IMG_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break child.wait()?;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| io::Error::other("qemu-img stdout reader panicked"))??;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| io::Error::other("qemu-img stderr reader panicked"))??;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_bounded_output<R: Read>(reader: R) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(QEMU_IMG_MAX_OUTPUT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > QEMU_IMG_MAX_OUTPUT_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "qemu-img output exceeded the safety bound",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn is_checksum(value: &str) -> bool {
@@ -1479,6 +1610,69 @@ esac
                     .join(format!("{invalid_checksum}.qcow2"))
                     .exists()
             );
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&path);
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qemu_img_output_is_bounded_and_hostile_output_fails_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root("qemu-output-bound");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            "#!/bin/sh\n/usr/bin/head -c 1048577 /dev/zero >&2\n",
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+        let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
+        let content = b"hostile-qemu-output";
+        let checksum = format!("{:x}", Sha256::digest(content));
+        assert!(matches!(
+            cache.cache_base(&checksum, "qcow2", content),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        assert!(!path.join("base").join(format!("{checksum}.qcow2")).exists());
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uploaded_qcow2_with_any_backing_relationship_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root("cache-rejects-qcow-backing");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            r#"#!/bin/sh
+printf '{"format":"qcow2","backing-filename":"/tmp/tenant-base"}\n'
+"#,
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let cache = ImageCache::open_with_qemu_img(&path, 1024, &fake_qemu)?;
+            let content = b"qcow-with-backing";
+            let checksum = format!("{:x}", Sha256::digest(content));
+            assert!(matches!(
+                cache.cache_base(&checksum, "qcow2", content),
+                Err(ImageError::FormatVerificationFailed)
+            ));
+            assert!(!path.join("base").join(format!("{checksum}.qcow2")).exists());
             Ok(())
         })();
 

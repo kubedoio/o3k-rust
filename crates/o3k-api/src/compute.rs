@@ -323,7 +323,7 @@ pub(crate) fn should_query_live_console(offset: u64) -> bool {
 }
 
 #[allow(clippy::result_large_err)]
-fn project_token(
+pub(crate) fn project_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     project_id: &str,
@@ -648,14 +648,28 @@ pub(crate) async fn create_server(
             Ok(value) => value,
             Err(message) => return keystone_error(StatusCode::BAD_REQUEST, "Bad Request", message),
         };
+        let user_data = body
+            .server
+            .user_data
+            .clone()
+            .unwrap_or_default()
+            .into_bytes();
+        let vendor_data = body.server.vendor_data.clone().map(String::into_bytes);
+        if let Err(error) = o3k_config_drive::validate_input_bounds(
+            &ssh_public_key,
+            &user_data,
+            vendor_data.as_deref(),
+        ) {
+            tracing::debug!(%error, "config-drive request rejected by input bounds");
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "config-drive input exceeds configured limits",
+            );
+        }
         Some(ConfigDriveRequest {
-            user_data: body
-                .server
-                .user_data
-                .clone()
-                .unwrap_or_default()
-                .into_bytes(),
-            vendor_data: body.server.vendor_data.clone().map(String::into_bytes),
+            user_data,
+            vendor_data,
             ssh_public_key,
         })
     } else {

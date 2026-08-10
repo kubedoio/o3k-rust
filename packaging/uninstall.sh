@@ -56,7 +56,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)
@@ -86,8 +86,54 @@ if [[ $SYSTEM_INSTALL -eq 1 ]]; then
   command -v systemctl >/dev/null 2>&1 && systemctl disable --now o3k-compute.service 2>/dev/null || true
   command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
 fi
+remove_owned_system_file() {
+  local source="$1" destination="$2"
+  [[ ! -e "$destination" && ! -L "$destination" ]] && return 0
+  if [[ -f "$source" && ! -L "$source" && -f "$destination" && ! -L "$destination" ]] \
+    && cmp -s "$source" "$destination"; then
+    rm -f -- "$destination"
+  else
+    echo "preserving foreign system file: $destination" >&2
+  fi
+}
 if [[ $PURGE -eq 1 ]]; then
-  for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do [[ -e "$path" ]] && find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -exec rm -rf -- {} +; [[ -f "$path/.o3k-owned" ]] && rm -f -- "$path/.o3k-owned"; rmdir "$path" 2>/dev/null || true; done
+  purge_empty_owned_dir() {
+    local path="$1"
+    [[ -d "$path" && ! -L "$path" ]] || return 0
+    if find "$path" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit | grep -q .; then
+      echo "refusing purge of non-empty state root with unclassified entries: $path" >&2
+      exit 2
+    fi
+    rm -f -- "$path/.o3k-owned"
+    rmdir -- "$path" 2>/dev/null || true
+  }
+  # Runtime data and logs are intentionally not recursively deleted: their
+  # children have no independent installer ledger, so an unknown child may be
+  # foreign state. Operators can reset/reconcile it explicitly first.
+  purge_empty_owned_dir "$DATA_DIR"
+  purge_empty_owned_dir "$LOG_DIR"
+  if [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]]; then
+    # Config files are removed only by exact, non-symlink paths created by the
+    # installer. Unknown files (including canaries) remain and prevent the
+    # directory from being removed.
+    for file in o3kd.env o3kd.env.lock o3k-compute.env; do
+      target="$CONFIG_DIR/$file"
+      [[ ! -L "$target" ]] && rm -f -- "$target"
+    done
+    if [[ -d "$CONFIG_DIR/tls" && ! -L "$CONFIG_DIR/tls" ]]; then
+      for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
+        target="$CONFIG_DIR/tls/$file"
+        [[ ! -L "$target" ]] && rm -f -- "$target"
+      done
+      rmdir -- "$CONFIG_DIR/tls" 2>/dev/null || true
+    fi
+    if find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit | grep -q .; then
+      echo "preserving unknown config state: $CONFIG_DIR" >&2
+    else
+      rm -f -- "$CONFIG_DIR/.o3k-owned"
+      rmdir -- "$CONFIG_DIR" 2>/dev/null || true
+    fi
+  fi
   # The libvirt-profile polkit rule applied by install.sh is O3K-applied
   # state: purge removes it (issue #90). The rule is inert on hosts whose
   # libvirtd uses auth_unix_rw = "none" (Ubuntu 24.04) and is scoped to the
@@ -95,14 +141,16 @@ if [[ $PURGE -eq 1 ]]; then
   # install.sh only applies the rule when EUID == 0; mirror that guard so a
   # sandboxed non-root purge (packaging tests) never touches host paths.
   if [[ $EUID -eq 0 ]]; then
-    rm -f -- /etc/polkit-1/rules.d/50-o3k-libvirt.rules
+    remove_owned_system_file "$PREFIX/share/o3k/50-o3k-libvirt.rules" \
+      /etc/polkit-1/rules.d/50-o3k-libvirt.rules
   else
     echo "skipping /etc/polkit-1/rules.d/50-o3k-libvirt.rules removal (not root)" >&2
   fi
 fi
 
 if [[ $SYSTEM_INSTALL -eq 1 ]]; then
-  rm -f -- /etc/systemd/system/o3kd.service /etc/systemd/system/o3k-compute.service
+  remove_owned_system_file "$PREFIX/share/o3k/o3kd.service" /etc/systemd/system/o3kd.service
+  remove_owned_system_file "$PREFIX/share/o3k/o3k-compute.service" /etc/systemd/system/o3k-compute.service
 fi
 for relative in "${MANIFEST_FILES[@]}"; do
   destination="$PREFIX/$relative"

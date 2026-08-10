@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    compute::{compute_error, requested_compute_289},
+    compute::{compute_error, project_token, requested_compute_289},
     error::keystone_error,
 };
 
@@ -96,9 +96,13 @@ pub(crate) fn map_volume_attachment(
 
 pub(crate) async fn attach_volume(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path((project_id, server_id)): Path<(String, String)>,
     Json(request): Json<VolumeAttachmentRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -138,9 +142,12 @@ pub(crate) async fn attach_volume(
 
 pub(crate) async fn list_volume_attachments(
     State(state): State<AppState>,
-    Path((project_id, server_id)): Path<(String, String)>,
     headers: axum::http::HeaderMap,
+    Path((project_id, server_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -177,9 +184,12 @@ pub(crate) async fn list_volume_attachments(
 
 pub(crate) async fn show_volume_attachment(
     State(state): State<AppState>,
-    Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
     headers: axum::http::HeaderMap,
+    Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -219,8 +229,12 @@ pub(crate) async fn show_volume_attachment(
 
 pub(crate) async fn delete_volume_attachment(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = project_token(&state, &headers, &project_id) {
+        return response;
+    }
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };

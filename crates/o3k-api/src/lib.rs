@@ -89,6 +89,7 @@ pub struct AppState {
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
+    volume_attachments_enabled: bool,
 }
 
 impl AppState {
@@ -145,6 +146,15 @@ impl AppState {
         self
     }
 
+    /// Enables the external-Cinder Nova attachment surface for an explicitly
+    /// configured hosted-service profile. The native ephemeral-root profile
+    /// leaves this disabled, so attachment routes are not publicly registered.
+    #[must_use]
+    pub fn with_volume_attachments_enabled(mut self, enabled: bool) -> Self {
+        self.volume_attachments_enabled = enabled;
+        self
+    }
+
     /// Reports whether the router is ready (`/readyz` returns 200 when true).
     #[must_use]
     pub fn is_ready(&self) -> bool {
@@ -159,7 +169,7 @@ impl AppState {
 /// then the image upload body-size limit) must not change without a
 /// compatibility record update.
 pub fn router_with_state(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(keystone_root))
         .route("/v3", get(keystone_v3))
         .route("/v2.1", get(nova_v2_1_version))
@@ -217,15 +227,19 @@ pub fn router_with_state(state: AppState) -> Router {
         .route(
             "/v2.1/{project_id}/servers/{id}/action",
             post(server_action),
-        )
-        .route(
-            "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments",
-            get(list_volume_attachments).post(attach_volume),
-        )
-        .route(
-            "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}",
-            get(show_volume_attachment).delete(delete_volume_attachment),
-        )
+        );
+    if state.volume_attachments_enabled {
+        router = router
+            .route(
+                "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments",
+                get(list_volume_attachments).post(attach_volume),
+            )
+            .route(
+                "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}",
+                get(show_volume_attachment).delete(delete_volume_attachment),
+            );
+    }
+    router
         .layer(axum::middleware::from_fn(microversion_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(
             o3k_image::DEFAULT_MAX_UPLOAD_BYTES,

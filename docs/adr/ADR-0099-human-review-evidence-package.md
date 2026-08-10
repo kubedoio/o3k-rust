@@ -25,10 +25,12 @@ listed by issue #92. Validate it with
 `packaging/validate-human-review.sh`. Validation is fail-closed for missing
 independent-review identity, complete threat-model scope,
 findings/dispositions, commit binding, review record URL, unresolved-risk
-disclosure, and explicit approvals. Critical and high findings must be marked
-`fixed` or explicitly `accepted`; they cannot be hidden behind `deferred` or
-`not-applicable`. A release invocation must additionally pass
-`--require-approved`.
+disclosure, and approval declarations. Approved reviews must explicitly set
+`release_blocking_findings`, `destructive_cleanup`, and
+`foreign_state_safeguards` to true; pending or rejected reviews may truthfully
+set them false. Critical and high findings must be marked `fixed` or explicitly
+`accepted`; they cannot be hidden behind `deferred` or `not-applicable`. A
+release invocation must additionally pass `--require-approved`.
 
 The repository does not generate or commit a `human-review.json` artifact.
 The validator checks declarations and structure, not the truth of a person's
@@ -46,7 +48,7 @@ responsibilities.
 
 ## Verification
 
-`tests/human-review-package.sh` covers valid pending preparation, approved
-review, missing independent identity, missing finding disposition, duplicate
-finding identifiers, deferred critical findings, and the required-approved
-failure path.
+`tests/human-review-package.sh` covers valid pending and rejected preparation,
+approved review with all explicit approvals, missing independent identity,
+missing finding disposition, duplicate finding identifiers, deferred critical
+findings, and the required-approved failure path.

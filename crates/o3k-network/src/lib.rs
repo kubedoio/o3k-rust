@@ -61,6 +61,8 @@ pub struct BridgeOwnership {
     pub uplink: Option<String>,
     pub created_by_o3k: bool,
     #[serde(default)]
+    pub identity: Option<String>,
+    #[serde(default)]
     pub gateway: Option<GatewayOwnership>,
 }
 
@@ -203,7 +205,7 @@ mod host_network_tests {
 
         assert!(matches!(
             manager.ensure_bridge(),
-            Err(HostNetworkError::CommandFailed)
+            Err(HostNetworkError::RollbackFailed)
         ));
         assert_eq!(
             command.calls(),
@@ -212,7 +214,6 @@ mod host_network_tests {
                 vec!["link", "add", "name", "o3k-br0", "type", "bridge"],
                 vec!["link", "set", "dev", "o3k-br0", "up"],
                 vec!["link", "set", "dev", "eth0", "master", "o3k-br0"],
-                vec!["link", "del", "dev", "o3k-br0"],
             ]
         );
     }
@@ -226,6 +227,10 @@ mod host_network_tests {
             Response::output(false, ""),
             Response::status(true),
             Response::status(false),
+            Response::output(
+                true,
+                "2: o3ktap-abcd: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
             Response::status(true),
             Response::status(true),
         ]);
@@ -238,7 +243,7 @@ mod host_network_tests {
 
         assert!(matches!(
             manager.create_tap(&spec),
-            Err(HostNetworkError::CommandFailed)
+            Err(HostNetworkError::RollbackFailed)
         ));
         let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
         assert_eq!(
@@ -250,8 +255,8 @@ mod host_network_tests {
                 vec!["link", "show", "dev", &tap],
                 vec!["tuntap", "add", "dev", &tap, "mode", "tap"],
                 vec!["link", "set", "dev", &tap, "address", "02:00:00:00:00:01"],
+                vec!["-d", "link", "show", "dev", &tap],
                 vec!["link", "del", "dev", &tap],
-                vec!["link", "del", "dev", "o3k-br0"],
             ]
         );
     }
@@ -558,6 +563,7 @@ mod host_network_tests {
                 name: "o3k-br0".to_owned(),
                 uplink: None,
                 created_by_o3k: true,
+                identity: Some("2".to_owned()),
                 gateway: None,
             }),
             taps: [
@@ -751,7 +757,13 @@ mod host_network_tests {
             "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 1a:8d:9b:1f:2f:b5",
         ));
         responses.push(Response::status(false));
-        // Rollback deletes the owned TAP and the owned bridge.
+        responses.push(Response::output(
+            true,
+            "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+        ));
+        // Without a durable bridge identity, rollback preserves the bridge for
+        // reconciliation instead of guessing that a same-name replacement is
+        // still O3K-owned; the newly-created TAP is still removed.
         responses.push(Response::status(true));
         responses.push(Response::status(true));
         let command = FakeNetworkCommand::new(responses);
@@ -764,7 +776,7 @@ mod host_network_tests {
 
         assert!(matches!(
             manager.create_tap(&spec),
-            Err(HostNetworkError::CommandFailed)
+            Err(HostNetworkError::RollbackFailed)
         ));
         let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
         let calls = command.calls();
@@ -775,10 +787,14 @@ mod host_network_tests {
             })
             .count();
         assert!(reapplies >= 2, "address must be re-applied while unstable");
-        assert_eq!(calls[calls.len() - 2], vec!["link", "del", "dev", &tap]);
         assert_eq!(
-            calls[calls.len() - 1],
-            vec!["link", "del", "dev", "o3k-br0"]
+            calls.last(),
+            Some(&vec![
+                "link".to_owned(),
+                "del".to_owned(),
+                "dev".to_owned(),
+                tap.clone()
+            ])
         );
     }
 
@@ -873,6 +889,7 @@ mod host_network_tests {
                 name: "o3k-br0".to_owned(),
                 uplink: None,
                 created_by_o3k: true,
+                identity: Some("2".to_owned()),
                 gateway: None,
             }),
             taps: [
@@ -960,6 +977,23 @@ mod host_network_tests {
 
     impl NetworkCommand for FakeNetworkCommand {
         fn output(&self, args: &[&str]) -> io::Result<NetworkCommandOutput> {
+            let identity_probe = args == ["-d", "link", "show", "dev", "o3k-br0"]
+                && self
+                    .calls
+                    .lock()
+                    .expect("test calls mutex")
+                    .last()
+                    .is_some_and(|previous| {
+                        previous == &["link", "set", "dev", "o3k-br0", "up"]
+                            || (previous.len() >= 2
+                                && previous[previous.len() - 2..] == ["master", "o3k-br0"])
+                    });
+            if identity_probe {
+                return Ok(NetworkCommandOutput {
+                    success: true,
+                    stdout: "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500".to_owned(),
+                });
+            }
             match self.next(args) {
                 Response::Output(success, stdout) => Ok(NetworkCommandOutput { success, stdout }),
                 Response::Status(_) => panic!("test output response expected"),
@@ -1138,7 +1172,7 @@ impl HostNetworkManager {
             return Err(HostNetworkError::OwnershipConflict);
         }
         let bridge_created = self.ensure_bridge_with_ownership()?;
-        if !bridge_created && !self.bridge_is_owned() {
+        if !bridge_created && !self.bridge_is_owned_live()? {
             return Err(HostNetworkError::ForeignInterface);
         }
         let address = format!("{}/{}", gateway.address, gateway.prefix_len);
@@ -1206,7 +1240,7 @@ impl HostNetworkManager {
             if !output.success || !interface_output_is_bridge(&output.stdout) {
                 return Err(HostNetworkError::ForeignInterface);
             }
-            if self.ownership.is_some() && !self.bridge_is_owned() {
+            if self.ownership.is_some() && !self.bridge_is_owned_output(&output) {
                 return Err(HostNetworkError::ForeignInterface);
             }
             self.run_ip(["link", "set", "dev", &self.config.bridge_name, "up"])?;
@@ -1246,7 +1280,15 @@ impl HostNetworkManager {
         if let Err(error) = setup {
             return Err(self.rollback_bridge(error));
         }
-        if let Err(error) = self.record_bridge_ownership() {
+        let identity = self
+            .command_output(["-d", "link", "show", "dev", &self.config.bridge_name])
+            .ok()
+            .filter(|output| output.success && interface_output_is_bridge(&output.stdout))
+            .and_then(|output| interface_identity(&output.stdout));
+        let Some(identity) = identity else {
+            return Err(self.rollback_bridge(HostNetworkError::ForeignInterface));
+        };
+        if let Err(error) = self.record_bridge_ownership(identity) {
             return Err(self.rollback_bridge(error));
         }
         Ok(true)
@@ -1297,13 +1339,13 @@ impl HostNetworkManager {
             Ok::<(), HostNetworkError>(())
         })();
         if let Err(error) = setup {
-            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
+            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
         }
         if let Err(error) = self.stabilize_tap_address(&name, &spec.mac) {
-            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
+            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
         }
         if let Err(error) = self.record_tap_ownership(&name, spec) {
-            return Err(self.rollback_tap_and_bridge(&name, bridge_created, error));
+            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
         }
         Ok((name, true))
     }
@@ -1479,10 +1521,23 @@ impl HostNetworkManager {
             .and_then(|store| store.lock().ok().map(|guard| guard.path.clone()))
     }
 
-    fn bridge_is_owned(&self) -> bool {
-        self.recorded_bridge()
-            .map(|bridge| bridge.is_some_and(|record| record.created_by_o3k))
-            .unwrap_or(false)
+    fn bridge_is_owned_output(&self, output: &NetworkCommandOutput) -> bool {
+        let Some(identity) = interface_identity(&output.stdout) else {
+            return false;
+        };
+        self.recorded_bridge().ok().flatten().is_some_and(|record| {
+            record.name == self.config.bridge_name
+                && record.created_by_o3k
+                && record.identity.as_deref() == Some(identity.as_str())
+        })
+    }
+
+    fn bridge_is_owned_live(&self) -> Result<bool, HostNetworkError> {
+        let output =
+            self.command_output(["-d", "link", "show", "dev", &self.config.bridge_name])?;
+        Ok(output.success
+            && interface_output_is_bridge(&output.stdout)
+            && self.bridge_is_owned_output(&output))
     }
 
     fn recorded_bridge(&self) -> Result<Option<BridgeOwnership>, HostNetworkError> {
@@ -1505,7 +1560,7 @@ impl HostNetworkManager {
             .map(|empty| empty.unwrap_or(true))
     }
 
-    fn record_bridge_ownership(&self) -> Result<(), HostNetworkError> {
+    fn record_bridge_ownership(&self, identity: String) -> Result<(), HostNetworkError> {
         self.update_ownership(|manifest| {
             if let Some(existing) = &manifest.bridge
                 && (existing.name != self.config.bridge_name
@@ -1517,6 +1572,7 @@ impl HostNetworkManager {
                 name: self.config.bridge_name.clone(),
                 uplink: self.config.uplink.clone(),
                 created_by_o3k: true,
+                identity: Some(identity.clone()),
                 gateway: manifest
                     .bridge
                     .as_ref()
@@ -1690,9 +1746,24 @@ impl HostNetworkManager {
     }
 
     fn rollback_bridge(&self, original: HostNetworkError) -> HostNetworkError {
-        if self
-            .run_ip(["link", "del", "dev", &self.config.bridge_name])
-            .is_ok()
+        // A bridge that never reached the durable ownership manifest has no
+        // current identity to verify.  Preserve it for reconciliation rather
+        // than deleting a same-name replacement during rollback.
+        if self.recorded_bridge().ok().flatten().is_none() {
+            return HostNetworkError::RollbackFailed;
+        }
+        let owned_now = self
+            .command_output(["-d", "link", "show", "dev", &self.config.bridge_name])
+            .ok()
+            .is_some_and(|output| {
+                output.success
+                    && interface_output_is_bridge(&output.stdout)
+                    && self.bridge_is_owned_output(&output)
+            });
+        if owned_now
+            && self
+                .run_ip(["link", "del", "dev", &self.config.bridge_name])
+                .is_ok()
         {
             match self.clear_bridge_ownership() {
                 Ok(()) => original,
@@ -1706,10 +1777,22 @@ impl HostNetworkManager {
     fn rollback_tap_and_bridge(
         &self,
         tap_name: &str,
+        expected_mac: &str,
         bridge_created: bool,
         original: HostNetworkError,
     ) -> HostNetworkError {
-        if self.run_ip(["link", "del", "dev", tap_name]).is_err() {
+        let owned_now = self
+            .command_output(["-d", "link", "show", "dev", tap_name])
+            .ok()
+            .is_some_and(|output| {
+                output.success
+                    && interface_output_is_owned(
+                        &output.stdout,
+                        expected_mac,
+                        &self.config.bridge_name,
+                    )
+            });
+        if !owned_now || self.run_ip(["link", "del", "dev", tap_name]).is_err() {
             return HostNetworkError::RollbackFailed;
         }
         if bridge_created {
@@ -1912,6 +1995,24 @@ fn interface_output_is_bridge(output: &str) -> bool {
     output
         .lines()
         .any(|line| line.trim_start().starts_with("bridge "))
+}
+
+/// Returns a stable live-link identity from `ip -d link show`: the kernel
+/// ifindex plus the link-layer address when present. A missing identity is
+/// treated as unowned for destructive operations.
+fn interface_identity(output: &str) -> Option<String> {
+    let first = output.lines().next()?.trim();
+    let index = first.split_once(':')?.0.trim();
+    if !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let mac = output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|pair| pair[0] == "link/ether")
+        .map(|pair| pair[1].to_ascii_lowercase());
+    Some(mac.map_or_else(|| index.to_owned(), |mac| format!("{index}:{mac}")))
 }
 
 pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
