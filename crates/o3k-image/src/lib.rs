@@ -552,7 +552,7 @@ fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
             // The compute service installs this subtree with the kvm group;
             // 0710 grants traversal only and leaves file read policy to the
             // individual artifact modes.
-            fs::set_permissions(path, fs::Permissions::from_mode(0o710))
+            fs::set_permissions(path, fs::Permissions::from_mode(0o2710))
                 .map_err(ImageError::Storage)?;
             Ok(())
         }
@@ -560,7 +560,7 @@ fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(path).map_err(ImageError::Storage)?;
             #[cfg(unix)]
-            fs::set_permissions(path, fs::Permissions::from_mode(0o710))
+            fs::set_permissions(path, fs::Permissions::from_mode(0o2710))
                 .map_err(ImageError::Storage)?;
             Ok(())
         }
@@ -1274,8 +1274,9 @@ mod tests {
             cache_path.join("base"),
             cache_path.join("overlays"),
         ] {
-            let mode = fs::metadata(directory)?.permissions().mode() & 0o777;
-            assert_eq!(mode, 0o710);
+            let mode = fs::metadata(directory)?.permissions().mode();
+            assert_eq!(mode & 0o777, 0o710);
+            assert_ne!(mode & 0o2000, 0, "cache directory must preserve kvm group inheritance");
         }
         fs::remove_dir_all(cache_path)?;
         Ok(())
