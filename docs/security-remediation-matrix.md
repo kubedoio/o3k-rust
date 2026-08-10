@@ -29,6 +29,7 @@ candidate-bound evidence are present and independently reviewable.
 | ASR-019 | medium | Destructive host ownership | Certificate bootstrap follows symlinked components after weak path checks | #590 | Symlinked output canary during root bootstrap on host | install | Foreign target preserved and write refused |
 | ASR-020 | medium | Evidence/governance | Rejected review status still requires approval booleans; safeguards field not validated | #92 | Validator tests for truthful rejected/pending/approved artifacts and --require-approved | human review, release gate | Rejection validates without approval; approved still requires all gates |
 | ASR-021 | medium | Evidence/governance | Machine artifacts are bound to ancestor commits rather than final candidate | #92/#93 | Candidate-bound source manifest and fresh full evidence sequence | all ancestor evidence | Every release artifact names exact candidate source/binaries |
+| ASR-022 | high | Installer / service identity | Existing `o3k` control account can retain host-execution supplementary groups during libvirt install | #589 | Installer refuses `o3k` reuse when `libvirt` or `kvm` groups are present; clean-install account-boundary proof | prior install evidence | Refusal and clean fresh-install UID/DAC/libvirt proof are candidate-bound |
 
 ## Workstream issue map
 
@@ -40,6 +41,7 @@ candidate-bound evidence are present and independently reviewable.
 - #82: ASR-018 Placement allocation recovery.
 - #83/#87/#575: ASR-014/015/016/017 durable command and lifecycle recovery.
 - #92/#93: ASR-020/021 evidence and release governance.
+- #589: ASR-022 unsafe pre-existing control-account privilege reuse.
 
 No ASR is accepted as a release limitation. Lower-severity rows remain open
 until their stated evidence exists.
