@@ -35,6 +35,9 @@ assert 'gpasswd --delete o3k' in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
 assert 'O3K_REAL_HOST_PROTECTED_PATHS=%s\\nO3K_REAL_HOST_INVENTORY_ROOT=%s' in bootstrap
+assert 'ps -o user:32=' in bootstrap
+assert 'ps -o user:32=' in cleanup
+assert '"$uid" == o3k || "$uid" == o3k-compute' in cleanup
 ready_start = bootstrap.index('wait_for_o3kd_ready() {')
 ready_end = bootstrap.index('\n}', ready_start)
 ready_block = bootstrap[ready_start:ready_end]

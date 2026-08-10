@@ -61,7 +61,9 @@ process_start_ticks() {
 
 process_uid() {
   local pid="$1"
-  sudo -n ps -o user= -p "$pid" 2>/dev/null | tr -d ' '
+  # ps(1)'s default USER column truncates names such as o3k-compute to
+  # `o3k-com+`, which would make a valid service look foreign during cleanup.
+  sudo -n ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' '
 }
 
 process_record_matches() {

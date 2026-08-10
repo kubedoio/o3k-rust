@@ -139,13 +139,15 @@ process_start_ticks() {
 
 process_uid() {
   local pid="$1"
-  sudo -n ps -o user= -p "$pid" 2>/dev/null | tr -d ' '
+  # Keep the full account name; ps(1)'s default USER column truncates
+  # o3k-compute and causes safe owned-process cleanup to fail closed.
+  sudo -n ps -o user:32= -p "$pid" 2>/dev/null | tr -d ' '
 }
 
 process_record_matches() {
   local pid="$1" start_ticks="$2" uid="$3" binary="$4"
-  [[ "$uid" == o3k ]] \
-    && [[ "$(process_uid "$pid")" == o3k ]] \
+  [[ "$uid" == o3k || "$uid" == o3k-compute ]] \
+    && [[ "$(process_uid "$pid")" == "$uid" ]] \
     && [[ "$(process_start_ticks "$pid")" == "$start_ticks" ]] \
     && process_matches "$pid" "$binary"
 }
