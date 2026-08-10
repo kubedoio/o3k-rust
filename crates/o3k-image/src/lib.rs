@@ -1803,7 +1803,7 @@ esac
             ),
         )?;
         fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
-        let cache = ImageCache::open_with_qemu_img(&path.join("cache"), 1024, &fake_qemu)?;
+        let cache = ImageCache::open_with_qemu_img(path.join("cache"), 1024, &fake_qemu)?;
         let mut hostile = vec![0_u8; 104];
         hostile[..4].copy_from_slice(b"QFI\xfb");
         hostile[4..8].copy_from_slice(&3_u32.to_be_bytes());
