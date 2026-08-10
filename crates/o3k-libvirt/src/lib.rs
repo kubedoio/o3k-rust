@@ -718,6 +718,15 @@ impl LibvirtAdapter {
         self.domain_action(name, DomainAction::Start).await
     }
 
+    pub async fn start_owned(
+        &self,
+        name: String,
+        expected_server_id: String,
+    ) -> Result<(), LibvirtError> {
+        self.owned_domain_action(name, expected_server_id, DomainAction::Start)
+            .await
+    }
+
     pub async fn inspect(&self, name: String) -> Result<DomainInspection, LibvirtError> {
         let uri = self.config.uri.clone();
         run_blocking(move || backend_inspect(&uri, &name)).await
@@ -727,16 +736,62 @@ impl LibvirtAdapter {
         self.domain_action(name, DomainAction::Shutdown).await
     }
 
+    pub async fn shutdown_owned(
+        &self,
+        name: String,
+        expected_server_id: String,
+    ) -> Result<(), LibvirtError> {
+        self.owned_domain_action(name, expected_server_id, DomainAction::Shutdown)
+            .await
+    }
+
     pub async fn force_stop(&self, name: String) -> Result<(), LibvirtError> {
         self.domain_action(name, DomainAction::ForceStop).await
+    }
+
+    pub async fn force_stop_owned(
+        &self,
+        name: String,
+        expected_server_id: String,
+    ) -> Result<(), LibvirtError> {
+        self.owned_domain_action(name, expected_server_id, DomainAction::ForceStop)
+            .await
     }
 
     pub async fn reboot(&self, name: String) -> Result<(), LibvirtError> {
         self.domain_action(name, DomainAction::Reboot).await
     }
 
+    pub async fn reboot_owned(
+        &self,
+        name: String,
+        expected_server_id: String,
+    ) -> Result<(), LibvirtError> {
+        self.owned_domain_action(name, expected_server_id, DomainAction::Reboot)
+            .await
+    }
+
     pub async fn undefine(&self, name: String) -> Result<(), LibvirtError> {
         self.domain_action(name, DomainAction::Undefine).await
+    }
+
+    /// Undefines a domain only when the current libvirt object still carries
+    /// the expected O3K server identity.  The ownership check and undefine
+    /// operate on the same looked-up domain handle, so callers never perform
+    /// a check-then-lookup-by-name destructive race.
+    pub async fn undefine_owned(
+        &self,
+        name: String,
+        expected_server_id: String,
+    ) -> Result<(), LibvirtError> {
+        if expected_server_id.trim().is_empty() {
+            return Err(LibvirtError::new(
+                ErrorCategory::InvalidRequest,
+                "domain owner is invalid",
+            ));
+        }
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_undefine_owned(&uri, &name, &expected_server_id)).await
     }
 
     pub async fn list_managed_domains(&self) -> Result<Vec<String>, LibvirtError> {
@@ -785,6 +840,22 @@ impl LibvirtAdapter {
         let uri = self.config.uri.clone();
         run_blocking(move || backend_action(&uri, &name, action)).await
     }
+
+    async fn owned_domain_action(
+        &self,
+        name: String,
+        expected_server_id: String,
+        action: DomainAction,
+    ) -> Result<(), LibvirtError> {
+        if expected_server_id.trim().is_empty() {
+            return Err(LibvirtError::new(
+                ErrorCategory::InvalidRequest,
+                "domain owner is invalid",
+            ));
+        }
+        let uri = self.config.uri.clone();
+        run_blocking(move || backend_owned_action(&uri, &name, &expected_server_id, action)).await
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -826,6 +897,10 @@ fn backend_inspect(_: &str, _: &str) -> Result<DomainInspection, LibvirtError> {
 }
 #[cfg(not(feature = "libvirt"))]
 fn backend_action(_: &str, _: &str, _: DomainAction) -> Result<(), LibvirtError> {
+    unavailable()
+}
+#[cfg(not(feature = "libvirt"))]
+fn backend_owned_action(_: &str, _: &str, _: &str, _: DomainAction) -> Result<(), LibvirtError> {
     unavailable()
 }
 #[cfg(not(feature = "libvirt"))]
@@ -975,6 +1050,91 @@ fn backend_action(uri: &str, name: &str, action: DomainAction) -> Result<(), Lib
             "domain lifecycle operation failed",
         )
     })
+}
+
+#[cfg(feature = "libvirt")]
+fn backend_owned_action(
+    uri: &str,
+    name: &str,
+    expected_server_id: &str,
+    action: DomainAction,
+) -> Result<(), LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain ownership metadata unavailable",
+        )
+    })?;
+    if !rollback_domain_is_owned_xml(name, &xml, expected_server_id) {
+        return Err(LibvirtError::new(
+            ErrorCategory::NotFound,
+            "domain ownership verification failed",
+        ));
+    }
+    let result = match action {
+        DomainAction::Start => domain.create().map(|_| ()),
+        DomainAction::Shutdown => domain.shutdown().map(|_| ()),
+        DomainAction::ForceStop => domain.destroy(),
+        DomainAction::Reboot => domain.reboot(0),
+        DomainAction::Undefine => domain.undefine(),
+    };
+    result.map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "owned domain lifecycle operation failed",
+        )
+    })
+}
+
+#[cfg(feature = "libvirt")]
+fn backend_undefine_owned(
+    uri: &str,
+    name: &str,
+    expected_server_id: &str,
+) -> Result<(), LibvirtError> {
+    let connection = open(uri)?;
+    let domain = Domain::lookup_by_name(&connection, name)
+        .map_err(|_| LibvirtError::new(ErrorCategory::NotFound, "domain was not found"))?;
+    let xml = domain.get_xml_desc(0).map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "domain ownership metadata unavailable",
+        )
+    })?;
+    if !rollback_domain_is_owned_xml(name, &xml, expected_server_id) {
+        return Err(LibvirtError::new(
+            ErrorCategory::NotFound,
+            "domain ownership verification failed",
+        ));
+    }
+    domain.undefine().map_err(|_| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "owned domain undefine failed",
+        )
+    })
+}
+
+fn rollback_domain_is_owned_xml(name: &str, xml: &str, expected_server_id: &str) -> bool {
+    matches!(
+        discover_domain_xml(name, xml),
+        DiscoveryResult::Owned { metadata, .. } if metadata.server_id == expected_server_id
+    )
+}
+
+#[cfg(not(feature = "libvirt"))]
+fn backend_undefine_owned(
+    _uri: &str,
+    _name: &str,
+    _expected_server_id: &str,
+) -> Result<(), LibvirtError> {
+    Err(LibvirtError::new(
+        ErrorCategory::Unavailable,
+        "libvirt undefine is unavailable in this build",
+    ))
 }
 
 #[cfg(feature = "libvirt")]
@@ -1445,7 +1605,11 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             })
             .await
             .map_err(provider_error)?;
-        if let Err(error) = self.adapter.start(definition.name.clone()).await {
+        if let Err(error) = self
+            .adapter
+            .start_owned(definition.name.clone(), request.o3k_server_id.to_string())
+            .await
+        {
             // Start may fail after libvirt has accepted the definition.  A
             // foreign same-name replacement can race this rollback, so never
             // undefine by name alone.  Re-inspect the current XML and preserve
@@ -1454,7 +1618,10 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             if let Ok(inspection) = self.adapter.inspect(definition.name.clone()).await
                 && rollback_domain_is_owned(&inspection, &expected_server_id)
             {
-                let _ = self.adapter.undefine(definition.name.clone()).await;
+                let _ = self
+                    .adapter
+                    .undefine_owned(definition.name.clone(), expected_server_id)
+                    .await;
             }
             return Err(provider_error(error));
         }
@@ -1487,14 +1654,17 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
         let name = request.provider_instance_id;
         match self.adapter.inspect(name.clone()).await {
             Ok(inspection) => {
-                owned_metadata(&inspection, None)?;
+                let metadata = owned_metadata(&inspection, None)?;
                 if inspection.active {
                     self.adapter
-                        .force_stop(name.clone())
+                        .force_stop_owned(name.clone(), metadata.server_id.clone())
                         .await
                         .map_err(provider_error)?;
                 }
-                self.adapter.undefine(name).await.map_err(provider_error)?;
+                self.adapter
+                    .undefine_owned(name, metadata.server_id)
+                    .await
+                    .map_err(provider_error)?;
             }
             Err(error) if error.category == ErrorCategory::NotFound => {}
             Err(error) => return Err(provider_error(error)),
@@ -1515,11 +1685,16 @@ impl o3k_provider::ComputeProvider for LibvirtProvider {
             .inspect(name.clone())
             .await
             .map_err(provider_error)?;
-        owned_metadata(&inspection, None)?;
+        let metadata = owned_metadata(&inspection, None)?;
+        let server_id = metadata.server_id;
         match action {
-            o3k_provider::InstanceAction::Start => self.adapter.start(name).await,
-            o3k_provider::InstanceAction::Stop => self.adapter.shutdown(name).await,
-            o3k_provider::InstanceAction::Reboot => self.adapter.reboot(name).await,
+            o3k_provider::InstanceAction::Start => self.adapter.start_owned(name, server_id).await,
+            o3k_provider::InstanceAction::Stop => {
+                self.adapter.shutdown_owned(name, server_id).await
+            }
+            o3k_provider::InstanceAction::Reboot => {
+                self.adapter.reboot_owned(name, server_id).await
+            }
         }
         .map_err(provider_error)?;
         self.operation(operation_id, Some(provider_instance_id.to_owned()))
@@ -2089,6 +2264,16 @@ mod tests {
         );
         assert!(!rollback_domain_is_owned(&foreign, "server-guard"));
         assert!(rollback_domain_is_owned(&owned, "server-guard"));
+        assert!(!rollback_domain_is_owned_xml(
+            &foreign.name,
+            &foreign.xml,
+            "server-guard"
+        ));
+        assert!(rollback_domain_is_owned_xml(
+            &owned.name,
+            &owned.xml,
+            "server-guard"
+        ));
         Ok(())
     }
 

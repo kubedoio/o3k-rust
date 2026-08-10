@@ -1332,8 +1332,15 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     ));
                 }
                 test_fault_pause_ms("after-define", "O3K_TEST_FAULT_PAUSE_AFTER_DEFINE_MS");
-                if let Err(error) = self.adapter.start(definition_name.clone()).await {
-                    let undefine_result = self.adapter.undefine(definition_name.clone()).await;
+                if let Err(error) = self
+                    .adapter
+                    .start_owned(definition_name.clone(), command.resource_id.clone())
+                    .await
+                {
+                    let undefine_result = self
+                        .adapter
+                        .undefine_owned(definition_name.clone(), command.resource_id.clone())
+                        .await;
                     let error = match undefine_result {
                         Ok(()) => agent_error(error),
                         Err(cleanup_error) => AgentError::Protocol(format!(
@@ -1356,7 +1363,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let inspection = match self.adapter.inspect(definition_name).await {
                     Ok(value) => value,
                     Err(error) => {
-                        let error = match self.adapter.undefine(name.clone()).await {
+                        let error = match self
+                            .adapter
+                            .undefine_owned(name.clone(), command.resource_id.clone())
+                            .await
+                        {
                             Ok(()) => agent_error(error),
                             Err(cleanup_error) => AgentError::Protocol(format!(
                                 "{}; domain rollback also failed: {}",
@@ -1376,7 +1387,11 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     }
                 };
                 if let Err(error) = verify_owned_domain(&inspection, &command.resource_id) {
-                    let error = match self.adapter.undefine(name.clone()).await {
+                    let error = match self
+                        .adapter
+                        .undefine_owned(name.clone(), command.resource_id.clone())
+                        .await
+                    {
                         Ok(()) => error,
                         Err(cleanup_error) => AgentError::Protocol(format!(
                             "{error}; domain rollback also failed: {cleanup_error}"
