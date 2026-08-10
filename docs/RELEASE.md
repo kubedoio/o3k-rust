@@ -6,6 +6,32 @@ an SPDX 2.3 SBOM, a manifest, and `SHA256SUMS`. The SBOM
 and manifest record the source commit and workflow name; local path sources are
 represented as `NOASSERTION` so private filesystem paths are not published.
 
+## Build baseline
+
+Release binaries are built on the **Debian 12 (bookworm, glibc 2.36) baseline**
+so the same artifacts execute on both advertised targets: Ubuntu 24.04 and
+Debian 12. A binary built on a newer baseline (for example Ubuntu 24.04's
+glibc 2.39) requires `GLIBC_2.38`/`GLIBC_2.39` symbols (`__isoc23_sscanf`,
+`pidfd_getpid`, `pidfd_spawnp`) and fails at exec on Debian 12 with
+`version 'GLIBC_2.38' not found` (see
+`target/real-host-workflow-artifacts/clean-debian/defect-5-glibc-abi.md`).
+
+```bash
+bash scripts/build-release-binaries-debian12.sh        # builds in a disposable bookworm rootfs
+O3K_RELEASE_BINARIES_DIR=target/release-debian12 \
+  packaging/make-release.sh 0.2.0-alpha.1 libvirt
+```
+
+The script installs the `rust-toolchain.toml` toolchain with rustup inside the
+rootfs, builds `o3kd` and `o3k-compute-bin --features libvirt` with
+`cargo build --release --locked`, and records sha256, a glibc-floor proof, and
+build provenance in the output directory. `make-release.sh` runs
+`packaging/check-glibc-baseline.sh` on the binaries it packages, and
+`packaging/verify-release-bundle.sh` re-checks the glibc floor on the finished
+bundle, so a binary above the 2.36 baseline blocks the release with a message
+naming the offending version and the fix. The check is runnable standalone:
+`bash packaging/check-glibc-baseline.sh bin/o3kd`.
+
 Build and verify a candidate locally:
 
 ```bash

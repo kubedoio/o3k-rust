@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_DIR="${1:?usage: verify-release-bundle.sh BUNDLE_DIR}"
 [[ -d "$BUNDLE_DIR" ]] || { echo "release bundle is not a directory: $BUNDLE_DIR" >&2; exit 2; }
 
@@ -57,5 +58,22 @@ result = subprocess.run(
 if result.returncode:
     raise SystemExit(result.returncode)
 PY
+
+# Release binaries must execute on every advertised target. Debian 12
+# (bookworm) ships glibc 2.36, so a binary requiring newer glibc symbols
+# (e.g. GLIBC_2.38/2.39 from an Ubuntu 24.04 host build) fails at exec on the
+# clean-Debian target; the release bundle must be built on the Debian 12
+# baseline instead (scripts/build-release-binaries-debian12.sh). The baseline
+# check skips non-ELF files, so scripts and documentation in the bundle are
+# unaffected.
+if [[ -d "$BUNDLE_DIR/bin" ]]; then
+  BINARIES=()
+  while IFS= read -r -d '' binary; do
+    BINARIES+=("$binary")
+  done < <(find "$BUNDLE_DIR/bin" -maxdepth 1 -type f -print0)
+  if (( ${#BINARIES[@]} > 0 )); then
+    bash "$SCRIPT_DIR/check-glibc-baseline.sh" "${BINARIES[@]}"
+  fi
+fi
 
 echo "verified release bundle integrity: $BUNDLE_DIR"
