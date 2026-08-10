@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `0dda944` and must not be
+This status is bound to the remediation branch at `29de383` and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
@@ -22,7 +22,10 @@ only after ownership-specific link-down and `brctl delbr` instructions.  The
 post-run inventory for `987654406` has no O3K domains, links, or OpenStack
 resources and retains the foreign domain.  These are diagnostic results, not
 a complete passing lifecycle or release approval; clean-boundary
-recertification is still required.
+recertification is still required.  Final-source host run `1786387900` on
+`29de383` passed the complete public CirrOS lifecycle, including console boot
+marker, restart/reconciliation, delete, and zero owned-resource residue; the
+managed console sink was observed as `o3k-compute:kvm` mode `0660`.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
@@ -32,8 +35,8 @@ recertification is still required.
 | ASR-004 | implemented-portable | Helper limits, bounded output, and capability stripping are tested | Fresh installed-host capability/resource proof |
 | ASR-005 | in-progress | Restrictive modes and separate state roots are packaged; SQLite, WAL, and SHM are explicitly forced to `0600`, verified by unit and fresh-host bootstrap checks; a live run observed all three at `0600` | Fresh Ubuntu/Debian DAC proof |
 | ASR-006 | implemented-portable | Admission limits and restart/symlink-safe config-drive cleanup tests pass | Fresh host kill/restart evidence |
-| ASR-007 | in-progress | Managed-root regular-file console checks and bounded reads are tested | Fresh installed-host capability and DAC proof |
-| ASR-008 | implemented-portable | Console tail reads are bounded by request and snapshot limits | Fresh sparse/growing-log host evidence |
+| ASR-007 | closed | `29de383` host run `1786387900` used a non-root `o3k-compute` capability probe and observed the managed console sink as `o3k-compute:kvm` mode `0660`; the complete CirrOS console lifecycle passed; portable foreign-path/special-file and bounded-read tests pass | None for remediation; candidate-bound recertification remains separate |
+| ASR-008 | in-progress | `29de383` host run `1786387900` passed real CirrOS console capture with a 28,985-byte managed sink and portable sparse/special-file bounds; the live console API remained bounded | Fresh host sparse/growing-log adversarial evidence |
 | ASR-009 | in-progress | `o3kd`/`o3k-compute` have separate users, state, units, and polkit authority | Fresh Ubuntu/Debian install proof |
 | ASR-010 | implemented-portable | Every agent lifecycle mutation uses ownership-fenced libvirt handles; same-name replacement tests pass | Fresh libvirt failure/replacement proof |
 | ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; `5c65db9` gives disposable runs a validated per-run bridge, `3024edb` pins its MAC before TAP attachment, and run `987654406` removed its owned bridge without touching the foreign domain | Fresh host link canaries and a complete lifecycle run after the bridge-isolation fix |
