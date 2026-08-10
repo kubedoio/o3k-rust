@@ -35,7 +35,7 @@ case "$*" in
     if [[ -e "${state_dir}/port-port-id" ]]; then echo '{}'; else echo 'No port with a name or ID was found' >&2; exit 1; fi;;
   flavor\ show*)
     if [[ -e "${state_dir}/flavor-flavor-id" ]]; then echo '{}'; else echo 'No flavor with a name or ID was found' >&2; exit 1; fi;;
-  server\ create*) : >"${state_file}"; echo server-id;;
+  server\ create*) : >"${state_file}"; echo 00000000-0000-0000-0000-000000000001;;
   server\ stop*) echo SHUTOFF >"${state_dir}/server-status";;
   server\ start*) echo ACTIVE >"${state_dir}/server-status";;
   server\ reboot*) echo ACTIVE >"${state_dir}/server-status";;
@@ -54,7 +54,7 @@ case "$*" in
     *)
       config_drive=true
       [[ "${O3K_TESTLAB_CONFIG_DRIVE:-true}" == false ]] && config_drive=false
-      echo "{\"id\":\"server-id\",\"name\":\"o3k-testlab-server\",\"status\":\"ACTIVE\",\"config_drive\":${config_drive},\"addresses\":{\"o3k-testlab-network\":[{\"addr\":\"192.0.2.2\"}]}}";;
+      echo "{\"id\":\"00000000-0000-0000-0000-000000000001\",\"name\":\"o3k-testlab-server\",\"status\":\"ACTIVE\",\"config_drive\":${config_drive},\"addresses\":{\"o3k-testlab-network\":[{\"addr\":\"192.0.2.2\"}]}}";;
     esac
     ;;
   server\ list*)
@@ -65,7 +65,7 @@ case "$*" in
     elif [[ "${mode}" == unrelated ]]; then
       echo '[{"id":"unrelated-server"}]'
     else
-      echo '[{"id":"server-id","name":"o3k-testlab-server"}]'
+      echo '[{"id":"00000000-0000-0000-0000-000000000001","name":"o3k-testlab-server"}]'
     fi
     ;;
   server\ delete*)
@@ -123,7 +123,7 @@ import sys
 result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "failed"
 assert result["cleanup"]["status"] == sys.argv[2]
-assert result["resources"]["server_id"] == "server-id"
+assert result["resources"]["server_id"] == "00000000-0000-0000-0000-000000000001"
 assert result["resources"]["keypair_id"] == "o3k-testlab-keypair"
 PY
 }
@@ -176,7 +176,7 @@ assert result["reason"] == "console polling did not produce non-empty output"
 assert result["polling"] == {"attempts": 1, "max_attempts": 1}
 PY
 
-for resource in "server delete --wait server-id" "flavor delete flavor-id" \
+for resource in "server delete --wait 00000000-0000-0000-0000-000000000001" "flavor delete flavor-id" \
                 "port delete port-id" "keypair delete o3k-testlab-keypair" "subnet delete subnet-id" \
                 "network delete network-id" "image delete image-id"; do
   grep -Fq "${resource}" "${O3K_MOCK_LOG}"
@@ -189,7 +189,7 @@ result = json.load(open(sys.argv[1], encoding="utf-8"))
 assert result["status"] == "passed"
 assert result["lifecycle"]["list"] is True
 assert result["acceptance"] == {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True, "console_boot_marker": True, "restart": {"status": "ACTIVE", "fixed_ip": "192.0.2.2", "config_drive": True}}
-assert result["resources"]["server_id"] == "server-id"
+assert result["resources"]["server_id"] == "00000000-0000-0000-0000-000000000001"
 assert set(result["cleanup"]["resources"]) == {"image", "keypair", "network", "subnet", "port", "flavor", "server"}
 assert all(value == "verified_absent" for value in result["cleanup"]["resources"].values())
 PY
@@ -200,15 +200,15 @@ grep -Fq "keypair create --public-key" "${O3K_MOCK_LOG}"
 grep -Fq -- "--key-name o3k-testlab-keypair" "${O3K_MOCK_LOG}"
 grep -Fq -- "--config-drive true" "${O3K_MOCK_LOG}"
 grep -Fq -- "--nic port-id=port-id" "${O3K_MOCK_LOG}"
-grep -Fq "server stop server-id" "${O3K_MOCK_LOG}"
-grep -Fq "server start server-id" "${O3K_MOCK_LOG}"
-grep -Fq "server reboot --hard server-id" "${O3K_MOCK_LOG}"
+grep -Fq "server stop 00000000-0000-0000-0000-000000000001" "${O3K_MOCK_LOG}"
+grep -Fq "server start 00000000-0000-0000-0000-000000000001" "${O3K_MOCK_LOG}"
+grep -Fq "server reboot --hard 00000000-0000-0000-0000-000000000001" "${O3K_MOCK_LOG}"
 if grep -Eq "server (stop|start|reboot).*--wait" "${O3K_MOCK_LOG}"; then
   echo "CLI harness passed an unsupported lifecycle wait option" >&2
   exit 1
 fi
-grep -Fq "console log show server-id" "${O3K_MOCK_LOG}"
-if grep -Fq "console log show server-id -f value" "${O3K_MOCK_LOG}"; then
+grep -Fq "console log show 00000000-0000-0000-0000-000000000001" "${O3K_MOCK_LOG}"
+if grep -Fq "console log show 00000000-0000-0000-0000-000000000001 -f value" "${O3K_MOCK_LOG}"; then
   echo "CLI harness passed an unsupported console output format option" >&2
   exit 1
 fi
