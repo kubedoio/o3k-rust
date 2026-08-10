@@ -826,12 +826,9 @@ where
             .provider_id
             .clone()
             .ok_or(ReconcileError::InvalidIntent)?;
-        if action == LifecycleAction::Delete
-            && matches!(
-                self.provider.get_instance(&provider_id).await,
-                Err(ProviderError::NotFound)
-            )
-        {
+        let presence = self.provider.get_instance(&provider_id).await;
+        let instance_present = presence.is_ok();
+        if action == LifecycleAction::Delete && matches!(presence, Err(ProviderError::NotFound)) {
             return self
                 .finish_lifecycle(
                     operation.id,
@@ -892,6 +889,30 @@ where
                 self.retry_or_fail(operation.id, resource.id, ProviderError::Retryable)
                     .await
             }
+            ProviderOperationState::Accepted | ProviderOperationState::Running
+                if action == LifecycleAction::Delete && instance_present =>
+            {
+                // The old accepted command may have been lost after the
+                // host mutation began (#575).  Reusing its provider command
+                // identity can keep the operation permanently Accepted.
+                // Mint one deterministic command identity tied to the
+                // durable lifecycle operation, so retries are idempotent and
+                // old-stream evidence cannot complete the new command.
+                let redrive_operation_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!("o3k:lifecycle-delete-redrive:{}", operation.id).as_bytes(),
+                );
+                let result = self
+                    .provider
+                    .delete_instance(o3k_provider::DeleteInstanceRequest {
+                        operation_id: redrive_operation_id,
+                        provider_instance_id: provider_id.clone(),
+                        idempotency_key: format!("o3k-operation-{}-redrive", operation.id),
+                    })
+                    .await;
+                self.handle_lifecycle_result(operation, resource, action, provider_id, result)
+                    .await
+            }
             ProviderOperationState::Accepted | ProviderOperationState::Running => {
                 self.store
                     .update_operation(
@@ -930,7 +951,11 @@ where
     ) -> Result<OperationState, ReconcileError> {
         match result {
             Ok(provider_operation) => {
-                validate_provider_operation_owner(operation.id, &provider_operation)?;
+                validate_lifecycle_provider_operation_owner(
+                    operation.id,
+                    action,
+                    &provider_operation,
+                )?;
                 match provider_operation.state {
                     ProviderOperationState::Succeeded => {
                         self.finish_lifecycle(
@@ -1939,6 +1964,26 @@ fn validate_provider_operation_owner(
         return Err(ReconcileError::InvalidIntent);
     }
     Ok(())
+}
+
+fn validate_lifecycle_provider_operation_owner(
+    operation_id: Uuid,
+    action: LifecycleAction,
+    provider_operation: &o3k_provider::Operation,
+) -> Result<(), ReconcileError> {
+    if provider_operation.o3k_operation_id == operation_id {
+        return Ok(());
+    }
+    let redrive_operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:lifecycle-delete-redrive:{operation_id}").as_bytes(),
+    );
+    if action == LifecycleAction::Delete
+        && provider_operation.o3k_operation_id == redrive_operation_id
+    {
+        return Ok(());
+    }
+    Err(ReconcileError::InvalidIntent)
 }
 
 fn valid_agent_reference(value: &str) -> bool {
@@ -3807,6 +3852,56 @@ mod tests {
             store.get_resource(resource.id).await?.observed_state,
             "DELETED"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_accepted_delete_gets_one_fresh_idempotent_redrive() -> Result<(), ReconcileError>
+    {
+        let (journal, store, provider) = journal("delete-stale-accepted", 2).await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        provider.set_failure(FailureInjection::StaleAccepted)?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Running
+        );
+        let stale_provider_operation: Uuid = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        store
+            .update_operation(
+                operation_id,
+                OperationState::UnknownOutcome,
+                Some(&stale_provider_operation.to_string()),
+                Some("unknown_outcome"),
+                None,
+            )
+            .await?;
+        provider.set_failure(FailureInjection::None)?;
+
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "DELETED"
+        );
+        assert_eq!(provider.instance_count(), 0);
         Ok(())
     }
 

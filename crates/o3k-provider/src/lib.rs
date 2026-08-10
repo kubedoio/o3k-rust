@@ -396,6 +396,10 @@ pub enum FailureInjection {
     /// dispatch fails terminally (a re-drive rejection), so the drive's
     /// terminal-failure projection can be tested without a provider wrapper.
     TerminalOnRedrive,
+    /// A delete is accepted without changing provider state, modelling the
+    /// stale-accepted window from #575 where the original command may have
+    /// been lost after acceptance.
+    StaleAccepted,
 }
 
 #[derive(Clone)]
@@ -804,6 +808,20 @@ impl ComputeProvider for FakeComputeProvider {
             FailureInjection::Transient => return Err(ProviderError::Retryable),
             FailureInjection::Terminal => return Err(ProviderError::Terminal),
             FailureInjection::StaleState => return Err(ProviderError::StaleState),
+            FailureInjection::StaleAccepted => {
+                let operation = Self::operation(
+                    &mut state,
+                    request.operation_id,
+                    OperationState::Accepted,
+                    None,
+                    Some(request.provider_instance_id.clone()),
+                );
+                state.idempotency.insert(
+                    request.idempotency_key,
+                    (operation.provider_operation_id, fingerprint),
+                );
+                return Ok(operation);
+            }
             _ => {}
         }
         state.instances.remove(&request.provider_instance_id);
