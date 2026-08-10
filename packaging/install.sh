@@ -196,6 +196,14 @@ if [[ "$PROFILE" == libvirt ]]; then
     [[ -s "$TLS_DIR/$file" ]] || { echo "libvirt TLS bootstrap is incomplete: $TLS_DIR/$file" >&2; exit 2; }
   done
   if [[ $EUID -eq 0 ]]; then
+    # o3kd.service / o3k-compute.service read the TLS material as user o3k;
+    # bootstrap-certs.sh creates the config dir as root:root 0750, so grant
+    # o3k group traversal on the parent itself (the mode is unchanged — 0750
+    # already grants group r-x; the group is the missing piece). The env
+    # files stay root-owned 0600 and are read by systemd as root, so only
+    # the TLS files (0640 root:o3k) become readable by the service account.
+    chgrp o3k "$CONFIG_DIR"
+    chmod 0750 "$CONFIG_DIR"
     chgrp o3k "$TLS_DIR" "$TLS_DIR"/*
     chmod 0750 "$TLS_DIR"
     chmod 0640 "$TLS_DIR"/*
