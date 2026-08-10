@@ -47,6 +47,14 @@ provides a trusted value; disk format support is not capacity evidence.
 The packaged libvirt profile installs with `O3K_COMPUTE_MAX_DISK_GB=10`
 (`packaging/install.sh`); tune it per host before scheduling larger flavors.
 
+The packaged libvirt profile also configures libvirtd unix-socket
+authorization for the o3k service account: `packaging/install.sh` installs a
+policykit-1 rule (`/etc/polkit-1/rules.d/50-o3k-libvirt.rules`) granting only
+user `o3k` the `org.libvirt.unix.manage` action. Debian 12's libvirtd
+defaults to `auth_unix_rw = "polkit"`, where the session-less service account
+cannot authenticate; the rule is inert on hosts with an active
+`auth_unix_rw = "none"` (Ubuntu 24.04).
+
 `log_format` accepts `json` or `pretty`; `provider` accepts `fake`, `cellhv`, or
 `agent`. The `agent` provider requires complete compute TLS configuration and
 an authorized-agent mapping. TLS can also be enabled independently while the

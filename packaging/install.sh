@@ -224,6 +224,21 @@ if [[ "$PROFILE" == libvirt ]]; then
     printf 'O3K_COMPUTE_MAX_DISK_GB=10\n' >>"$CONFIG_DIR/o3k-compute.env"
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
+  if [[ $EUID -eq 0 ]]; then
+    # Defect 6 (issue #90, clean Debian 12): libvirtd defaults to
+    # auth_unix_rw = "polkit" and org.libvirt.unix.manage requires
+    # auth_admin_keep, which the session-less o3k service account cannot
+    # satisfy (no polkit agent available); the agent then publishes zeroed
+    # capabilities and every create 409s. Install a policykit-1 JS rule
+    # granting ONLY user o3k the manage action (Debian 12 and Ubuntu 24.04
+    # both load /etc/polkit-1/rules.d/*.rules); on hosts with an active
+    # auth_unix_rw = "none" (Ubuntu 24.04) polkit is never consulted and the
+    # rule is inert. polkitd reloads rules on change; the guarded reload
+    # makes it deterministic.
+    install -d -m 0755 /etc/polkit-1/rules.d
+    install -m 0644 "$ROOT_DIR/packaging/50-o3k-libvirt.rules" /etc/polkit-1/rules.d/50-o3k-libvirt.rules
+    systemctl reload polkitd 2>/dev/null || systemctl reload polkit 2>/dev/null || true
+  fi
   # ADR-0086 (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) deliberately
   # blocks the direct libvirt provider at daemon startup
   # (ConfigError::DirectLibvirtProviderUnavailable); the packaged real-libvirt
