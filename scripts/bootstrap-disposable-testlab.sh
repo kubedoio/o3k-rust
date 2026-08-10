@@ -159,7 +159,7 @@ failure_cleanup() {
         RUNNER_TEMP="$RUNNER_TEMP" GITHUB_RUN_ID="$RUN_ID" \
           O3K_TESTLAB_STATE_ROOT="$STATE_ROOT" O3K_TESTLAB_PID_ROOT="$PID_ROOT" \
           O3K_REAL_HOST_INVENTORY_ROOT="$INVENTORY_ROOT" \
-          O3K_OPENSTACK_VENV="$OPENSTACK_VENV" O3K_TESTLAB_IMAGE_PATH="$IMAGE_PATH" \
+          O3K_OPENSTACK_VENV="$OPENSTACK_VENV" O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH:-}" \
           bash "$ROOT_DIR/scripts/cleanup-disposable-testlab.sh" 2>/dev/null || cleanup_failed=true
       else
         cleanup_failed=true

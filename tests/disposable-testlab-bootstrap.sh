@@ -34,6 +34,7 @@ assert 'usermod --append --groups "$group" o3k\n' not in bootstrap
 assert 'gpasswd --delete o3k' in bootstrap
 assert 'cleanup-disposable-testlab.sh' in bootstrap
 assert 'ownership ledger until libvirt, network, and DHCP state have' in bootstrap
+assert 'O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH:-}"' in bootstrap
 assert 'sudo -n rm -rf -- "$STATE_ROOT"' not in bootstrap
 assert '/readyz' in bootstrap
 assert 'GITHUB_PATH' in bootstrap
