@@ -1,6 +1,6 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `a713f48` and must not be
+This status is bound to the remediation branch at `03b2784` and must not be
 used as release or human-review approval.  Host evidence from the rejected
 candidate is stale after these changes.  Disposable real-host runs now prove
 bootstrap/readiness, authentication, managed image upload, network/port/server
@@ -30,7 +30,7 @@ unchanged.
 | ASR-011 | in-progress | Network cleanup revalidates live ownership and preserves foreign replacement links; `5c65db9` gives disposable runs a validated per-run bridge, and run `987654344` removed its run bridge cleanly | Fresh host link canaries and a complete lifecycle run after the bridge-isolation fix |
 | ASR-012 | implemented-portable | Reset/purge preserve ledgers and fail closed on active/foreign host state | Fresh install/uninstall/purge host suite |
 | ASR-013 | implemented-portable | dnsmasq cleanup acquires pidfd before identity validation and signals only the stable handle; process tests pass | Fresh Linux pid-reuse stress proof |
-| ASR-014 | implemented-portable | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity | Fresh process/agent reconnect evidence |
+| ASR-014 | in-progress | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity; run `987654346` committed both transfers without the prior offer-conflict disconnect | Fresh process/agent reconnect evidence and a complete lifecycle run |
 | ASR-015 | implemented-portable | Epoch fencing and durable command replay tests pass | Fresh reconnect/crash host evidence |
 | ASR-016 | implemented-portable | Monotonic observation and concurrent store tests pass | Fresh multi-process concurrency evidence |
 | ASR-017 | implemented-portable | Stale-accepted delete now receives a deterministic fresh redrive; regression test passes | Fresh libvirtd-restart-mid-define proof |
