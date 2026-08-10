@@ -224,7 +224,13 @@ PY
 collect() {
     local output="$1"
     shift
-    env O3K_REAL_HOST_STATE_ROOT="${STATE_ROOT}" \
+    collect_root "${STATE_ROOT}" "${output}" "$@"
+}
+
+collect_root() {
+    local root="$1" output="$2"
+    shift 2
+    env O3K_REAL_HOST_STATE_ROOT="${root}" \
         O3K_REAL_HOST_CANARIES="${WORK_DIR}/canaries.json" \
         O3K_REAL_HOST_OPENSTACK_INVENTORY=true \
         PATH="${FAKE_BIN}:${PATH}" "$@" \
@@ -677,6 +683,55 @@ python3 - "${WORK_DIR}/base-a.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 assert value["schema_version"] == 3 and value["status"] == "available"
+PY
+
+# --- 10b. installed layout: the state root IS the data dir -------------------
+# The packaged install passes /var/lib/o3k directly as --data-dir, so the
+# ledger and the managed subdirectories sit at the state root itself (no
+# `data/` subdir). The collector must probe `data/` when present (testlab
+# layout) and walk the root otherwise, finding the durable ledger in both
+# places. The testlab-layout fixtures above keep passing unchanged.
+INSTALLED_ROOT="${WORK_DIR}/installed-state"
+setup_installed_fixture() {
+    mkdir -p "${INSTALLED_ROOT}/dhcp" \
+        "${INSTALLED_ROOT}/network" \
+        "${INSTALLED_ROOT}/image-cache/base" \
+        "${INSTALLED_ROOT}/console" \
+        "${INSTALLED_ROOT}/config-drive" \
+        "${INSTALLED_ROOT}/placement"
+    printf 'compute-agent\n' >"${INSTALLED_ROOT}/agent-id"
+    printf '{"bridge": null, "taps": {}}\n' >"${INSTALLED_ROOT}/network/ownership.json"
+    printf '{"config": {"subnet": "192.0.2.0/29", "gateway": "192.0.2.1", "dns": ["192.0.2.1"], "interface": "o3k-br0", "lease_seconds": 3600}, "bindings": {}}\n' >"${INSTALLED_ROOT}/dhcp/state.json"
+    printf '# Managed by o3k-dhcp; do not edit.\ninterface=o3k-br0\n' >"${INSTALLED_ROOT}/dhcp/dnsmasq.conf"
+    build_db "${INSTALLED_ROOT}/o3k.sqlite"
+    seed_db "${INSTALLED_ROOT}/o3k.sqlite"
+}
+setup_installed_fixture
+collect_root "${INSTALLED_ROOT}" "${WORK_DIR}/installed-layout.json"
+python3 - "${WORK_DIR}/installed-layout.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "available", value
+assert value["managed_state"]["status"] == "available", value["managed_state"]
+paths = {e["path"] for e in value["managed_state"]["entries"]}
+assert "dhcp/state.json" in paths, paths
+assert "network/ownership.json" in paths, paths
+assert "agent-id" in paths, paths
+# The ledger is covered by the durable section, never hashed as managed state.
+assert not any(p.startswith("o3k.sqlite") for p in paths), paths
+assert value["durable"]["status"] == "available", value["durable"]
+assert value["durable"]["live_resources"] == [], value["durable"]["live_resources"]
+PY
+python3 "${ROOT_DIR}/scripts/real-host-leak-verifier.py" compare \
+    --baseline "${WORK_DIR}/installed-layout.json" --after "${WORK_DIR}/installed-layout.json" \
+    --scope installed-layout --expect-state-root present \
+    --out "${WORK_DIR}/installed-layout-verdict.json"
+python3 - "${WORK_DIR}/installed-layout-verdict.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert value["status"] == "passed", value
+assert value["owned_leaks"] == [], value["owned_leaks"]
+assert value["inconsistencies"] == [], value["inconsistencies"]
 PY
 
 # --- 11. secret-bearing values cannot enter result JSON ----------------------

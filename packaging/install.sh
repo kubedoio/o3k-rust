@@ -71,8 +71,11 @@ if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
   if [[ -x "$ROOT_DIR/bin/o3k-compute" ]]; then
     COMPUTE_BINARY="$ROOT_DIR/bin/o3k-compute"
   else
-    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute
-    COMPUTE_BINARY="$ROOT_DIR/target/release/o3k-compute"
+    # The cargo bin target is `o3k-compute-bin` (bins/o3k-compute package);
+    # its `libvirt` feature gates the libvirt backend
+    # (bins/o3k-compute/Cargo.toml).
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
+    COMPUTE_BINARY="$ROOT_DIR/target/release/o3k-compute-bin"
   fi
 fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
@@ -202,8 +205,17 @@ if [[ "$PROFILE" == libvirt ]]; then
     printf 'O3K_COMPUTE_DATA_DIR=%q\nO3K_COMPUTE_PROFILE=libvirt\nO3K_COMPUTE_TLS_DIR=%q\n' "$DATA_DIR" "$TLS_DIR" >"$CONFIG_DIR/o3k-compute.env"
     chmod 0600 "$CONFIG_DIR/o3k-compute.env"
   fi
+  # ADR-0086 (docs/adr/ADR-0086-libvirt-profile-fail-closed.md) deliberately
+  # blocks the direct libvirt provider at daemon startup
+  # (ConfigError::DirectLibvirtProviderUnavailable); the packaged real-libvirt
+  # profile therefore runs the agent provider, driven by the local
+  # o3k-compute.service over the mTLS control plane bootstrapped above.
+  # Listen on 127.0.0.1:18080 like the disposable-testlab path
+  # (O3K_LISTEN_ADDR) instead of the default 127.0.0.1:8080; the unit does not
+  # hardcode a listen address so this env governs.
   for setting in \
-    "O3K_PROVIDER=libvirt" \
+    "O3K_PROVIDER=agent" \
+    "O3K_LISTEN_ADDR=127.0.0.1:18080" \
     "O3K_COMPUTE_SERVER_CERTIFICATE=$TLS_DIR/server.pem" \
     "O3K_COMPUTE_SERVER_PRIVATE_KEY=$TLS_DIR/server-key.pem" \
     "O3K_COMPUTE_CLIENT_CA=$TLS_DIR/ca.pem" \
