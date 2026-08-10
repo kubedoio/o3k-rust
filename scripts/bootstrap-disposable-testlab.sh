@@ -630,6 +630,7 @@ printf 'O3K_REAL_HOST_COMPUTE_BINARY=%s\n' "$STATE_ROOT/bin/o3k-compute" >>"${GI
 printf 'O3K_REAL_HOST_NETWORK_CAPABILITY=ambient-net-admin\n' >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_DAEMON_ACCOUNT=%s\n' "$SERVICE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_COMPUTE_ACCOUNT=%s\n' "$COMPUTE_ACCOUNT" >>"${GITHUB_ENV:-/dev/null}"
+printf 'O3K_COMPUTE_BRIDGE_NAME=%s\n' "$BRIDGE_NAME" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_TESTLAB_PID_ROOT=%s\n' "$PID_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 printf 'O3K_REAL_HOST_PROTECTED_PATHS=%s\nO3K_REAL_HOST_INVENTORY_ROOT=%s\nO3K_OPENSTACK_VENV=%s\n' \
   "$INVENTORY_ROOT" "$INVENTORY_ROOT" "$OPENSTACK_VENV" >>"${GITHUB_ENV:-/dev/null}"
