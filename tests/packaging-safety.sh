@@ -254,6 +254,17 @@ if bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
 fi
 [[ -f "$WORK_DIR/purge-data/foreign-canary" ]]
 rm -f -- "$WORK_DIR/purge-data/foreign-canary"
+# A same-path replacement of generated configuration is foreign state. Purge
+# must preserve it even though the surrounding config directory is O3K-owned.
+printf 'foreign configuration replacement\n' >"$WORK_DIR/purge-config/o3kd.env"
+if bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
+  --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
+  --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"; then
+  echo "purge removed or accepted a replaced foreign config file" >&2
+  exit 1
+fi
+[[ -f "$WORK_DIR/purge-config/o3kd.env" ]]
+rm -f -- "$WORK_DIR/purge-config/o3kd.env"
 bash "$ROOT_DIR/packaging/uninstall.sh" --purge --yes \
   --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
   --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"

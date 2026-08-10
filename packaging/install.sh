@@ -336,6 +336,53 @@ if [[ "$PROFILE" == libvirt ]]; then
   done
   install -m 0640 "$TLS_DIR/agent-id" "$DATA_DIR/agent-id"
 fi
+
+# Keep a root-owned content ledger for generated configuration and TLS files.
+# Purge may remove a file only when its bytes still match the version recorded
+# at installation time; operator edits or same-path foreign replacements are
+# preserved rather than treated as O3K-owned state.
+CONFIG_FILE_LEDGER="$CONFIG_DIR/.o3k-config-files"
+config_file_specs=(o3kd.env)
+[[ -e "$CONFIG_DIR/o3kd.env.lock" ]] && config_file_specs+=(o3kd.env.lock)
+if [[ "$PROFILE" == libvirt ]]; then
+  config_file_specs+=(o3k-compute.env tls/ca.pem tls/server.pem tls/server-key.pem \
+    tls/agent.pem tls/agent-key.pem tls/agent-id tls/agent-fingerprint)
+fi
+if [[ -e "$CONFIG_FILE_LEDGER" ]]; then
+  [[ -f "$CONFIG_FILE_LEDGER" && ! -L "$CONFIG_FILE_LEDGER" ]] || {
+    echo "refusing invalid configuration ownership ledger: $CONFIG_FILE_LEDGER" >&2
+    exit 2
+  }
+  while IFS=$'\t' read -r marker relative digest extra; do
+    [[ -z "${extra:-}" && "$marker" == o3k-config-file-v1 && "$relative" != /* \
+      && "$digest" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "refusing malformed configuration ownership ledger: $CONFIG_FILE_LEDGER" >&2
+      exit 2
+    }
+    [[ -f "$CONFIG_DIR/$relative" && ! -L "$CONFIG_DIR/$relative" ]] || {
+      echo "refusing missing configuration file recorded in ledger: $relative" >&2
+      exit 2
+    }
+    [[ "$(sha256sum "$CONFIG_DIR/$relative" | awk '{print $1}')" == "$digest" ]] || {
+      echo "refusing to overwrite operator-modified configuration file: $relative" >&2
+      exit 2
+    }
+  done <"$CONFIG_FILE_LEDGER"
+fi
+ledger_tmp="$CONFIG_FILE_LEDGER.tmp-$$"
+umask 077
+: >"$ledger_tmp"
+for relative in "${config_file_specs[@]}"; do
+  [[ -f "$CONFIG_DIR/$relative" && ! -L "$CONFIG_DIR/$relative" ]] || {
+    echo "configuration file is missing or unsafe: $relative" >&2
+    rm -f -- "$ledger_tmp"
+    exit 2
+  }
+  printf 'o3k-config-file-v1\t%s\t%s\n' "$relative" \
+    "$(sha256sum "$CONFIG_DIR/$relative" | awk '{print $1}')" >>"$ledger_tmp"
+done
+mv -f -- "$ledger_tmp" "$CONFIG_FILE_LEDGER"
+chmod 0600 "$CONFIG_FILE_LEDGER"
 if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k-compute "$DATA_DIR"
   chown -R o3k:o3k "$LOG_DIR"

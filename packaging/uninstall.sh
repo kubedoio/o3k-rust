@@ -114,24 +114,50 @@ if [[ $PURGE -eq 1 ]]; then
   purge_empty_owned_dir "$LOG_DIR"
   if [[ -d "$CONFIG_DIR" && ! -L "$CONFIG_DIR" ]]; then
     # Config files are removed only by exact, non-symlink paths created by the
-    # installer. Unknown files (including canaries) remain and prevent the
-    # directory from being removed.
+    # installer and whose bytes still match the install-time content ledger.
+    # A same-path operator or foreign replacement is preserved.
+    CONFIG_FILE_LEDGER="$CONFIG_DIR/.o3k-config-files"
+    config_file_unverified=false
+    config_file_owned() {
+      local relative="$1" target="$CONFIG_DIR/$1" expected actual
+      [[ -f "$CONFIG_FILE_LEDGER" && ! -L "$CONFIG_FILE_LEDGER" ]] || return 1
+      [[ -f "$target" && ! -L "$target" ]] || return 1
+      expected="$(awk -F $'\t' -v key="$relative" \
+        '$1 == "o3k-config-file-v1" && $2 == key { print $3; exit }' \
+        "$CONFIG_FILE_LEDGER")"
+      [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+      actual="$(sha256sum "$target" | awk '{print $1}')"
+      [[ "$actual" == "$expected" ]]
+    }
     for file in o3kd.env o3kd.env.lock o3k-compute.env; do
-      target="$CONFIG_DIR/$file"
-      [[ ! -L "$target" ]] && rm -f -- "$target"
+      if config_file_owned "$file"; then
+        rm -f -- "$CONFIG_DIR/$file"
+      elif [[ -e "$CONFIG_DIR/$file" ]]; then
+        echo "preserving unverified config file: $CONFIG_DIR/$file" >&2
+        config_file_unverified=true
+      fi
     done
     if [[ -d "$CONFIG_DIR/tls" && ! -L "$CONFIG_DIR/tls" ]]; then
       for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
-        target="$CONFIG_DIR/tls/$file"
-        [[ ! -L "$target" ]] && rm -f -- "$target"
+        if config_file_owned "tls/$file"; then
+          rm -f -- "$CONFIG_DIR/tls/$file"
+        elif [[ -e "$CONFIG_DIR/tls/$file" ]]; then
+          echo "preserving unverified TLS file: $CONFIG_DIR/tls/$file" >&2
+          config_file_unverified=true
+        fi
       done
       rmdir -- "$CONFIG_DIR/tls" 2>/dev/null || true
     fi
-    if find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name .o3k-owned -print -quit | grep -q .; then
+    if find "$CONFIG_DIR" -mindepth 1 -maxdepth 1 ! -name .o3k-owned ! -name .o3k-config-files -print -quit | grep -q .; then
       echo "preserving unknown config state: $CONFIG_DIR" >&2
     else
+      rm -f -- "$CONFIG_FILE_LEDGER"
       rm -f -- "$CONFIG_DIR/.o3k-owned"
       rmdir -- "$CONFIG_DIR" 2>/dev/null || true
+    fi
+    if [[ "$config_file_unverified" == true ]]; then
+      echo "refusing purge while unverified configuration remains" >&2
+      exit 2
     fi
   fi
   # The libvirt-profile polkit rule applied by install.sh is O3K-applied
