@@ -131,6 +131,27 @@ CINDER_VOLUMES_DIR="/var/lib/cinder/volumes"
 TGT_CONF_PATH="/etc/tgt/targets.conf"
 TGT_CONF_BACKUP="${STATE_ROOT}/tgt-targets.conf.orig"
 TGT_CONF_MODIFIED=0
+ISCSI_ACL_BACKUP="${STATE_ROOT}/iscsi-acl.before"
+ISCSI_ACL_MODIFIED=0
+MYSQL_TMP_DIR="${DATA_DIR}/mysql-tmp"
+MYSQL_TMP_CONF="/etc/mysql/mariadb.conf.d/99-o3k-${RUN_SLUG}.cnf"
+MYSQL_TMP_CONF_CREATED=0
+
+restore_iscsi_compute_access() {
+  if [ "${ISCSI_ACL_MODIFIED:-0}" = "1" ] && [ -s "${ISCSI_ACL_BACKUP:-}" ]; then
+    setfacl --restore="${ISCSI_ACL_BACKUP}" 2>/dev/null || \
+      echo "WARNING: unable to restore iSCSI ACLs from ${ISCSI_ACL_BACKUP}" >&2
+    ISCSI_ACL_MODIFIED=0
+  fi
+}
+
+restore_mysql_tmpdir() {
+  if [ "${MYSQL_TMP_CONF_CREATED:-0}" = "1" ]; then
+    rm -f -- "${MYSQL_TMP_CONF}" 2>/dev/null || true
+    systemctl restart mariadb 2>/dev/null || true
+    MYSQL_TMP_CONF_CREATED=0
+  fi
+}
 
 # Phase reached before failure; recorded in the aggregate failure artifact.
 RUN_PHASE="start"
@@ -151,6 +172,18 @@ early_failure_cleanup() {
   # cleanup trap was installed; the run-owned backup lives in the state root
   # that is removed below, so ordering matters.
   restore_tgtd_config 2>/dev/null || true
+  restore_iscsi_compute_access 2>/dev/null || true
+  restore_mysql_tmpdir 2>/dev/null || true
+  # The database, message-bus, and loop/LVM resources are created before the
+  # full service cleanup trap is installed. Remove only this run's exact
+  # identities on an early failure; never sweep by a shared prefix.
+  rabbitmqctl delete_vhost "${MQ_VHOST:-}" 2>/dev/null || true
+  rabbitmqctl delete_user "${MQ_USER:-}" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME:-invalid_run_database}\`; DROP USER IF EXISTS '${DB_USER:-invalid_run_user}'@'localhost'; DROP USER IF EXISTS '${DB_USER:-invalid_run_user}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  vgchange -an "${VG_NAME:-invalid_run_vg}" 2>/dev/null || true
+  vgremove -y "${VG_NAME:-invalid_run_vg}" 2>/dev/null || true
+  losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
+  [ -n "${LOOP_FILE:-}" ] && rm -f -- "${LOOP_FILE}" || true
   if [ -n "${STATE_ROOT:-}" ] && [ "${STATE_ROOT}" != "${STATE_BASE}" ] && [ -d "${STATE_ROOT}" ]; then
     rm -rf "${STATE_ROOT}"
   fi
@@ -323,6 +356,7 @@ apt-get install -y -qq \
   rabbitmq-server \
   memcached \
   lvm2 \
+  acl \
   open-iscsi \
   tgt \
   python3-openstackclient \
@@ -349,8 +383,64 @@ echo "==> Recording Cinder version evidence..."
 dpkg-query -W -f='${Package} ${Version}\n' mariadb-server rabbitmq-server memcached open-iscsi tgt lvm2 python3-openstackclient > "${EVIDENCE_DIR}/installed-packages.txt" 2>/dev/null || true
 
 echo "==> Starting MariaDB, RabbitMQ, memcached, tgt, open-iscsi..."
-systemctl start mariadb rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
+mkdir -p "${MYSQL_TMP_DIR}"
+chown mysql:mysql "${MYSQL_TMP_DIR}"
+chmod 0700 "${MYSQL_TMP_DIR}"
+if [ -e "${MYSQL_TMP_CONF}" ]; then
+  echo "ERROR: run-owned MariaDB tmpdir config already exists: ${MYSQL_TMP_CONF}" >&2
+  exit 1
+fi
+install -m 0644 /dev/null "${MYSQL_TMP_CONF}"
+MYSQL_TMP_CONF_CREATED=1
+cat > "${MYSQL_TMP_CONF}" <<EOF
+[mysqld]
+tmpdir = ${MYSQL_TMP_DIR}
+EOF
+systemctl restart mariadb 2>/dev/null || service mariadb restart
+systemctl start rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
 sleep 5
+
+# open-iscsi keeps its node database and lock under root-owned system paths.
+# The compute agent remains non-root and retains only its existing network
+# capabilities, so grant it the minimum durable access needed by iscsiadm on
+# this disposable hosted-service testbed.  Save the complete ACLs first and
+# restore them on every cleanup path; never leave a testbed ACL on the host.
+configure_iscsi_compute_access() {
+  command -v getfacl >/dev/null 2>&1 || {
+    echo "ERROR: getfacl is required for reversible iSCSI access setup" >&2
+    return 1
+  }
+  command -v setfacl >/dev/null 2>&1 || {
+    echo "ERROR: setfacl is required for reversible iSCSI access setup" >&2
+    return 1
+  }
+  local path
+  : > "${ISCSI_ACL_BACKUP}"
+  for path in /etc/iscsi /etc/iscsi/nodes /etc/iscsi/iscsid.conf \
+              /run/lock/iscsi /run/lock/iscsi/lock; do
+    [ -e "${path}" ] || continue
+    getfacl -p "${path}" >> "${ISCSI_ACL_BACKUP}"
+  done
+  chmod 0600 "${ISCSI_ACL_BACKUP}"
+  ISCSI_ACL_MODIFIED=1
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rx" /etc/iscsi
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /etc/iscsi/nodes
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:r" /etc/iscsi/iscsid.conf
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /run/lock/iscsi
+  if [ -e /run/lock/iscsi/lock ]; then
+    setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rw" /run/lock/iscsi/lock
+  fi
+  cat > "${EVIDENCE_DIR}/iscsi-privilege-boundary.txt" <<EOF
+account=${O3K_COMPUTE_ACCOUNT}
+access_paths=/etc/iscsi/iscsid.conf,/etc/iscsi/nodes,/run/lock/iscsi
+network_capabilities=net_admin,net_bind_service,net_raw
+acl_backup=${ISCSI_ACL_BACKUP}
+EOF
+}
+echo "==> Granting reversible non-root iSCSI control-path access..."
+configure_iscsi_compute_access
 
 # tgt-admin (used by cinder.privsep.targets.tgt) parses only
 # /etc/tgt/targets.conf on every invocation; tgtd itself does not need a
@@ -903,12 +993,14 @@ cleanup_early() {
   "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" stop 2>/dev/null || true
   kill -TERM "${CINDER_API_PID:-}" "${CINDER_SCHED_PID:-}" "${CINDER_VOL_PID:-}" 2>/dev/null || true
   remove_run_owned_tgt_state
+  restore_iscsi_compute_access
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
   rabbitmqctl delete_vhost "${MQ_VHOST}" 2>/dev/null || true
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  restore_mysql_tmpdir
   rm -f "${LOOP_FILE}"
   write_foreign_state_after
 }
