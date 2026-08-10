@@ -53,7 +53,7 @@ capabilities.
 | ASR-017 | implemented-portable | Stale-accepted delete now receives a deterministic fresh redrive; regression test passes | Fresh libvirtd-restart-mid-define proof |
 | ASR-018 | implemented-portable | Placement intent/commit/restart reconciliation tests pass | Fresh crash-failpoint host proof |
 | ASR-019 | in-progress | Bootstrap/install path checks and ownership markers are fenced | Fresh symlink-component host canary |
-| ASR-020 | implemented-portable | Rejected artifacts validate with false approvals and `--require-approved` still fails | Independent governance review |
+| ASR-020 | closed | `tests/human-review-package.sh` passed on source `61f4308`: pending/approved/rejected artifacts validate truthfully, rejected approval booleans are not required, malformed safeguards are rejected, and `--require-approved` rejects non-approved artifacts | None for validator remediation; human approval is intentionally not created here |
 | ASR-021 | in-progress | Candidate-binding gates exist | New candidate-bound recertification |
 | ASR-022 | in-progress | Installer refuses unsafe reuse of pre-existing control/compute identities | Fresh clean-install identity proof |
 
