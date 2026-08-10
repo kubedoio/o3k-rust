@@ -1,9 +1,12 @@
 # Security remediation status after rejected-candidate fixes
 
-This status is bound to the remediation branch at `4660bda` and must not be
+This status is bound to the remediation branch at `a30be7d` and must not be
 used as release or human-review approval.  Host evidence from the rejected
-candidate is stale after these changes; `libvirtd` is inactive in the current
-environment, so no host-bound row is marked closed here.
+candidate is stale after these changes.  A disposable real-host bootstrap was
+re-run after starting `libvirtd`; the in-shell health/auth probe succeeded, but
+the subsequent CLI artifact was skipped because the terminal reaped the
+background daemons when the bootstrap shell exited.  No host-bound row is
+marked closed here.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
