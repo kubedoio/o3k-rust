@@ -162,6 +162,7 @@ impl ImageCache {
                     && format!("{:x}", Sha256::digest(&cached)) == checksum
                 {
                     if format == "qcow2" {
+                        reject_qcow2_dependencies(&path)?;
                         verify_image_format(&self.qemu_img, &path, format)?;
                     }
                     return Ok(path);
@@ -180,7 +181,10 @@ impl ImageCache {
             return Err(ImageError::Storage(error));
         }
         if format == "qcow2"
-            && let Err(error) = verify_image_format(&self.qemu_img, &temporary, format)
+            && let Err(error) = (|| {
+                reject_qcow2_dependencies(&temporary)?;
+                verify_image_format(&self.qemu_img, &temporary, format)
+            })()
         {
             let _ = fs::remove_file(&temporary);
             return Err(error);
@@ -538,7 +542,46 @@ fn validate_verified_base(
         return Err(ImageError::ChecksumMismatch);
     }
     if format == "qcow2" {
+        reject_qcow2_dependencies(base)?;
         verify_image_format(qemu_img, base, format)?;
+    }
+    Ok(())
+}
+
+/// Rejects qcow2 backing and external-data references by inspecting only the
+/// fixed-size qcow2 header. This runs before qemu-img so an uploaded image
+/// cannot make the helper open a tenant-controlled host path while discovering
+/// that the image is unsafe.
+fn reject_qcow2_dependencies(path: &Path) -> Result<(), ImageError> {
+    let mut file = fs::File::open(path).map_err(ImageError::Storage)?;
+    let mut header = [0_u8; 104];
+    let count = file.read(&mut header).map_err(ImageError::Storage)?;
+    if count < 32 || &header[..4] != b"QFI\xfb" {
+        // qemu-img remains the format authority for malformed/non-qcow2
+        // bytes; this branch keeps injectable test helpers deterministic.
+        return Ok(());
+    }
+    let version = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+    if !matches!(version, 2 | 3) {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let backing_offset = u64::from_be_bytes([
+        header[8], header[9], header[10], header[11], header[12], header[13], header[14],
+        header[15],
+    ]);
+    let backing_size = u32::from_be_bytes([header[16], header[17], header[18], header[19]]);
+    if backing_offset != 0 || backing_size != 0 {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    // QCOW2 v3 incompatible feature bit 2 denotes an external data file.
+    if version == 3 && count >= 80 {
+        let incompatible = u64::from_be_bytes([
+            header[72], header[73], header[74], header[75], header[76], header[77], header[78],
+            header[79],
+        ]);
+        if incompatible & (1 << 2) != 0 {
+            return Err(ImageError::FormatVerificationFailed);
+        }
     }
     Ok(())
 }
@@ -1721,6 +1764,32 @@ esac
         assert!(limits.contains("Max processes             32"));
         assert!(limits.contains("Max open files            128"));
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn qcow2_header_dependencies_are_rejected_before_helper_invocation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("qcow2-header-dependencies");
+        fs::create_dir_all(&path)?;
+        for (name, offset, incompatible, rejected) in [
+            ("backing", 4096_u64, 0_u64, true),
+            ("external-data", 0_u64, 1_u64 << 2, true),
+            ("standalone", 0_u64, 0_u64, false),
+        ] {
+            let image = path.join(name);
+            let mut header = vec![0_u8; 104];
+            header[..4].copy_from_slice(b"QFI\xfb");
+            header[4..8].copy_from_slice(&3_u32.to_be_bytes());
+            header[8..16].copy_from_slice(&offset.to_be_bytes());
+            header[72..80].copy_from_slice(&incompatible.to_be_bytes());
+            fs::write(&image, header)?;
+            assert_eq!(
+                reject_qcow2_dependencies(&image).is_err(),
+                rejected,
+                "unexpected dependency decision for {name}"
+            );
+        }
         Ok(())
     }
 
