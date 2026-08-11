@@ -3901,18 +3901,80 @@ impl DurableStore for SqliteStore {
         error_category: Option<&str>,
         error_message: Option<&str>,
     ) -> Result<OperationRecord, StoreError> {
-        let result = sqlx::query("UPDATE operations SET state = ?, provider_operation_id = ?, error_category = ?, error_message = ? WHERE id = ?")
-            .bind(state.as_str())
-            .bind(provider_operation_id)
-            .bind(error_category)
-            .bind(error_message)
-            .bind(id.to_string())
-            .execute(&self.pool)
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
             .await
             .map_err(StoreError::Database)?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::OperationNotFound);
+        let outcome: Result<(), StoreError> = async {
+            let row = sqlx::query(
+                "SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?",
+            )
+            .bind(id.to_string())
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+            let current = operation_from_row(&row)?;
+            if matches!(
+                current.state,
+                OperationState::Succeeded | OperationState::Failed
+            ) {
+                if current
+                    .provider_operation_id
+                    .as_deref()
+                    .is_some_and(|existing| {
+                        provider_operation_id.is_some_and(|incoming| incoming != existing)
+                    })
+                {
+                    return Err(StoreError::Corrupt(
+                        "terminal operation provider identity conflicts with durable state"
+                            .to_owned(),
+                    ));
+                }
+                if current.state != state {
+                    if matches!(state, OperationState::Succeeded | OperationState::Failed) {
+                        return Err(StoreError::Corrupt(
+                            "terminal operation state cannot conflict with durable state"
+                                .to_owned(),
+                        ));
+                    }
+                    // A stale non-terminal projection may arrive after the
+                    // terminal writer. Preserve the terminal truth and let
+                    // the caller continue idempotently.
+                    return Ok(());
+                }
+
+                // An equivalent terminal projection may fill in durable
+                // evidence that was absent from the first terminal write,
+                // but it can never replace an existing provider identity.
+                sqlx::query("UPDATE operations SET provider_operation_id = COALESCE(?, provider_operation_id), error_category = COALESCE(?, error_category), error_message = COALESCE(?, error_message) WHERE id = ?")
+                    .bind(provider_operation_id)
+                    .bind(error_category)
+                    .bind(error_message)
+                    .bind(id.to_string())
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+                return Ok(());
+            }
+            sqlx::query("UPDATE operations SET state = ?, provider_operation_id = ?, error_category = ?, error_message = ? WHERE id = ?")
+                .bind(state.as_str())
+                // `None` intentionally clears a stale provider-operation
+                // identity when retry recovery mints a new attempt. A
+                // non-None value was checked above for identity consistency.
+                .bind(provider_operation_id)
+                .bind(error_category)
+                .bind(error_message)
+                .bind(id.to_string())
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            Ok(())
         }
+        .await;
+        SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
+        drop(connection);
         self.get_operation(id).await
     }
 
@@ -7545,6 +7607,202 @@ mod tests {
         );
         assert_eq!(reopened.increment_operation_retry(operation.id).await?, 3);
         fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_terminal_state_rejects_stale_in_flight_projection()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: Uuid::now_v7(),
+            kind: "lifecycle:reboot".to_owned(),
+            state: OperationState::Running,
+            provider_operation_id: Some("provider-op-1".to_owned()),
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource(&ResourceRecord {
+                id: operation.resource_id,
+                kind: "server".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "requested".to_owned(),
+                observed_state: "unknown".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store.insert_operation(&operation).await?;
+
+        store
+            .update_operation(
+                operation.id,
+                OperationState::Succeeded,
+                Some("provider-op-1"),
+                None,
+                None,
+            )
+            .await?;
+        let stale = store
+            .update_operation(
+                operation.id,
+                OperationState::Running,
+                Some("provider-op-1"),
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(stale.state, OperationState::Succeeded);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_terminal_conflicts_and_provider_identity_drift_fail_closed()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: Uuid::now_v7(),
+            kind: "lifecycle:reboot".to_owned(),
+            state: OperationState::Running,
+            provider_operation_id: Some("provider-op-1".to_owned()),
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource(&ResourceRecord {
+                id: operation.resource_id,
+                kind: "server".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "requested".to_owned(),
+                observed_state: "unknown".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        store.insert_operation(&operation).await?;
+        store
+            .update_operation(
+                operation.id,
+                OperationState::Failed,
+                Some("provider-op-1"),
+                Some("provider_error"),
+                Some("failed"),
+            )
+            .await?;
+
+        let terminal_conflict = store
+            .update_operation(
+                operation.id,
+                OperationState::Succeeded,
+                Some("provider-op-1"),
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(terminal_conflict, Err(StoreError::Corrupt(_))));
+
+        let identity_conflict = store
+            .update_operation(
+                operation.id,
+                OperationState::Failed,
+                Some("provider-op-2"),
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(identity_conflict, Err(StoreError::Corrupt(_))));
+
+        let final_operation = store.get_operation(operation.id).await?;
+        assert_eq!(final_operation.state, OperationState::Failed);
+        assert_eq!(
+            final_operation.provider_operation_id.as_deref(),
+            Some("provider-op-1")
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn independent_store_connections_preserve_terminal_operation_under_race()
+    -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-store-operation-race-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let first = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
+        let second = std::sync::Arc::new(SqliteStore::connect_file(&path).await?);
+
+        for _ in 0..25 {
+            let operation = OperationRecord {
+                id: Uuid::now_v7(),
+                resource_id: Uuid::now_v7(),
+                kind: "lifecycle:reboot".to_owned(),
+                state: OperationState::Running,
+                provider_operation_id: Some("provider-op-race".to_owned()),
+                error_category: None,
+                error_message: None,
+            };
+            first
+                .insert_resource(&ResourceRecord {
+                    id: operation.resource_id,
+                    kind: "server".to_owned(),
+                    project_id: "project-race".to_owned(),
+                    generation: 1,
+                    observed_generation: 0,
+                    desired_state: "requested".to_owned(),
+                    observed_state: "unknown".to_owned(),
+                    provider_id: None,
+                })
+                .await?;
+            first.insert_operation(&operation).await?;
+
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let terminal_store = first.clone();
+            let stale_store = second.clone();
+            let terminal_barrier = barrier.clone();
+            let stale_barrier = barrier;
+            let terminal_operation = operation.clone();
+            let stale_operation = operation.clone();
+            let terminal = tokio::spawn(async move {
+                terminal_barrier.wait().await;
+                terminal_store
+                    .update_operation(
+                        terminal_operation.id,
+                        OperationState::Succeeded,
+                        Some("provider-op-race"),
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            let stale = tokio::spawn(async move {
+                stale_barrier.wait().await;
+                stale_store
+                    .update_operation(
+                        stale_operation.id,
+                        OperationState::Running,
+                        Some("provider-op-race"),
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            terminal.await??;
+            stale.await??;
+
+            let final_operation = first.get_operation(operation.id).await?;
+            assert_eq!(final_operation.state, OperationState::Succeeded);
+        }
+
+        drop(first);
+        drop(second);
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
         Ok(())
     }
 
