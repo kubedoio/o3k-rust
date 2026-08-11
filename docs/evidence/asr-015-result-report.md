@@ -10,7 +10,7 @@ and left no owned residue or foreign-state change.
 ## Source and ownership
 
 - Repository: `kubedoio/o3k-rust`
-- Tested source SHA: `a2ddaa7b2275d226e83690a83db7b4c276024a22`
+- Tested source SHA: `294940ec6acf1dbbcc860f66568418c42feeab05`
 - Fail-before source SHA: `633f8cb49f225394968bc90c8b2124257f28ffad`
 - Owning issue: #83
 - Related closed issues: #87 and #575
@@ -86,15 +86,16 @@ or provider execution semantics were broadened.
 
 ## Exact real-host reproduction
 
-The final run used one real CirrOS server created through public OpenStack APIs.
+The final run used one real CirrOS server created through public OpenStack APIs
+on the exact final PR head, including the shared agent-command projection lock.
 
 - Server/resource: `a340cf83-1604-59d1-9a5f-7daa8749a9d0`
 - Create operation: `813453cb-2cae-5b5d-9535-3b58c7f7f423`
 - Hard-reboot operation: `ed4e630b-5991-59f8-a13e-518b3d28550b`
 - Command: `97b12289-2197-53c9-a8ca-4085349ba828`
 - Agent: `compute-agent`
-- E1: `019ff28b-f772-7173-b599-64739fe8ccfb`
-- E2: `019ff28c-a88d-7d30-a15c-d270e3ac33c5`
+- E1: `019ff2d2-7e48-7c91-b464-803042dea727`
+- E2: `019ff2d3-2e9d-7f33-b571-95d1c4a08217`
 - Pre-crash command state: `accepted`
 - Post-crash command state: `accepted`
 - Post-reconnect command state: `succeeded`
@@ -127,7 +128,7 @@ Identity stayed unchanged:
   `1498217f2bb626ffa454967f33cdbfbf4a065d7a3c02a81a6e9270f96e5eb9bd`;
 - provider/domain name: `o3k-66a348162124007cff5b`;
 - libvirt UUID before/after:
-  `8902257f-9e13-4038-bc66-7cc0952bc30b`;
+  `e892202b-da94-4320-b0e5-c31531fd9f6f`;
 - provider resource count after recovery: `1`;
 - effective hard-reboot execution count: `1`.
 
@@ -152,13 +153,15 @@ foreign canary XML digest remained byte-identical:
 ## Evidence files
 
 - Passing machine artifact:
-  `docs/evidence/asr-015-reconnect-host-a2ddaa7.json`
+  `docs/evidence/asr-015-reconnect-host-294940e.json`
+- Final-head stale-epoch test results:
+  `docs/evidence/asr-015-stale-epoch-tests-294940e.txt`
 - Fail-before machine artifact:
   `docs/evidence/asr-015-reconnect-host-633f8cb.json`
 - Archived stale-epoch test results:
   `docs/evidence/asr-015-stale-epoch-tests-a2ddaa7.txt`
 - Protected raw run tree:
-  `target/real-host-workflow-artifacts/asr-015-a3d1caa/real-host-a2ddaa7/`
+  `target/real-host-workflow-artifacts/asr-015-a3d1caa/real-host-294940e/`
 
 All tracked artifacts are redacted. They contain no tokens, passwords,
 certificates, private keys, user-data, unrestricted command payloads, or host
@@ -166,9 +169,9 @@ connection secrets.
 Bootstrap stdout was not retained because the disposable bootstrap command
 emits generated ephemeral credentials for the caller to consume.
 
-## Validation
+## Final-head validation
 
-Passed on the corrected source:
+Passed on the exact final PR head `294940ec6acf1dbbcc860f66568418c42feeab05`:
 
 ```text
 python3 scripts/check-architecture-boundaries.py
@@ -180,8 +183,10 @@ git diff --check
 
 Focused results include 45 reconciler tests, 110 compute-agent tests, 65 compute
 tests, 30 store tests, the black-box agent mTLS test, both registration TLS
-tests, the real libvirt lifecycle, and the independent leak/foreign-state
-verifier.
+tests, the final-head real libvirt lifecycle, and the independent
+leak/foreign-state verifier. The final-head run recorded E1 `accepted`, E2
+recovery to `succeeded`, one effective mutation, unchanged provider/domain
+identity, complete public cleanup, and an unchanged foreign canary.
 
 ## Closure decision
 
