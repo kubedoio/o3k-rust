@@ -19,6 +19,15 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install protobuf compiler and compatibility-test parser
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
+      - name: TEMP diagnose qemu-img sandbox (remove before merge)
+        run: |
+          ls -la /usr/bin/setpriv /usr/bin/prlimit /usr/bin/qemu-img 2>&1 || true
+          setpriv --version 2>&1 | head -1 || true
+          qemu-img --version 2>&1 | head -1 || true
+          id
+          echo "--- sandbox spawn test ---"
+          setpriv --no-new-privs --ambient-caps=-all --inh-caps=-all --reset-env -- /usr/bin/prlimit --as=1073741824 --nproc=32 --nofile=128 -- /bin/sh -c 'echo SANDBOX_OK; echo "PATH=$PATH"; command -v grep awk find qemu-img' 2>&1
+          echo "sandbox_exit=$?"
       - name: Refresh cached libvirt bindings
         run: cargo clean -p virt-sys
       - name: Format
