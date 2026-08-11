@@ -22,7 +22,6 @@ pub const DEFAULT_MAX_CACHE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const QEMU_IMG_TIMEOUT: Duration = Duration::from_secs(30);
 const QEMU_IMG_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const QEMU_IMG_MAX_ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
-const QEMU_IMG_MAX_PROCESSES: u64 = 32;
 const QEMU_IMG_MAX_OPEN_FILES: u64 = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -798,9 +797,14 @@ where
         "--",
     ]);
     command.arg(prlimit);
+    // RLIMIT_NPROC is enforced per real UID across the whole system, not per
+    // process tree. A low --nproc bound therefore breaks the helper whenever
+    // the service account already runs other threads (CI runners with parallel
+    // test processes, or a busy o3k-compute account), because the helper cannot
+    // create even one thread. Per-process bounds that actually hold are kept:
+    // address space, open files, bounded output, and a hard timeout.
     command.args([
         format!("--as={QEMU_IMG_MAX_ADDRESS_SPACE_BYTES}"),
-        format!("--nproc={QEMU_IMG_MAX_PROCESSES}"),
         format!("--nofile={QEMU_IMG_MAX_OPEN_FILES}"),
         "--".to_owned(),
     ]);
@@ -1761,7 +1765,12 @@ esac
         );
         let limits = fs::read_to_string(limits)?;
         assert!(limits.contains("Max address space         1073741824"));
-        assert!(limits.contains("Max processes             32"));
+        // RLIMIT_NPROC is deliberately NOT set: it is enforced per real UID
+        // across the whole system, so a low bound would break the helper
+        // whenever the service account already runs other threads (CI runners
+        // with parallel test processes, or a busy o3k-compute account).
+        // Assert it is not artificially constrained instead.
+        assert!(!limits.contains("Max processes             32"));
         assert!(limits.contains("Max open files            128"));
         fs::remove_dir_all(path)?;
         Ok(())
