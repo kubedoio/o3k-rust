@@ -3843,7 +3843,7 @@ impl DurableStore for SqliteStore {
     }
 
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        let result = sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .bind(operation.id.to_string())
             .bind(operation.resource_id.to_string())
             .bind(&operation.kind)
@@ -3852,9 +3852,18 @@ impl DurableStore for SqliteStore {
             .bind(&operation.error_category)
             .bind(&operation.error_message)
             .execute(&self.pool)
-            .await
-            .map(|_| ())
-            .map_err(StoreError::Database)
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            // A duplicate operation identity is the "already exists" contract
+            // the lifecycle entry points match on (begin_lifecycle etc.); the
+            // raw constraint error would otherwise surface as a 500 on every
+            // idempotent lifecycle retry.
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
     }
 
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
