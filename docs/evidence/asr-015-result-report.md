@@ -10,7 +10,7 @@ and left no owned residue or foreign-state change.
 ## Source and ownership
 
 - Repository: `kubedoio/o3k-rust`
-- Tested source SHA: `124079d170d92f945272e544aaf30dc811039a28`
+- Tested source SHA: `a2ddaa7b2275d226e83690a83db7b4c276024a22`
 - Fail-before source SHA: `633f8cb49f225394968bc90c8b2124257f28ffad`
 - Owning issue: #83
 - Related closed issues: #87 and #575
@@ -69,12 +69,17 @@ The correction is limited to durable agent evidence projection:
   in-memory watermark cannot permanently strand a failed store write;
 - a same-agent fresh epoch re-anchors evidence even when replay sequence values
   overlap the prior epoch;
+- a per-agent epoch lease makes current-epoch validation and durable projection
+  one linearizable action, so E2 registration cannot complete while an E1
+  projection is in flight;
 - provider/resource identity and terminal-state compatibility are validated
-  before advancing the evidence fence;
+  across both durable provider-reference namespaces before advancing the
+  evidence fence;
 - the provider adapter retains a registry-current, identity-checked backup
   projection for broadcast lag and rejects queued events from replaced epochs;
 - terminal command state and established provider identities cannot regress or
-  drift at the store boundary.
+  drift at the store boundary, and `UnknownOutcome` cannot regress to an
+  in-flight command state.
 
 No command is rebuilt, no mutation is automatically retried, and no reconnect
 or provider execution semantics were broadened.
@@ -88,8 +93,8 @@ The final run used one real CirrOS server created through public OpenStack APIs.
 - Hard-reboot operation: `ed4e630b-5991-59f8-a13e-518b3d28550b`
 - Command: `97b12289-2197-53c9-a8ca-4085349ba828`
 - Agent: `compute-agent`
-- E1: `019ff269-aa37-7420-872b-d149fe25e272`
-- E2: `019ff26a-5e65-7b92-a68f-2a324000bc84`
+- E1: `019ff28b-f772-7173-b599-64739fe8ccfb`
+- E2: `019ff28c-a88d-7d30-a15c-d270e3ac33c5`
 - Pre-crash command state: `accepted`
 - Post-crash command state: `accepted`
 - Post-reconnect command state: `succeeded`
@@ -122,7 +127,7 @@ Identity stayed unchanged:
   `1498217f2bb626ffa454967f33cdbfbf4a065d7a3c02a81a6e9270f96e5eb9bd`;
 - provider/domain name: `o3k-66a348162124007cff5b`;
 - libvirt UUID before/after:
-  `fad0fe51-9709-4782-9b82-2111d50ce9a5`;
+  `8902257f-9e13-4038-bc66-7cc0952bc30b`;
 - provider resource count after recovery: `1`;
 - effective hard-reboot execution count: `1`.
 
@@ -147,17 +152,19 @@ foreign canary XML digest remained byte-identical:
 ## Evidence files
 
 - Passing machine artifact:
-  `docs/evidence/asr-015-reconnect-host-124079d.json`
+  `docs/evidence/asr-015-reconnect-host-a2ddaa7.json`
 - Fail-before machine artifact:
   `docs/evidence/asr-015-reconnect-host-633f8cb.json`
 - Archived stale-epoch test results:
-  `docs/evidence/asr-015-stale-epoch-tests-124079d.txt`
+  `docs/evidence/asr-015-stale-epoch-tests-a2ddaa7.txt`
 - Protected raw run tree:
-  `target/real-host-workflow-artifacts/asr-015-a3d1caa/real-host-124079d/`
+  `target/real-host-workflow-artifacts/asr-015-a3d1caa/real-host-a2ddaa7/`
 
 All tracked artifacts are redacted. They contain no tokens, passwords,
 certificates, private keys, user-data, unrestricted command payloads, or host
 connection secrets.
+Bootstrap stdout was not retained because the disposable bootstrap command
+emits generated ephemeral credentials for the caller to consume.
 
 ## Validation
 
@@ -171,7 +178,7 @@ cargo test --workspace --all-features
 git diff --check
 ```
 
-Focused results include 43 reconciler tests, 108 compute-agent tests, 65 compute
+Focused results include 45 reconciler tests, 110 compute-agent tests, 65 compute
 tests, 30 store tests, the black-box agent mTLS test, both registration TLS
 tests, the real libvirt lifecycle, and the independent leak/foreign-state
 verifier.
