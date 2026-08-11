@@ -3916,21 +3916,22 @@ impl DurableStore for SqliteStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
             let current = operation_from_row(&row)?;
-            if current
-                .provider_operation_id
-                .as_deref()
-                .is_some_and(|existing| {
-                    provider_operation_id.is_some_and(|incoming| incoming != existing)
-                })
-            {
-                return Err(StoreError::Corrupt(
-                    "operation provider identity conflicts with durable state".to_owned(),
-                ));
-            }
             if matches!(
                 current.state,
                 OperationState::Succeeded | OperationState::Failed
             ) {
+                if current
+                    .provider_operation_id
+                    .as_deref()
+                    .is_some_and(|existing| {
+                        provider_operation_id.is_some_and(|incoming| incoming != existing)
+                    })
+                {
+                    return Err(StoreError::Corrupt(
+                        "terminal operation provider identity conflicts with durable state"
+                            .to_owned(),
+                    ));
+                }
                 if current.state != state {
                     if matches!(state, OperationState::Succeeded | OperationState::Failed) {
                         return Err(StoreError::Corrupt(
