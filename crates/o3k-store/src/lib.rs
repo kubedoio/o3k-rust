@@ -3,6 +3,7 @@ use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -1034,6 +1035,7 @@ pub mod testkit {
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    agent_command_projection_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SqliteStore {
@@ -1066,7 +1068,10 @@ impl SqliteStore {
             .await
             .map_err(StoreError::Migration)?;
 
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            agent_command_projection_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
         store.verify_integrity().await?;
         Ok(store)
     }
@@ -4042,6 +4047,7 @@ impl DurableStore for SqliteStore {
         provider_operation_id: Option<&str>,
         provider_resource_id: Option<&str>,
     ) -> Result<AgentCommandRecord, StoreError> {
+        let _projection_guard = self.agent_command_projection_lock.lock().await;
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE command_id = ?")
             .bind(command_id)
@@ -7407,6 +7413,40 @@ mod tests {
                 Some("provider-op-1")
             );
             assert_eq!(updated.provider_resource_id.as_deref(), Some("domain-1"));
+            let concurrent_command = AgentCommandRecord {
+                command_id: "command-concurrent".to_owned(),
+                idempotency_key: "create-concurrent".to_owned(),
+                ..command.clone()
+            };
+            store.insert_agent_command(&concurrent_command).await?;
+            let left_store = store.clone();
+            let right_store = store.clone();
+            let left = tokio::spawn(async move {
+                left_store
+                    .update_agent_command(
+                        "command-concurrent",
+                        AgentCommandState::Accepted,
+                        1,
+                        1,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            let right = tokio::spawn(async move {
+                right_store
+                    .update_agent_command(
+                        "command-concurrent",
+                        AgentCommandState::Accepted,
+                        1,
+                        1,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            assert_eq!(left.await??.state, AgentCommandState::Accepted);
+            assert_eq!(right.await??.state, AgentCommandState::Accepted);
             assert_eq!(store.increment_operation_retry(operation.id).await?, 1);
             assert_eq!(store.increment_operation_retry(operation.id).await?, 2);
             assert_eq!(
