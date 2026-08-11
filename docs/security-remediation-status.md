@@ -50,8 +50,31 @@ libvirtd asynchronously, and issued delete while the create was paused.  The
 first delete was rejected with the expected current-operation conflict; after
 create completion the retry converged to absence.  A foreign same-name domain
 digest was unchanged before/after (`cc24140437ae576bb17dbc16ddc92411e6bf829dbe1ae32825d487671a45141d`) and the stale-state guard was empty.  This is useful
-pass-after recovery evidence but does not reproduce the historical accepted
-delete command stranded in #575, so ASR-017 remains open.
+pass-after recovery evidence but did not reproduce the historical accepted
+delete command stranded in #575.
+
+ASR-017 is now CLOSED by PR #593 (merged as `dc9598d`), which re-drives a
+stale-accepted delete with one deterministic fresh command identity and
+observes it to terminal.  Real-host proof on the exact merged source
+(runs `local-575`/`local-5752`/`local-5753` on `nkudo-vm1`, evidence under
+`target/real-host-workflow-artifacts/pr575-*`):
+
+- `local-575` (current main `2d4ebef`) reproduced the #575 mid-define
+  envelope and exposed the `13d1d65` create-adoption regression (the
+  placeholder empty-payload inspection row was rejected by the agent, so an
+  interrupted create stayed REQUESTED with its domain running); fixed in the
+  same PR.
+- `local-5753` (final head) executed the exact scenario: create interrupted
+  by a mid-define libvirtd restart, adopted to ACTIVE by the fixed presence
+  inspection; delete raced against a second restart; the original delete
+  command was accepted and its undefine hit `Domain not found` (the #575
+  failure) with the observation rejected; the lifecycle sweep minted the
+  deterministic fresh command, the agent executed it to Succeeded, the
+  re-drive operation row carried the evidence, and the delete API returned
+  rc=0.  Final durable state: original command `unknown_outcome` (historical
+  record), re-drive command `succeeded`, delete op `succeeded`, server
+  absent, 0 libvirt domains, 0 placement allocations, foreign canary digest
+  unchanged, controlled cleanup completed with zero owned residue.
 
 | ASR | State | Current proof | Remaining gate |
 |---|---|---|---|
@@ -71,7 +94,7 @@ delete command stranded in #575, so ASR-017 remains open.
 | ASR-014 | closed | Agent evidence is bound to command/resource/agent identity; artifact-offer retries tolerate only expiry refreshes while preserving immutable identity; run `987654346` committed both transfers without the prior offer-conflict disconnect. Fresh disposable run `1786401002` killed the running non-root compute process, observed its health endpoint disappear, restarted it with the same durable journal, observed replayed command observations on reconnect, and then passed a complete public CirrOS lifecycle with owned-resource cleanup | None for remediation; candidate-bound recertification remains separate |
 | ASR-015 | implemented-portable | Epoch fencing and durable command replay tests pass; fresh Flamingo run `1786403012` completed the real attachment/reconnect path with durable attachment state and clean detach | Fresh reconnect/crash host evidence |
 | ASR-016 | implemented-portable | Monotonic observation and concurrent store tests pass | Fresh multi-process concurrency evidence |
-| ASR-017 | in-progress | Historical fail-before evidence is preserved in #575: libvirtd restart during mid-define left an accepted delete permanently unknown/stranded. Source `acc2f11` pass-after run `1786389004` paused create after define, restarted libvirtd with exit 0, completed create/stop/start/reboot/delete, verified every public resource absent, and observed no owned O3K domain or link. Fresh run `1786401003` performed the tighter asynchronous-restart attempt: delete during the pause returned the expected current-operation 409, then a retry after create completion converged to absence; the foreign-domain digest remained unchanged and cleanup was empty. It still does not reproduce an accepted stale delete being re-driven, so the row remains open | Fresh exact stale-accepted-delete re-drive after libvirtd restart |
+| ASR-017 | closed | PR #593 (merged `dc9598d`) re-drives a stale-accepted delete with one deterministic fresh command identity and observes it to terminal. Real-host run `local-5753` on the exact PR head reproduced the full #575 envelope (mid-define libvirtd restart; delete's undefine hit `Domain not found`; observation rejected; stale command) and converged: delete API rc=0, op `succeeded`, server absent, 0 domains, 0 allocations, canary unchanged. The same PR fixed the `13d1d65` create-adoption regression found by run `local-575`. Evidence: `target/real-host-workflow-artifacts/pr575-*` | None for remediation; candidate-bound recertification remains separate |
 | ASR-018 | implemented-portable | Placement intent/commit/restart reconciliation tests pass | Fresh crash-failpoint host proof |
 | ASR-019 | closed | Source `acc2f11` host run `TMPDIR=/var/tmp bash tests/packaging-safety.sh` passed the symlinked certificate output canary and all installer/uninstaller ownership checks; preserved output: `/var/tmp/o3k-real-host-evidence-1786389106/packaging-safety.log` | None for remediation; candidate-bound recertification remains separate |
 | ASR-020 | closed | `tests/human-review-package.sh` passed on source `61f4308`: pending/approved/rejected artifacts validate truthfully, rejected approval booleans are not required, malformed safeguards are rejected, and `--require-approved` rejects non-approved artifacts | None for validator remediation; human approval is intentionally not created here |
