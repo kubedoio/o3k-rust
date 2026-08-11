@@ -1568,6 +1568,53 @@ impl ComputeProvider for AgentComputeProvider {
     }
 
     async fn get_operation(&self, id: Uuid) -> Result<Operation, ProviderError> {
+        // The durable agent command row is the authoritative execution
+        // state for a dispatched command: for lifecycle commands the
+        // provider operation identity is the operation's own id, so reading
+        // the operation row instead would be self-referential (it mirrors
+        // the control plane's own projection, not the agent's state) and
+        // would hide a stale command forever (issue #575). The command row
+        // is updated from authenticated agent evidence and survives
+        // control-plane restarts, so observation polls see the true agent
+        // state.
+        if let Some(store) = &self.store
+            && let Ok(command) = store.get_agent_command_by_operation(id).await
+        {
+            let provider_resource_id = match store
+                .get_provider_reference(command.resource_id, "compute")
+                .await
+            {
+                Ok(reference) => Some(reference.provider_resource_id),
+                Err(_) => store
+                    .get_provider_reference(command.resource_id, "agent")
+                    .await
+                    .ok()
+                    .map(|reference| reference.provider_resource_id),
+            };
+            let state = match command.state {
+                o3k_store::AgentCommandState::Pending | o3k_store::AgentCommandState::Accepted => {
+                    o3k_provider::OperationState::Accepted
+                }
+                o3k_store::AgentCommandState::Running => o3k_provider::OperationState::Running,
+                o3k_store::AgentCommandState::Retryable => o3k_provider::OperationState::Retryable,
+                o3k_store::AgentCommandState::UnknownOutcome => {
+                    o3k_provider::OperationState::UnknownOutcome
+                }
+                o3k_store::AgentCommandState::Succeeded => o3k_provider::OperationState::Succeeded,
+                o3k_store::AgentCommandState::Failed => o3k_provider::OperationState::Failed,
+            };
+            return Ok(Operation {
+                provider_operation_id: command
+                    .provider_operation_id
+                    .as_deref()
+                    .and_then(|value| Uuid::parse_str(value).ok())
+                    .unwrap_or(id),
+                o3k_operation_id: id,
+                state,
+                error_category: None,
+                provider_resource_id,
+            });
+        }
         if let Some(store) = &self.store
             && let Ok(record) = store.get_operation(id).await
         {

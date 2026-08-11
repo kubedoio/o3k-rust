@@ -3556,6 +3556,34 @@ mod tests {
             .await?;
         assert_eq!(first.state, ServerState::Requested);
         assert_eq!(fake.inspect_dispatch_count(), 1);
+        // The real provider's `dispatch_recorded` persists the inspection's
+        // durable command row (with the real payload) before sending it, and
+        // the terminal agent update/observation are bound to that row. Model
+        // that binding here exactly as the real adapter leaves it, so the
+        // evidence below can be applied (the fake provider does not create
+        // command rows itself).
+        let inspect_operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:inspect-create:{}", request.operation_id).as_bytes(),
+        );
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("o3k-inspect-command-{inspect_operation_id}"),
+                idempotency_key: format!("o3k-inspect-create-{}", request.operation_id),
+                operation_id: inspect_operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
         // A repeated poll must reuse the in-flight inspection, not re-dispatch.
         let second = service
             .show_server("project-a", ServerId::from_uuid(request.o3k_server_id))
@@ -3564,10 +3592,6 @@ mod tests {
         assert_eq!(fake.inspect_dispatch_count(), 1);
 
         // The agent completes the inspection: terminal update + observation.
-        let inspect_operation_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("o3k:inspect-create:{}", request.operation_id).as_bytes(),
-        );
         let update = AgentOperationUpdate {
             agent_id: "node-a".to_owned(),
             agent_epoch: "epoch-1".to_owned(),

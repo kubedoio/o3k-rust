@@ -846,7 +846,7 @@ where
                     .map_err(|_| ReconcileError::InvalidIntent)?,
             )
             .await?;
-        validate_provider_operation_owner(operation.id, &provider_operation)?;
+        validate_lifecycle_provider_operation_owner(operation.id, action, &provider_operation)?;
         match provider_operation.state {
             ProviderOperationState::Succeeded => {
                 self.finish_lifecycle(
@@ -882,6 +882,14 @@ where
                             )
                             .await;
                     }
+                } else if instance_present {
+                    // #575: the delete command's outcome is unknown and the
+                    // instance is still present, so the delete goal is NOT
+                    // converged. The recorded command cannot make progress
+                    // again (the agent journal replays the recorded unknown
+                    // outcome instead of re-executing), so reconciliation
+                    // mints one deterministic fresh command identity.
+                    return self.redrive_delete(operation, resource, provider_id).await;
                 }
                 Ok(OperationState::UnknownOutcome)
             }
@@ -898,20 +906,7 @@ where
                 // Mint one deterministic command identity tied to the
                 // durable lifecycle operation, so retries are idempotent and
                 // old-stream evidence cannot complete the new command.
-                let redrive_operation_id = Uuid::new_v5(
-                    &Uuid::NAMESPACE_URL,
-                    format!("o3k:lifecycle-delete-redrive:{}", operation.id).as_bytes(),
-                );
-                let result = self
-                    .provider
-                    .delete_instance(o3k_provider::DeleteInstanceRequest {
-                        operation_id: redrive_operation_id,
-                        provider_instance_id: provider_id.clone(),
-                        idempotency_key: format!("o3k-operation-{}-redrive", operation.id),
-                    })
-                    .await;
-                self.handle_lifecycle_result(operation, resource, action, provider_id, result)
-                    .await
+                self.redrive_delete(operation, resource, provider_id).await
             }
             ProviderOperationState::Accepted | ProviderOperationState::Running => {
                 self.store
@@ -941,6 +936,43 @@ where
         }
     }
 
+    /// #575 stale-accepted delete re-drive: mints ONE deterministic fresh
+    /// command identity tied to the durable lifecycle operation and
+    /// dispatches the delete again. The recorded command cannot make
+    /// progress (its observation was rejected and the agent journal replays
+    /// the recorded outcome instead of re-executing), and the instance is
+    /// still present, so the delete goal is not converged. Re-drives are
+    /// idempotent: repeated passes re-dispatch the SAME command identity,
+    /// which the agent journal reuses without a second execution, and
+    /// old-stream evidence cannot complete the fresh command. The dispatch
+    /// result is handled by `handle_lifecycle_result`, which keeps a
+    /// re-drive that is merely accepted in `UnknownOutcome` so the lifecycle
+    /// sweep keeps observing the fresh provider operation to terminal.
+    async fn redrive_delete(
+        &self,
+        operation: OperationRecord,
+        resource: ResourceRecord,
+        provider_id: String,
+    ) -> Result<OperationState, ReconcileError> {
+        let redrive_operation_id = delete_redrive_operation_id(operation.id);
+        let result = self
+            .provider
+            .delete_instance(o3k_provider::DeleteInstanceRequest {
+                operation_id: redrive_operation_id,
+                provider_instance_id: provider_id.clone(),
+                idempotency_key: format!("o3k-operation-{}-redrive", operation.id),
+            })
+            .await;
+        self.handle_lifecycle_result(
+            operation,
+            resource,
+            LifecycleAction::Delete,
+            provider_id,
+            result,
+        )
+        .await
+    }
+
     async fn handle_lifecycle_result(
         &self,
         operation: OperationRecord,
@@ -968,6 +1000,32 @@ where
                         .await
                     }
                     ProviderOperationState::Accepted | ProviderOperationState::Running => {
+                        let redrive = action == LifecycleAction::Delete
+                            && provider_operation.o3k_operation_id
+                                == delete_redrive_operation_id(operation.id);
+                        if redrive {
+                            // The fresh re-drive command is in flight on the
+                            // agent; its terminal evidence cannot arrive
+                            // through the operation event stream (no durable
+                            // operation row carries the redrive identity, so
+                            // every agent evidence consumer rejects it by
+                            // design). The durable operation therefore stays
+                            // `UnknownOutcome` with the redrive provider
+                            // identity so the lifecycle sweep keeps polling
+                            // the fresh provider operation until it reaches
+                            // terminal (issue #575).
+                            self.store
+                                .update_operation(
+                                    operation.id,
+                                    OperationState::UnknownOutcome,
+                                    Some(&provider_operation.provider_operation_id.to_string()),
+                                    Some("unknown_outcome"),
+                                    None,
+                                )
+                                .await?;
+                            self.event(operation.id, resource.id, JournalEventKind::RetryScheduled);
+                            return Ok(OperationState::UnknownOutcome);
+                        }
                         self.store
                             .update_operation(
                                 operation.id,
@@ -1499,33 +1557,15 @@ where
         // validates the identity instead of rejecting an empty id; an empty
         // id keeps the inspection keyed on the server's durable identity.
         let known_provider_resource_id = self.provider_resource_id_for(&resource).await?;
-        // Presence inspection is itself a durable agent command.  Persist its
-        // assignment before dispatch so a terminal observation cannot arrive
-        // for an unbound operation after a control-plane crash.
-        if self
-            .store
-            .get_agent_command_by_operation(inspect_operation_id)
-            .await
-            .is_err()
-        {
-            self.store
-                .insert_agent_command(&o3k_store::AgentCommandRecord {
-                    command_id: format!("o3k-inspect-command-{inspect_operation_id}"),
-                    idempotency_key: idempotency_key.clone(),
-                    operation_id: inspect_operation_id,
-                    resource_id: resource.id,
-                    agent_id: provider_id.to_owned(),
-                    agent_epoch: "dispatch".to_owned(),
-                    payload_fingerprint_sha256: "0".repeat(64),
-                    payload: Vec::new(),
-                    state: o3k_store::AgentCommandState::Pending,
-                    accepted_sequence: 0,
-                    last_sequence: 0,
-                    provider_operation_id: None,
-                    provider_resource_id: None,
-                })
-                .await?;
-        }
+        // The inspection dispatch itself persists the durable command row
+        // (with the REAL payload and the selected agent's identity) before
+        // sending anything over the wire, so a terminal observation can never
+        // arrive for an unbound operation after a control-plane crash. A
+        // pre-inserted placeholder row would be reused by the provider's
+        // `dispatch_recorded` instead, and its empty payload decodes into an
+        // action-less command that the agent rejects — stranding every
+        // unknown-outcome create in REQUESTED forever (issue #575 real-host
+        // finding; introduced by 13d1d65).
         let result = self
             .provider
             .inspect_instance(
@@ -1966,6 +2006,16 @@ fn validate_provider_operation_owner(
     Ok(())
 }
 
+/// Deterministic fresh command identity for a #575 delete re-drive, tied to
+/// the durable lifecycle operation so repeated reconciliations re-dispatch
+/// the SAME command and old-stream evidence cannot complete it.
+fn delete_redrive_operation_id(operation_id: Uuid) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:lifecycle-delete-redrive:{operation_id}").as_bytes(),
+    )
+}
+
 fn validate_lifecycle_provider_operation_owner(
     operation_id: Uuid,
     action: LifecycleAction,
@@ -1974,12 +2024,8 @@ fn validate_lifecycle_provider_operation_owner(
     if provider_operation.o3k_operation_id == operation_id {
         return Ok(());
     }
-    let redrive_operation_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_URL,
-        format!("o3k:lifecycle-delete-redrive:{operation_id}").as_bytes(),
-    );
     if action == LifecycleAction::Delete
-        && provider_operation.o3k_operation_id == redrive_operation_id
+        && provider_operation.o3k_operation_id == delete_redrive_operation_id(operation_id)
     {
         return Ok(());
     }
@@ -3902,6 +3948,391 @@ mod tests {
             "DELETED"
         );
         assert_eq!(provider.instance_count(), 0);
+        Ok(())
+    }
+
+    /// Models the REAL `AgentComputeProvider` delete contract for #575: the
+    /// dispatch is asynchronous — `delete_instance` returns an Accepted
+    /// operation immediately and the agent-side completion is observed only
+    /// later through `get_operation`, never inside the dispatch call (the
+    /// flaw that hid the bug in `FakeComputeProvider::delete_instance`, which
+    /// returns Succeeded synchronously in the no-injection case). The FIRST
+    /// delete dispatch for the instance is the #575 stale command whose
+    /// execution was lost in the libvirtd restart: it stays Accepted forever
+    /// and counts as zero effective executions. Any later dispatch (the
+    /// deterministic redrive command) executes once and completes on its
+    /// second `get_operation` poll, mirroring the agent event stream
+    /// terminalizing the adapter's volatile projection between sweep ticks.
+    /// Re-dispatching an already-recorded operation id reuses the recorded
+    /// operation without executing again, mirroring
+    /// `AgentComputeProvider::reuse_recorded_command` and the agent journal's
+    /// command-identity replay.
+    #[derive(Clone)]
+    struct AsyncAgentDeleteProvider {
+        inner: FakeComputeProvider,
+        state: Arc<Mutex<AsyncAgentDeleteState>>,
+    }
+
+    struct AsyncAgentDeleteState {
+        /// Provider operations keyed by the operation id the reconciler
+        /// passed to `delete_instance` (the agent adapter keys its volatile
+        /// operation projection by the command's operation id).
+        operations: HashMap<Uuid, o3k_provider::Operation>,
+        /// The first (stale) delete dispatch's operation id; its execution
+        /// was lost and it never completes.
+        original_operation_id: Option<Uuid>,
+        /// The durable state the stale command projects through
+        /// `get_operation` — `Accepted` models the lost-update shape and
+        /// `UnknownOutcome` models the rejected-observation shape (the
+        /// exact #575 durable row).
+        stale_original_state: o3k_provider::OperationState,
+        /// Provider instance id per dispatched operation, used to remove the
+        /// instance when that operation's execution completes.
+        instance_by_operation: HashMap<Uuid, String>,
+        /// `get_operation` poll counts per operation.
+        polls: HashMap<Uuid, usize>,
+        /// Delete commands whose execution actually ran on the "agent".
+        delete_executions: usize,
+    }
+
+    impl AsyncAgentDeleteProvider {
+        fn new() -> Self {
+            Self::with_stale_state(o3k_provider::OperationState::Accepted)
+        }
+
+        fn with_stale_state(stale_original_state: o3k_provider::OperationState) -> Self {
+            Self {
+                inner: FakeComputeProvider::new(),
+                state: Arc::new(Mutex::new(AsyncAgentDeleteState {
+                    stale_original_state,
+                    operations: HashMap::new(),
+                    original_operation_id: None,
+                    instance_by_operation: HashMap::new(),
+                    polls: HashMap::new(),
+                    delete_executions: 0,
+                })),
+            }
+        }
+
+        fn delete_executions(&self) -> usize {
+            self.state
+                .lock()
+                .map(|state| state.delete_executions)
+                .unwrap_or_default()
+        }
+
+        fn instance_count(&self) -> usize {
+            self.inner.instance_count()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ComputeProvider for AsyncAgentDeleteProvider {
+        async fn capabilities(&self) -> Result<o3k_provider::Capabilities, ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, ProviderError> {
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, ProviderError> {
+            let mut state = self.state.lock().map_err(|_| ProviderError::Storage)?;
+            let operation_id = request.operation_id;
+            if let Some(existing) = state.operations.get(&operation_id) {
+                // Idempotent re-dispatch of the same command identity: reuse
+                // the recorded operation without a second execution.
+                return Ok(existing.clone());
+            }
+            let stale = state.original_operation_id.is_none();
+            if stale {
+                state.original_operation_id = Some(operation_id);
+            } else {
+                state.delete_executions += 1;
+                state
+                    .instance_by_operation
+                    .insert(operation_id, request.provider_instance_id.clone());
+            }
+            let operation = o3k_provider::Operation {
+                provider_operation_id: operation_id,
+                o3k_operation_id: operation_id,
+                state: o3k_provider::OperationState::Accepted,
+                error_category: None,
+                provider_resource_id: None,
+            };
+            state.operations.insert(operation_id, operation.clone());
+            Ok(operation)
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, ProviderError> {
+            let (operation, instance_to_remove) = {
+                let mut state = self.state.lock().map_err(|_| ProviderError::Storage)?;
+                let Some(operation) = state.operations.get(&provider_operation_id).cloned() else {
+                    return Err(ProviderError::NotFound);
+                };
+                let polls = state.polls.entry(provider_operation_id).or_insert(0);
+                *polls += 1;
+                let poll_count = *polls;
+                if state.original_operation_id == Some(provider_operation_id) {
+                    // The stale command's durable projection: the control
+                    // plane projected the operation's own durable state
+                    // (`UnknownOutcome` for the rejected-observation shape,
+                    // `Accepted` for the lost-update shape), never the
+                    // in-flight `Accepted` from the original dispatch.
+                    let mut stale = operation;
+                    stale.state = state.stale_original_state;
+                    (stale, None)
+                } else if operation.state != o3k_provider::OperationState::Accepted
+                    || poll_count < 2
+                {
+                    (operation, None)
+                } else {
+                    // The simulated agent execution completed: the terminal
+                    // state and the instance removal are observed now, exactly
+                    // as the real agent's terminal events arrive between
+                    // sweep ticks.
+                    let mut completed = operation.clone();
+                    completed.state = o3k_provider::OperationState::Succeeded;
+                    state
+                        .operations
+                        .insert(provider_operation_id, completed.clone());
+                    (
+                        completed,
+                        state.instance_by_operation.remove(&provider_operation_id),
+                    )
+                }
+            };
+            if let Some(provider_instance_id) = instance_to_remove {
+                let _ = self.inner.remove_instance(&provider_instance_id);
+            }
+            Ok(operation)
+        }
+    }
+
+    /// Reproduces the #575 durable state and drives convergence the way the
+    /// REAL system does — the `drive_all_lifecycle_convergence` sweep gate
+    /// (crates/o3k-compute/src/lib.rs ~805-811) — against a provider fake with
+    /// the REAL agent's asynchronous delete contract. The first dispatch is
+    /// Accepted with the original provider operation id; the #575 condition
+    /// is simulated exactly like the existing regression test (the agent's
+    /// non-Succeeded observation was rejected, so the durable operation is
+    /// UnknownOutcome with the stale id); then the sweep-gated loop must
+    /// redrive the delete with the deterministic fresh command identity and
+    /// POLL it to terminal. On current main the redrive arm stores Running
+    /// with the redrive id, the sweep gate then skips the operation forever
+    /// ("in flight: the agent event stream terminalizes it"), the redrive's
+    /// agent evidence is rejected (no operation row carries the redrive id),
+    /// and the delete never converges — the resource stays ACTIVE and the
+    /// allocation/config-drive media stay held.
+    #[tokio::test]
+    async fn stale_accepted_delete_converges_under_async_agent_contract()
+    -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-delete-async-agent-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let provider = Arc::new(AsyncAgentDeleteProvider::new());
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        // First dispatch, exactly like the real agent-backed path: the
+        // command is accepted asynchronously and the operation is stored
+        // Running with the ORIGINAL provider operation id (the agent adapter
+        // keys its operation projection by the command's operation id).
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Running
+        );
+        let stale_provider_operation: Uuid = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        assert_eq!(stale_provider_operation, operation_id);
+        // Issue #575 residue: the agent's non-Succeeded observation was
+        // rejected by `apply_agent_observation`, leaving the durable
+        // operation UnknownOutcome with the stale provider operation id
+        // (exactly the existing regression test's shape).
+        store
+            .update_operation(
+                operation_id,
+                OperationState::UnknownOutcome,
+                Some(&stale_provider_operation.to_string()),
+                Some("unknown_outcome"),
+                None,
+            )
+            .await?;
+
+        // Drive convergence EXACTLY like the real sweep: only Pending /
+        // UnknownOutcome / Retryable / Running-without-provider-operation-id
+        // are re-driven; Running WITH the identity is skipped as in-flight.
+        for _ in 0..20 {
+            let operation = store.get_operation(operation_id).await?;
+            if matches!(
+                operation.state,
+                OperationState::Succeeded | OperationState::Failed
+            ) {
+                break;
+            }
+            let re_drive = matches!(
+                operation.state,
+                OperationState::Pending
+                    | OperationState::UnknownOutcome
+                    | OperationState::Retryable
+            ) || (operation.state == OperationState::Running
+                && operation.provider_operation_id.is_none());
+            if !re_drive {
+                continue;
+            }
+            journal.reconcile_lifecycle_once(operation_id).await?;
+        }
+
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "DELETED"
+        );
+        assert_eq!(provider.instance_count(), 0);
+        // The lost original command never executed; the redrive executed
+        // exactly once. Any repeated gate pass re-dispatches the SAME
+        // deterministic redrive command identity, which the provider reuses
+        // without a second execution — so the count can never exceed one.
+        assert_eq!(provider.delete_executions(), 1);
+        Ok(())
+    }
+
+    /// The exact #575 durable shape (V1): the stale command's durable
+    /// projection is `UnknownOutcome` — the control plane rejected the
+    /// agent's non-Succeeded observation, the operation row carries the
+    /// stale provider operation id, and the agent's journal only replays the
+    /// recorded unknown outcome. `observe_lifecycle`'s UnknownOutcome arm
+    /// must therefore re-drive the delete when the instance is still present
+    /// (previously it returned UnknownOutcome forever and the redrive arm was
+    /// unreachable on the real agent-backed path, because the provider
+    /// adapter projected the operation's own durable state).
+    #[tokio::test]
+    async fn stale_unknown_outcome_delete_redrives_and_converges() -> Result<(), ReconcileError> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-reconciler-delete-async-unknown-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let provider = Arc::new(AsyncAgentDeleteProvider::with_stale_state(
+            o3k_provider::OperationState::UnknownOutcome,
+        ));
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Running
+        );
+        let stale_provider_operation: Uuid = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        store
+            .update_operation(
+                operation_id,
+                OperationState::UnknownOutcome,
+                Some(&stale_provider_operation.to_string()),
+                Some("unknown_outcome"),
+                None,
+            )
+            .await?;
+
+        for _ in 0..20 {
+            let operation = store.get_operation(operation_id).await?;
+            if matches!(
+                operation.state,
+                OperationState::Succeeded | OperationState::Failed
+            ) {
+                break;
+            }
+            let re_drive = matches!(
+                operation.state,
+                OperationState::Pending
+                    | OperationState::UnknownOutcome
+                    | OperationState::Retryable
+            ) || (operation.state == OperationState::Running
+                && operation.provider_operation_id.is_none());
+            if !re_drive {
+                continue;
+            }
+            journal.reconcile_lifecycle_once(operation_id).await?;
+        }
+
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "DELETED"
+        );
+        assert_eq!(provider.instance_count(), 0);
+        assert_eq!(provider.delete_executions(), 1);
         Ok(())
     }
 
