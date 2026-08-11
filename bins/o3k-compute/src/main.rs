@@ -2758,13 +2758,40 @@ mod tests {
         root: &std::path::Path,
         pidfile: &str,
     ) -> std::io::Result<std::process::Child> {
-        std::process::Command::new("sh")
+        // Keep the shell as the single process with its original argv: the
+        // reap's ownership check reads the command line, and a shell that
+        // `exec`s away its argv would lose the `--conf-file=<root>/...`
+        // marker. The TERM trap is installed as the FIRST statement so the
+        // reap's pidfd SIGTERM always finds it, the foreground loop keeps
+        // the shell alive until then, the loop is bounded so a fake the
+        // reap legitimately skipped cannot outlive the suite, and stdio is
+        // detached so an unreaped fake never keeps the test harness's
+        // output pipe open (cargo test waits for EOF).
+        let child = std::process::Command::new("sh")
             .arg("-c")
-            .arg("sleep 300 & s=$!; trap 'kill $s; exit 0' TERM; wait $s")
+            .arg("trap 'exit 0' TERM; n=0; while [ $n -lt 300 ]; do sleep 1; n=$((n+1)); done")
             .arg("dnsmasq")
             .arg(format!("--conf-file={}/dnsmasq.conf", root.display()))
             .arg(format!("--pid-file={}/{}", root.display(), pidfile))
-            .spawn()
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        // Wait for the fork-to-exec window to close: the reap's ownership
+        // check reads /proc/<pid>/cmdline immediately after this returns,
+        // and on a busy host the exec can lag long enough for the kernel to
+        // expose an empty cmdline, making the reap skip a live owned fake
+        // (the dnsmasq-reap CI flakes). Once exec lands, the argv is stable.
+        let pid = child.id();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline"))
+                && !raw.is_empty()
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok(child)
     }
 
     /// Issue #88 S3: an agent that crashed after starting dnsmasq leaves the

@@ -657,7 +657,14 @@ impl ComputeProvider for FakeComputeProvider {
             FailureInjection::StaleState => return Err(ProviderError::StaleState),
             _ => {}
         }
-        let provider_id = format!("fake-{}", Uuid::now_v7());
+        // Deterministic per-request provider identity: concurrent creates of
+        // the same server converge on one provider id, so the loser's
+        // observation matches the winner's attached provider reference
+        // instead of racing it (create_race_releases_placement_not_owned_by_
+        // winner flaked with ProviderReferenceAlreadyExists because a fresh
+        // now_v7 id was minted per call). The idempotency ledger still
+        // guards duplicate executions.
+        let provider_id = format!("fake-{}", request.o3k_server_id);
         let instance = Instance {
             provider_instance_id: provider_id.clone(),
             o3k_server_id: request.o3k_server_id,
