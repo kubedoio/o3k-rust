@@ -26,8 +26,10 @@ jobs:
           qemu-img --version 2>&1 | head -1 || true
           id
           echo "--- sandbox spawn test ---"
-          setpriv --no-new-privs --ambient-caps=-all --inh-caps=-all --reset-env -- /usr/bin/prlimit --as=1073741824 --nproc=32 --nofile=128 -- /bin/sh -c 'echo SANDBOX_OK; echo "PATH=$PATH"; command -v grep awk find qemu-img' 2>&1
+          setpriv --no-new-privs --ambient-caps=-all --inh-caps=-all --reset-env -- /usr/bin/prlimit --as=1073741824 --nproc=32 --nofile=128 -- /bin/sh -c 'echo SANDBOX_OK; echo "PATH=$PATH"; for t in grep awk find qemu-img sh; do printf "%s=" "$t"; command -v "$t"; done' 2>&1
           echo "sandbox_exit=$?"
+          echo "--- sandbox qemu-img create test ---"
+          rm -rf "${RUNNER_TEMP}/o3k-sbx" && mkdir -p "${RUNNER_TEMP}/o3k-sbx" && dd if=/dev/zero of="${RUNNER_TEMP}/o3k-sbx/base.raw" bs=1M count=1 2>/dev/null && setpriv --no-new-privs --ambient-caps=-all --inh-caps=-all --reset-env -- /usr/bin/prlimit --as=1073741824 --nproc=32 --nofile=128 -- /usr/bin/qemu-img create -f qcow2 -b "${RUNNER_TEMP}/o3k-sbx/base.raw" -F raw "${RUNNER_TEMP}/o3k-sbx/overlay.qcow2" 2>&1; echo "create_exit=$?"
       - name: Refresh cached libvirt bindings
         run: cargo clean -p virt-sys
       - name: Format
