@@ -23,7 +23,7 @@ pub use attachment::{
 };
 pub use node::{
     AgentAdministrativeState, AgentAvailability, AgentCapabilities, AgentCapabilityFlag,
-    AgentNodeRegistry, AgentNodeSnapshot, ArtifactKind, CreateArtifactResolver,
+    AgentEpochLease, AgentNodeRegistry, AgentNodeSnapshot, ArtifactKind, CreateArtifactResolver,
     NetworkAttachmentSpec, ResolvedCreateArtifact, ResolvedCreateInputs, ResolvedCreateResolver,
     UnconfiguredCreateArtifactResolver, UnconfiguredResolvedCreateResolver,
 };

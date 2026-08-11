@@ -4078,6 +4078,16 @@ impl DurableStore for SqliteStore {
                 "terminal agent command state cannot regress".to_owned(),
             ));
         }
+        if current.state == AgentCommandState::UnknownOutcome
+            && matches!(
+                state,
+                AgentCommandState::Accepted | AgentCommandState::Running
+            )
+        {
+            return Err(StoreError::Corrupt(
+                "unknown-outcome agent command cannot regress to in-flight".to_owned(),
+            ));
+        }
         if provider_operation_id.is_some_and(|value| {
             current
                 .provider_operation_id
@@ -7426,17 +7436,17 @@ mod tests {
                     .await,
                 Err(StoreError::Corrupt(_))
             ));
-            let terminal = store
+            let unknown = store
                 .update_agent_command(
                     &command.command_id,
-                    AgentCommandState::Succeeded,
+                    AgentCommandState::UnknownOutcome,
                     1,
                     2,
                     Some("provider-op-1"),
                     Some("domain-1"),
                 )
                 .await?;
-            assert_eq!(terminal.state, AgentCommandState::Succeeded);
+            assert_eq!(unknown.state, AgentCommandState::UnknownOutcome);
             assert!(matches!(
                 store
                     .update_agent_command(
@@ -7450,13 +7460,37 @@ mod tests {
                     .await,
                 Err(StoreError::Corrupt(_))
             ));
+            let terminal = store
+                .update_agent_command(
+                    &command.command_id,
+                    AgentCommandState::Succeeded,
+                    1,
+                    3,
+                    Some("provider-op-1"),
+                    Some("domain-1"),
+                )
+                .await?;
+            assert_eq!(terminal.state, AgentCommandState::Succeeded);
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Running,
+                        1,
+                        4,
+                        Some("provider-op-1"),
+                        Some("domain-1"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
             assert!(matches!(
                 store
                     .update_agent_command(
                         &command.command_id,
                         AgentCommandState::Succeeded,
                         1,
-                        4,
+                        5,
                         Some("provider-op-1"),
                         Some("domain-2"),
                     )

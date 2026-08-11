@@ -819,7 +819,7 @@ pub(crate) async fn apply_agent_provider_event(
     registry: Option<&NodeRegistry>,
     event: o3k_provider::AgentEvent,
 ) {
-    if let Some(registry) = registry {
+    let _epoch_lease = if let Some(registry) = registry {
         let identity = match &event {
             o3k_provider::AgentEvent::CommandAccepted(accepted) => {
                 Some((&accepted.agent_id, &accepted.agent_epoch))
@@ -827,18 +827,31 @@ pub(crate) async fn apply_agent_provider_event(
             o3k_provider::AgentEvent::Operation(update) => {
                 Some((&update.agent_id, &update.agent_epoch))
             }
+            o3k_provider::AgentEvent::Observation(observation) => {
+                Some((&observation.agent_id, &observation.agent_epoch))
+            }
             _ => None,
         };
-        if let Some((agent_id, agent_epoch)) = identity
-            && registry
-                .snapshot(agent_id)
-                .await
-                .is_none_or(|current| current.agent_epoch != *agent_epoch)
-        {
-            tracing::debug!(%agent_id, %agent_epoch, "replaced-epoch provider event was not projected");
-            return;
+        if let Some((agent_id, agent_epoch)) = identity {
+            match o3k_provider::AgentNodeRegistry::lease_current_epoch(
+                registry,
+                agent_id,
+                agent_epoch,
+            )
+            .await
+            {
+                Some(lease) => Some(lease),
+                None => {
+                    tracing::debug!(%agent_id, %agent_epoch, "replaced-epoch provider event was not projected");
+                    return;
+                }
+            }
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
     let mut state = state.write().await;
     match event {
         o3k_provider::AgentEvent::CommandAccepted(accepted) => {
@@ -846,6 +859,7 @@ pub(crate) async fn apply_agent_provider_event(
                 && let Ok(command) = store.get_agent_command(&accepted.command_id).await
                 && command.operation_id == accepted.operation_id
                 && command.agent_id == accepted.agent_id
+                && command.state != AgentCommandState::UnknownOutcome
                 && matches!(
                     accepted.state,
                     AgentOperationState::Accepted | AgentOperationState::Running
@@ -1067,14 +1081,17 @@ async fn backup_provider_identity_matches(
     {
         return Ok(false);
     }
-    match store
-        .get_provider_reference(update.resource_id, "compute-agent")
-        .await
-    {
-        Ok(reference) => Ok(reference.provider_resource_id == incoming),
-        Err(StoreError::ProviderReferenceNotFound) => Ok(true),
-        Err(error) => Err(error),
+    for provider_name in ["compute-agent", "agent"] {
+        match store
+            .get_provider_reference(update.resource_id, provider_name)
+            .await
+        {
+            Ok(reference) if reference.provider_resource_id != incoming => return Ok(false),
+            Ok(_) | Err(StoreError::ProviderReferenceNotFound) => {}
+            Err(error) => return Err(error),
+        }
     }
+    Ok(true)
 }
 
 /// Projects one authenticated agent capability snapshot into the inventory
@@ -2592,6 +2609,59 @@ mod tests {
                 .await?
                 .state,
             AgentCommandState::Succeeded
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn backup_command_projection_rejects_agent_reference_identity_drift()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let operation_id = Uuid::now_v7();
+        let resource_id = Uuid::now_v7();
+        seed_unknown_outcome_create(store.as_ref(), operation_id, resource_id).await?;
+        store
+            .attach_provider_reference(&o3k_store::ProviderReference {
+                resource_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-established".to_owned(),
+            })
+            .await?;
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let state = Arc::new(RwLock::new(AgentProviderState::default()));
+        apply_agent_provider_event(
+            &state,
+            Some(store.as_ref()),
+            Some(&registry),
+            o3k_provider::AgentEvent::Operation(o3k_provider::AgentOperationUpdate {
+                agent_id: "node-a".to_owned(),
+                agent_epoch: "epoch-2".to_owned(),
+                operation_sequence: 2,
+                operation_id,
+                resource_id,
+                state: AgentOperationState::Succeeded,
+                error_category: None,
+                redacted_message: None,
+                provider_resource_id: Some("domain-conflict".to_owned()),
+            }),
+        )
+        .await;
+        assert_eq!(
+            store
+                .get_agent_command_by_operation(operation_id)
+                .await?
+                .state,
+            AgentCommandState::UnknownOutcome
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(resource_id, "agent")
+                .await?
+                .provider_resource_id,
+            "domain-established"
         );
         Ok(())
     }

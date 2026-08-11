@@ -59,6 +59,12 @@ pub struct AgentNodeSnapshot {
     pub capabilities: AgentCapabilities,
 }
 
+/// A read-side lease on one registry epoch. While this value is alive, the
+/// registry implementation must not make a replacement epoch current for the
+/// same agent. Evidence consumers hold the lease across their durable write,
+/// making current-epoch validation and projection one linearizable action.
+pub trait AgentEpochLease: Send {}
+
 /// The bounded application port for authenticated agent nodes. Dispatch and
 /// wire conversion stay in the transport adapter; application services only
 /// read node snapshots and the application-level event stream.
@@ -66,6 +72,11 @@ pub struct AgentNodeSnapshot {
 pub trait AgentNodeRegistry: Send + Sync {
     async fn all(&self) -> Vec<AgentNodeSnapshot>;
     async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot>;
+    async fn lease_current_epoch(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Option<Box<dyn AgentEpochLease>>;
     fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<AgentEvent>;
 }
 

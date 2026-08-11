@@ -123,6 +123,11 @@ enum EvidenceDisposition {
     Stale,
 }
 
+struct AgentEvidencePermit {
+    disposition: EvidenceDisposition,
+    _epoch_lease: Option<Box<dyn o3k_provider::AgentEpochLease>>,
+}
+
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
@@ -190,7 +195,7 @@ where
         sequence: u64,
         state: AgentOperationState,
         provider_resource_id: &str,
-    ) -> Result<EvidenceDisposition, ReconcileError> {
+    ) -> Result<AgentEvidencePermit, ReconcileError> {
         if agent_id.trim().is_empty()
             || agent_epoch.trim().is_empty()
             || sequence == 0
@@ -207,15 +212,16 @@ where
         // epoch) re-anchor the operation while still rejecting evidence from
         // replaced connections. Fail closed when the agent is not registered:
         // an unregistered agent has no current epoch at all.
-        if let Some(registry) = &self.agent_registry {
-            match registry.snapshot(agent_id).await {
-                Some(node) if node.agent_epoch != agent_epoch => {
-                    return Err(ReconcileError::StaleAgentEvidence);
-                }
-                None => return Err(ReconcileError::StaleAgentEvidence),
-                Some(_) => {}
-            }
-        }
+        let epoch_lease = if let Some(registry) = &self.agent_registry {
+            Some(
+                registry
+                    .lease_current_epoch(agent_id, agent_epoch)
+                    .await
+                    .ok_or(ReconcileError::StaleAgentEvidence)?,
+            )
+        } else {
+            None
+        };
         let mut evidence = self
             .agent_evidence
             .lock()
@@ -227,7 +233,7 @@ where
             state,
             provider_resource_id: provider_resource_id.to_owned(),
         };
-        match evidence.get(&operation_id) {
+        let disposition = match evidence.get(&operation_id) {
             None => {
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
@@ -259,7 +265,11 @@ where
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
             }
-        }
+        }?;
+        Ok(AgentEvidencePermit {
+            disposition,
+            _epoch_lease: epoch_lease,
+        })
     }
 
     /// Observations are terminal evidence for a durable command, not a free
@@ -271,7 +281,7 @@ where
         agent_id: &str,
         agent_epoch: &str,
         sequence: u64,
-    ) -> Result<EvidenceDisposition, ReconcileError> {
+    ) -> Result<AgentEvidencePermit, ReconcileError> {
         if agent_id.trim().is_empty()
             || agent_epoch.trim().is_empty()
             || sequence == 0
@@ -280,18 +290,21 @@ where
         {
             return Err(ReconcileError::InvalidIntent);
         }
-        if let Some(registry) = &self.agent_registry {
-            match registry.snapshot(agent_id).await {
-                Some(node) if node.agent_epoch == agent_epoch => {}
-                Some(_) => return Err(ReconcileError::StaleAgentEvidence),
-                None => return Err(ReconcileError::StaleAgentEvidence),
-            }
-        }
+        let epoch_lease = if let Some(registry) = &self.agent_registry {
+            Some(
+                registry
+                    .lease_current_epoch(agent_id, agent_epoch)
+                    .await
+                    .ok_or(ReconcileError::StaleAgentEvidence)?,
+            )
+        } else {
+            None
+        };
         let mut evidence = self
             .observation_evidence
             .lock()
             .map_err(|_| ReconcileError::InvalidIntent)?;
-        match evidence.get(&operation_id) {
+        let disposition = match evidence.get(&operation_id) {
             None => {
                 evidence.insert(
                     operation_id,
@@ -322,7 +335,11 @@ where
             }
             Some(previous) if sequence < previous.sequence => Ok(EvidenceDisposition::Stale),
             Some(_) => Ok(EvidenceDisposition::Duplicate),
-        }
+        }?;
+        Ok(AgentEvidencePermit {
+            disposition,
+            _epoch_lease: epoch_lease,
+        })
     }
 
     pub fn events(&self) -> Vec<JournalEvent> {
@@ -425,6 +442,11 @@ where
         };
         if operation.state == OperationState::UnknownOutcome
             && matches!(durable_state, OperationState::Running)
+            || command.state == AgentCommandState::UnknownOutcome
+                && matches!(
+                    command_state,
+                    AgentCommandState::Accepted | AgentCommandState::Running
+                )
         {
             return Err(ReconcileError::InvalidIntent);
         }
@@ -445,7 +467,7 @@ where
         }
         self.validate_agent_provider_identity(&command, update)
             .await?;
-        let disposition = self
+        let evidence_permit = self
             .fence_agent_evidence(
                 update.operation_id,
                 &update.agent_id,
@@ -455,7 +477,7 @@ where
                 update.provider_resource_id.as_deref().unwrap_or(""),
             )
             .await?;
-        if disposition == EvidenceDisposition::Stale {
+        if evidence_permit.disposition == EvidenceDisposition::Stale {
             return Ok(operation.state);
         }
         // Persist the agent-reported, contract-redacted failure reason so the
@@ -550,7 +572,7 @@ where
                 )
                 .await?;
         }
-        if disposition == EvidenceDisposition::New {
+        if evidence_permit.disposition == EvidenceDisposition::New {
             self.event(
                 update.operation_id,
                 update.resource_id,
@@ -588,17 +610,20 @@ where
         {
             return Err(ReconcileError::InvalidIntent);
         }
-        match self
-            .store
-            .get_provider_reference(update.resource_id, "compute-agent")
-            .await
-        {
-            Ok(reference) if reference.provider_resource_id != incoming => {
-                Err(ReconcileError::InvalidIntent)
+        for provider_name in ["compute-agent", "agent"] {
+            match self
+                .store
+                .get_provider_reference(update.resource_id, provider_name)
+                .await
+            {
+                Ok(reference) if reference.provider_resource_id != incoming => {
+                    return Err(ReconcileError::InvalidIntent);
+                }
+                Ok(_) | Err(StoreError::ProviderReferenceNotFound) => {}
+                Err(error) => return Err(error.into()),
             }
-            Ok(_) | Err(StoreError::ProviderReferenceNotFound) => Ok(()),
-            Err(error) => Err(error.into()),
         }
+        Ok(())
     }
 
     /// Commits an authenticated command acceptance before the agent executes
@@ -621,10 +646,12 @@ where
             AgentOperationState::Accepted | AgentOperationState::Running => {}
             _ => return Err(ReconcileError::InvalidIntent),
         }
-        if operation.state == OperationState::UnknownOutcome {
+        if operation.state == OperationState::UnknownOutcome
+            || command.state == AgentCommandState::UnknownOutcome
+        {
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self
+        let evidence_permit = self
             .fence_agent_evidence(
                 accepted.operation_id,
                 &accepted.agent_id,
@@ -634,7 +661,7 @@ where
                 "",
             )
             .await?;
-        if disposition == EvidenceDisposition::Stale {
+        if evidence_permit.disposition == EvidenceDisposition::Stale {
             return Ok(operation.state);
         }
         if matches!(
@@ -662,7 +689,7 @@ where
                 operation.error_message.as_deref(),
             )
             .await?;
-        if disposition == EvidenceDisposition::New {
+        if evidence_permit.disposition == EvidenceDisposition::New {
             self.event(
                 accepted.operation_id,
                 operation.resource_id,
@@ -713,7 +740,7 @@ where
             );
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self
+        let evidence_permit = self
             .fence_agent_observation(
                 observation.operation_id,
                 &observation.agent_id,
@@ -721,7 +748,7 @@ where
                 observation.observation_sequence,
             )
             .await?;
-        if disposition != EvidenceDisposition::New {
+        if evidence_permit.disposition != EvidenceDisposition::New {
             return Ok(());
         }
         let observed_state = server_state_to_storage(ServerState::from(observation.state));
@@ -2271,6 +2298,12 @@ mod tests {
         nodes: Arc<tokio::sync::RwLock<HashMap<String, o3k_provider::AgentNodeSnapshot>>>,
     }
 
+    struct TestAgentEpochLease {
+        _nodes: tokio::sync::OwnedRwLockReadGuard<HashMap<String, o3k_provider::AgentNodeSnapshot>>,
+    }
+
+    impl o3k_provider::AgentEpochLease for TestAgentEpochLease {}
+
     #[async_trait::async_trait]
     impl o3k_provider::AgentNodeRegistry for TestAgentRegistry {
         async fn all(&self) -> Vec<o3k_provider::AgentNodeSnapshot> {
@@ -2279,6 +2312,22 @@ mod tests {
 
         async fn snapshot(&self, agent_id: &str) -> Option<o3k_provider::AgentNodeSnapshot> {
             self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        async fn lease_current_epoch(
+            &self,
+            agent_id: &str,
+            agent_epoch: &str,
+        ) -> Option<Box<dyn o3k_provider::AgentEpochLease>> {
+            let nodes = self.nodes.clone().read_owned().await;
+            if nodes
+                .get(agent_id)
+                .is_some_and(|node| node.agent_epoch == agent_epoch)
+            {
+                Some(Box::new(TestAgentEpochLease { _nodes: nodes }))
+            } else {
+                None
+            }
         }
 
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
@@ -2612,6 +2661,62 @@ mod tests {
                 .await?
                 .provider_resource_id,
             "agent-domain-1"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_update_rejects_agent_namespace_provider_identity_drift()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-reference-identity", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let command_id = format!("command-{operation_id}");
+        bind_command(
+            &store,
+            command_id.clone(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
+        store
+            .attach_provider_reference(&ProviderReference {
+                resource_id: request.o3k_server_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-established".to_owned(),
+            })
+            .await?;
+        let update = AgentOperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: Some("domain-conflict".to_owned()),
+        };
+        assert!(matches!(
+            journal.apply_agent_update(&update).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_agent_command(&command_id).await?.state,
+            AgentCommandState::Pending
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Pending
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "agent")
+                .await?
+                .provider_resource_id,
+            "domain-established"
         );
         Ok(())
     }
@@ -3136,6 +3241,54 @@ mod tests {
         assert_eq!(
             store.get_operation(operation_id).await?.state,
             OperationState::Running
+        );
+        Ok(())
+    }
+
+    /// ASR-015: once E1 passes current-epoch validation, its lease must keep
+    /// E2 registration from becoming current until the caller finishes the
+    /// durable projection. This closes the check/write interleaving where an
+    /// old stream could otherwise write after E2 registration.
+    #[tokio::test]
+    async fn current_epoch_lease_serializes_projection_with_reregistration()
+    -> Result<(), ReconcileError> {
+        let (journal, _, _) = journal("agent-epoch-lease", 2).await?;
+        let registry = TestAgentRegistry::default();
+        registry.register("agent-a", "epoch-a").await;
+        let journal = journal.with_agent_registry(Arc::new(registry.clone()));
+        let permit = journal
+            .fence_agent_evidence(
+                Uuid::now_v7(),
+                "agent-a",
+                "epoch-a",
+                1,
+                AgentOperationState::Accepted,
+                "",
+            )
+            .await?;
+
+        let replacement_registry = registry.clone();
+        let mut replacement = tokio::spawn(async move {
+            replacement_registry.register("agent-a", "epoch-b").await;
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut replacement)
+                .await
+                .is_err(),
+            "replacement epoch became current while E1 projection held its lease"
+        );
+
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(1), replacement)
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        assert_eq!(
+            o3k_provider::AgentNodeRegistry::snapshot(&registry, "agent-a")
+                .await
+                .map(|node| node.agent_epoch)
+                .as_deref(),
+            Some("epoch-b")
         );
         Ok(())
     }

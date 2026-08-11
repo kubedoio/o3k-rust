@@ -2367,6 +2367,12 @@ mod tests {
         nodes: Arc<tokio::sync::RwLock<BTreeMap<String, AgentNodeSnapshot>>>,
     }
 
+    struct FakeAgentEpochLease {
+        _nodes: tokio::sync::OwnedRwLockReadGuard<BTreeMap<String, AgentNodeSnapshot>>,
+    }
+
+    impl o3k_provider::AgentEpochLease for FakeAgentEpochLease {}
+
     #[async_trait]
     impl AgentNodeRegistry for FakeAgentRegistry {
         async fn all(&self) -> Vec<AgentNodeSnapshot> {
@@ -2375,6 +2381,22 @@ mod tests {
 
         async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot> {
             self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        async fn lease_current_epoch(
+            &self,
+            agent_id: &str,
+            agent_epoch: &str,
+        ) -> Option<Box<dyn o3k_provider::AgentEpochLease>> {
+            let nodes = self.nodes.clone().read_owned().await;
+            if nodes
+                .get(agent_id)
+                .is_some_and(|node| node.agent_epoch == agent_epoch)
+            {
+                Some(Box::new(FakeAgentEpochLease { _nodes: nodes }))
+            } else {
+                None
+            }
         }
 
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
