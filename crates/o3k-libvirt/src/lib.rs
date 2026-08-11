@@ -7,7 +7,8 @@
 
 use std::{
     fmt, fs,
-    path::{Component, Path},
+    io::{Read, Seek, SeekFrom},
+    path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
@@ -16,7 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(feature = "libvirt")]
-use virt::{connect::Connect, domain::Domain, stream::Stream};
+use virt::{connect::Connect, domain::Domain};
 
 pub const LOCAL_SYSTEM_URI: &str = "qemu:///system";
 pub const O3K_METADATA_NAMESPACE: &str = "urn:o3k:compute:domain";
@@ -182,6 +183,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         ));
     }
     let name = stable_domain_name(&spec.metadata.server_id);
+    let console_path = console_log_path(&spec.image_id, &name)?;
     let m = &spec.metadata;
     let config_drive = spec.config_drive_image.as_ref().map(|image| {
             format!(
@@ -201,7 +203,7 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         );
     }
     let xml = format!(
-        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><controller type=\"scsi\" index=\"0\" model=\"virtio-scsi\" /><controller type=\"pci\" index=\"1\" model=\"pci-bridge\" /><serial type=\"pty\"><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"pty\"><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
+        "<domain type=\"kvm\"><name>{}</name><memory unit=\"MiB\">{}</memory><currentMemory unit=\"MiB\">{}</currentMemory><vcpu>{}</vcpu><metadata><o3k:domain xmlns:o3k=\"{}\" server_id=\"{}\" project_id=\"{}\" generation=\"{}\" operation_id=\"{}\" managed_by=\"{}\" /></metadata><os><type machine=\"pc\">hvm</type></os><devices><controller type=\"scsi\" index=\"0\" model=\"virtio-scsi\" /><controller type=\"pci\" index=\"1\" model=\"pci-bridge\" /><serial type=\"file\"><source path=\"{}\" append=\"on\" /><target type=\"isa-serial\" port=\"0\" /></serial><console type=\"file\"><source path=\"{}\" append=\"on\" /><target type=\"serial\" port=\"0\" /></console><disk type=\"file\" device=\"disk\"><driver name=\"qemu\" type=\"qcow2\" /><source file=\"{}\" /><target dev=\"vda\" bus=\"virtio\" /></disk>{}{}</devices></domain>",
         xml_escape(&name),
         spec.memory_mib,
         spec.memory_mib,
@@ -212,6 +214,8 @@ pub fn build_domain_xml(spec: &DomainSpec) -> Result<BuiltDomainXml, LibvirtErro
         m.generation,
         xml_escape(&m.operation_id),
         xml_escape(&m.managed_by),
+        xml_escape(&console_path),
+        xml_escape(&console_path),
         xml_escape(&spec.image_id),
         config_drive,
         network_interfaces
@@ -1324,76 +1328,50 @@ fn backend_read_console(
     validate_console_ownership(name, &xml, expected_server_id).inspect_err(|error| {
         tracing::warn!(%error, domain = %name, "libvirt read_console ownership rejected");
     })?;
-    tracing::info!(
-        domain = %name,
-        "libvirt read_console uses the bounded console stream; durable file paths are never opened"
-    );
-    let stream = Stream::new(&connection, virt::sys::VIR_STREAM_NONBLOCK).map_err(|_| {
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "console stream creation failed",
-        )
-    })?;
-    domain.open_console(None, &stream, 0).map_err(|_| {
-        LibvirtError::new(
-            ErrorCategory::OperationFailed,
-            "domain console is unavailable",
-        )
-    })?;
-    let mut output = Vec::with_capacity(max_bytes);
-    let mut buffer = vec![0_u8; max_bytes.min(4096)];
-    // A newly booted guest may not have written its first serial bytes when
-    // the stream is opened.  Nonblocking recv reports that state as an error;
-    // treat it as temporary for a bounded interval instead of returning an
-    // empty snapshot that makes a healthy guest look console-less.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        match stream.recv(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => {
-                output.extend_from_slice(&buffer[..count]);
-                if output.len() == max_bytes {
-                    break;
-                }
-            }
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
-        }
-    }
-    let _ = stream.abort();
-    tracing::info!(domain = %name, bytes = output.len(), "libvirt read_console stream end");
+    let path = console_file_path_from_xml(&xml, name)?;
+    let output = read_console_file_tail(&path, max_bytes, std::time::Duration::from_secs(3))?;
+    tracing::info!(domain = %name, bytes = output.len(), "libvirt read_console durable end");
     Ok(output)
 }
 
-/// Extracts the validated durable console file path from domain XML.
-///
-/// Returns `Ok(None)` when the domain has no `<console type="file">` source,
-/// in which case the caller falls back to the libvirt console stream.
-#[cfg(test)]
-fn console_file_path_from_xml(xml: &str) -> Result<Option<std::path::PathBuf>, LibvirtError> {
-    let Some(console) = xml
-        .split("<console type=\"file\">")
-        .nth(1)
-        .or_else(|| xml.split("<console type='file'>").nth(1))
-    else {
-        return Ok(None);
-    };
-    let path = console
-        .split_once("<source path=\"")
-        .and_then(|(_, value)| value.split_once('"'))
-        .map(|(value, _)| value)
-        .or_else(|| {
-            console
-                .split_once("<source path='")
-                .and_then(|(_, value)| value.split_once('\''))
-                .map(|(value, _)| value)
-        })
-        .ok_or_else(|| {
-            LibvirtError::new(
-                ErrorCategory::OperationFailed,
-                "durable console path is unavailable",
-            )
-        })?;
-    let path = Path::new(path);
+/// Extracts and validates the deterministic O3K-owned durable console path.
+#[cfg(any(test, feature = "libvirt"))]
+fn console_file_path_from_xml(
+    xml: &str,
+    domain_name: &str,
+) -> Result<std::path::PathBuf, LibvirtError> {
+    let console = xml_section(xml, "console", "file").ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "durable console path is unavailable",
+        )
+    })?;
+    let path = xml_fragment_attribute(console, "path").ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "durable console path is unavailable",
+        )
+    })?;
+    let disk = xml_section(xml, "disk", "file").ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "console image source is unavailable",
+        )
+    })?;
+    let image = xml_fragment_attribute(disk, "file").ok_or_else(|| {
+        LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "console image source is unavailable",
+        )
+    })?;
+    let expected = console_log_path(&image, domain_name)?;
+    if path != expected {
+        return Err(LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "durable console path is not O3K-owned",
+        ));
+    }
+    let path = Path::new(&path);
     if !path.is_absolute()
         || path
             .components()
@@ -1404,7 +1382,47 @@ fn console_file_path_from_xml(xml: &str) -> Result<Option<std::path::PathBuf>, L
             "durable console path is invalid",
         ));
     }
-    Ok(Some(path.to_path_buf()))
+    Ok(path.to_path_buf())
+}
+
+#[cfg(any(test, feature = "libvirt"))]
+fn xml_section<'a>(xml: &'a str, element: &str, device_type: &str) -> Option<&'a str> {
+    for quote in ['"', '\''] {
+        let marker = if element == "disk" {
+            format!("<{element} type={quote}{device_type}{quote} device={quote}disk{quote}>")
+        } else {
+            format!("<{element} type={quote}{device_type}{quote}>")
+        };
+        if let Some(start) = xml.find(&marker) {
+            let body = &xml[start + marker.len()..];
+            return body
+                .split_once(&format!("</{element}>"))
+                .map(|(value, _)| value);
+        }
+    }
+    None
+}
+
+#[cfg(any(test, feature = "libvirt"))]
+fn xml_fragment_attribute(fragment: &str, attribute: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let marker = format!("{attribute}={quote}");
+        if let Some((_, value)) = fragment.split_once(&marker)
+            && let Some((value, _)) = value.split_once(quote)
+        {
+            return Some(xml_unescape(value));
+        }
+    }
+    None
+}
+
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// Reads at most `max_bytes` from the end of the durable console file.
@@ -1414,18 +1432,59 @@ fn console_file_path_from_xml(xml: &str) -> Result<Option<std::path::PathBuf>, L
 /// empty snapshot. Every other I/O error (for example insufficient
 /// permissions) is a hard failure so a permission problem is never mistaken
 /// for an empty console.
-#[cfg(test)]
+#[cfg(any(test, feature = "libvirt"))]
 fn read_console_file_tail(
     path: &Path,
     max_bytes: usize,
     wait: std::time::Duration,
 ) -> Result<Vec<u8>, LibvirtError> {
+    if max_bytes == 0
+        || max_bytes > 64 * 1024
+        || !path.is_absolute()
+        || path
+            .components()
+            .any(|component| component == Component::ParentDir)
+    {
+        return Err(LibvirtError::new(
+            ErrorCategory::OperationFailed,
+            "durable console read bound or path is invalid",
+        ));
+    }
+    validate_console_path_components(path)?;
     let deadline = std::time::Instant::now() + wait;
     loop {
-        match fs::read(path) {
-            Ok(bytes) => {
-                let start = bytes.len().saturating_sub(max_bytes);
-                return Ok(bytes[start..].to_vec());
+        match fs::OpenOptions::new().read(true).open(path) {
+            Ok(mut file) => {
+                let metadata = file.metadata().map_err(|_| {
+                    LibvirtError::new(
+                        ErrorCategory::OperationFailed,
+                        "durable console metadata unavailable",
+                    )
+                })?;
+                if !metadata.file_type().is_file() {
+                    return Err(LibvirtError::new(
+                        ErrorCategory::OperationFailed,
+                        "durable console path is not a regular file",
+                    ));
+                }
+                let length = metadata.len();
+                let start = length.saturating_sub(max_bytes as u64);
+                file.seek(SeekFrom::Start(start)).map_err(|_| {
+                    LibvirtError::new(
+                        ErrorCategory::OperationFailed,
+                        "durable console seek failed",
+                    )
+                })?;
+                let mut bytes = Vec::with_capacity((length - start).min(max_bytes as u64) as usize);
+                file.take(max_bytes as u64)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| {
+                        LibvirtError::new(
+                            ErrorCategory::OperationFailed,
+                            "durable console read failed",
+                        )
+                    })?;
+                return Ok(bytes);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if std::time::Instant::now() >= deadline {
@@ -1445,6 +1504,40 @@ fn read_console_file_tail(
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "libvirt"))]
+fn validate_console_path_components(path: &Path) -> Result<(), LibvirtError> {
+    let mut current = PathBuf::from("/");
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            continue;
+        };
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(LibvirtError::new(
+                    ErrorCategory::OperationFailed,
+                    "durable console path contains a symlink",
+                ));
+            }
+            Ok(metadata) if current != path && !metadata.file_type().is_dir() => {
+                return Err(LibvirtError::new(
+                    ErrorCategory::OperationFailed,
+                    "durable console path component is not a directory",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => {
+                return Err(LibvirtError::new(
+                    ErrorCategory::OperationFailed,
+                    "durable console path cannot be inspected",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_console_ownership(
@@ -1798,9 +1891,10 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.xml.contains("project&amp;1"));
         assert!(
-            first.xml.contains("<console type=\"pty\">")
-                && first.xml.contains("<serial type=\"pty\">")
-                && !first.xml.contains("/console/o3k-")
+            first.xml.contains("<console type=\"file\">")
+                && first.xml.contains("<serial type=\"file\">")
+                && first.xml.matches("append=\"on\"").count() == 2
+                && first.xml.contains("/console/o3k-")
         );
         assert_eq!(
             discover_domain_xml(&first.name, &first.xml),
@@ -2059,7 +2153,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_console_xml_has_no_durable_file_path() -> Result<(), LibvirtError> {
+    fn domain_xml_has_deterministic_durable_console_path() -> Result<(), LibvirtError> {
         let spec = DomainSpec {
             metadata: DomainMetadata {
                 server_id: "console-server".to_owned(),
@@ -2075,17 +2169,21 @@ mod tests {
             network_interfaces: Vec::new(),
         };
         let xml = build_domain_xml(&spec)?.xml;
-        let path = console_file_path_from_xml(&xml)?;
-        assert!(path.is_none());
+        let domain_name = stable_domain_name(&spec.metadata.server_id);
+        let path = console_file_path_from_xml(&xml, &domain_name)?;
+        assert_eq!(
+            path.as_path(),
+            Path::new(&console_log_path(&spec.image_id, &domain_name)?)
+        );
         Ok(())
     }
 
     #[test]
-    fn console_file_path_from_xml_reports_missing_source_as_none() {
-        assert!(matches!(
-            console_file_path_from_xml("<domain><name>o3k-none</name></domain>"),
-            Ok(None)
-        ));
+    fn console_file_path_from_xml_rejects_missing_source() {
+        assert!(
+            console_file_path_from_xml("<domain><name>o3k-none</name></domain>", "o3k-none")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2096,7 +2194,7 @@ mod tests {
             "<domain><console type=\"file\"><source path=\"/var/lib/../escape.log\"/></console></domain>",
         ] {
             assert!(matches!(
-                console_file_path_from_xml(xml),
+                console_file_path_from_xml(xml, "o3k-unsafe"),
                 Err(LibvirtError {
                     category: ErrorCategory::OperationFailed,
                     ..
@@ -2150,6 +2248,54 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_console_file_tail_rejects_symlink_components() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "o3k-console-symlink-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(root.join("real"))?;
+        fs::write(root.join("real/console.log"), b"secret")?;
+        symlink(root.join("real"), root.join("link"))?;
+        let result = read_console_file_tail(
+            &root.join("link/console.log"),
+            100,
+            std::time::Duration::from_millis(1),
+        );
+        let _ = fs::remove_dir_all(&root);
+        assert!(matches!(
+            result,
+            Err(LibvirtError {
+                category: ErrorCategory::OperationFailed,
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn read_console_file_tail_bounds_sparse_file_reads() -> Result<(), Box<dyn std::error::Error>> {
+        let path = std::env::temp_dir().join(format!(
+            "o3k-console-sparse-{}-{}.log",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        let mut file = fs::File::create(&path)?;
+        file.set_len(16 * 1024 * 1024 * 1024)?;
+        file.seek(SeekFrom::End(-4))?;
+        std::io::Write::write_all(&mut file, b"boot")?;
+        let tail = read_console_file_tail(&path, 64, std::time::Duration::from_millis(1))?;
+        let _ = fs::remove_file(&path);
+        assert_eq!(tail.len(), 64);
+        assert_eq!(&tail[tail.len() - 4..], b"boot");
+        Ok(())
     }
 
     #[test]

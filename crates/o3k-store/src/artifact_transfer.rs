@@ -263,44 +263,76 @@ pub(crate) async fn update(
     expected_agent_epoch: &str,
     update: ArtifactTransferUpdate,
 ) -> Result<ArtifactTransferRecord, StoreError> {
-    let mut transaction = pool.begin().await.map_err(StoreError::Database)?;
-    let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
-        .bind(transfer_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(StoreError::Database)?
-        .ok_or(StoreError::ArtifactTransferNotFound)?;
-    let current = from_row(&row)?;
-    if current.agent_epoch != expected_agent_epoch {
-        return Err(StoreError::ArtifactTransferEpochConflict);
-    }
-    update.validate_against(&current)?;
-    if update
-        == (ArtifactTransferUpdate {
-            state: current.state,
-            contiguous_bytes: current.contiguous_bytes,
-            next_chunk_index: current.next_chunk_index,
-            retry_count: current.retry_count,
-        })
-    {
-        transaction.rollback().await.map_err(StoreError::Database)?;
-        return Ok(current);
-    }
-    let result = sqlx::query("UPDATE artifact_transfers SET state = ?, contiguous_bytes = ?, next_chunk_index = ?, retry_count = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_id = ? AND agent_epoch = ?")
-        .bind(update.state.as_str())
-        .bind(sqlite_sequence(update.contiguous_bytes)?)
-        .bind(sqlite_sequence(update.next_chunk_index)?)
-        .bind(i64::from(update.retry_count))
-        .bind(transfer_id)
-        .bind(expected_agent_epoch)
-        .execute(&mut *transaction)
+    // Acquire the write lock before reading the row.  A deferred transaction
+    // can take a read snapshot and then fail with SQLITE_BUSY_SNAPSHOT when
+    // the commit update upgrades it after another transfer heartbeat/write.
+    // The store's bounded busy timeout applies to BEGIN IMMEDIATE, making the
+    // durable commit path retryable instead of surfacing a false provider
+    // conflict.
+    let mut connection = pool.acquire().await.map_err(StoreError::Database)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *connection)
         .await
         .map_err(StoreError::Database)?;
-    if result.rows_affected() != 1 {
-        return Err(StoreError::ArtifactTransferEpochConflict);
+    let outcome: Result<Option<ArtifactTransferRecord>, StoreError> = async {
+        let row = sqlx::query("SELECT transfer_id, command_id, operation_id, resource_id, agent_id, agent_epoch, artifact_id, artifact_kind, sha256, size_bytes, expires_at_unix_ms, format, chunk_size_bytes, chunk_count, state, contiguous_bytes, next_chunk_index, retry_count, created_at, updated_at FROM artifact_transfers WHERE transfer_id = ?")
+            .bind(transfer_id)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::ArtifactTransferNotFound)?;
+        let current = from_row(&row)?;
+        if current.agent_epoch != expected_agent_epoch {
+            return Err(StoreError::ArtifactTransferEpochConflict);
+        }
+        update.validate_against(&current)?;
+        if update
+            == (ArtifactTransferUpdate {
+                state: current.state,
+                contiguous_bytes: current.contiguous_bytes,
+                next_chunk_index: current.next_chunk_index,
+                retry_count: current.retry_count,
+            })
+        {
+            return Ok(Some(current));
+        }
+        let result = sqlx::query("UPDATE artifact_transfers SET state = ?, contiguous_bytes = ?, next_chunk_index = ?, retry_count = ?, updated_at = CURRENT_TIMESTAMP WHERE transfer_id = ? AND agent_epoch = ?")
+            .bind(update.state.as_str())
+            .bind(sqlite_sequence(update.contiguous_bytes)?)
+            .bind(sqlite_sequence(update.next_chunk_index)?)
+            .bind(i64::from(update.retry_count))
+            .bind(transfer_id)
+            .bind(expected_agent_epoch)
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::ArtifactTransferEpochConflict);
+        }
+        Ok(None)
     }
-    transaction.commit().await.map_err(StoreError::Database)?;
-    get(pool, transfer_id).await
+    .await;
+    match outcome {
+        Ok(Some(current)) => {
+            sqlx::query("ROLLBACK")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            Ok(current)
+        }
+        Ok(None) => {
+            sqlx::query("COMMIT")
+                .execute(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+            drop(connection);
+            get(pool, transfer_id).await
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn rebind_epoch(

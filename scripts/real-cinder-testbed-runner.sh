@@ -117,6 +117,8 @@ DATA_DIR="${STATE_ROOT}/data"
 EVIDENCE_DIR="${STATE_ROOT}/evidence-$(date +%s)"
 VENV_DIR="${STATE_ROOT}/venv"
 LOOP_FILE="${DATA_DIR}/${VG_NAME}.img"
+O3K_SERVICE_ACCOUNT="${O3K_SERVICE_ACCOUNT:-o3k}"
+O3K_COMPUTE_ACCOUNT="${O3K_COMPUTE_ACCOUNT:-o3k-compute}"
 mkdir -p "${EVIDENCE_DIR}" "${DATA_DIR}"
 
 # Cinder TgtAdm target driver contract: cinder writes tgt-admin persistence
@@ -129,6 +131,36 @@ CINDER_VOLUMES_DIR="/var/lib/cinder/volumes"
 TGT_CONF_PATH="/etc/tgt/targets.conf"
 TGT_CONF_BACKUP="${STATE_ROOT}/tgt-targets.conf.orig"
 TGT_CONF_MODIFIED=0
+ISCSI_ACL_BACKUP="${STATE_ROOT}/iscsi-acl.before"
+ISCSI_ACL_MODIFIED=0
+ISCSI_SUDOERS_PATH="/etc/sudoers.d/o3k-cinder-${RUN_SLUG}"
+ISCSI_SUDOERS_CREATED=0
+MYSQL_TMP_DIR="${DATA_DIR}/mysql-tmp"
+MYSQL_TMP_CONF="/etc/mysql/mariadb.conf.d/99-o3k-${RUN_SLUG}.cnf"
+MYSQL_TMP_CONF_CREATED=0
+
+restore_iscsi_compute_access() {
+  if [ "${ISCSI_ACL_MODIFIED:-0}" = "1" ] && [ -s "${ISCSI_ACL_BACKUP:-}" ]; then
+    setfacl --restore="${ISCSI_ACL_BACKUP}" 2>/dev/null || \
+      echo "WARNING: unable to restore iSCSI ACLs from ${ISCSI_ACL_BACKUP}" >&2
+    ISCSI_ACL_MODIFIED=0
+  fi
+}
+
+restore_iscsi_sudo_policy() {
+  if [ "${ISCSI_SUDOERS_CREATED:-0}" = "1" ]; then
+    rm -f -- "${ISCSI_SUDOERS_PATH}"
+    ISCSI_SUDOERS_CREATED=0
+  fi
+}
+
+restore_mysql_tmpdir() {
+  if [ "${MYSQL_TMP_CONF_CREATED:-0}" = "1" ]; then
+    rm -f -- "${MYSQL_TMP_CONF}" 2>/dev/null || true
+    systemctl restart mariadb 2>/dev/null || true
+    MYSQL_TMP_CONF_CREATED=0
+  fi
+}
 
 # Phase reached before failure; recorded in the aggregate failure artifact.
 RUN_PHASE="start"
@@ -149,6 +181,19 @@ early_failure_cleanup() {
   # cleanup trap was installed; the run-owned backup lives in the state root
   # that is removed below, so ordering matters.
   restore_tgtd_config 2>/dev/null || true
+  restore_iscsi_compute_access 2>/dev/null || true
+  restore_iscsi_sudo_policy 2>/dev/null || true
+  restore_mysql_tmpdir 2>/dev/null || true
+  # The database, message-bus, and loop/LVM resources are created before the
+  # full service cleanup trap is installed. Remove only this run's exact
+  # identities on an early failure; never sweep by a shared prefix.
+  rabbitmqctl delete_vhost "${MQ_VHOST:-}" 2>/dev/null || true
+  rabbitmqctl delete_user "${MQ_USER:-}" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME:-invalid_run_database}\`; DROP USER IF EXISTS '${DB_USER:-invalid_run_user}'@'localhost'; DROP USER IF EXISTS '${DB_USER:-invalid_run_user}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  vgchange -an "${VG_NAME:-invalid_run_vg}" 2>/dev/null || true
+  vgremove -y "${VG_NAME:-invalid_run_vg}" 2>/dev/null || true
+  losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
+  [ -n "${LOOP_FILE:-}" ] && rm -f -- "${LOOP_FILE}" || true
   if [ -n "${STATE_ROOT:-}" ] && [ "${STATE_ROOT}" != "${STATE_BASE}" ] && [ -d "${STATE_ROOT}" ]; then
     rm -rf "${STATE_ROOT}"
   fi
@@ -283,6 +328,34 @@ TLS_DIR="${TLS_PARENT}/tls"
 install -m 0640 "${TLS_DIR}/agent-id" "${DATA_DIR}/agent-id"
 AUTHORIZED_FINGERPRINT="$(cat "${TLS_DIR}/agent-fingerprint")"
 
+# Run the two O3K processes under their installed service identities.  The
+# compute image cache is intentionally group-traversable by libvirt/qemu, but
+# remains inaccessible to the control-plane account.  Starting both daemons
+# as root would turn the host DAC policy into a false positive and leaves
+# qemu unable to read files created with root's primary group.
+getent passwd "${O3K_SERVICE_ACCOUNT}" >/dev/null \
+  || { echo "ERROR: missing ${O3K_SERVICE_ACCOUNT} service account"; exit 1; }
+getent passwd "${O3K_COMPUTE_ACCOUNT}" >/dev/null \
+  || { echo "ERROR: missing ${O3K_COMPUTE_ACCOUNT} compute account"; exit 1; }
+id -nG "${O3K_COMPUTE_ACCOUNT}" | tr ' ' '\n' | grep -Fqx kvm \
+  || { echo "ERROR: ${O3K_COMPUTE_ACCOUNT} is not a kvm member"; exit 1; }
+O3K_DATA_DIR="${DATA_DIR}/o3k"
+COMPUTE_DATA_DIR="${DATA_DIR}/compute"
+install -d -o "${O3K_SERVICE_ACCOUNT}" -g "${O3K_SERVICE_ACCOUNT}" -m 0700 \
+  "${O3K_DATA_DIR}"
+install -d -o "${O3K_COMPUTE_ACCOUNT}" -g kvm -m 2710 \
+  "${COMPUTE_DATA_DIR}"
+install -m 0640 -o "${O3K_COMPUTE_ACCOUNT}" -g kvm \
+  "${TLS_DIR}/agent-id" "${COMPUTE_DATA_DIR}/agent-id"
+chown "${O3K_SERVICE_ACCOUNT}:${O3K_SERVICE_ACCOUNT}" "${TLS_DIR}/server-key.pem"
+chmod 0640 "${TLS_DIR}/server-key.pem"
+chown "${O3K_COMPUTE_ACCOUNT}:kvm" "${TLS_DIR}/agent-key.pem" "${TLS_DIR}/agent-id"
+chmod 0640 "${TLS_DIR}/agent-key.pem" "${TLS_DIR}/agent-id"
+chmod 0644 "${TLS_DIR}/ca.pem" "${TLS_DIR}/agent.pem" \
+  "${TLS_DIR}/server.pem" "${TLS_DIR}/agent-fingerprint"
+chgrp kvm "${TLS_PARENT}" "${TLS_DIR}"
+chmod 0751 "${TLS_PARENT}" "${TLS_DIR}"
+
 echo "==> Installing Cinder 28.0.0 and visible dependencies (pinned venv)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -293,6 +366,7 @@ apt-get install -y -qq \
   rabbitmq-server \
   memcached \
   lvm2 \
+  acl \
   open-iscsi \
   tgt \
   python3-openstackclient \
@@ -319,8 +393,107 @@ echo "==> Recording Cinder version evidence..."
 dpkg-query -W -f='${Package} ${Version}\n' mariadb-server rabbitmq-server memcached open-iscsi tgt lvm2 python3-openstackclient > "${EVIDENCE_DIR}/installed-packages.txt" 2>/dev/null || true
 
 echo "==> Starting MariaDB, RabbitMQ, memcached, tgt, open-iscsi..."
-systemctl start mariadb rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
+mkdir -p "${MYSQL_TMP_DIR}"
+chown mysql:mysql "${MYSQL_TMP_DIR}"
+chmod 0700 "${MYSQL_TMP_DIR}"
+if [ -e "${MYSQL_TMP_CONF}" ]; then
+  echo "ERROR: run-owned MariaDB tmpdir config already exists: ${MYSQL_TMP_CONF}" >&2
+  exit 1
+fi
+install -m 0644 /dev/null "${MYSQL_TMP_CONF}"
+MYSQL_TMP_CONF_CREATED=1
+cat > "${MYSQL_TMP_CONF}" <<EOF
+[mysqld]
+tmpdir = ${MYSQL_TMP_DIR}
+EOF
+systemctl restart mariadb 2>/dev/null || service mariadb restart
+systemctl start rabbitmq-server memcached tgt open-iscsi 2>/dev/null || service mariadb start
 sleep 5
+
+# open-iscsi keeps its node database and lock under root-owned system paths.
+# The compute agent remains non-root and retains only its existing network
+# capabilities, so grant it the minimum durable access needed by iscsiadm on
+# this disposable hosted-service testbed.  Save the complete ACLs first and
+# restore them on every cleanup path; never leave a testbed ACL on the host.
+configure_iscsi_compute_access() {
+  command -v getfacl >/dev/null 2>&1 || {
+    echo "ERROR: getfacl is required for reversible iSCSI access setup" >&2
+    return 1
+  }
+  command -v setfacl >/dev/null 2>&1 || {
+    echo "ERROR: setfacl is required for reversible iSCSI access setup" >&2
+    return 1
+  }
+  local path
+  : > "${ISCSI_ACL_BACKUP}"
+  for path in /etc/iscsi /etc/iscsi/nodes /etc/iscsi/ifaces \
+              /etc/iscsi/send_targets /etc/iscsi/iscsid.conf \
+              /etc/iscsi/initiatorname.iscsi /run/lock/iscsi \
+              /run/lock/iscsi/lock; do
+    [ -e "${path}" ] || continue
+    getfacl -p "${path}" >> "${ISCSI_ACL_BACKUP}"
+  done
+  chmod 0600 "${ISCSI_ACL_BACKUP}"
+  ISCSI_ACL_MODIFIED=1
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rx" /etc/iscsi
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /etc/iscsi/nodes
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rx" /etc/iscsi/ifaces
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /etc/iscsi/send_targets
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:r" /etc/iscsi/iscsid.conf
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:r" /etc/iscsi/initiatorname.iscsi
+  setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rwx,d:u:${O3K_COMPUTE_ACCOUNT}:rwX" \
+    /run/lock/iscsi
+  if [ -e /run/lock/iscsi/lock ]; then
+    setfacl -m "u:${O3K_COMPUTE_ACCOUNT}:rw" /run/lock/iscsi/lock
+  fi
+  cat > "${EVIDENCE_DIR}/iscsi-privilege-boundary.txt" <<EOF
+account=${O3K_COMPUTE_ACCOUNT}
+access_paths=/etc/iscsi/iscsid.conf,/etc/iscsi/initiatorname.iscsi,/etc/iscsi/ifaces,/etc/iscsi/nodes,/etc/iscsi/send_targets,/run/lock/iscsi
+network_capabilities=net_admin,net_bind_service,net_raw
+acl_backup=${ISCSI_ACL_BACKUP}
+EOF
+}
+echo "==> Granting reversible non-root iSCSI control-path access..."
+configure_iscsi_compute_access
+
+# Debian open-iscsi requires root for the login control path even when the
+# node database and lock files have been ACL-scoped.  The external-Cinder
+# testbed therefore grants only this disposable compute account permission to
+# execute the exact host iscsiadm binary through a run-owned sudoers file. The
+# compute process remains non-root; the policy is syntax-checked, recorded,
+# and removed on every cleanup path. This is a hosted-testbed prerequisite,
+# not an installed native-profile privilege claim.
+configure_iscsi_sudo_policy() {
+  command -v sudo >/dev/null 2>&1 || {
+    echo "ERROR: sudo is required for the non-root hosted iSCSI boundary" >&2
+    return 1
+  }
+  command -v visudo >/dev/null 2>&1 || {
+    echo "ERROR: visudo is required to validate the hosted iSCSI policy" >&2
+    return 1
+  }
+  if [ -e "${ISCSI_SUDOERS_PATH}" ]; then
+    echo "ERROR: run-owned iSCSI sudoers path already exists: ${ISCSI_SUDOERS_PATH}" >&2
+    return 1
+  fi
+  install -m 0440 /dev/null "${ISCSI_SUDOERS_PATH}"
+  ISCSI_SUDOERS_CREATED=1
+  printf '%s ALL=(root) NOPASSWD: /usr/sbin/iscsiadm\n' \
+    "${O3K_COMPUTE_ACCOUNT}" > "${ISCSI_SUDOERS_PATH}"
+  visudo -cf "${ISCSI_SUDOERS_PATH}" >/dev/null
+  cat > "${EVIDENCE_DIR}/iscsi-privilege-boundary.txt" <<EOF
+account=${O3K_COMPUTE_ACCOUNT}
+compute_process_uid=non-root
+privileged_operation=/usr/sbin/iscsiadm
+authorization=sudoers-run-owned-exact-binary
+policy_path=${ISCSI_SUDOERS_PATH}
+restored_after_run=true
+EOF
+}
+echo "==> Installing the reversible hosted iSCSI privilege boundary..."
+configure_iscsi_sudo_policy
 
 # tgt-admin (used by cinder.privsep.targets.tgt) parses only
 # /etc/tgt/targets.conf on every invocation; tgtd itself does not need a
@@ -438,7 +611,7 @@ volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
 volume_group = ${VG_NAME}
 target_protocol = iscsi
 target_helper = tgtadm
-iscsi_ip_address = 127.0.0.1
+target_ip_address = 127.0.0.1
 volume_clear = none
 # The volume service is launched from the pinned venv as root (no systemd
 # cinder account). Use sudo directly for LVM commands instead of the
@@ -539,7 +712,7 @@ echo "==> Starting O3K control plane with durable hosted-service identity and ag
 CONTROL_PORT=50051
 COMPUTE_HEALTH_PORT=18091
 export O3K_LISTEN_ADDR="127.0.0.1:${O3K_PORT}"
-export O3K_DATA_DIR="${DATA_DIR}/o3k"
+export O3K_DATA_DIR="${O3K_DATA_DIR}"
 export O3K_PROVIDER="agent"
 export O3K_LOG_FORMAT="json"
 export O3K_BOOTSTRAP_PASSWORD="${O3K_PW}"
@@ -551,22 +724,27 @@ export O3K_COMPUTE_SERVER_CERTIFICATE="${TLS_DIR}/server.pem"
 export O3K_COMPUTE_SERVER_PRIVATE_KEY="${TLS_DIR}/server-key.pem"
 export O3K_COMPUTE_CLIENT_CA="${TLS_DIR}/ca.pem"
 export O3K_COMPUTE_AUTHORIZED_AGENTS="compute-agent=${AUTHORIZED_FINGERPRINT}"
-"${O3KD_BIN}" > "${EVIDENCE_DIR}/o3kd.log" 2>&1 &
+runuser -u "${O3K_SERVICE_ACCOUNT}" -- "${O3KD_BIN}" > "${EVIDENCE_DIR}/o3kd.log" 2>&1 &
 O3KD_PID=$!
 
 echo "==> Starting the real o3k-compute agent (libvirt + iSCSI)..."
 cat > "${STATE_ROOT}/o3k-compute.env" <<EOF
-O3K_COMPUTE_DATA_DIR=${DATA_DIR}
+O3K_COMPUTE_DATA_DIR=${COMPUTE_DATA_DIR}
 O3K_COMPUTE_CONTROL_ENDPOINT=https://127.0.0.1:${CONTROL_PORT}
 O3K_COMPUTE_SERVER_NAME=o3k-control-plane
 O3K_COMPUTE_HOST_LABEL=o3k-testlab
 O3K_COMPUTE_TLS_DIR=${TLS_DIR}
 O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:${COMPUTE_HEALTH_PORT}
 O3K_COMPUTE_MAX_DISK_GB=10
+O3K_ISCSIADM_SUDO=1
 RUST_LOG=info
 EOF
 set -a; . "${STATE_ROOT}/o3k-compute.env"; set +a
-"${O3K_COMPUTE_BIN}" > "${EVIDENCE_DIR}/o3k-compute.log" 2>&1 &
+setpriv --reuid="$(id -u "${O3K_COMPUTE_ACCOUNT}")" \
+  --regid="$(id -g "${O3K_COMPUTE_ACCOUNT}")" --init-groups \
+  --inh-caps=+net_admin,+net_bind_service,+net_raw \
+  --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
+  "${O3K_COMPUTE_BIN}" > "${EVIDENCE_DIR}/o3k-compute.log" 2>&1 &
 COMPUTE_PID=$!
 
 # ------------------------------------------------------------------------------
@@ -614,7 +792,7 @@ emit_failure_diagnostics() {
   } > "${EVIDENCE_DIR}/failure-host-state.log" 2>&1
   {
     echo "== non-secret Cinder backend configuration =="
-    grep -E '^(volumes_dir|volume_group|volume_driver|target_helper|target_protocol|iscsi_ip_address|iscsi_target_prefix|iscsi_write_cache|volume_clear|root_helper|chap_authentication|enabled_backends|control_exchange|osapi_volume_listen)' "${CONF}" 2>&1 || true
+    grep -E '^(volumes_dir|volume_group|volume_driver|target_helper|target_protocol|target_ip_address|iscsi_ip_address|iscsi_target_prefix|iscsi_write_cache|volume_clear|root_helper|chap_authentication|enabled_backends|control_exchange|osapi_volume_listen)' "${CONF}" 2>&1 || true
   } > "${EVIDENCE_DIR}/failure-cinder-config.log" 2>&1
   {
     echo "== run-owned Cinder volume, attachment, and provider-location state =="
@@ -869,12 +1047,15 @@ cleanup_early() {
   "${VENV_DIR}/bin/cinder-api" --config-file "${CONF}" stop 2>/dev/null || true
   kill -TERM "${CINDER_API_PID:-}" "${CINDER_SCHED_PID:-}" "${CINDER_VOL_PID:-}" 2>/dev/null || true
   remove_run_owned_tgt_state
+  restore_iscsi_compute_access
+  restore_iscsi_sudo_policy
   vgchange -an "${VG_NAME}" 2>/dev/null || true
   vgremove -y "${VG_NAME}" 2>/dev/null || true
   losetup -d "${LOOP_DEV:-}" 2>/dev/null || true
   rabbitmqctl delete_vhost "${MQ_VHOST}" 2>/dev/null || true
   rabbitmqctl delete_user "${MQ_USER}" 2>/dev/null || true
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  restore_mysql_tmpdir
   rm -f "${LOOP_FILE}"
   write_foreign_state_after
 }
@@ -1532,6 +1713,7 @@ cleanup_run_owned() {
   mysql -e "DROP DATABASE IF EXISTS \`${DB_NAME}\`; DROP USER IF EXISTS '${DB_USER}'@'localhost'; DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1'; FLUSH PRIVILEGES;" 2>/dev/null || true
   rm -f "${LOOP_FILE}"
   restore_tgtd_config
+  restore_iscsi_sudo_policy
 }
 
 verify_clean() {
@@ -1569,15 +1751,6 @@ echo "==> Cleaning up run-owned host resources..."
 trap - EXIT
 cleanup_run_owned
 
-if [ "${KEEP}" != "--keep" ]; then
-  rm -rf "${STATE_ROOT}"
-else
-  # Preserve evidence for the post-run guard, but remove bulky non-evidence
-  # state (venv, data, tls). The guard discovers evidence.yaml under the state
-  # root and reads foreign-state-after.json from the evidence directory.
-  rm -rf "${VENV_DIR}" "${DATA_DIR}" "${TLS_PARENT}"
-fi
-
 echo "==> Recording post-cleanup foreign-state verification..."
 write_foreign_state_after
 python3 - "${INVENTORY_AFTER}" <<'PY'
@@ -1587,4 +1760,8 @@ assert after["cleanup_status"] == "passed", after
 assert after["foreign_unchanged"] is True, after
 assert after["tgt"]["targets_conf_restored"] is True, after
 PY
+# Keep only the bounded evidence directory so the post-run guard and reviewers
+# can inspect the foreign-state inventory after cleanup. Disposable services,
+# databases, loop images, certificates, and virtual environments are removed.
+rm -rf "${VENV_DIR}" "${DATA_DIR}" "${TLS_PARENT}"
 echo "==> Cleanup complete: zero run-owned resources remain."

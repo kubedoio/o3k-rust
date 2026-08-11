@@ -1081,17 +1081,28 @@ impl SqliteStore {
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
+            #[cfg(unix)]
+            let parent_existed = parent.symlink_metadata().is_ok();
             fs::create_dir_all(parent).map_err(|source| StoreError::CreateDataDirectory {
                 path: parent.to_owned(),
                 source,
             })?;
+            // Restrict the parent directory only when O3K created it. A
+            // pre-existing parent (for example /tmp in tests, or a state
+            // root already provisioned by the installer) may be a shared
+            // system directory or owned by another account; chmod'ing it
+            // would either fail with EPERM or change foreign state. The
+            // database file and its sidecars are still restricted to 0600
+            // below regardless of the parent.
             #[cfg(unix)]
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|source| {
-                StoreError::CreateDataDirectory {
-                    path: parent.to_owned(),
-                    source,
-                }
-            })?;
+            if !parent_existed {
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(
+                    |source| StoreError::CreateDataDirectory {
+                        path: parent.to_owned(),
+                        source,
+                    },
+                )?;
+            }
         }
         #[cfg(unix)]
         if path.exists() {
@@ -7551,6 +7562,41 @@ mod tests {
         let health = store.database_health().await?;
         assert_eq!(health.journal_mode, "memory");
         assert!(health.wal_checkpoint_status.is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_file_restricts_only_created_parent_directories() -> Result<(), Box<dyn Error>>
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent =
+            std::env::temp_dir().join(format!("o3k-store-parent-created-{}", Uuid::now_v7()));
+        let path = parent.join("state.sqlite");
+        let store = SqliteStore::connect_file(&path).await?;
+        drop(store);
+        assert_eq!(
+            fs::symlink_metadata(&parent)?.permissions().mode() & 0o777,
+            0o700,
+            "a parent directory created by connect_file must be restricted to 0700"
+        );
+        // Restrict the parent back to a shared-system-like mode so the
+        // second connect exercises the pre-existing-parent branch.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o1777))?;
+        let reopened = SqliteStore::connect_file(&path).await?;
+        drop(reopened);
+        assert_eq!(
+            fs::symlink_metadata(&parent)?.permissions().mode() & 0o1777,
+            0o1777,
+            "connect_file must not chmod a pre-existing parent directory"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&path)?.permissions().mode() & 0o777,
+            0o600,
+            "the database file must still be restricted to 0600"
+        );
+        fs::remove_dir_all(&parent)?;
         Ok(())
     }
 

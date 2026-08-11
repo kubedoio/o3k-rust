@@ -167,17 +167,36 @@ pub struct ConfigDriveStore {
 impl ConfigDriveStore {
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, ConfigDriveError> {
         let root = root.into();
+        #[cfg(unix)]
+        let root_created;
         match fs::symlink_metadata(&root) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(metadata) if metadata.file_type().is_dir() => {
+                #[cfg(unix)]
+                {
+                    root_created = false;
+                }
+            }
             Ok(_) => return Err(ConfigDriveError::UnownedPath),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 fs::create_dir_all(&root).map_err(ConfigDriveError::Storage)?;
+                #[cfg(unix)]
+                {
+                    root_created = true;
+                }
             }
             Err(error) => return Err(ConfigDriveError::Storage(error)),
         }
+        // Restrict the root only when O3K created it. A pre-existing root
+        // (for example /tmp in tests, or a state root already provisioned by
+        // the installer) may be a shared system directory or owned by another
+        // account; chmod'ing it would either fail with EPERM or change
+        // foreign state. The generated per-instance content below is still
+        // restricted to 0600/0700 regardless of the root.
         #[cfg(unix)]
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
-            .map_err(ConfigDriveError::Storage)?;
+        if root_created {
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+                .map_err(ConfigDriveError::Storage)?;
+        }
         reap_abandoned_publication_artifacts(&root)?;
         Ok(Self { root })
     }
@@ -1164,6 +1183,43 @@ mod tests {
                 .map_err(ConfigDriveError::Storage)?
                 .next()
                 .is_none()
+        );
+        fs::remove_dir_all(parent).map_err(ConfigDriveError::Storage)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_restricts_only_created_root_directories() -> Result<(), ConfigDriveError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = test_root("root-restrict");
+        let root = parent.join("config-drive");
+        let store = ConfigDriveStore::open(&root)?;
+        assert_eq!(
+            fs::symlink_metadata(&root)
+                .map_err(ConfigDriveError::Storage)?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "a config-drive root created by open must be restricted to 0700"
+        );
+        drop(store);
+        // Restrict the parent back to a shared-system-like mode so the second
+        // open exercises the pre-existing-root branch.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o1777))
+            .map_err(ConfigDriveError::Storage)?;
+        let reopened = ConfigDriveStore::open(&root)?;
+        drop(reopened);
+        assert_eq!(
+            fs::symlink_metadata(&root)
+                .map_err(ConfigDriveError::Storage)?
+                .permissions()
+                .mode()
+                & 0o1777,
+            0o1777,
+            "open must not chmod a pre-existing root directory"
         );
         fs::remove_dir_all(parent).map_err(ConfigDriveError::Storage)?;
         Ok(())

@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use async_trait::async_trait;
 use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_compute_agent::{
@@ -1304,10 +1307,9 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         )),
                     ));
                 }
-                if let Err(error) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&console_path)
+                #[cfg(unix)]
+                if let Err(error) =
+                    std::fs::set_permissions(console_root, std::fs::Permissions::from_mode(0o2730))
                 {
                     return definitive_failure(return_after_create_rollback(
                         &self.network,
@@ -1316,7 +1318,45 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         &self.image_materializer,
                         &self.artifact_root,
                         &command.resource_id,
-                        AgentError::Protocol(format!("console log could not be created: {error}")),
+                        AgentError::Protocol(format!(
+                            "console log root permissions could not be set: {error}"
+                        )),
+                    ));
+                }
+                let console_file = match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&console_path)
+                {
+                    Ok(file) => file,
+                    Err(error) => {
+                        return definitive_failure(return_after_create_rollback(
+                            &self.network,
+                            &self.dhcp,
+                            &preparation,
+                            &self.image_materializer,
+                            &self.artifact_root,
+                            &command.resource_id,
+                            AgentError::Protocol(format!(
+                                "console log could not be created: {error}"
+                            )),
+                        ));
+                    }
+                };
+                #[cfg(unix)]
+                if let Err(error) =
+                    console_file.set_permissions(std::fs::Permissions::from_mode(0o660))
+                {
+                    return definitive_failure(return_after_create_rollback(
+                        &self.network,
+                        &self.dhcp,
+                        &preparation,
+                        &self.image_materializer,
+                        &self.artifact_root,
+                        &command.resource_id,
+                        AgentError::Protocol(format!(
+                            "console log permissions could not be set: {error}"
+                        )),
                     ));
                 }
                 if let Err(error) = self
@@ -1366,7 +1406,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     ));
                 }
                 test_fault_pause_ms("after-start", "O3K_TEST_FAULT_PAUSE_AFTER_START_MS");
-                let inspection = match self.adapter.inspect(definition_name).await {
+                let inspection = match self.adapter.inspect(definition_name.clone()).await {
                     Ok(value) => value,
                     Err(error) => {
                         let error = match self
@@ -1413,7 +1453,30 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         error,
                     ));
                 }
-                success("domain created", resource_state(&inspection))
+                let console_log = match self
+                    .adapter
+                    .read_console(
+                        definition_name,
+                        o3k_console::MAX_CONSOLE_BYTES,
+                        command.resource_id.clone(),
+                    )
+                    .await
+                {
+                    Ok(bytes) if !bytes.is_empty() => Some(ConsoleLogResult {
+                        truncated: bytes.len() == o3k_console::MAX_CONSOLE_BYTES,
+                        complete: bytes.len() < o3k_console::MAX_CONSOLE_BYTES,
+                        offset: 0,
+                        bytes,
+                    }),
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::warn!(%error, server_id = %command.resource_id, "initial console capture failed");
+                        None
+                    }
+                };
+                let mut result = success("domain created", resource_state(&inspection))?;
+                result.console_log = console_log;
+                Ok(result)
             }
             Some(proto::command::Action::ConsoleLog(request)) => {
                 if request.offset > 0 {
@@ -1780,9 +1843,22 @@ fn agent_error(_error: o3k_libvirt::LibvirtError) -> AgentError {
 fn read_hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .ok()
-        .map(|value| value.trim().to_owned())
+        .and_then(|value| normalized_hostname(&value))
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "o3k-compute".to_owned())
+}
+
+fn normalized_hostname(value: &str) -> Option<String> {
+    let value =
+        value.trim_matches(|character: char| character == '\0' || character.is_whitespace());
+    if value.is_empty()
+        || value.len() > 253
+        || value.chars().any(|character| character.is_control())
+    {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 fn read_first_ip() -> String {
@@ -1821,6 +1897,16 @@ fn collect_host_connector() -> Result<o3k_provider::ConnectorInfo, AgentError> {
     })
 }
 
+fn iscsiadm_command() -> std::process::Command {
+    if std::env::var_os("O3K_ISCSIADM_SUDO").is_some_and(|value| value == "1") {
+        let mut command = std::process::Command::new("sudo");
+        command.args(["--non-interactive", "--", "/usr/sbin/iscsiadm"]);
+        command
+    } else {
+        std::process::Command::new("iscsiadm")
+    }
+}
+
 /// Logs into the iSCSI target and returns the observed host device path. A
 /// missing iscsiadm is an explicit unsupported-connector failure; a successful
 /// login without an observed device is an unknown outcome. The node record is
@@ -1842,13 +1928,13 @@ fn iscsi_login(
     // The node record must exist before CHAP settings can be applied. Show
     // the node first (os-brick tolerates "no records found") and create the
     // record only when it is absent.
-    let node_show = std::process::Command::new("iscsiadm")
+    let node_show = iscsiadm_command()
         .args(["--mode", "node", "-T", target_iqn, "-p", target_portal])
         .output();
     match node_show {
         Ok(output) if output.status.success() => {}
         Ok(_) | Err(_) => {
-            let node_new = std::process::Command::new("iscsiadm")
+            let node_new = iscsiadm_command()
                 .args([
                     "--mode",
                     "node",
@@ -1880,7 +1966,7 @@ fn iscsi_login(
     if let Some((username, password)) = chap_auth {
         // Apply CHAP to the node session before login. Credentials are passed
         // as arguments and never logged or echoed into errors.
-        let update = std::process::Command::new("iscsiadm")
+        let update = iscsiadm_command()
             .args([
                 "--mode",
                 "node",
@@ -1915,7 +2001,7 @@ fn iscsi_login(
             }
         }
     }
-    let login = std::process::Command::new("iscsiadm")
+    let login = iscsiadm_command()
         .args([
             "--mode",
             "node",
@@ -1937,7 +2023,7 @@ fn iscsi_login(
                 .find_map(|line| line.split("with session").nth(1))
                 .map(|value| value.trim().to_owned());
             for _ in 0..10 {
-                let device = std::process::Command::new("iscsiadm")
+                let device = iscsiadm_command()
                     .args(["--mode", "session", "-P", "3"])
                     .output()
                     .ok()
@@ -2012,7 +2098,7 @@ fn discover_iscsi_device(session_output: &str, target_iqn: &str) -> Option<Strin
 
 fn iscsi_logout(target_iqn: &str, target_portal: &str) -> Result<(), AgentError> {
     let _ = target_portal;
-    let logout = std::process::Command::new("iscsiadm")
+    let logout = iscsiadm_command()
         .args(["--mode", "node", "-T", target_iqn, "--logout"])
         .output();
     match logout {
@@ -2324,6 +2410,16 @@ fn config_from_env() -> Result<AgentConfig, Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_normalization_discards_nul_padding_and_bounds_identity() {
+        assert_eq!(
+            normalized_hostname("compute-agent\0\0\0\n"),
+            Some("compute-agent".to_owned())
+        );
+        assert!(normalized_hostname(&"x".repeat(254)).is_none());
+        assert!(normalized_hostname("compute\0agent").is_none());
+    }
 
     #[test]
     fn test_fault_pause_guard_accepts_only_positive_numeric_durations() {
