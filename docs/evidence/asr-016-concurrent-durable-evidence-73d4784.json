@@ -2,7 +2,7 @@
   "artifact_type": "asr-016-concurrent-durable-evidence",
   "asr": "ASR-016",
   "profile": "native-rust-testlab",
-  "source_commit": "73d47846838e9b10338d8d868dd97a0f2da5abad",
+  "source_commit": "99db021b56904ad20104fdd50123b35ac9764115",
   "host": "nkudo-vm1",
   "kernel": "6.8.0-110-generic",
   "libvirt_version": "10.0.0",
@@ -12,13 +12,13 @@
   "overlap": {
     "scenario": "real hard reboot with eight concurrent public server-show consumers",
     "agent_terminal_observation_and_control_plane_requests_overlapped": true,
-    "race_results_artifact": "target/real-host-workflow-artifacts/asr-016-73d4784/real-host-73d4784/concurrent-race-results.tsv"
+    "race_results_artifact": "target/real-host-workflow-artifacts/asr-016-73d4784/real-host-99db021/concurrent-race-results.tsv"
   },
   "server_id": "a340cf83-1604-59d1-9a5f-7daa8749a9d0",
   "provider_resource_id": "o3k-66a348162124007cff5b",
-  "provider_domain_uuid": "33e3a016-6b6b-439a-9f42-74685f662178",
+  "provider_domain_uuid": "ac7fcdb8-2b62-4414-954a-abcd2e46ba4d",
   "agent_id": "compute-agent",
-  "agent_epoch": "019ff2ec-3860-7bd3-ac69-01a8497ad111",
+  "agent_epoch": "019ff2fa-cd84-75d0-ad4c-b75be90f8e0c",
   "terminal_regressions": 0,
   "stale_sequence_acceptances": 0,
   "stale_epoch_acceptances": 0,
@@ -35,8 +35,8 @@
   "observation_watermark_check": "no stale or regressing observation was accepted; durable state was removed by the verified public cleanup",
   "crash_recovery": {
     "agent_reconnect_exercised": true,
-    "old_epoch": "019ff2eb-88ca-71b3-8216-6194caefd491",
-    "new_epoch": "019ff2ec-3860-7bd3-ac69-01a8497ad111",
+    "old_epoch": "019ff2fa-1c35-7721-8305-f9a6f2899cae",
+    "new_epoch": "019ff2fa-cd84-75d0-ad4c-b75be90f8e0c",
     "same_agent_identity": true,
     "epoch_changed": true,
     "partial_projection_failpoint": false
