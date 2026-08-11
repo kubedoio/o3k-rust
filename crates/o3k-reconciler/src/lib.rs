@@ -955,6 +955,31 @@ where
         provider_id: String,
     ) -> Result<OperationState, ReconcileError> {
         let redrive_operation_id = delete_redrive_operation_id(operation.id);
+        // The fresh command identity must have a durable operation row
+        // BEFORE the provider persists its command record: the agent-command
+        // ledger references `operations(id)`, the evidence consumers resolve
+        // by operation id, and the lifecycle sweep lists lifecycle rows.
+        // Without the row the command insert fails the foreign key, the
+        // dispatch returns Conflict, and the delete op terminalizes Failed
+        // while the instance is still present (real-host finding, run
+        // local-5752). Mirrors the presence-inspection pattern of persisting
+        // the operation intent before dispatch.
+        match self
+            .store
+            .insert_operation(&OperationRecord {
+                id: redrive_operation_id,
+                resource_id: operation.resource_id,
+                kind: "lifecycle:delete".to_owned(),
+                state: OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await
+        {
+            Ok(_) | Err(StoreError::ResourceAlreadyExists) => {}
+            Err(error) => return Err(error.into()),
+        }
         let result = self
             .provider
             .delete_instance(o3k_provider::DeleteInstanceRequest {
@@ -3971,6 +3996,7 @@ mod tests {
     struct AsyncAgentDeleteProvider {
         inner: FakeComputeProvider,
         state: Arc<Mutex<AsyncAgentDeleteState>>,
+        store: Option<Arc<dyn o3k_store::ComputeRepository>>,
     }
 
     struct AsyncAgentDeleteState {
@@ -3981,6 +4007,9 @@ mod tests {
         /// The first (stale) delete dispatch's operation id; its execution
         /// was lost and it never completes.
         original_operation_id: Option<Uuid>,
+        /// The O3K server id captured at create time (the command ledger's
+        /// `resource_id` is the server id, never the provider domain name).
+        resource_id: Option<Uuid>,
         /// The durable state the stale command projects through
         /// `get_operation` — `Accepted` models the lost-update shape and
         /// `UnknownOutcome` models the rejected-observation shape (the
@@ -3996,21 +4025,22 @@ mod tests {
     }
 
     impl AsyncAgentDeleteProvider {
-        fn new() -> Self {
-            Self::with_stale_state(o3k_provider::OperationState::Accepted)
-        }
-
-        fn with_stale_state(stale_original_state: o3k_provider::OperationState) -> Self {
+        fn with_store(
+            store: Arc<dyn o3k_store::ComputeRepository>,
+            stale_original_state: o3k_provider::OperationState,
+        ) -> Self {
             Self {
                 inner: FakeComputeProvider::new(),
                 state: Arc::new(Mutex::new(AsyncAgentDeleteState {
                     stale_original_state,
                     operations: HashMap::new(),
                     original_operation_id: None,
+                    resource_id: None,
                     instance_by_operation: HashMap::new(),
                     polls: HashMap::new(),
                     delete_executions: 0,
                 })),
+                store: Some(store),
             }
         }
 
@@ -4036,6 +4066,10 @@ mod tests {
             &self,
             request: CreateInstanceRequest,
         ) -> Result<o3k_provider::Operation, ProviderError> {
+            self.state
+                .lock()
+                .map_err(|_| ProviderError::Storage)?
+                .resource_id = Some(request.o3k_server_id);
             self.inner.create_instance(request).await
         }
 
@@ -4050,11 +4084,62 @@ mod tests {
             &self,
             request: o3k_provider::DeleteInstanceRequest,
         ) -> Result<o3k_provider::Operation, ProviderError> {
+            {
+                let state = self.state.lock().map_err(|_| ProviderError::Storage)?;
+                if let Some(existing) = state.operations.get(&request.operation_id) {
+                    // Idempotent re-dispatch of the same command identity:
+                    // reuse the recorded operation without a second execution.
+                    return Ok(existing.clone());
+                }
+            }
+            // Mirror `AgentComputeProvider::dispatch_recorded`: persist the
+            // durable command row BEFORE dispatch. The ledger's foreign key
+            // on `operation_id -> operations(id)` is the #575 real-host
+            // constraint: a fresh command identity without a durable
+            // operation row fails the insert and the dispatch reports
+            // Conflict (run local-5752), so the reconciler must create the
+            // re-drive operation row first.
+            if let Some(store) = &self.store {
+                let resource_id = self
+                    .state
+                    .lock()
+                    .map_err(|_| ProviderError::Storage)?
+                    .resource_id
+                    .ok_or(ProviderError::InvalidRequest)?;
+                let record = o3k_store::AgentCommandRecord {
+                    command_id: format!("async-agent-delete-{}", request.operation_id),
+                    idempotency_key: request.idempotency_key.clone(),
+                    operation_id: request.operation_id,
+                    resource_id,
+                    agent_id: "node-a".to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                    payload_fingerprint_sha256: "0".repeat(64),
+                    payload: Vec::new(),
+                    state: o3k_store::AgentCommandState::Pending,
+                    accepted_sequence: 0,
+                    last_sequence: 0,
+                    provider_operation_id: Some(request.operation_id.to_string()),
+                    provider_resource_id: None,
+                };
+                if store.insert_agent_command(&record).await.is_err() {
+                    // The insert failed: either the foreign key rejected a
+                    // command identity without an operation row, or a
+                    // concurrent dispatch inserted first. Only the former is
+                    // a conflict — the latter adopts the surviving row.
+                    let adopted = self
+                        .state
+                        .lock()
+                        .map_err(|_| ProviderError::Storage)?
+                        .operations
+                        .contains_key(&request.operation_id);
+                    if !adopted {
+                        return Err(ProviderError::Conflict);
+                    }
+                }
+            }
             let mut state = self.state.lock().map_err(|_| ProviderError::Storage)?;
             let operation_id = request.operation_id;
             if let Some(existing) = state.operations.get(&operation_id) {
-                // Idempotent re-dispatch of the same command identity: reuse
-                // the recorded operation without a second execution.
                 return Ok(existing.clone());
             }
             let stale = state.original_operation_id.is_none();
@@ -4161,7 +4246,10 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
-        let provider = Arc::new(AsyncAgentDeleteProvider::new());
+        let provider = Arc::new(AsyncAgentDeleteProvider::with_store(
+            store.clone(),
+            o3k_provider::OperationState::Accepted,
+        ));
         let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
 
         let request = request();
@@ -4264,7 +4352,8 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store = Arc::new(o3k_store::testkit::open_file(&path).await?);
-        let provider = Arc::new(AsyncAgentDeleteProvider::with_stale_state(
+        let provider = Arc::new(AsyncAgentDeleteProvider::with_store(
+            store.clone(),
             o3k_provider::OperationState::UnknownOutcome,
         ));
         let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
