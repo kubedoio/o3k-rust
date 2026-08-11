@@ -542,7 +542,7 @@ mod tests {
             error_message: None,
         };
         store
-            .insert_resource_and_operation(&resource, &operation)
+            .insert_resource_and_operation(&resource, &operation, None)
             .await?;
         Ok((store, transfer(operation.id, resource.id)))
     }
@@ -687,7 +687,7 @@ mod tests {
                     error_message: None,
                 };
                 store
-                    .insert_resource_and_operation(&resource, &operation)
+                    .insert_resource_and_operation(&resource, &operation, None)
                     .await?;
                 (store, transfer(operation.id, resource.id))
             };
@@ -769,7 +769,7 @@ mod tests {
             error_message: None,
         };
         store
-            .insert_resource_and_operation(&resource, &failed)
+            .insert_resource_and_operation(&resource, &failed, None)
             .await?;
         store.insert_operation(&running).await?;
         store

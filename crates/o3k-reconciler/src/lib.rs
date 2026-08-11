@@ -375,7 +375,11 @@ where
             error_message: None,
         };
         self.store
-            .insert_resource_and_operation(&resource, &operation)
+            .insert_resource_and_operation(
+                &resource,
+                &operation,
+                request.placement_allocation_id.as_deref(),
+            )
             .await?;
         self.event(
             request.operation_id,

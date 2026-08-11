@@ -30,6 +30,30 @@ pub mod attachment;
 
 pub use attachment::AttachmentOrchestrator;
 
+/// Test-only fault pause (issue #87): sleeps the configured duration when the
+/// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
+/// production configuration never sets these variables.
+fn test_fault_pause_ms(name: &str, env_var: &str) {
+    let Some(ms) = test_fault_pause_ms_value(std::env::var(env_var).ok()) else {
+        return;
+    };
+    tracing::info!(pause_ms = ms, "test-only fault pause {} enabled", name);
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// Parse/guard half of `test_fault_pause_ms`; split out so the no-op
+/// conditions can be unit-tested without sleeping.
+fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
+    let raw = raw?;
+    let Ok(ms) = raw.parse::<u64>() else {
+        return None;
+    };
+    if ms == 0 {
+        return None;
+    }
+    Some(ms)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Flavor {
     pub id: Uuid,
@@ -1260,6 +1284,14 @@ impl ComputeService {
             ..request
         };
         let id = request.o3k_server_id;
+        // ASR-018 crash-window failpoint: the placement allocation is already
+        // durable; the server/resource/create-operation intent is not yet
+        // persisted. Killed here, restart startup reconciliation must release
+        // the orphan allocation and the retried create must stay idempotent.
+        test_fault_pause_ms(
+            "after-placement-commit",
+            "O3K_TEST_FAULT_PAUSE_AFTER_PLACEMENT_COMMIT_MS",
+        );
         match self.journal.begin_create(&project_id, &request).await {
             Ok(_) => {}
             Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
@@ -1343,6 +1375,15 @@ impl ComputeService {
                     }
                 }
                 return self.show_server(&project_id, ServerId::from_uuid(id)).await;
+            }
+            // The placement allocation referenced by this create was
+            // reconciled away before the consumer intent became durable
+            // (startup orphan reconciliation racing an in-flight create).
+            // Fail closed: no resource may outlive its allocation. The
+            // caller retries; the deterministic allocation identity keeps
+            // the retry idempotent.
+            Err(ReconcileError::Store(StoreError::PlacementAllocationNotFound)) => {
+                return Err(ComputeError::Conflict);
             }
             Err(error) => return Err(ComputeError::Reconcile(error)),
         }
@@ -2617,11 +2658,13 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file; the decorated create
+        // intent references an allocation that must already be committed in
+        // the same store (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement = o3k_placement::PlacementLedger::open(&placement_path, placement_repository)
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
@@ -3150,11 +3193,13 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file; the decorated create
+        // intent references an allocation that must already be committed in
+        // the same store (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement =
             o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
         placement
@@ -3199,6 +3244,16 @@ mod tests {
             config_drive: None,
             idempotency_key: "agent-failed".to_owned(),
         };
+        let generation = placement.provider("node-a").await?.generation;
+        placement
+            .allocate(
+                "node-a",
+                "alloc-1",
+                &request.o3k_server_id.to_string(),
+                std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
+                generation,
+            )
+            .await?;
         service
             .journal
             .begin_create("project-a", &request)
@@ -3225,16 +3280,6 @@ mod tests {
         service
             .store
             .attach_server_keypair(request.o3k_server_id, keypair.id)
-            .await?;
-        let generation = placement.provider("node-a").await?.generation;
-        placement
-            .allocate(
-                "node-a",
-                "alloc-1",
-                &request.o3k_server_id.to_string(),
-                std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
-                generation,
-            )
             .await?;
 
         let update = AgentOperationUpdate {
@@ -3319,11 +3364,13 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file; the decorated create
+        // intent references an allocation that must already be committed in
+        // the same store (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement =
             o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
         placement
@@ -3388,15 +3435,6 @@ mod tests {
             config_drive: None,
             idempotency_key: format!("{label}-request"),
         };
-        service
-            .journal
-            .begin_create("project-a", &request)
-            .await
-            .map_err(ComputeError::Reconcile)?;
-        service
-            .store
-            .attach_server_keypair(request.o3k_server_id, keypair.id)
-            .await?;
         let generation = placement.provider("node-a").await?.generation;
         placement
             .allocate(
@@ -3406,6 +3444,15 @@ mod tests {
                 std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
                 generation,
             )
+            .await?;
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .attach_server_keypair(request.o3k_server_id, keypair.id)
             .await?;
         // The caller keeps the injected timeout active, so the synchronous
         // pass leaves the create operation unknown with no resource identity.
@@ -3660,7 +3707,9 @@ mod tests {
     /// operation is `Running` with no provider operation identity (the
     /// Pending→Running transition in `reconcile_once` persisted, then o3kd
     /// died before the dispatch reached the provider), and — unless a command
-    /// record is inserted by the caller — no agent command row exists.
+    /// record is inserted by the caller — no agent command row exists. The
+    /// placement allocation the decorated request references is committed
+    /// first, mirroring the scheduler-decorated create ordering (ASR-018).
     #[allow(clippy::type_complexity)]
     async fn crash_before_dispatch_fixture(
         label: &str,
@@ -3678,8 +3727,9 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let raw_store = o3k_store::testkit::open_file(&path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_store: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let service = ComputeService::new(store.clone(), provider);
         let request = CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
@@ -3699,6 +3749,38 @@ mod tests {
             config_drive: None,
             idempotency_key: format!("{label}-request"),
         };
+        placement_store
+            .register_provider(
+                "node-a",
+                &[o3k_store::PlacementInventoryRecord {
+                    resource_class: "VCPU".to_owned(),
+                    total: 8,
+                    reserved: 0,
+                    allocation_ratio: 1.0,
+                    used: 0,
+                }],
+            )
+            .await?;
+        let generation = placement_store
+            .get_provider("node-a")
+            .await?
+            .ok_or(StoreError::PlacementProviderNotFound)?
+            .generation;
+        placement_store
+            .commit_allocation(
+                "node-a",
+                generation,
+                &o3k_store::PlacementAllocationRecord {
+                    id: "alloc-1".to_owned(),
+                    provider_id: "node-a".to_owned(),
+                    consumer_id: request.o3k_server_id.to_string(),
+                    resources: vec![o3k_store::PlacementResourceRecord {
+                        resource_class: "VCPU".to_owned(),
+                        amount: 1,
+                    }],
+                },
+            )
+            .await?;
         service
             .journal
             .begin_create("project-a", &request)
@@ -3948,7 +4030,7 @@ mod tests {
             error_message: None,
         };
         store
-            .insert_resource_and_operation(&running_resource, &running_operation)
+            .insert_resource_and_operation(&running_resource, &running_operation, None)
             .await?;
         for transfer in [
             artifact_transfer(
@@ -4464,8 +4546,10 @@ mod tests {
             key_name: None,
             keypair_id: None,
             network_ids: Vec::new(),
-            placement_provider_id: Some("node-a".to_owned()),
-            placement_allocation_id: Some("alloc-1".to_owned()),
+            // No scheduler/placement in this fixture: the residue is the
+            // crash-before-dispatch shape without a placement binding.
+            placement_provider_id: None,
+            placement_allocation_id: None,
             config_drive: None,
             idempotency_key: "empty-registry-request".to_owned(),
         };
@@ -4641,11 +4725,13 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file; the decorated create
+        // intent references an allocation that must already be committed in
+        // the same store (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement =
             o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
         placement
@@ -4710,15 +4796,6 @@ mod tests {
             config_drive: None,
             idempotency_key: format!("{label}-request"),
         };
-        service
-            .journal
-            .begin_create("project-a", &request)
-            .await
-            .map_err(ComputeError::Reconcile)?;
-        service
-            .store
-            .attach_server_keypair(request.o3k_server_id, keypair.id)
-            .await?;
         let generation = placement.provider("node-a").await?.generation;
         placement
             .allocate(
@@ -4728,6 +4805,15 @@ mod tests {
                 std::collections::BTreeMap::from([(o3k_placement::VCPU.to_owned(), 1_u64)]),
                 generation,
             )
+            .await?;
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .attach_server_keypair(request.o3k_server_id, keypair.id)
             .await?;
         // The stranded terminal shape: Failed create with no provider
         // operation identity (the dispatch never reached an agent), resource
@@ -5503,9 +5589,16 @@ mod tests {
     -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-compute-{}", Uuid::now_v7()));
-        let placement_store = o3k_store::testkit::open_memory().await?;
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-scheduler-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+            Arc::new(raw_store.clone());
         let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
@@ -5544,9 +5637,11 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = service("scheduler")
-            .await?
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service = ComputeService::new(
+            Arc::new(raw_store) as Arc<dyn ComputeRepository>,
+            Arc::new(FakeComputeProvider::new()),
+        )
+        .with_scheduler(Scheduler::new(placement.clone()));
         let flavor = service.flavors()[0].id;
         let server = service
             .create_server(
@@ -5608,9 +5703,16 @@ mod tests {
             "/tmp/o3k-placement-duplicate-name-{}",
             Uuid::now_v7()
         ));
-        let placement_store = o3k_store::testkit::open_memory().await?;
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-duplicate-name-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+            Arc::new(raw_store.clone());
         let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
@@ -5649,9 +5751,11 @@ mod tests {
             )
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = service("duplicate-name")
-            .await?
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service = ComputeService::new(
+            Arc::new(raw_store) as Arc<dyn ComputeRepository>,
+            Arc::new(FakeComputeProvider::new()),
+        )
+        .with_scheduler(Scheduler::new(placement.clone()));
         let flavor = service.flavors()[0].id;
         service
             .create_server(
@@ -5710,9 +5814,16 @@ mod tests {
     async fn create_race_releases_placement_not_owned_by_winner() -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-create-race-{}", Uuid::now_v7()));
-        let placement_store = o3k_store::testkit::open_memory().await?;
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-create-race-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+            Arc::new(raw_store.clone());
         let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
@@ -5755,9 +5866,11 @@ mod tests {
             .register_provider("node-b", inventory(3))
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
-        let service = service("create-race")
-            .await?
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service = ComputeService::new(
+            Arc::new(raw_store) as Arc<dyn ComputeRepository>,
+            Arc::new(FakeComputeProvider::new()),
+        )
+        .with_scheduler(Scheduler::new(placement.clone()));
         let flavor = service.flavors()[0].id;
         let left = service.create_server(
             "project-a",
@@ -6153,11 +6266,18 @@ mod tests {
             "/tmp/o3k-placement-delete-release-{}",
             Uuid::now_v7()
         ));
-        let placement_store = o3k_store::testkit::open_memory().await?;
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-delete-release-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
         let fail_releases = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
             Arc::new(FailingReleaseRepository {
-                inner: placement_store,
+                inner: raw_store.clone(),
                 fail_releases: fail_releases.clone(),
             });
         let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
@@ -6201,9 +6321,11 @@ mod tests {
         // The compute service is constructed once; the scheduler reaches the
         // repository through the failing wrapper, so the release failure is
         // injected before the first delete and the retry succeeds.
-        let service = service("delete-release")
-            .await?
-            .with_scheduler(Scheduler::new(placement.clone()));
+        let service = ComputeService::new(
+            Arc::new(raw_store) as Arc<dyn ComputeRepository>,
+            Arc::new(FakeComputeProvider::new()),
+        )
+        .with_scheduler(Scheduler::new(placement.clone()));
         let server = service
             .create_server(
                 "project-a",
@@ -6265,9 +6387,16 @@ mod tests {
     -> Result<(), ComputeError> {
         let placement_root =
             PathBuf::from(format!("/tmp/o3k-placement-registry-{}", Uuid::now_v7()));
-        let placement_store = o3k_store::testkit::open_memory().await?;
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-registry-gate-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
         let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+            Arc::new(raw_store.clone());
         let placement = o3k_placement::PlacementLedger::open(&placement_root, placement_repository)
             .await
             .map_err(|error| ComputeError::Scheduler(SchedulerError::Placement(error)))?;
@@ -6348,10 +6477,12 @@ mod tests {
             ))
             .await;
 
-        let service = service("registry-gate")
-            .await?
-            .with_scheduler(Scheduler::new(placement.clone()))
-            .with_agent_registry(Arc::new(registry));
+        let service = ComputeService::new(
+            Arc::new(raw_store) as Arc<dyn ComputeRepository>,
+            Arc::new(FakeComputeProvider::new()),
+        )
+        .with_scheduler(Scheduler::new(placement.clone()))
+        .with_agent_registry(Arc::new(registry));
         let server = service
             .create_server(
                 "project-a",
@@ -6419,12 +6550,12 @@ mod tests {
             std::env::temp_dir().join(format!("o3k-compute-projid-pl-{}", Uuid::now_v7()));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
         let provider = Arc::new(FakeComputeProvider::new());
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement =
             o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
         placement
@@ -6524,12 +6655,12 @@ mod tests {
             std::env::temp_dir().join(format!("o3k-compute-isolation-pl-{}", Uuid::now_v7()));
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
-        let store: Arc<dyn ComputeRepository> =
-            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        // The production composition keeps the compute store and the
+        // placement ledger on one durable SQLite file (ASR-018 ordering).
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
         let provider = Arc::new(FakeComputeProvider::new());
-        let placement_store = o3k_store::testkit::open_memory().await?;
-        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
-            Arc::new(placement_store);
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
         let placement =
             o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
         placement
