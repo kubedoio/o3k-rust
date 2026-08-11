@@ -1,0 +1,14 @@
+source_commit=a2ddaa7b2275d226e83690a83db7b4c276024a22
+profile=native-rust-testlab
+redacted=true
+
+test tests::terminal_replay_after_reregistration_converges_command_when_operation_is_terminal ... ok
+test tests::agent_evidence_from_dead_epoch_is_rejected_after_reregistration ... ok
+test tests::current_epoch_lease_serializes_projection_with_reregistration ... ok
+test tests::current_epoch_lease_blocks_replacement_registration ... ok
+test provider::tests::backup_command_projection_fences_queued_replaced_epoch ... ok
+test provider::tests::backup_command_projection_rejects_agent_reference_identity_drift ... ok
+test tests::agent_update_rejects_agent_namespace_provider_identity_drift ... ok
+test tests::agent_command_identity_is_idempotent_and_survives_restart ... ok
+
+verdict=passed

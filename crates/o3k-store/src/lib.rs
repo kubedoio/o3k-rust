@@ -3,6 +3,7 @@ use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -1034,6 +1035,7 @@ pub mod testkit {
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    agent_command_projection_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SqliteStore {
@@ -1066,7 +1068,10 @@ impl SqliteStore {
             .await
             .map_err(StoreError::Migration)?;
 
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            agent_command_projection_lock: Arc::new(tokio::sync::Mutex::new(())),
+        };
         store.verify_integrity().await?;
         Ok(store)
     }
@@ -4042,6 +4047,7 @@ impl DurableStore for SqliteStore {
         provider_operation_id: Option<&str>,
         provider_resource_id: Option<&str>,
     ) -> Result<AgentCommandRecord, StoreError> {
+        let _projection_guard = self.agent_command_projection_lock.lock().await;
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let row = sqlx::query("SELECT command_id, idempotency_key, operation_id, resource_id, agent_id, agent_epoch, payload_fingerprint_sha256, payload, state, accepted_sequence, last_sequence, provider_operation_id, provider_resource_id FROM agent_commands WHERE command_id = ?")
             .bind(command_id)
@@ -4067,6 +4073,40 @@ impl DurableStore for SqliteStore {
             }
             return Err(StoreError::Corrupt(
                 "conflicting agent command evidence at one sequence".to_owned(),
+            ));
+        }
+        if matches!(
+            current.state,
+            AgentCommandState::Succeeded | AgentCommandState::Failed
+        ) && current.state != state
+        {
+            return Err(StoreError::Corrupt(
+                "terminal agent command state cannot regress".to_owned(),
+            ));
+        }
+        if current.state == AgentCommandState::UnknownOutcome
+            && matches!(
+                state,
+                AgentCommandState::Accepted | AgentCommandState::Running
+            )
+        {
+            return Err(StoreError::Corrupt(
+                "unknown-outcome agent command cannot regress to in-flight".to_owned(),
+            ));
+        }
+        if provider_operation_id.is_some_and(|value| {
+            current
+                .provider_operation_id
+                .as_deref()
+                .is_some_and(|existing| existing != value)
+        }) || provider_resource_id.is_some_and(|value| {
+            current
+                .provider_resource_id
+                .as_deref()
+                .is_some_and(|existing| existing != value)
+        }) {
+            return Err(StoreError::Corrupt(
+                "agent command provider identity conflicts with durable state".to_owned(),
             ));
         }
         let accepted_sequence = accepted_sequence.max(current.accepted_sequence);
@@ -7373,6 +7413,40 @@ mod tests {
                 Some("provider-op-1")
             );
             assert_eq!(updated.provider_resource_id.as_deref(), Some("domain-1"));
+            let concurrent_command = AgentCommandRecord {
+                command_id: "command-concurrent".to_owned(),
+                idempotency_key: "create-concurrent".to_owned(),
+                ..command.clone()
+            };
+            store.insert_agent_command(&concurrent_command).await?;
+            let left_store = store.clone();
+            let right_store = store.clone();
+            let left = tokio::spawn(async move {
+                left_store
+                    .update_agent_command(
+                        "command-concurrent",
+                        AgentCommandState::Accepted,
+                        1,
+                        1,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            let right = tokio::spawn(async move {
+                right_store
+                    .update_agent_command(
+                        "command-concurrent",
+                        AgentCommandState::Accepted,
+                        1,
+                        1,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+            assert_eq!(left.await??.state, AgentCommandState::Accepted);
+            assert_eq!(right.await??.state, AgentCommandState::Accepted);
             assert_eq!(store.increment_operation_retry(operation.id).await?, 1);
             assert_eq!(store.increment_operation_retry(operation.id).await?, 2);
             assert_eq!(
@@ -7402,11 +7476,72 @@ mod tests {
                     .await,
                 Err(StoreError::Corrupt(_))
             ));
+            let unknown = store
+                .update_agent_command(
+                    &command.command_id,
+                    AgentCommandState::UnknownOutcome,
+                    1,
+                    2,
+                    Some("provider-op-1"),
+                    Some("domain-1"),
+                )
+                .await?;
+            assert_eq!(unknown.state, AgentCommandState::UnknownOutcome);
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Running,
+                        1,
+                        3,
+                        Some("provider-op-1"),
+                        Some("domain-1"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
+            let terminal = store
+                .update_agent_command(
+                    &command.command_id,
+                    AgentCommandState::Succeeded,
+                    1,
+                    3,
+                    Some("provider-op-1"),
+                    Some("domain-1"),
+                )
+                .await?;
+            assert_eq!(terminal.state, AgentCommandState::Succeeded);
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Running,
+                        1,
+                        4,
+                        Some("provider-op-1"),
+                        Some("domain-1"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Succeeded,
+                        1,
+                        5,
+                        Some("provider-op-1"),
+                        Some("domain-2"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
         }
         let reopened = SqliteStore::connect_file(&path).await?;
         assert_eq!(
             reopened.get_agent_command(&command.command_id).await?.state,
-            AgentCommandState::Accepted
+            AgentCommandState::Succeeded
         );
         assert_eq!(reopened.increment_operation_retry(operation.id).await?, 3);
         fs::remove_file(path)?;

@@ -316,6 +316,7 @@ struct AgentConnection {
 #[derive(Clone)]
 pub struct NodeRegistry {
     nodes: Arc<RwLock<HashMap<String, NodeSnapshot>>>,
+    epoch_gates: Arc<RwLock<HashMap<String, Arc<RwLock<()>>>>>,
     authorized_agents: Arc<RwLock<HashMap<String, [u8; 32]>>>,
     connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
     artifact_transfer_slots: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
@@ -327,11 +328,18 @@ pub struct NodeRegistry {
     store: Option<Arc<dyn o3k_store::ComputeRepository>>,
 }
 
+struct NodeEpochLease {
+    _epoch: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl o3k_provider::AgentEpochLease for NodeEpochLease {}
+
 impl Default for NodeRegistry {
     fn default() -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
+            epoch_gates: Arc::new(RwLock::new(HashMap::new())),
             authorized_agents: Arc::new(RwLock::new(HashMap::new())),
             connections: Arc::new(RwLock::new(HashMap::new())),
             artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
@@ -342,6 +350,18 @@ impl Default for NodeRegistry {
 }
 
 impl NodeRegistry {
+    async fn epoch_gate(&self, agent_id: &str) -> Arc<RwLock<()>> {
+        if let Some(gate) = self.epoch_gates.read().await.get(agent_id).cloned() {
+            return gate;
+        }
+        self.epoch_gates
+            .write()
+            .await
+            .entry(agent_id.to_owned())
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
     pub async fn snapshot(&self, agent_id: &str) -> Option<NodeSnapshot> {
         self.nodes.read().await.get(agent_id).cloned()
     }
@@ -822,6 +842,7 @@ impl NodeRegistry {
         request: &proto::RegisterRequest,
     ) -> Result<proto::RegisterResponse, Status> {
         validate_register(request).map_err(|status| *status)?;
+        let _epoch_change = self.epoch_gate(&request.agent_id).await.write_owned().await;
         let now = SystemTime::now();
         let mut nodes = self.nodes.write().await;
         let desired = nodes
@@ -993,6 +1014,20 @@ impl o3k_provider::AgentNodeRegistry for NodeRegistry {
 
     async fn snapshot(&self, agent_id: &str) -> Option<o3k_provider::AgentNodeSnapshot> {
         self.nodes.read().await.get(agent_id).map(agent_snapshot)
+    }
+
+    async fn lease_current_epoch(
+        &self,
+        agent_id: &str,
+        agent_epoch: &str,
+    ) -> Option<Box<dyn o3k_provider::AgentEpochLease>> {
+        let epoch = self.epoch_gate(agent_id).await.read_owned().await;
+        self.nodes
+            .read()
+            .await
+            .get(agent_id)
+            .is_some_and(|node| node.agent_epoch == agent_epoch)
+            .then(|| Box::new(NodeEpochLease { _epoch: epoch }) as Box<_>)
     }
 
     fn subscribe_events(&self) -> broadcast::Receiver<o3k_provider::AgentEvent> {
@@ -4516,6 +4551,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_epoch_lease_blocks_replacement_registration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        registry.register(&register("node", "epoch-1")).await?;
+        let lease =
+            o3k_provider::AgentNodeRegistry::lease_current_epoch(&registry, "node", "epoch-1")
+                .await
+                .ok_or("current epoch lease")?;
+
+        let replacement_registry = registry.clone();
+        let mut replacement = tokio::spawn(async move {
+            replacement_registry
+                .register(&register("node", "epoch-2"))
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut replacement)
+                .await
+                .is_err(),
+            "replacement epoch became current while the E1 lease was held"
+        );
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), replacement).await???;
+        assert_eq!(
+            registry
+                .snapshot("node")
+                .await
+                .map(|node| node.agent_epoch)
+                .as_deref(),
+            Some("epoch-2")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn duplicate_or_fenced_heartbeat_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let registry = NodeRegistry::default();
         registry.register(&register("node", "epoch")).await?;
@@ -6492,11 +6562,13 @@ mod tests {
         apply_agent_provider_event(
             &state,
             None,
+            None,
             o3k_provider::AgentEvent::Operation(update.clone()),
         )
         .await;
         apply_agent_provider_event(
             &state,
+            None,
             None,
             o3k_provider::AgentEvent::Observation(Box::new(AgentObservation {
                 agent_id: "node-a".to_owned(),
@@ -6539,6 +6611,7 @@ mod tests {
         );
         apply_agent_provider_event(
             &state,
+            None,
             None,
             o3k_provider::AgentEvent::Error(o3k_provider::AgentProtocolError {
                 category: Some(AgentErrorCategory::Retryable),
@@ -6615,6 +6688,7 @@ mod tests {
         apply_agent_provider_event(
             &state,
             Some(store.as_ref()),
+            None,
             o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "command-1".to_owned(),
@@ -6636,6 +6710,7 @@ mod tests {
         apply_agent_provider_event(
             &state,
             Some(store.as_ref()),
+            None,
             o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "different-command".to_owned(),

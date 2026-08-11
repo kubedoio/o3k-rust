@@ -10,8 +10,8 @@ use o3k_provider::{
     OperationState as ProviderOperationState, ProviderError,
 };
 use o3k_store::{
-    DurableStore, ObservationUpdate, OperationRecord, OperationState, ProviderReference,
-    ResourceRecord, StoreError, server_state_to_storage,
+    AgentCommandRecord, AgentCommandState, DurableStore, ObservationUpdate, OperationRecord,
+    OperationState, ProviderReference, ResourceRecord, StoreError, server_state_to_storage,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -123,6 +123,11 @@ enum EvidenceDisposition {
     Stale,
 }
 
+struct AgentEvidencePermit {
+    disposition: EvidenceDisposition,
+    _epoch_lease: Option<Box<dyn o3k_provider::AgentEpochLease>>,
+}
+
 pub struct OperationJournal<S: ?Sized, P: ?Sized> {
     store: Arc<S>,
     provider: Arc<P>,
@@ -190,7 +195,7 @@ where
         sequence: u64,
         state: AgentOperationState,
         provider_resource_id: &str,
-    ) -> Result<EvidenceDisposition, ReconcileError> {
+    ) -> Result<AgentEvidencePermit, ReconcileError> {
         if agent_id.trim().is_empty()
             || agent_epoch.trim().is_empty()
             || sequence == 0
@@ -207,15 +212,16 @@ where
         // epoch) re-anchor the operation while still rejecting evidence from
         // replaced connections. Fail closed when the agent is not registered:
         // an unregistered agent has no current epoch at all.
-        if let Some(registry) = &self.agent_registry {
-            match registry.snapshot(agent_id).await {
-                Some(node) if node.agent_epoch != agent_epoch => {
-                    return Err(ReconcileError::StaleAgentEvidence);
-                }
-                None => return Err(ReconcileError::StaleAgentEvidence),
-                Some(_) => {}
-            }
-        }
+        let epoch_lease = if let Some(registry) = &self.agent_registry {
+            Some(
+                registry
+                    .lease_current_epoch(agent_id, agent_epoch)
+                    .await
+                    .ok_or(ReconcileError::StaleAgentEvidence)?,
+            )
+        } else {
+            None
+        };
         let mut evidence = self
             .agent_evidence
             .lock()
@@ -227,7 +233,7 @@ where
             state,
             provider_resource_id: provider_resource_id.to_owned(),
         };
-        match evidence.get(&operation_id) {
+        let disposition = match evidence.get(&operation_id) {
             None => {
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
@@ -242,6 +248,10 @@ where
             {
                 Err(ReconcileError::InvalidIntent)
             }
+            Some(previous) if previous.agent_epoch != agent_epoch => {
+                evidence.insert(operation_id, next);
+                Ok(EvidenceDisposition::New)
+            }
             Some(previous) if sequence < previous.sequence => Ok(EvidenceDisposition::Stale),
             Some(previous) if sequence == previous.sequence => {
                 if previous.state == state && previous.provider_resource_id == provider_resource_id
@@ -255,7 +265,11 @@ where
                 evidence.insert(operation_id, next);
                 Ok(EvidenceDisposition::New)
             }
-        }
+        }?;
+        Ok(AgentEvidencePermit {
+            disposition,
+            _epoch_lease: epoch_lease,
+        })
     }
 
     /// Observations are terminal evidence for a durable command, not a free
@@ -267,7 +281,7 @@ where
         agent_id: &str,
         agent_epoch: &str,
         sequence: u64,
-    ) -> Result<EvidenceDisposition, ReconcileError> {
+    ) -> Result<AgentEvidencePermit, ReconcileError> {
         if agent_id.trim().is_empty()
             || agent_epoch.trim().is_empty()
             || sequence == 0
@@ -276,18 +290,21 @@ where
         {
             return Err(ReconcileError::InvalidIntent);
         }
-        if let Some(registry) = &self.agent_registry {
-            match registry.snapshot(agent_id).await {
-                Some(node) if node.agent_epoch == agent_epoch => {}
-                Some(_) => return Err(ReconcileError::StaleAgentEvidence),
-                None => return Err(ReconcileError::StaleAgentEvidence),
-            }
-        }
+        let epoch_lease = if let Some(registry) = &self.agent_registry {
+            Some(
+                registry
+                    .lease_current_epoch(agent_id, agent_epoch)
+                    .await
+                    .ok_or(ReconcileError::StaleAgentEvidence)?,
+            )
+        } else {
+            None
+        };
         let mut evidence = self
             .observation_evidence
             .lock()
             .map_err(|_| ReconcileError::InvalidIntent)?;
-        match evidence.get(&operation_id) {
+        let disposition = match evidence.get(&operation_id) {
             None => {
                 evidence.insert(
                     operation_id,
@@ -318,7 +335,11 @@ where
             }
             Some(previous) if sequence < previous.sequence => Ok(EvidenceDisposition::Stale),
             Some(_) => Ok(EvidenceDisposition::Duplicate),
-        }
+        }?;
+        Ok(AgentEvidencePermit {
+            disposition,
+            _epoch_lease: epoch_lease,
+        })
     }
 
     pub fn events(&self) -> Vec<JournalEvent> {
@@ -407,7 +428,46 @@ where
         if command.agent_id != update.agent_id || command.resource_id != update.resource_id {
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self
+        let (command_state, durable_state) = match update.state {
+            AgentOperationState::Accepted => (AgentCommandState::Accepted, OperationState::Running),
+            AgentOperationState::Running => (AgentCommandState::Running, OperationState::Running),
+            AgentOperationState::Succeeded => {
+                (AgentCommandState::Succeeded, OperationState::Succeeded)
+            }
+            AgentOperationState::Failed => (AgentCommandState::Failed, OperationState::Failed),
+            AgentOperationState::UnknownOutcome => (
+                AgentCommandState::UnknownOutcome,
+                OperationState::UnknownOutcome,
+            ),
+        };
+        if operation.state == OperationState::UnknownOutcome
+            && matches!(durable_state, OperationState::Running)
+            || command.state == AgentCommandState::UnknownOutcome
+                && matches!(
+                    command_state,
+                    AgentCommandState::Accepted | AgentCommandState::Running
+                )
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let error_category = if durable_state == OperationState::Failed {
+            Some(agent_error_category(update.error_category)?)
+        } else {
+            None
+        };
+        let error_message = (durable_state == OperationState::Failed).then(|| {
+            bounded_agent_failure_message(update.redacted_message.as_deref().unwrap_or(""))
+        });
+        if matches!(
+            operation.state,
+            OperationState::Succeeded | OperationState::Failed
+        ) && operation.state != durable_state
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        self.validate_agent_provider_identity(&command, update)
+            .await?;
+        let evidence_permit = self
             .fence_agent_evidence(
                 update.operation_id,
                 &update.agent_id,
@@ -417,38 +477,35 @@ where
                 update.provider_resource_id.as_deref().unwrap_or(""),
             )
             .await?;
-        if disposition != EvidenceDisposition::New {
+        if evidence_permit.disposition == EvidenceDisposition::Stale {
             return Ok(operation.state);
         }
+        // Persist the agent-reported, contract-redacted failure reason so the
+        // durable record carries an actionable cause; it is bounded and
+        // sanitized before storage. Unknown-outcome and non-failure updates
+        // keep no message.
+        // The epoch-fenced journal is the authoritative durable command
+        // projector (the provider adapter keeps only a current-epoch,
+        // identity-checked backup for broadcast lag).
+        // A terminal observation can win the event-consumer race and close
+        // the operation before this update arrives, but this write must still
+        // close the matching command row (ASR-015 E1 -> E2 crash recovery).
+        self.store
+            .update_agent_command(
+                &command.command_id,
+                command_state,
+                command.accepted_sequence,
+                update.operation_sequence,
+                command.provider_operation_id.as_deref(),
+                update.provider_resource_id.as_deref(),
+            )
+            .await?;
         if matches!(
             operation.state,
             OperationState::Succeeded | OperationState::Failed
         ) {
             return Ok(operation.state);
         }
-        let durable_state = match update.state {
-            AgentOperationState::Accepted | AgentOperationState::Running => OperationState::Running,
-            AgentOperationState::Succeeded => OperationState::Succeeded,
-            AgentOperationState::Failed => OperationState::Failed,
-            AgentOperationState::UnknownOutcome => OperationState::UnknownOutcome,
-        };
-        if operation.state == OperationState::UnknownOutcome
-            && matches!(durable_state, OperationState::Running)
-        {
-            return Err(ReconcileError::InvalidIntent);
-        }
-        let error_category = if durable_state == OperationState::Failed {
-            Some(agent_error_category(update.error_category)?)
-        } else {
-            None
-        };
-        // Persist the agent-reported, contract-redacted failure reason so the
-        // durable record carries an actionable cause; it is bounded and
-        // sanitized before storage. Unknown-outcome and non-failure updates
-        // keep no message.
-        let error_message = (durable_state == OperationState::Failed).then(|| {
-            bounded_agent_failure_message(update.redacted_message.as_deref().unwrap_or(""))
-        });
         let provider_operation_id = operation.provider_operation_id.as_deref();
         self.store
             .update_operation(
@@ -515,17 +572,58 @@ where
                 )
                 .await?;
         }
-        self.event(
-            update.operation_id,
-            update.resource_id,
-            match durable_state {
-                OperationState::Succeeded => JournalEventKind::Succeeded,
-                OperationState::Failed => JournalEventKind::Failed,
-                OperationState::UnknownOutcome => JournalEventKind::UnknownObserved,
-                _ => JournalEventKind::ProviderStarted,
-            },
-        );
+        if evidence_permit.disposition == EvidenceDisposition::New {
+            self.event(
+                update.operation_id,
+                update.resource_id,
+                match durable_state {
+                    OperationState::Succeeded => JournalEventKind::Succeeded,
+                    OperationState::Failed => JournalEventKind::Failed,
+                    OperationState::UnknownOutcome => JournalEventKind::UnknownObserved,
+                    _ => JournalEventKind::ProviderStarted,
+                },
+            );
+        }
         Ok(durable_state)
+    }
+
+    async fn validate_agent_provider_identity(
+        &self,
+        command: &AgentCommandRecord,
+        update: &AgentOperationUpdate,
+    ) -> Result<(), ReconcileError> {
+        let Some(incoming) = update.provider_resource_id.as_deref() else {
+            return Ok(());
+        };
+        if command
+            .provider_resource_id
+            .as_deref()
+            .is_some_and(|existing| existing != incoming)
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let resource = self.store.get_resource(update.resource_id).await?;
+        if resource
+            .provider_id
+            .as_deref()
+            .is_some_and(|existing| existing != incoming)
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        for provider_name in ["compute-agent", "agent"] {
+            match self
+                .store
+                .get_provider_reference(update.resource_id, provider_name)
+                .await
+            {
+                Ok(reference) if reference.provider_resource_id != incoming => {
+                    return Err(ReconcileError::InvalidIntent);
+                }
+                Ok(_) | Err(StoreError::ProviderReferenceNotFound) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     /// Commits an authenticated command acceptance before the agent executes
@@ -544,7 +642,16 @@ where
         if command.operation_id != accepted.operation_id || command.agent_id != accepted.agent_id {
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self
+        match accepted.state {
+            AgentOperationState::Accepted | AgentOperationState::Running => {}
+            _ => return Err(ReconcileError::InvalidIntent),
+        }
+        if operation.state == OperationState::UnknownOutcome
+            || command.state == AgentCommandState::UnknownOutcome
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let evidence_permit = self
             .fence_agent_evidence(
                 accepted.operation_id,
                 &accepted.agent_id,
@@ -554,7 +661,7 @@ where
                 "",
             )
             .await?;
-        if disposition != EvidenceDisposition::New {
+        if evidence_permit.disposition == EvidenceDisposition::Stale {
             return Ok(operation.state);
         }
         if matches!(
@@ -563,13 +670,16 @@ where
         ) {
             return Ok(operation.state);
         }
-        match accepted.state {
-            AgentOperationState::Accepted | AgentOperationState::Running => {}
-            _ => return Err(ReconcileError::InvalidIntent),
-        }
-        if operation.state == OperationState::UnknownOutcome {
-            return Err(ReconcileError::InvalidIntent);
-        }
+        self.store
+            .update_agent_command(
+                &command.command_id,
+                AgentCommandState::Accepted,
+                accepted.operation_sequence,
+                accepted.operation_sequence,
+                command.provider_operation_id.as_deref(),
+                command.provider_resource_id.as_deref(),
+            )
+            .await?;
         self.store
             .update_operation(
                 accepted.operation_id,
@@ -579,11 +689,13 @@ where
                 operation.error_message.as_deref(),
             )
             .await?;
-        self.event(
-            accepted.operation_id,
-            operation.resource_id,
-            JournalEventKind::ProviderStarted,
-        );
+        if evidence_permit.disposition == EvidenceDisposition::New {
+            self.event(
+                accepted.operation_id,
+                operation.resource_id,
+                JournalEventKind::ProviderStarted,
+            );
+        }
         Ok(OperationState::Running)
     }
 
@@ -628,7 +740,7 @@ where
             );
             return Err(ReconcileError::InvalidIntent);
         }
-        let disposition = self
+        let evidence_permit = self
             .fence_agent_observation(
                 observation.operation_id,
                 &observation.agent_id,
@@ -636,7 +748,7 @@ where
                 observation.observation_sequence,
             )
             .await?;
-        if disposition != EvidenceDisposition::New {
+        if evidence_permit.disposition != EvidenceDisposition::New {
             return Ok(());
         }
         let observed_state = server_state_to_storage(ServerState::from(observation.state));
@@ -2070,7 +2182,6 @@ mod tests {
     use super::*;
     use o3k_provider::{FailureInjection, FakeComputeProvider};
     use o3k_store::testkit::TestStore;
-    use o3k_store::{AgentCommandRecord, AgentCommandState};
     use std::path::PathBuf;
 
     #[test]
@@ -2135,15 +2246,20 @@ mod tests {
         agent_id: &str,
         agent_epoch: &str,
     ) -> Result<(), ReconcileError> {
+        let command_id = format!("observation-command-{operation_id}");
         bind_command(
             store,
-            format!("observation-command-{operation_id}"),
+            command_id.clone(),
             operation_id,
             resource_id,
             agent_id,
             agent_epoch,
         )
-        .await
+        .await?;
+        store
+            .update_agent_command(&command_id, AgentCommandState::Succeeded, 1, 1, None, None)
+            .await?;
+        Ok(())
     }
 
     async fn bind_command(
@@ -2164,9 +2280,9 @@ mod tests {
                 agent_epoch: agent_epoch.to_owned(),
                 payload_fingerprint_sha256: "f".repeat(64),
                 payload: Vec::new(),
-                state: AgentCommandState::Succeeded,
-                accepted_sequence: 1,
-                last_sequence: 1,
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
                 provider_operation_id: None,
                 provider_resource_id: None,
             })
@@ -2182,6 +2298,12 @@ mod tests {
         nodes: Arc<tokio::sync::RwLock<HashMap<String, o3k_provider::AgentNodeSnapshot>>>,
     }
 
+    struct TestAgentEpochLease {
+        _nodes: tokio::sync::OwnedRwLockReadGuard<HashMap<String, o3k_provider::AgentNodeSnapshot>>,
+    }
+
+    impl o3k_provider::AgentEpochLease for TestAgentEpochLease {}
+
     #[async_trait::async_trait]
     impl o3k_provider::AgentNodeRegistry for TestAgentRegistry {
         async fn all(&self) -> Vec<o3k_provider::AgentNodeSnapshot> {
@@ -2190,6 +2312,22 @@ mod tests {
 
         async fn snapshot(&self, agent_id: &str) -> Option<o3k_provider::AgentNodeSnapshot> {
             self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        async fn lease_current_epoch(
+            &self,
+            agent_id: &str,
+            agent_epoch: &str,
+        ) -> Option<Box<dyn o3k_provider::AgentEpochLease>> {
+            let nodes = self.nodes.clone().read_owned().await;
+            if nodes
+                .get(agent_id)
+                .is_some_and(|node| node.agent_epoch == agent_epoch)
+            {
+                Some(Box::new(TestAgentEpochLease { _nodes: nodes }))
+            } else {
+                None
+            }
         }
 
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
@@ -2528,6 +2666,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_update_rejects_agent_namespace_provider_identity_drift()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-reference-identity", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        let command_id = format!("command-{operation_id}");
+        bind_command(
+            &store,
+            command_id.clone(),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
+        store
+            .attach_provider_reference(&ProviderReference {
+                resource_id: request.o3k_server_id,
+                provider_name: "agent".to_owned(),
+                provider_resource_id: "domain-established".to_owned(),
+            })
+            .await?;
+        let update = AgentOperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: Some("domain-conflict".to_owned()),
+        };
+        assert!(matches!(
+            journal.apply_agent_update(&update).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_agent_command(&command_id).await?.state,
+            AgentCommandState::Pending
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Pending
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "agent")
+                .await?
+                .provider_resource_id,
+            "domain-established"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn agent_evidence_rejects_foreign_and_stale_updates() -> Result<(), ReconcileError> {
         let (journal, store, _) = journal("agent-evidence-fence", 2).await?;
         let request = request();
@@ -2564,10 +2758,10 @@ mod tests {
             provider_resource_id: None,
             ..succeeded.clone()
         };
-        assert_eq!(
-            journal.apply_agent_update(&stale).await?,
-            OperationState::Succeeded
-        );
+        assert!(matches!(
+            journal.apply_agent_update(&stale).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
         let foreign = AgentOperationUpdate {
             agent_id: "agent-b".to_owned(),
             agent_epoch: "epoch-b".to_owned(),
@@ -2712,6 +2906,271 @@ mod tests {
         Ok(())
     }
 
+    /// ASR-015 real-host regression: the agent persists terminal execution
+    /// before its E1 stream is lost, then replays that result under E2.  A
+    /// preceding terminal observation may win the two-consumer race and make
+    /// the operation Succeeded first; the later operation update must still
+    /// terminalize the matching durable command instead of leaving it
+    /// recoverable forever.
+    #[tokio::test]
+    async fn terminal_replay_after_reregistration_converges_command_when_operation_is_terminal()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("agent-terminal-reregister-replay", 2).await?;
+        let registry = TestAgentRegistry::default();
+        registry.register("agent-a", "epoch-a").await;
+        let journal = journal.with_agent_registry(Arc::new(registry.clone()));
+
+        let request = request();
+        journal.begin_create("project", &request).await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        store
+            .update_resource(
+                request.o3k_server_id,
+                resource.generation,
+                &resource.desired_state,
+                server_state_to_storage(ServerState::Active),
+                resource.generation,
+                Some("domain-a"),
+            )
+            .await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(request.o3k_server_id, operation_id, LifecycleAction::Reboot)
+            .await?;
+        store
+            .insert_agent_command(&AgentCommandRecord {
+                command_id: "command-1".to_owned(),
+                idempotency_key: format!("asr-015-{operation_id}"),
+                operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-a".to_owned(),
+                agent_epoch: "epoch-a".to_owned(),
+                payload_fingerprint_sha256: "f".repeat(64),
+                payload: Vec::new(),
+                state: AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: Some(operation_id.to_string()),
+                provider_resource_id: None,
+            })
+            .await?;
+        let accepted = AgentCommandAccepted {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            command_id: "command-1".to_owned(),
+            operation_id,
+            state: AgentOperationState::Accepted,
+            operation_sequence: 1,
+        };
+        assert_eq!(
+            journal.apply_agent_acceptance(&accepted).await?,
+            OperationState::Running
+        );
+        let accepted_command = store.get_agent_command("command-1").await?;
+        assert_eq!(accepted_command.state, AgentCommandState::Accepted);
+
+        registry.register("agent-a", "epoch-b").await;
+        let stale = AgentOperationUpdate {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-a".to_owned(),
+            operation_sequence: 2,
+            operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Succeeded,
+            error_category: None,
+            redacted_message: None,
+            provider_resource_id: Some("domain-a".to_owned()),
+        };
+        let operation_before_stale = store.get_operation(operation_id).await?;
+        let resource_before_stale = store.get_resource(request.o3k_server_id).await?;
+        let command_before_stale = store.get_agent_command("command-1").await?;
+        let evidence_before_stale = journal
+            .agent_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .clone();
+        assert!(matches!(
+            journal.apply_agent_update(&stale).await,
+            Err(ReconcileError::StaleAgentEvidence)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?,
+            operation_before_stale
+        );
+        assert_eq!(
+            store.get_resource(request.o3k_server_id).await?,
+            resource_before_stale
+        );
+        assert_eq!(
+            store.get_agent_command("command-1").await?,
+            command_before_stale
+        );
+        assert_eq!(
+            journal
+                .agent_evidence
+                .lock()
+                .map_err(|_| ReconcileError::InvalidIntent)?
+                .clone(),
+            evidence_before_stale
+        );
+
+        // This is the real-host ordering: the E2 observation reaches the
+        // durable journal before the E2 terminal operation update.
+        journal
+            .apply_agent_observation(&AgentObservation {
+                agent_id: "agent-a".to_owned(),
+                agent_epoch: "epoch-b".to_owned(),
+                resource_id: request.o3k_server_id,
+                provider_resource_id: Some("domain-a".to_owned()),
+                state: o3k_provider::InstanceState::Running,
+                operation_id,
+                operation_state: AgentOperationState::Succeeded,
+                observation_sequence: 2,
+                observed_at_unix_ms: 2,
+                redacted_message: None,
+                console_log_bytes: Vec::new(),
+                console_log_offset: 0,
+                console_log_complete: false,
+                console_log_truncated: false,
+                block_device: None,
+            })
+            .await?;
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_agent_command("command-1").await?.state,
+            AgentCommandState::Accepted
+        );
+        let replayed = AgentOperationUpdate {
+            agent_epoch: "epoch-b".to_owned(),
+            provider_resource_id: Some("domain-a".to_owned()),
+            ..stale
+        };
+        let conflicting = AgentOperationUpdate {
+            provider_resource_id: Some("domain-b".to_owned()),
+            ..replayed.clone()
+        };
+        let operation_before_conflict = store.get_operation(operation_id).await?;
+        let resource_before_conflict = store.get_resource(request.o3k_server_id).await?;
+        let command_before_conflict = store.get_agent_command("command-1").await?;
+        let reference_before_conflict = store
+            .get_provider_reference(request.o3k_server_id, "compute-agent")
+            .await?;
+        let agent_fence_before_conflict = journal
+            .agent_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .clone();
+        let observation_fence_before_conflict = journal
+            .observation_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .clone();
+        assert!(matches!(
+            journal.apply_agent_update(&conflicting).await,
+            Err(ReconcileError::InvalidIntent)
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?,
+            operation_before_conflict
+        );
+        assert_eq!(
+            store.get_resource(request.o3k_server_id).await?,
+            resource_before_conflict
+        );
+        assert_eq!(
+            store.get_agent_command("command-1").await?,
+            command_before_conflict
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "compute-agent")
+                .await?,
+            reference_before_conflict
+        );
+        assert_eq!(
+            journal
+                .agent_evidence
+                .lock()
+                .map_err(|_| ReconcileError::InvalidIntent)?
+                .clone(),
+            agent_fence_before_conflict
+        );
+        assert_eq!(
+            journal
+                .observation_evidence
+                .lock()
+                .map_err(|_| ReconcileError::InvalidIntent)?
+                .clone(),
+            observation_fence_before_conflict
+        );
+
+        // Model a transient store failure after the in-memory E2 fence was
+        // advanced but before command projection committed.  Equal evidence
+        // must retry the idempotent durable repair, not be discarded merely
+        // because its watermark is already present.
+        journal
+            .agent_evidence
+            .lock()
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .insert(
+                operation_id,
+                AgentEvidenceFence {
+                    agent_id: replayed.agent_id.clone(),
+                    agent_epoch: replayed.agent_epoch.clone(),
+                    sequence: replayed.operation_sequence,
+                    state: replayed.state,
+                    provider_resource_id: "domain-a".to_owned(),
+                },
+            );
+        assert_eq!(
+            journal.apply_agent_update(&replayed).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_agent_command("command-1").await?.state,
+            AgentCommandState::Succeeded
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        let terminal_command = store.get_agent_command("command-1").await?;
+        assert_eq!(terminal_command.command_id, accepted_command.command_id);
+        assert_eq!(
+            terminal_command.idempotency_key,
+            accepted_command.idempotency_key
+        );
+        assert_eq!(terminal_command.operation_id, accepted_command.operation_id);
+        assert_eq!(terminal_command.resource_id, accepted_command.resource_id);
+        assert_eq!(terminal_command.agent_id, accepted_command.agent_id);
+        assert_eq!(terminal_command.agent_epoch, accepted_command.agent_epoch);
+        assert_eq!(
+            terminal_command.payload_fingerprint_sha256,
+            accepted_command.payload_fingerprint_sha256
+        );
+        assert_eq!(terminal_command.payload, accepted_command.payload);
+        assert_eq!(terminal_command.accepted_sequence, 1);
+        assert_eq!(terminal_command.last_sequence, 2);
+        assert_eq!(
+            terminal_command.provider_resource_id.as_deref(),
+            Some("domain-a")
+        );
+
+        // Same-epoch replay is idempotent and cannot change durable identity.
+        assert_eq!(
+            journal.apply_agent_update(&replayed).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_agent_command("command-1").await?,
+            terminal_command
+        );
+        Ok(())
+    }
+
     /// Issue #87 invariant: evidence minted under an epoch that is no longer
     /// the agent's current registered epoch is a dead/stale stream and must be
     /// rejected, even though the same agent legitimately re-registered under a
@@ -2782,6 +3241,54 @@ mod tests {
         assert_eq!(
             store.get_operation(operation_id).await?.state,
             OperationState::Running
+        );
+        Ok(())
+    }
+
+    /// ASR-015: once E1 passes current-epoch validation, its lease must keep
+    /// E2 registration from becoming current until the caller finishes the
+    /// durable projection. This closes the check/write interleaving where an
+    /// old stream could otherwise write after E2 registration.
+    #[tokio::test]
+    async fn current_epoch_lease_serializes_projection_with_reregistration()
+    -> Result<(), ReconcileError> {
+        let (journal, _, _) = journal("agent-epoch-lease", 2).await?;
+        let registry = TestAgentRegistry::default();
+        registry.register("agent-a", "epoch-a").await;
+        let journal = journal.with_agent_registry(Arc::new(registry.clone()));
+        let permit = journal
+            .fence_agent_evidence(
+                Uuid::now_v7(),
+                "agent-a",
+                "epoch-a",
+                1,
+                AgentOperationState::Accepted,
+                "",
+            )
+            .await?;
+
+        let replacement_registry = registry.clone();
+        let mut replacement = tokio::spawn(async move {
+            replacement_registry.register("agent-a", "epoch-b").await;
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut replacement)
+                .await
+                .is_err(),
+            "replacement epoch became current while E1 projection held its lease"
+        );
+
+        drop(permit);
+        tokio::time::timeout(std::time::Duration::from_secs(1), replacement)
+            .await
+            .map_err(|_| ReconcileError::InvalidIntent)?
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        assert_eq!(
+            o3k_provider::AgentNodeRegistry::snapshot(&registry, "agent-a")
+                .await
+                .map(|node| node.agent_epoch)
+                .as_deref(),
+            Some("epoch-b")
         );
         Ok(())
     }

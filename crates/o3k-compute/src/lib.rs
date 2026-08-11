@@ -2367,6 +2367,12 @@ mod tests {
         nodes: Arc<tokio::sync::RwLock<BTreeMap<String, AgentNodeSnapshot>>>,
     }
 
+    struct FakeAgentEpochLease {
+        _nodes: tokio::sync::OwnedRwLockReadGuard<BTreeMap<String, AgentNodeSnapshot>>,
+    }
+
+    impl o3k_provider::AgentEpochLease for FakeAgentEpochLease {}
+
     #[async_trait]
     impl AgentNodeRegistry for FakeAgentRegistry {
         async fn all(&self) -> Vec<AgentNodeSnapshot> {
@@ -2375,6 +2381,22 @@ mod tests {
 
         async fn snapshot(&self, agent_id: &str) -> Option<AgentNodeSnapshot> {
             self.nodes.read().await.get(agent_id).cloned()
+        }
+
+        async fn lease_current_epoch(
+            &self,
+            agent_id: &str,
+            agent_epoch: &str,
+        ) -> Option<Box<dyn o3k_provider::AgentEpochLease>> {
+            let nodes = self.nodes.clone().read_owned().await;
+            if nodes
+                .get(agent_id)
+                .is_some_and(|node| node.agent_epoch == agent_epoch)
+            {
+                Some(Box::new(FakeAgentEpochLease { _nodes: nodes }))
+            } else {
+                None
+            }
         }
 
         fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<o3k_provider::AgentEvent> {
@@ -3078,9 +3100,9 @@ mod tests {
                 agent_epoch: "epoch-1".to_owned(),
                 payload_fingerprint_sha256: "0".repeat(64),
                 payload: Vec::new(),
-                state: o3k_store::AgentCommandState::Succeeded,
-                accepted_sequence: 1,
-                last_sequence: 1,
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
                 provider_operation_id: None,
                 provider_resource_id: None,
             })
@@ -3193,9 +3215,9 @@ mod tests {
                 agent_epoch: "epoch-1".to_owned(),
                 payload_fingerprint_sha256: "0".repeat(64),
                 payload: Vec::new(),
-                state: o3k_store::AgentCommandState::Succeeded,
-                accepted_sequence: 1,
-                last_sequence: 1,
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
                 provider_operation_id: None,
                 provider_resource_id: None,
             })
@@ -5142,9 +5164,9 @@ mod tests {
                 agent_epoch: "epoch-1".to_owned(),
                 payload_fingerprint_sha256: "0".repeat(64),
                 payload: Vec::new(),
-                state: o3k_store::AgentCommandState::Succeeded,
-                accepted_sequence: 1,
-                last_sequence: 1,
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
                 provider_operation_id: None,
                 provider_resource_id: None,
             })
@@ -5184,27 +5206,26 @@ mod tests {
         service.apply_agent_update(&failed).await?;
         assert_eq!(projector_calls(&projector).len(), 4);
 
-        // Terminal states are sticky in the journal: a later succeeded
-        // delivery of the same operation returns the terminal failed state
-        // and projects the same error outcome.
+        // Terminal states are sticky in both the operation and command
+        // journals: conflicting later evidence fails closed and cannot
+        // trigger another binding projection.
         let succeeded = AgentOperationUpdate {
             operation_sequence: 2,
             state: AgentOperationState::Succeeded,
             ..failed.clone()
         };
+        assert!(matches!(
+            service.apply_agent_update(&succeeded).await,
+            Err(ComputeError::Reconcile(ReconcileError::InvalidIntent))
+        ));
+        assert_eq!(projector_calls(&projector).len(), 4);
         assert_eq!(
-            service.apply_agent_update(&succeeded).await?,
-            o3k_store::OperationState::Failed
+            store
+                .get_agent_command_by_operation(request.operation_id)
+                .await?
+                .state,
+            o3k_store::AgentCommandState::Failed
         );
-        let calls = projector_calls(&projector);
-        assert_eq!(calls.len(), 6);
-        assert!(calls[4..].iter().all(|call| matches!(
-            call,
-            ProjectorCall::CreateOutcome {
-                succeeded: false,
-                ..
-            }
-        )));
         std::fs::remove_file(database_path)?;
         Ok(())
     }
