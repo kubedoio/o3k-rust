@@ -907,35 +907,35 @@ pub(crate) async fn apply_agent_provider_event(
                     operation.state,
                     o3k_store::OperationState::Succeeded | o3k_store::OperationState::Failed
                 ) && operation.state != operation_state;
+                let command_terminal_conflict = matches!(
+                    command.state,
+                    AgentCommandState::Succeeded | AgentCommandState::Failed
+                ) && command.state != command_state;
                 let unknown_regression = operation.state
                     == o3k_store::OperationState::UnknownOutcome
-                    && operation_state == o3k_store::OperationState::Running;
-                let provider_conflict =
-                    if let Some(incoming) = update.provider_resource_id.as_deref() {
-                        let command_conflict = command
-                            .provider_resource_id
-                            .as_deref()
-                            .is_some_and(|existing| existing != incoming);
-                        let resource_conflict = store
-                            .get_resource(update.resource_id)
-                            .await
-                            .is_ok_and(|resource| {
-                                resource
-                                    .provider_id
-                                    .as_deref()
-                                    .is_some_and(|existing| existing != incoming)
-                            });
-                        let reference_conflict = store
-                            .get_provider_reference(update.resource_id, "compute-agent")
-                            .await
-                            .is_ok_and(|reference| reference.provider_resource_id != incoming);
-                        command_conflict || resource_conflict || reference_conflict
-                    } else {
-                        false
-                    };
+                    && operation_state == o3k_store::OperationState::Running
+                    || command.state == AgentCommandState::UnknownOutcome
+                        && matches!(
+                            command_state,
+                            AgentCommandState::Accepted | AgentCommandState::Running
+                        );
+                let classified_failure =
+                    update.state != AgentOperationState::Failed || update.error_category.is_some();
+                let provider_identity_matches = backup_provider_identity_matches(
+                    store,
+                    &command,
+                    &update,
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::debug!(%error, operation_id = %update.operation_id, "backup provider identity validation failed closed");
+                    false
+                });
                 if !terminal_conflict
+                    && !command_terminal_conflict
                     && !unknown_regression
-                    && !provider_conflict
+                    && classified_failure
+                    && provider_identity_matches
                     && let Err(error) = store
                         .update_agent_command(
                             &command.command_id,
@@ -1041,6 +1041,39 @@ pub(crate) async fn apply_agent_provider_event(
                 tracing::debug!(%error, transfer_id = %status.transfer_id, "agent artifact status rejected");
             }
         }
+    }
+}
+
+async fn backup_provider_identity_matches(
+    store: &dyn ComputeRepository,
+    command: &AgentCommandRecord,
+    update: &o3k_provider::AgentOperationUpdate,
+) -> Result<bool, StoreError> {
+    let Some(incoming) = update.provider_resource_id.as_deref() else {
+        return Ok(true);
+    };
+    if command
+        .provider_resource_id
+        .as_deref()
+        .is_some_and(|existing| existing != incoming)
+    {
+        return Ok(false);
+    }
+    let resource = store.get_resource(update.resource_id).await?;
+    if resource
+        .provider_id
+        .as_deref()
+        .is_some_and(|existing| existing != incoming)
+    {
+        return Ok(false);
+    }
+    match store
+        .get_provider_reference(update.resource_id, "compute-agent")
+        .await
+    {
+        Ok(reference) => Ok(reference.provider_resource_id == incoming),
+        Err(StoreError::ProviderReferenceNotFound) => Ok(true),
+        Err(error) => Err(error),
     }
 }
 
@@ -2503,15 +2536,54 @@ mod tests {
             AgentCommandState::UnknownOutcome
         );
 
-        let current = o3k_provider::AgentOperationUpdate {
+        let unclassified_failure = o3k_provider::AgentOperationUpdate {
             agent_epoch: "epoch-2".to_owned(),
+            state: AgentOperationState::Failed,
             ..stale
         };
         apply_agent_provider_event(
             &state,
             Some(store.as_ref()),
             Some(&registry),
-            o3k_provider::AgentEvent::Operation(current),
+            o3k_provider::AgentEvent::Operation(unclassified_failure.clone()),
+        )
+        .await;
+        assert_eq!(
+            store
+                .get_agent_command_by_operation(operation_id)
+                .await?
+                .state,
+            AgentCommandState::UnknownOutcome
+        );
+
+        let running = o3k_provider::AgentOperationUpdate {
+            state: AgentOperationState::Running,
+            ..unclassified_failure
+        };
+        apply_agent_provider_event(
+            &state,
+            Some(store.as_ref()),
+            Some(&registry),
+            o3k_provider::AgentEvent::Operation(running.clone()),
+        )
+        .await;
+        assert_eq!(
+            store
+                .get_agent_command_by_operation(operation_id)
+                .await?
+                .state,
+            AgentCommandState::UnknownOutcome
+        );
+
+        let succeeded = o3k_provider::AgentOperationUpdate {
+            state: AgentOperationState::Succeeded,
+            ..running
+        };
+        apply_agent_provider_event(
+            &state,
+            Some(store.as_ref()),
+            Some(&registry),
+            o3k_provider::AgentEvent::Operation(succeeded),
         )
         .await;
         assert_eq!(
