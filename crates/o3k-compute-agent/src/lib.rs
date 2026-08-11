@@ -6492,11 +6492,13 @@ mod tests {
         apply_agent_provider_event(
             &state,
             None,
+            None,
             o3k_provider::AgentEvent::Operation(update.clone()),
         )
         .await;
         apply_agent_provider_event(
             &state,
+            None,
             None,
             o3k_provider::AgentEvent::Observation(Box::new(AgentObservation {
                 agent_id: "node-a".to_owned(),
@@ -6539,6 +6541,7 @@ mod tests {
         );
         apply_agent_provider_event(
             &state,
+            None,
             None,
             o3k_provider::AgentEvent::Error(o3k_provider::AgentProtocolError {
                 category: Some(AgentErrorCategory::Retryable),
@@ -6615,6 +6618,7 @@ mod tests {
         apply_agent_provider_event(
             &state,
             Some(store.as_ref()),
+            None,
             o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "command-1".to_owned(),
@@ -6636,6 +6640,7 @@ mod tests {
         apply_agent_provider_event(
             &state,
             Some(store.as_ref()),
+            None,
             o3k_provider::AgentEvent::ArtifactStatus(AgentArtifactStatus {
                 transfer_id: "transfer-1".to_owned(),
                 command_id: "different-command".to_owned(),

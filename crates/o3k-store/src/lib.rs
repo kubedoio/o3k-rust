@@ -4069,6 +4069,30 @@ impl DurableStore for SqliteStore {
                 "conflicting agent command evidence at one sequence".to_owned(),
             ));
         }
+        if matches!(
+            current.state,
+            AgentCommandState::Succeeded | AgentCommandState::Failed
+        ) && current.state != state
+        {
+            return Err(StoreError::Corrupt(
+                "terminal agent command state cannot regress".to_owned(),
+            ));
+        }
+        if provider_operation_id.is_some_and(|value| {
+            current
+                .provider_operation_id
+                .as_deref()
+                .is_some_and(|existing| existing != value)
+        }) || provider_resource_id.is_some_and(|value| {
+            current
+                .provider_resource_id
+                .as_deref()
+                .is_some_and(|existing| existing != value)
+        }) {
+            return Err(StoreError::Corrupt(
+                "agent command provider identity conflicts with durable state".to_owned(),
+            ));
+        }
         let accepted_sequence = accepted_sequence.max(current.accepted_sequence);
         let provider_operation_id =
             provider_operation_id.or(current.provider_operation_id.as_deref());
@@ -7402,11 +7426,48 @@ mod tests {
                     .await,
                 Err(StoreError::Corrupt(_))
             ));
+            let terminal = store
+                .update_agent_command(
+                    &command.command_id,
+                    AgentCommandState::Succeeded,
+                    1,
+                    2,
+                    Some("provider-op-1"),
+                    Some("domain-1"),
+                )
+                .await?;
+            assert_eq!(terminal.state, AgentCommandState::Succeeded);
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Running,
+                        1,
+                        3,
+                        Some("provider-op-1"),
+                        Some("domain-1"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
+            assert!(matches!(
+                store
+                    .update_agent_command(
+                        &command.command_id,
+                        AgentCommandState::Succeeded,
+                        1,
+                        4,
+                        Some("provider-op-1"),
+                        Some("domain-2"),
+                    )
+                    .await,
+                Err(StoreError::Corrupt(_))
+            ));
         }
         let reopened = SqliteStore::connect_file(&path).await?;
         assert_eq!(
             reopened.get_agent_command(&command.command_id).await?.state,
-            AgentCommandState::Accepted
+            AgentCommandState::Succeeded
         );
         assert_eq!(reopened.increment_operation_retry(operation.id).await?, 3);
         fs::remove_file(path)?;
