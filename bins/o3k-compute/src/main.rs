@@ -2776,20 +2776,32 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        // Wait for the fork-to-exec window to close: the reap's ownership
-        // check reads /proc/<pid>/cmdline immediately after this returns,
-        // and on a busy host the exec can lag long enough for the kernel to
-        // expose an empty cmdline, making the reap skip a live owned fake
-        // (the dnsmasq-reap CI flakes). Once exec lands, the argv is stable.
+        // Wait for the fork-to-exec window to close: a forked child inherits
+        // the parent's address space, so /proc/<pid>/cmdline shows the
+        // PARENT's argv until execve() lands — a non-empty check breaks
+        // immediately and the reap then reads the parent's argv and skips a
+        // live owned fake (the dnsmasq-reap CI flakes). Wait for the exec'd
+        // argv marker (the dhcp-root conf-file) instead; on a busy host the
+        // exec can lag well beyond a short budget.
         let pid = child.id();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let expected_marker = format!("--conf-file={}/dnsmasq.conf", root.display());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(2000);
+        let mut exec_landed = false;
         while std::time::Instant::now() < deadline {
-            if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline"))
-                && !raw.is_empty()
-            {
-                break;
+            if let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+                let cmdline = String::from_utf8_lossy(&raw);
+                if cmdline.contains(&expected_marker) {
+                    exec_landed = true;
+                    break;
+                }
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if !exec_landed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "fake dnsmasq exec did not land in time",
+            ));
         }
         Ok(child)
     }
