@@ -52,6 +52,25 @@ pub enum DhcpError {
     CommandFailed,
 }
 
+/// Kernel-maintained start time (clock ticks since boot, `/proc/<pid>/stat`
+/// field 22) of the process with the given pid. The value is set by the
+/// kernel at fork and cannot be forged or altered by a same-user process,
+/// so it is the durable half of the spawn-time identity the ownership reap
+/// validates before signaling. A read failure (permissions, the process
+/// exiting) is an unverifiable pid, never an identity.
+/// Linux-only by design: the project targets Linux and the ownership reap
+/// is /proc-based.
+pub fn process_starttime(pid: i32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The comm field is wrapped in parentheses and may contain spaces, so
+    // parse the fields AFTER the closing paren: state(0) ppid(1) pgrp(2)
+    // session(3) tty_nr(4) tpgid(5) flags(6) minflt(7) cminflt(8) majflt(9)
+    // cmajflt(10) utime(11) stime(12) cutime(13) cstime(14) priority(15)
+    // nice(16) num_threads(17) itrealvalue(18) starttime(19).
+    let after_comm = stat[stat.rfind(')')? + 1..].trim_start();
+    after_comm.split_whitespace().nth(19)?.parse().ok()
+}
+
 /// Owns one managed dnsmasq process and provides restart/cleanup semantics.
 ///
 /// The supervisor intentionally owns the child handle rather than relying on a
@@ -61,6 +80,12 @@ pub struct DnsmasqSupervisor {
     binary: PathBuf,
     config: PathBuf,
     pid_file: PathBuf,
+    /// Spawn-time process identity (start time of the child) recorded next to
+    /// the pidfile. The ownership reap requires the pidfile pid's CURRENT
+    /// start time to equal this recorded value before it may signal: a
+    /// same-user argv spoof or a PID-reuse replacement has a different start
+    /// time, so neither can be mistaken for the owned process.
+    identity_file: PathBuf,
     child: Child,
 }
 
@@ -69,10 +94,13 @@ impl DnsmasqSupervisor {
         let config = root.join("dnsmasq.conf");
         let pid_file = root.join(format!("dnsmasq-{}.pid", uuid::Uuid::now_v7()));
         let child = launch(binary, &config, &pid_file)?;
+        let identity_file = PathBuf::from(format!("{}.owner", pid_file.display()));
+        record_spawn_identity(&child, &identity_file)?;
         Ok(Self {
             binary: binary.to_path_buf(),
             config,
             pid_file,
+            identity_file,
             child,
         })
     }
@@ -90,10 +118,12 @@ impl DnsmasqSupervisor {
     pub fn restart(&mut self) -> Result<(), DhcpError> {
         self.stop()?;
         self.child = launch(&self.binary, &self.config, &self.pid_file)?;
+        record_spawn_identity(&self.child, &self.identity_file)?;
         Ok(())
     }
 
-    /// Stop the owned process and remove only its managed pid file.
+    /// Stop the owned process and remove only its managed pid file and the
+    /// recorded spawn identity next to it.
     pub fn stop(&mut self) -> Result<(), DhcpError> {
         if self
             .child
@@ -104,11 +134,14 @@ impl DnsmasqSupervisor {
             self.child.kill().map_err(|_| DhcpError::CommandFailed)?;
         }
         self.child.wait().map_err(|_| DhcpError::CommandFailed)?;
-        match fs::remove_file(&self.pid_file) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(_) => Err(DhcpError::CommandFailed),
+        for path in [&self.pid_file, &self.identity_file] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => return Err(DhcpError::CommandFailed),
+            }
         }
+        Ok(())
     }
 }
 
@@ -181,6 +214,18 @@ fn launch(binary: &Path, config: &Path, pid_file: &Path) -> Result<Child, DhcpEr
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Persists the spawn-time identity of the freshly launched dnsmasq next to
+/// its pidfile. The reap that later terminates an orphaned dnsmasq requires
+/// the process's current start time to match this recorded value before it
+/// may signal, so a same-user argv spoof or a PID-reuse replacement can
+/// never be mistaken for the owned process. Failing to record the identity
+/// fails the spawn closed: an unprovable process must not be started, and
+/// an identity-less pidfile must not be signaled later.
+fn record_spawn_identity(child: &Child, identity_file: &Path) -> Result<(), DhcpError> {
+    let starttime = process_starttime(child.id() as i32).ok_or(DhcpError::CommandFailed)?;
+    atomic_write(identity_file, starttime.to_string().as_bytes())
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -525,6 +570,14 @@ mod tests {
         service.configure(config()?)?;
         let mut supervisor = service.start(&binary)?;
         assert!(supervisor.is_running()?);
+        // The spawn identity must be recorded next to the pidfile and must
+        // match the child's kernel start time exactly.
+        let identity = fs::read_to_string(&supervisor.identity_file).map_err(DhcpError::Storage)?;
+        assert_eq!(
+            identity.trim().parse::<u64>().ok(),
+            process_starttime(supervisor.child.id() as i32),
+            "the recorded spawn identity must be the child's kernel start time"
+        );
         service.upsert_binding(Binding {
             port_id: "p1".into(),
             mac: "02:00:00:00:00:01".into(),
@@ -532,6 +585,14 @@ mod tests {
         })?;
         service.reload(&mut supervisor)?;
         assert!(supervisor.is_running()?);
+        // A restart respawns the child: the recorded identity must be
+        // refreshed to the new process, never carried over from the old one.
+        let identity = fs::read_to_string(&supervisor.identity_file).map_err(DhcpError::Storage)?;
+        assert_eq!(
+            identity.trim().parse::<u64>().ok(),
+            process_starttime(supervisor.child.id() as i32),
+            "restart must rewrite the spawn identity for the new child"
+        );
         assert!(
             fs::read_to_string(service.managed_config_path())
                 .map_err(DhcpError::Storage)?
@@ -539,6 +600,10 @@ mod tests {
         );
         supervisor.stop()?;
         assert!(!supervisor.is_running()?);
+        assert!(
+            !supervisor.identity_file.exists(),
+            "stop must remove the recorded spawn identity"
+        );
 
         let failing_binary = root.join("missing-dnsmasq");
         assert!(matches!(

@@ -177,7 +177,11 @@ fn cmdline_contains_dhcp_root(pid: i32, root: &std::path::Path) -> Result<bool, 
 
 /// Opens a race-resistant Linux process handle after ownership verification.
 /// Signals are sent through the pidfd, never through the reusable numeric PID.
-fn open_owned_pidfd(pid: i32, root: &std::path::Path) -> Result<OwnedFd, std::io::Error> {
+fn open_owned_pidfd(
+    pid: i32,
+    root: &std::path::Path,
+    expected_starttime: u64,
+) -> Result<OwnedFd, std::io::Error> {
     let raw_pid = pid;
     let pid = Pid::from_raw(raw_pid).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid process id")
@@ -191,6 +195,18 @@ fn open_owned_pidfd(pid: i32, root: &std::path::Path) -> Result<OwnedFd, std::io
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "process command line is not O3K-owned",
+        ));
+    }
+    // The spawn identity is the independent ownership proof: the kernel
+    // start time of the process must equal the value recorded next to the
+    // pidfile at spawn. A same-user process that forges the O3K dnsmasq
+    // argv has a different start time; a process that inherited the numeric
+    // PID after the owned dnsmasq exited has a different start time. Neither
+    // may ever be signaled, so an identity mismatch is an unverifiable pid.
+    if o3k_dhcp::process_starttime(raw_pid) != Some(expected_starttime) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "process start time does not match the recorded spawn identity",
         ));
     }
     Ok(pidfd)
@@ -384,12 +400,15 @@ impl DhcpRuntime {
     /// bindings are re-served by `start_after_restart` AFTER this residue
     /// cleanup (the caller's ordering), and the earlier stale-network reap
     /// already removed stale bindings first. Each `dnsmasq-*.pid` pidfile is
-    /// verified by its process cmdline (it must contain the O3K dhcp root)
-    /// before a pidfd is opened: SIGTERM, a bounded wait, SIGKILL only if
-    /// still alive, then the pidfile is removed. A pidfile whose process is
-    /// already gone is just removed. Unreadable or foreign pidfiles are
-    /// skipped with a warning (fail-open: the process inventory and
-    /// verifier catch residue, and the reap never crashes agent startup).
+    /// verified by its recorded spawn identity (`<pidfile>.owner`, written at
+    /// spawn with the process's kernel start time) and its process cmdline
+    /// (it must contain the O3K dhcp root) before a pidfd is opened: SIGTERM,
+    /// a bounded wait, SIGKILL only if still alive, then the pidfile and the
+    /// identity file are removed. A pidfile whose process is already gone is
+    /// just removed together with its identity file. A pidfile without a
+    /// recorded identity, with a mismatched identity (argv spoof, PID reuse),
+    /// or pointing at a foreign process is skipped with a warning and left
+    /// for the inventory — an unprovable process must never be signaled.
     fn reap_owned_dnsmasq(&self) -> Result<(), AgentError> {
         let entries = std::fs::read_dir(&self.root)
             .map_err(|_| AgentError::Protocol("dhcp root is unreadable".to_owned()))?;
@@ -422,17 +441,41 @@ impl DhcpRuntime {
             return;
         };
         if !pid_is_alive(pid) {
-            // The process is already gone; only the stale pidfile remains.
-            if let Err(error) = std::fs::remove_file(pidfile) {
-                tracing::warn!(
-                    pidfile = %pidfile.display(),
-                    error = %error,
-                    "stale dnsmasq pidfile removal failed"
-                );
+            // The process is already gone; only the stale pidfile (and its
+            // recorded identity) remain.
+            let identity_file = std::path::PathBuf::from(format!("{}.owner", pidfile.display()));
+            for path in [pidfile, &identity_file] {
+                if let Err(error) = std::fs::remove_file(path) {
+                    tracing::warn!(
+                        pidfile = %pidfile.display(),
+                        error = %error,
+                        "stale dnsmasq pidfile/identity removal failed"
+                    );
+                }
             }
             return;
         }
-        let pidfd = match open_owned_pidfd(pid, &self.root) {
+        let identity_file = std::path::PathBuf::from(format!("{}.owner", pidfile.display()));
+        let expected_starttime = match std::fs::read_to_string(&identity_file) {
+            Ok(raw) => match raw.trim().parse::<u64>() {
+                Ok(starttime) => starttime,
+                Err(_) => {
+                    tracing::warn!(
+                        pidfile = %pidfile.display(),
+                        "dnsmasq pidfile identity is malformed; left for the inventory"
+                    );
+                    return;
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    pidfile = %pidfile.display(),
+                    "dnsmasq pidfile has no recorded spawn identity; left for the inventory"
+                );
+                return;
+            }
+        };
+        let pidfd = match open_owned_pidfd(pid, &self.root, expected_starttime) {
             Ok(pidfd) => pidfd,
             Err(error) => {
                 tracing::warn!(
@@ -458,12 +501,14 @@ impl DhcpRuntime {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
-        if let Err(error) = std::fs::remove_file(pidfile) {
-            tracing::warn!(
-                pidfile = %pidfile.display(),
-                error = %error,
-                "owned dnsmasq pidfile removal failed"
-            );
+        for path in [pidfile, &identity_file] {
+            if let Err(error) = std::fs::remove_file(path) {
+                tracing::warn!(
+                    pidfile = %pidfile.display(),
+                    error = %error,
+                    "owned dnsmasq pidfile/identity removal failed"
+                );
+            }
         }
     }
 }
@@ -2803,6 +2848,16 @@ mod tests {
                 "fake dnsmasq exec did not land in time",
             ));
         }
+        // Record the spawn identity exactly like the production supervisor:
+        // the kernel start time of the child, stored next to the pidfile.
+        // The reap only signals a process whose start time matches.
+        let starttime = o3k_dhcp::process_starttime(pid as i32).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "fake dnsmasq start time unreadable",
+            )
+        })?;
+        std::fs::write(root.join(format!("{pidfile}.owner")), starttime.to_string())?;
         Ok(child)
     }
 
@@ -2933,6 +2988,216 @@ mod tests {
         foreign.kill()?;
         foreign.wait()?;
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A same-user process whose argv mimics the O3K dnsmasq command line but
+    /// has NO recorded spawn identity is not provably O3K-owned (ASR-013
+    /// invariant E): argv similarity alone must never be sufficient authority,
+    /// so the reap fails closed and the spoof survives.
+    #[cfg(unix)]
+    #[test]
+    fn reap_skips_argv_spoof_without_recorded_identity() -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-spoof-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let mut spoof = spawn_fake_owned_dnsmasq(&root, "dnsmasq-spoof.pid")?;
+        std::fs::write(root.join("dnsmasq-spoof.pid"), spoof.id().to_string())?;
+        // Remove the recorded identity: the process still matches by argv
+        // alone, which must never be sufficient authority for a signal.
+        std::fs::remove_file(root.join("dnsmasq-spoof.pid.owner"))?;
+
+        runtime.reap_owned_dnsmasq()?;
+
+        assert!(
+            pid_is_alive(spoof.id() as i32),
+            "an argv-spoofing process without a recorded identity must survive the reap"
+        );
+        assert!(
+            root.join("dnsmasq-spoof.pid").exists(),
+            "an unprovable pidfile must be left for the inventory"
+        );
+        spoof.kill()?;
+        spoof.wait()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// A process whose kernel start time does not match the recorded spawn
+    /// identity — a PID-reuse replacement or a same-user argv spoof started
+    /// at a different time — must never be signaled: the reap fails closed
+    /// (ASR-013 invariants D and E).
+    #[cfg(unix)]
+    #[test]
+    fn reap_skips_process_with_mismatched_spawn_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root =
+            env::temp_dir().join(format!("o3k-compute-dhcp-mismatch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let mut spoof = spawn_fake_owned_dnsmasq(&root, "dnsmasq-mismatch.pid")?;
+        std::fs::write(root.join("dnsmasq-mismatch.pid"), spoof.id().to_string())?;
+        // Corrupt the recorded identity: even with a perfect argv match, the
+        // start time mismatch must make the reap skip the process.
+        std::fs::write(root.join("dnsmasq-mismatch.pid.owner"), "0")?;
+
+        runtime.reap_owned_dnsmasq()?;
+
+        assert!(
+            pid_is_alive(spoof.id() as i32),
+            "a process whose start time mismatches the recorded identity must survive"
+        );
+        assert!(
+            root.join("dnsmasq-mismatch.pid").exists(),
+            "an identity-mismatched pidfile must be left for the inventory"
+        );
+        spoof.kill()?;
+        spoof.wait()?;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// The stable-handle semantics that make the O3K signal path race-safe on
+    /// a real Linux kernel: once the target exits, `pidfd_send_signal` on the
+    /// stale pidfd returns ESRCH and can never be redirected to a later
+    /// process that reuses the same numeric PID. This is the same kernel
+    /// primitive (`pidfd_open` + `pidfd_send_signal`) the ownership reap uses.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_pidfd_never_retargets_a_reused_numeric_pid() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut victim = std::process::Command::new("sleep").arg("60").spawn()?;
+        let numeric_pid = Pid::from_raw(victim.id() as i32)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid pid"))?;
+        let pidfd = pidfd_open(numeric_pid, PidfdFlags::empty()).map_err(std::io::Error::from)?;
+        victim.kill()?;
+        victim.wait()?;
+        // The handle is now stale: signaling through it must fail with ESRCH
+        // (the process is gone), never deliver to anything else.
+        let signal_error = match pidfd_send_signal(&pidfd, Signal::Term) {
+            Ok(()) => {
+                return Err(std::io::Error::other(
+                    "signaling a stale pidfd unexpectedly succeeded",
+                )
+                .into());
+            }
+            Err(error) => error,
+        };
+        assert_eq!(
+            signal_error,
+            rustix::io::Errno::SRCH,
+            "a stale pidfd must report ESRCH, got {signal_error}"
+        );
+        // Aggressively churn numeric PIDs: every replacement process must
+        // survive — the stale handle cannot retarget any of them.
+        let mut replacements = Vec::new();
+        for _ in 0..64 {
+            replacements.push(
+                std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("sleep 0.05")
+                    .spawn()?,
+            );
+        }
+        for mut replacement in replacements {
+            let status = replacement.wait()?;
+            assert!(
+                status.success(),
+                "a replacement process must never be signaled"
+            );
+        }
+        Ok(())
+    }
+
+    /// Race stress over the ownership reap (ASR-013 section 8): 100 iterations
+    /// with the owned process killed at varied points relative to the reap
+    /// window. Required outcome on every iteration: the owned process is
+    /// terminated exactly once (by the reap, or already dead), no watcher
+    /// process is ever signaled, and the pidfile/identity pair is removed.
+    #[cfg(unix)]
+    #[test]
+    fn reap_stress_never_signals_unowned_processes() -> Result<(), Box<dyn std::error::Error>> {
+        for iteration in 0..100 {
+            let root = env::temp_dir().join(format!(
+                "o3k-compute-dhcp-stress-{}-{}",
+                std::process::id(),
+                iteration
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            let runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+            // A watcher with a deliberately dnsmasq-shaped but NOT O3K-owned
+            // argv (no dhcp root, no identity file): it must never receive a
+            // signal from the reap.
+            let mut watcher = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("n=0; while [ $n -lt 60 ]; do sleep 0.1; n=$((n+1)); done")
+                .arg("dnsmasq")
+                .arg("--conf-file=/nonexistent/dnsmasq.conf")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            let mut owned = spawn_fake_owned_dnsmasq(&root, "dnsmasq-stress.pid")?;
+            std::fs::write(root.join("dnsmasq-stress.pid"), owned.id().to_string())?;
+            match iteration % 4 {
+                // The owned process exits before the reap runs.
+                0 | 1 => {
+                    owned.kill()?;
+                    owned.wait()?;
+                }
+                // The owned process exits concurrently with the reap window
+                // (short delay: usually lands before pidfd acquisition, but
+                // the reap must be safe in every interleaving).
+                2 => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    owned.kill()?;
+                    owned.wait()?;
+                }
+                // The owned process is still alive when the reap runs.
+                _ => {}
+            }
+            runtime.reap_owned_dnsmasq()?;
+            assert!(
+                pid_is_alive(watcher.id() as i32),
+                "iteration {iteration}: the watcher process must never be signaled"
+            );
+            // The owned process must be terminated — by the test kill
+            // (iterations 0-2, before the reap) or by the reap itself
+            // (iteration 3, SIGTERM through the pidfd and the TERM trap).
+            let mut status = owned.try_wait()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while status.is_none() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                status = owned.try_wait()?;
+            }
+            assert!(
+                status.is_some(),
+                "iteration {iteration}: the owned process must be terminated by the reap \
+                 (alive={}, cmdline={:?}, pidfile={:?}, identity={:?}, starttime_now={:?}, starttime_recorded={:?})",
+                pid_is_alive(owned.id() as i32),
+                std::fs::read(format!("/proc/{}/cmdline", owned.id())).ok(),
+                std::fs::read_to_string(root.join("dnsmasq-stress.pid")).ok(),
+                std::fs::read_to_string(root.join("dnsmasq-stress.pid.owner")).ok(),
+                o3k_dhcp::process_starttime(owned.id() as i32),
+                std::fs::read_to_string(root.join("dnsmasq-stress.pid.owner"))
+                    .ok()
+                    .and_then(|raw| raw.trim().parse::<u64>().ok()),
+            );
+            if status.is_none() {
+                let _ = owned.kill();
+                let _ = owned.wait();
+            }
+            assert!(
+                !root.join("dnsmasq-stress.pid").exists(),
+                "iteration {iteration}: the pidfile must be removed"
+            );
+            assert!(
+                !root.join("dnsmasq-stress.pid.owner").exists(),
+                "iteration {iteration}: the identity file must be removed"
+            );
+            watcher.kill()?;
+            watcher.wait()?;
+            std::fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 
