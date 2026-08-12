@@ -339,9 +339,14 @@ if [[ "$PROFILE" == libvirt ]]; then
   # so the identity must be installed there, owned by the compute account —
   # mirroring the disposable-testlab bootstrap. Installing it only under the
   # control data directory leaves the installed agent without an identity and
-  # the mTLS registration is always rejected (PermissionDenied).
-  install -m 0640 -o o3k-compute -g o3k-compute \
-    "$TLS_DIR/agent-id" "$COMPUTE_DATA_DIR/agent-id"
+  # the mTLS registration is always rejected (PermissionDenied). The non-root
+  # flow keeps the invoking user's ownership, matching RUN_USER below.
+  if [[ $EUID -eq 0 ]]; then
+    install -m 0640 -o o3k-compute -g o3k-compute \
+      "$TLS_DIR/agent-id" "$COMPUTE_DATA_DIR/agent-id"
+  else
+    install -m 0640 "$TLS_DIR/agent-id" "$COMPUTE_DATA_DIR/agent-id"
+  fi
 fi
 
 # Keep a root-owned content ledger for generated configuration and TLS files.
