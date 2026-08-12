@@ -462,6 +462,28 @@ pub struct BootstrapConfig {
     pub cinder_endpoint: Option<String>,
     /// PBKDF2 iteration count. Zero selects the production default.
     pub pbkdf2_iterations: u32,
+    /// Optional additional isolated project/user pairs seeded alongside the
+    /// bootstrap universe. Intentionally empty by default: the hosted-service
+    /// protected runner sets this to prove cross-tenant isolation with a
+    /// second fully independent project. Not an identity administration API.
+    pub extra_projects: Vec<ExtraProjectSeed>,
+}
+
+/// A fully independent project with exactly one user and role assignments
+/// inside that project. The seed is idempotent like the rest of the bootstrap
+/// universe, and passwords are never logged.
+#[derive(Debug, Clone)]
+pub struct ExtraProjectSeed {
+    /// Durable project UUID (also used as the URL path project).
+    pub project_id: String,
+    /// Human project name.
+    pub project_name: String,
+    /// Durable user UUID.
+    pub user_id: String,
+    /// Human user name.
+    pub user_name: String,
+    /// User password.
+    pub password: Secret,
 }
 
 /// Seeds the durable identity universe required by the hosted-service profile.
@@ -542,6 +564,32 @@ pub async fn seed_identity_defaults(
             .await?;
     }
 
+    for seed in &config.extra_projects {
+        store
+            .insert_keystone_project(&o3k_store::KeystoneProjectRecord {
+                id: seed.project_id.clone(),
+                domain_id: default_domain.clone(),
+                name: seed.project_name.clone(),
+                description: Some("Isolated hosted-service test project".to_owned()),
+                enabled: true,
+                created_at: now.clone(),
+            })
+            .await?;
+        let user_hash = PasswordHash::derive_with_iterations(seed.password.expose(), iterations)
+            .map_err(store_auth_error)?;
+        store
+            .insert_keystone_user(&o3k_store::KeystoneUserRecord {
+                id: seed.user_id.clone(),
+                domain_id: default_domain.clone(),
+                name: seed.user_name.clone(),
+                password_hash: user_hash.encoded().to_owned(),
+                email: None,
+                enabled: true,
+                created_at: now.clone(),
+            })
+            .await?;
+    }
+
     for (id, name) in [
         ("admin", "admin"),
         ("member", "member"),
@@ -576,6 +624,24 @@ pub async fn seed_identity_defaults(
             ("cinder", "eba29e2d-53de-461d-ae91-ede7402713cb", "admin"),
             ("cinder", "eba29e2d-53de-461d-ae91-ede7402713cb", "service"),
         ]);
+    }
+    for seed in &config.extra_projects {
+        assignments.extend([
+            (seed.user_id.as_str(), seed.project_id.as_str(), "admin"),
+            (seed.user_id.as_str(), seed.project_id.as_str(), "member"),
+        ]);
+        // The hosted-service profile's Cinder client acts in the caller's
+        // project with the service identity's token, so the service user
+        // must be assigned there exactly as it is in the bootstrap project.
+        // Without this, Cinder rejects the service-scoped call for the
+        // isolated tenant (Malformed request url) and the tenant cannot use
+        // the hosted profile at all.
+        if config.cinder_password.is_some() {
+            assignments.extend([
+                ("cinder", seed.project_id.as_str(), "admin"),
+                ("cinder", seed.project_id.as_str(), "service"),
+            ]);
+        }
     }
     for (index, (user_id, project_id, role_id)) in assignments.into_iter().enumerate() {
         store
@@ -1333,6 +1399,7 @@ pub mod testkit {
                 cinder_password: Some(Secret::new("password".to_owned())),
                 cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
                 pbkdf2_iterations: 1_000,
+                extra_projects: Vec::new(),
             },
         )
         .await
@@ -1902,6 +1969,7 @@ mod tests {
                 cinder_password: Some(Secret::new("password".to_owned())),
                 cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
                 pbkdf2_iterations: 1_000,
+                extra_projects: Vec::new(),
             },
         )
         .await
@@ -1953,6 +2021,56 @@ mod tests {
             ),
             Err(AuthError::WeakSigningKey)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn extra_project_seed_assigns_the_cinder_service_identity() -> Result<(), AuthError> {
+        let store = Arc::new(
+            o3k_store::testkit::open_memory()
+                .await
+                .map_err(|_| AuthError::IdentityUnavailable)?,
+        );
+        let project_b = "8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d";
+        seed_identity_defaults(
+            store.as_ref(),
+            &BootstrapConfig {
+                catalog_endpoint: "http://127.0.0.1:18080".to_owned(),
+                bootstrap_password: Secret::new("password".to_owned()),
+                cinder_password: Some(Secret::new("password".to_owned())),
+                cinder_endpoint: Some("http://127.0.0.1:8776".to_owned()),
+                pbkdf2_iterations: 1_000,
+                extra_projects: vec![ExtraProjectSeed {
+                    project_id: project_b.to_owned(),
+                    project_name: "tenant-b".to_owned(),
+                    user_id: "a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a".to_owned(),
+                    user_name: "tenant-b-user".to_owned(),
+                    password: Secret::new("tenant-b-password".to_owned()),
+                }],
+            },
+        )
+        .await
+        .map_err(|_| AuthError::IdentityUnavailable)?;
+
+        // The isolated tenant's own user holds admin+member there.
+        let tenant_roles = store
+            .list_user_role_names("a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a", project_b)
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        assert!(tenant_roles.contains(&"admin".to_owned()));
+        assert!(tenant_roles.contains(&"member".to_owned()));
+        assert!(!tenant_roles.contains(&"service".to_owned()));
+
+        // The hosted-profile Cinder service identity must be able to act in
+        // the isolated project (the client scopes its service token to the
+        // caller's project); without these assignments real Cinder rejects
+        // the service call with Malformed request url.
+        let service_roles = store
+            .list_user_role_names("cinder", project_b)
+            .await
+            .map_err(|_| AuthError::IdentityUnavailable)?;
+        assert!(service_roles.contains(&"admin".to_owned()));
+        assert!(service_roles.contains(&"service".to_owned()));
         Ok(())
     }
 }

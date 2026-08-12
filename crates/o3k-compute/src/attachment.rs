@@ -191,7 +191,36 @@ impl AttachmentOrchestrator {
             connection_info_digest: None,
             error: None,
         };
-        self.store.insert_volume_attachment(&record).await?;
+        if let Err(error) = self.store.insert_volume_attachment(&record).await {
+            // The durable schema enforces one attachment per volume across
+            // servers and projects. Resolve the existing attachment's owner
+            // before answering: a same-project conflict is surfaced as 409
+            // like Nova, while an attachment owned by another project is
+            // indistinguishable from an unknown volume (404), so the request
+            // never discloses a foreign project's attachment or existence.
+            if let o3k_store::StoreError::ResourceAlreadyExists = error {
+                let owner_project = match self
+                    .store
+                    .get_volume_attachment_by_volume(volume_id)
+                    .await?
+                {
+                    Some(existing) => match self.project_for_server(existing.server_id).await {
+                        Ok(project) => project,
+                        // The claiming attachment's server is gone or
+                        // unreadable: fail closed toward concealment (404),
+                        // never a foreign leak and never an internal error.
+                        Err(_) => return Err(ComputeError::NotFound),
+                    },
+                    None => return Err(ComputeError::NotFound),
+                };
+                return Err(if owner_project == project_id {
+                    ComputeError::Conflict
+                } else {
+                    ComputeError::NotFound
+                });
+            }
+            return Err(error.into());
+        }
         self.trace_phase(&record, STATUS_VALIDATED, None).await?;
         let _flight = self.enter_flight(id);
         self.continue_attach(project_id, &record).await

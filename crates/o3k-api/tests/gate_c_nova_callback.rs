@@ -71,7 +71,7 @@ async fn native_profile_does_not_expose_attachment_routes() -> Result<(), Box<dy
 {
     let store = Arc::new(o3k_store::testkit::open_memory().await?);
     let server_id = Uuid::now_v7();
-    seed_server_and_attachment(
+    let attachment_id = seed_server_and_attachment(
         &store,
         server_id,
         Uuid::now_v7(),
@@ -83,17 +83,38 @@ async fn native_profile_does_not_expose_attachment_routes() -> Result<(), Box<dy
     let state = AppState::new().with_compute(compute);
     state.set_ready(true);
     let app = o3k_api::router_with_state(state);
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(format!(
-                    "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
-                ))
-                .body(Body::empty())?,
-        )
-        .await?;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let base = format!(
+        "/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/{server_id}/os-volume_attachments"
+    );
+    // Every attachment method is absent from the native profile: list, show,
+    // detach, and attach all fall out as plain 404 (no capability leak, and
+    // the feature cannot be probed by method or path).
+    let requests = [
+        Request::builder()
+            .method(Method::GET)
+            .uri(&base)
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::GET)
+            .uri(format!("{base}/{attachment_id}"))
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("{base}/{attachment_id}"))
+            .body(Body::empty())?,
+        Request::builder()
+            .method(Method::POST)
+            .uri(&base)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"volumeAttachment":{"volumeId":Uuid::now_v7().to_string()}})
+                    .to_string(),
+            ))?,
+    ];
+    for request in requests {
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
     Ok(())
 }
 

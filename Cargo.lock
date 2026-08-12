@@ -962,6 +962,7 @@ version = "0.2.0-alpha.1"
 dependencies = [
  "axum",
  "http",
+ "o3k-cinder",
  "o3k-compute",
  "o3k-compute-agent",
  "o3k-config-drive",

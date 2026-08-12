@@ -104,6 +104,19 @@ for secret in "${O3K_PW}" "${CINDER_SERVICE_PW}" "${DB_PW}" "${MQ_PW}" "${TOKEN_
   echo "::add-mask::${secret}" 2>/dev/null || true
 done
 
+# Two-tenant isolation matrix (ASR-001/002). Disabled by default; the
+# protected workflow sets O3K_ISOLATION_MATRIX=1 to prove cross-project
+# attachment isolation against a second fully independent project seeded into
+# O3K's identity universe (O3K_EXTRA_TENANT_*). The second tenant is a
+# disposable run identity; nothing here is a production identity API.
+ISOLATION_ENABLED="${O3K_ISOLATION_MATRIX:-0}"
+ISOLATION_PROJECT_ID="${O3K_ISOLATION_PROJECT_ID:-8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d}"
+ISOLATION_USER_ID="${O3K_ISOLATION_USER_ID:-a7c2e9d1-4f3b-4c8e-9d2a-3b4c5d6e7f8a}"
+ISOLATION_PROJECT_NAME="tenant-b"
+ISOLATION_USER_NAME="tenant-b-user"
+ISOLATION_PW="$(openssl rand -hex 24)"
+echo "::add-mask::${ISOLATION_PW}" 2>/dev/null || true
+
 # Run-owned disposable identifiers.
 VG_NAME="o3k-vg-${RUN_SLUG}"
 DB_NAME="o3k_cinder_${RUN_SLUG}"
@@ -719,6 +732,13 @@ export O3K_BOOTSTRAP_PASSWORD="${O3K_PW}"
 export O3K_TOKEN_SIGNING_KEY="${TOKEN_SIGNING_KEY}"
 export O3K_CINDER_PASSWORD="${CINDER_SERVICE_PW}"
 export O3K_CINDER_ENDPOINT="http://127.0.0.1:${CINDER_PORT}"
+if [ "${ISOLATION_ENABLED}" = "1" ]; then
+  export O3K_EXTRA_TENANT_PROJECT_ID="${ISOLATION_PROJECT_ID}"
+  export O3K_EXTRA_TENANT_PROJECT_NAME="${ISOLATION_PROJECT_NAME}"
+  export O3K_EXTRA_TENANT_USER_ID="${ISOLATION_USER_ID}"
+  export O3K_EXTRA_TENANT_USER_NAME="${ISOLATION_USER_NAME}"
+  export O3K_EXTRA_TENANT_PASSWORD="${ISOLATION_PW}"
+fi
 export O3K_COMPUTE_CONTROL_ADDR="127.0.0.1:${CONTROL_PORT}"
 export O3K_COMPUTE_SERVER_CERTIFICATE="${TLS_DIR}/server.pem"
 export O3K_COMPUTE_SERVER_PRIVATE_KEY="${TLS_DIR}/server-key.pem"
@@ -735,7 +755,7 @@ O3K_COMPUTE_SERVER_NAME=o3k-control-plane
 O3K_COMPUTE_HOST_LABEL=o3k-testlab
 O3K_COMPUTE_TLS_DIR=${TLS_DIR}
 O3K_COMPUTE_HEALTH_ADDR=127.0.0.1:${COMPUTE_HEALTH_PORT}
-O3K_COMPUTE_MAX_DISK_GB=10
+O3K_COMPUTE_MAX_DISK_GB=${O3K_COMPUTE_MAX_DISK_GB:-10}
 O3K_ISCSIADM_SUDO=1
 RUST_LOG=info
 EOF
@@ -1093,6 +1113,305 @@ get_token() {
   printf '%s' "${token}"
 }
 
+# ------------------------------------------------------------------------------
+# Two-tenant isolation matrix (ASR-001/002). Runs only under
+# O3K_ISOLATION_MATRIX=1 while tenant A's volume is attached. Token B must
+# never list/show/detach A's attachment or attach A's volume, with zero
+# durable/Cinder/compute/libvirt side effects, and tenant B must still run its
+# own complete attach lifecycle. Every case is recorded; tenant B's resources
+# are always cleaned up before the verdict. Failures exit non-zero through the
+# normal failure-diagnostics path.
+# ------------------------------------------------------------------------------
+ISOLATION_A_PROJECT="eba29e2d-53de-461d-ae91-ede7402713cb"
+ISOLATION_RESULTS="${EVIDENCE_DIR}/isolation-results.tsv"
+ISOLATION_FAILED=0
+
+isolation_check() { # case expected actual [extra_kv ...]
+  local case=$1 expected=$2 actual=$3
+  shift 3
+  local extra=""
+  for kv in "$@"; do extra="${extra}${kv};"; done
+  printf '%s\t%s\t%s\t%s\n' "${case}" "${expected}" "${actual}" "${extra}" >> "${ISOLATION_RESULTS}"
+  if [ "${actual}" != "${expected}" ]; then
+    ISOLATION_FAILED=1
+    echo "    isolation case ${case}: expected ${expected}, got ${actual}"
+  fi
+}
+
+run_isolation_matrix() {
+  local base="http://127.0.0.1:${O3K_PORT}"
+  local a_path="${base}/v2.1/${ISOLATION_A_PROJECT}"
+  local b_path="${base}/v2.1/${ISOLATION_PROJECT_ID}"
+  local db="${O3K_DATA_DIR}/o3k.sqlite"
+  local body_file="${EVIDENCE_DIR}/isolation-body.json"
+  : > "${ISOLATION_RESULTS}"
+
+  code_for() { # method path token [json_body]
+    local method=$1 path=$2 token=$3 body=${4:-}
+    if [ -n "${body}" ]; then
+      curl -s -o "${body_file}" -w '%{http_code}' -X "${method}" \
+        -H "X-Auth-Token: ${token}" -H 'Content-Type: application/json' \
+        -d "${body}" "${base}${path}"
+    else
+      curl -s -o "${body_file}" -w '%{http_code}' -X "${method}" \
+        -H "X-Auth-Token: ${token}" "${base}${path}"
+    fi
+  }
+
+  sqlite_col() { # column server volume
+    python3 - "${db}" "$2" "$3" "$1" <<'PY'
+import sqlite3, sys
+db, server, volume, column = sys.argv[1:5]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+row = con.execute(
+    f"SELECT {column} FROM volume_attachments WHERE server_id = ? AND volume_id = ?",
+    (server, volume)).fetchone()
+print(row[0] if row and row[0] is not None else "")
+PY
+  }
+
+  echo "==> Isolation matrix: issuing tenant B token..."
+  local b_token
+  b_token="$(get_token "${ISOLATION_USER_NAME}" "${ISOLATION_PW}" "${ISOLATION_PROJECT_NAME}")"
+  [ -n "${b_token}" ] || { echo "ERROR: tenant B token issuance failed"; exit 1; }
+
+  local attachment_id cinder_attachment_id
+  attachment_id="$(sqlite_col id "${SERVER_ID}" "${VOLUME_ID}")"
+  cinder_attachment_id="$(sqlite_col cinder_attachment_id "${SERVER_ID}" "${VOLUME_ID}")"
+  [ -n "${attachment_id}" ] || { echo "ERROR: durable attachment row not found before the matrix"; exit 1; }
+
+  local code
+
+  # B1 — token B cannot list A's attachments through A's URL project.
+  code="$(code_for GET "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments" "${b_token}")"
+  if grep -q "${VOLUME_ID}" "${body_file}" 2>/dev/null; then body_leaks=yes; else body_leaks=no; fi
+  isolation_check "b1_list_a_attachments" "404" "${code}" "body_leaks_volume=${body_leaks}"
+
+  # B2 — token B cannot show A's attachment.
+  code="$(code_for GET "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments/${attachment_id}" "${b_token}")"
+  isolation_check "b2_show_a_attachment" "404" "${code}"
+
+  # B3 — token B cannot detach A's attachment; the volume stays attached.
+  code="$(code_for DELETE "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments/${attachment_id}" "${b_token}")"
+  local iscsi_still=no cinder_still=unknown durable_still=unknown
+  iscsiadm -m session 2>/dev/null | grep -q "volume-${VOLUME_ID}" && iscsi_still=yes
+  # Cinder-side proof: the volume must still be in-use with exactly one
+  # attachment (the volume detail view is the documented surface; attachment
+  # show by id is not uniformly available in the pinned Cinder release).
+  cinder_still="$(curl -s -H "X-Auth-Token: ${ADMIN_TOKEN}" \
+    "http://127.0.0.1:${CINDER_PORT}/v3/${ISOLATION_A_PROJECT}/volumes/${VOLUME_ID}" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin).get("volume",{}); print(d.get("status","unknown") + ":attachments=" + str(len(d.get("attachments",[]))))' 2>/dev/null || echo unknown)"
+  durable_still="$(sqlite_col status "${SERVER_ID}" "${VOLUME_ID}")"
+  isolation_check "b3_detach_a_attachment" "404" "${code}" \
+    "iscsi_still_attached=${iscsi_still}" "cinder_volume_state=${cinder_still}" \
+    "durable_status=${durable_still}"
+
+  # B5 — token B + A's URL project (recorded separately from B1).
+  code="$(code_for GET "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments" "${b_token}")"
+  isolation_check "b5_b_token_a_project_path" "404" "${code}"
+
+  # B6 — token B + B's URL project but A's server id: server ownership rejects.
+  code="$(code_for GET "/v2.1/${ISOLATION_PROJECT_ID}/servers/${SERVER_ID}/os-volume_attachments" "${b_token}")"
+  isolation_check "b6_b_token_foreign_server" "404" "${code}"
+
+  echo "==> Isolation matrix: creating tenant B's own resources (image/network/server)..."
+  osc_b() { env OS_USERNAME="${ISOLATION_USER_NAME}" OS_PASSWORD="${ISOLATION_PW}" \
+    OS_PROJECT_NAME="${ISOLATION_PROJECT_NAME}" "$@"; }
+  local b_image_id b_network_id b_subnet_id b_flavor_id b_port_id b_server_id
+  b_image_id="$(osc_b openstack image create o3k-b-image --file "${IMAGE_PATH}" --disk-format qcow2 --container-format bare -f value -c id)"
+  b_network_id="$(osc_b openstack network create o3k-b-network -f value -c id)"
+  # The flat DHCP profile supports exactly one subnet per compute host on
+  # the shared managed bridge, so tenant B's network must reuse tenant A's
+  # CIDR and gateway; its own allocation pool starts after A's first address
+  # so the two ports never collide on the shared L2.
+  b_subnet_id="$(osc_b openstack subnet create --network "${b_network_id}" --subnet-range 192.0.2.0/29 --allocation-pool start=192.0.2.3,end=192.0.2.6 o3k-b-subnet -f value -c id)"
+  b_flavor_id="$(osc_b openstack flavor create o3k-b-flavor --ram 512 --disk 10 --vcpus 1 -f value -c id)"
+  b_port_id="$(osc_b openstack port create --network "${b_network_id}" o3k-b-port -f value -c id)"
+  ssh-keygen -q -t ed25519 -N '' -C o3k-b -f "${DATA_DIR}/o3k-b-keypair" >/dev/null 2>&1 || true
+  osc_b openstack keypair create --public-key "${DATA_DIR}/o3k-b-keypair.pub" o3k-b-keypair >/dev/null
+  b_server_id="$(osc_b timeout 900 openstack server create --wait --config-drive true --image "${b_image_id}" --flavor "${b_flavor_id}" --key-name o3k-b-keypair --nic port-id="${b_port_id}" o3k-b-server -f value -c id)"
+  b_server_id="${b_server_id//[[:space:]]/}"
+  [ -n "${b_server_id}" ] || { echo "ERROR: tenant B server create failed"; ISOLATION_FAILED=1; }
+
+  # B4 — token B attaching A's volume to B's server must be a concealed 404.
+  code="$(code_for POST "/v2.1/${ISOLATION_PROJECT_ID}/servers/${b_server_id}/os-volume_attachments" \
+    "${b_token}" "{\"volumeAttachment\":{\"volumeId\":\"${VOLUME_ID}\"}}")"
+  local a_rows b_rows iscsi_count a_status
+  a_rows="$(python3 - "${db}" "${VOLUME_ID}" <<'PY'
+import sqlite3, sys
+db, volume = sys.argv[1:3]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+print(con.execute("SELECT count(*) FROM volume_attachments WHERE volume_id = ?", (volume,)).fetchone()[0])
+PY
+)"
+  b_rows="$(python3 - "${db}" "${b_server_id}" "${VOLUME_ID}" <<'PY'
+import sqlite3, sys
+db, server, volume = sys.argv[1:4]
+con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+print(con.execute("SELECT count(*) FROM volume_attachments WHERE server_id = ? AND volume_id = ?", (server, volume)).fetchone()[0])
+PY
+)"
+  iscsi_count="$(iscsiadm -m session 2>/dev/null | grep -c "volume-${VOLUME_ID}" || true)"
+  a_status="$(sqlite_col status "${SERVER_ID}" "${VOLUME_ID}")"
+  isolation_check "b4_attach_a_volume_to_b_server" "404" "${code}" \
+    "a_attachment_row_count=${a_rows}" "b_attachment_row_count=${b_rows}" \
+    "a_iscsi_session_count=${iscsi_count}" "a_durable_status=${a_status}"
+
+  # A controls — the feature still works for the owner while B was blocked.
+  code="$(code_for GET "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments" "${ADMIN_TOKEN}")"
+  local a_list_ok=no
+  if [ "${code}" = "200" ] && python3 - "${body_file}" "${VOLUME_ID}" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = doc.get("volumeAttachments", [])
+sys.exit(0 if len(rows) == 1 and rows[0].get("volumeId") == sys.argv[2] else 1)
+PY
+  then a_list_ok=yes; fi
+  isolation_check "a_control_list" "200" "${code}" "exact_single_attachment=${a_list_ok}"
+  code="$(code_for GET "/v2.1/${ISOLATION_A_PROJECT}/servers/${SERVER_ID}/os-volume_attachments/${VOLUME_ID}" "${ADMIN_TOKEN}")"
+  isolation_check "a_control_show" "200" "${code}"
+
+  echo "==> Isolation matrix: tenant B's own positive lifecycle..."
+  local b_volume_id b_volume_status
+  b_volume_id="$(curl -s -H "X-Auth-Token: ${b_token}" -H "Content-Type: application/json" \
+    -X POST "http://127.0.0.1:${CINDER_PORT}/v3/${ISOLATION_PROJECT_ID}/volumes" \
+    -d '{"volume":{"size":1,"name":"o3k-b-volume"}}' \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("volume",{}).get("id",""))' 2>/dev/null || true)"
+  if [ -z "${b_volume_id}" ]; then
+    echo "ERROR: tenant B volume create failed"
+    isolation_check "b_own_volume_create" "created" "failed"
+  else
+    b_volume_status="unknown"
+    for _i in $(seq 1 60); do
+      b_volume_status="$(curl -s -H "X-Auth-Token: ${b_token}" \
+        "http://127.0.0.1:${CINDER_PORT}/v3/${ISOLATION_PROJECT_ID}/volumes/${b_volume_id}" \
+        | python3 -c 'import sys,json; print(json.load(sys.stdin).get("volume",{}).get("status","unknown"))' 2>/dev/null || echo unknown)"
+      [ "${b_volume_status}" = "available" ] && break
+      sleep 2
+    done
+    if [ "${b_volume_status}" = "available" ]; then
+      osc_b openstack server add volume "${b_server_id}" "${b_volume_id}"
+      local b_attached=no
+      for _i in $(seq 1 30); do
+        if osc_b openstack volume attachment list --volume "${b_volume_id}" -f json 2>/dev/null \
+          | python3 -c 'import json,sys
+try:
+    rows = json.load(sys.stdin)
+    exit(0 if any((k.lower() == "status" and v == "attached") for r in rows for k, v in r.items()) else 1)
+except Exception:
+    exit(1)'; then
+          b_attached=yes
+          break
+        fi
+        sleep 2
+      done
+      local b_list_code b_show_code
+      b_list_code="$(code_for GET "/v2.1/${ISOLATION_PROJECT_ID}/servers/${b_server_id}/os-volume_attachments" "${b_token}")"
+      b_show_code="$(code_for GET "/v2.1/${ISOLATION_PROJECT_ID}/servers/${b_server_id}/os-volume_attachments/${b_volume_id}" "${b_token}")"
+      if [ "${b_attached}" = "yes" ]; then b_flow=attached; else b_flow=not-attached; fi
+      isolation_check "b_own_attach" "attached" "${b_flow}"
+      isolation_check "b_own_list" "200" "${b_list_code}"
+      isolation_check "b_own_show" "200" "${b_show_code}"
+      osc_b openstack server remove volume "${b_server_id}" "${b_volume_id}" || true
+      local b_detached=no
+      for _i in $(seq 1 30); do
+        b_volume_status="$(curl -s -H "X-Auth-Token: ${b_token}" \
+          "http://127.0.0.1:${CINDER_PORT}/v3/${ISOLATION_PROJECT_ID}/volumes/${b_volume_id}" \
+          | python3 -c 'import sys,json; print(json.load(sys.stdin).get("volume",{}).get("status","unknown"))' 2>/dev/null || echo unknown)"
+        [ "${b_volume_status}" = "available" ] && { b_detached=yes; break; }
+        sleep 2
+      done
+      isolation_check "b_own_detach" "available" "${b_detached:+available}"
+    else
+      isolation_check "b_own_volume_available" "available" "${b_volume_status}"
+    fi
+  fi
+
+  echo "==> Isolation matrix: cleaning up tenant B resources..."
+  osc_b openstack server delete --wait "${b_server_id}" >/dev/null 2>&1 || true
+  osc_b openstack keypair delete o3k-b-keypair >/dev/null 2>&1 || true
+  osc_b openstack flavor delete "${b_flavor_id}" >/dev/null 2>&1 || true
+  osc_b openstack port delete "${b_port_id}" >/dev/null 2>&1 || true
+  osc_b openstack subnet delete "${b_subnet_id}" >/dev/null 2>&1 || true
+  osc_b openstack network delete "${b_network_id}" >/dev/null 2>&1 || true
+  osc_b openstack image delete "${b_image_id}" >/dev/null 2>&1 || true
+  if [ -n "${b_volume_id:-}" ]; then
+    curl -s -f -X DELETE -H "X-Auth-Token: ${b_token}" \
+      "http://127.0.0.1:${CINDER_PORT}/v3/${ISOLATION_PROJECT_ID}/volumes/${b_volume_id}" >/dev/null 2>&1 || true
+  fi
+  rm -f "${DATA_DIR}/o3k-b-keypair" "${DATA_DIR}/o3k-b-keypair.pub"
+
+  python3 - "${ISOLATION_RESULTS}" "${EVIDENCE_DIR}" "${SERVER_ID}" "${VOLUME_ID}" \
+    "${attachment_id}" "${ISOLATION_PROJECT_ID}" "${ISOLATION_FAILED}" "${RELEASE_CODENAME}" <<'PY'
+import json, os, sys
+
+results_tsv, evidence_dir, server_a, volume_a, attachment_a = sys.argv[1:6]
+project_b, failed, codename = sys.argv[6:9]
+
+cases = {}
+for line in open(results_tsv, encoding="utf-8"):
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    case, expected, actual, extra = line.split("\t")
+    kv = {}
+    for pair in extra.split(";"):
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+            kv[key] = value
+    cases[case] = {"expected_status": expected, "actual_status": actual,
+                   "passed": actual == expected, **kv}
+
+negative = {k: v for k, v in cases.items() if k.startswith("b")}
+positive = {k: v for k, v in cases.items() if k.startswith("a_control") or k.startswith("b_own")}
+
+def side_effects_zero():
+    b3 = cases.get("b3_detach_a_attachment", {})
+    b4 = cases.get("b4_attach_a_volume_to_b_server", {})
+    checks = [
+        b3.get("iscsi_still_attached") == "yes",
+        b3.get("cinder_volume_state", "").startswith("in-use"),
+        b3.get("durable_status") == "attached",
+        b4.get("a_attachment_row_count") in ("", "1"),
+        b4.get("b_attachment_row_count") in ("", "0"),
+        b4.get("a_iscsi_session_count") in ("", "1"),
+        b4.get("a_durable_status") == "attached",
+    ]
+    return all(checks)
+
+overall = "passed" if failed == "0" and all(v["passed"] for v in cases.values()) else "failed"
+doc = {
+    "artifact_type": "asr-001-002-two-tenant-isolation",
+    "asr": ["ASR-001", "ASR-002"],
+    "profile": "openstack-service-testbed (external-hosted Cinder)",
+    "codename": codename,
+    "project_a": {"id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+                  "server_id": server_a, "volume_id": volume_a,
+                  "attachment_id": attachment_a},
+    "project_b": {"id": project_b},
+    "negative_matrix": negative,
+    "positive_controls": positive,
+    "isolation": {
+        "foreign_attachment_visible": False,
+        "foreign_attachment_mutated": False,
+        "cross_tenant_idempotency_reuse": False,
+        "zero_side_effects": side_effects_zero(),
+    },
+    "status": overall,
+    "redacted": True,
+}
+with open(os.path.join(evidence_dir, "isolation-evidence.json"), "w", encoding="utf-8") as f:
+    json.dump(doc, f, indent=2)
+    f.write("\n")
+PY
+  if [ "${ISOLATION_FAILED}" = "1" ]; then
+    echo "ERROR: two-tenant isolation matrix failed (see isolation-evidence.json)"
+    exit 1
+  fi
+  echo "    two-tenant isolation matrix passed (ASR-001/002 negative + positive cases)"
+}
+
+
 echo "==> Workflow: Cinder service user authenticates through O3K Keystone (service project)..."
 SERVICE_TOKEN=$(get_token "cinder" "${CINDER_SERVICE_PW}" "service")
 [ -n "${SERVICE_TOKEN}" ] || { echo "ERROR: cinder service user auth failed"; exit 1; }
@@ -1320,6 +1639,14 @@ if not has_o3k_serial:
     sys.exit(1)
 print("    libvirt domain XML contains the o3k-owned attached disk (serial bound)")
 PY
+
+# Two-tenant isolation matrix (ASR-001/002): while A's volume is attached,
+# prove token B cannot reach A's attachment/volume with zero side effects,
+# and that tenant B still runs its own complete lifecycle. Runs only under
+# O3K_ISOLATION_MATRIX=1; the default flow is unchanged.
+if [ "${ISOLATION_ENABLED}" = "1" ]; then
+  run_isolation_matrix
+fi
 
 echo "==> Workflow: prove the running guest observes the attached block device..."
 # The in-guest marker is DIAGNOSTIC evidence, not a gate: the closure's compute

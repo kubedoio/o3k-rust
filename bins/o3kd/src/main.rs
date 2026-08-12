@@ -291,6 +291,52 @@ impl CreateArtifactResolver for DaemonCreateResolver {
     }
 }
 
+/// Parses the protected two-tenant isolation seeding environment. Every
+/// variable is required together: a partial set is a misconfiguration and
+/// fails closed. Disabled by default; only the hosted-service testbed runner
+/// sets these to prove cross-tenant isolation.
+fn parse_extra_project_seeds()
+-> Result<Vec<o3k_identity::ExtraProjectSeed>, Box<dyn std::error::Error>> {
+    const PREFIX: &str = "O3K_EXTRA_TENANT_";
+    let vars = [
+        "PROJECT_ID",
+        "PROJECT_NAME",
+        "USER_ID",
+        "USER_NAME",
+        "PASSWORD",
+    ];
+    let values: Vec<Option<String>> = vars
+        .iter()
+        .map(|suffix| std::env::var(format!("{PREFIX}{suffix}")).ok())
+        .collect();
+    if values.iter().all(Option::is_none) {
+        return Ok(Vec::new());
+    }
+    let require = |suffix: &str, index: usize| -> Result<String, Box<dyn std::error::Error>> {
+        values[index].clone().ok_or_else(|| {
+            format!("{PREFIX}{suffix} is required when any {PREFIX}* variable is set").into()
+        })
+    };
+    let project_id = require("PROJECT_ID", 0)?;
+    let project_name = require("PROJECT_NAME", 1)?;
+    let user_id = require("USER_ID", 2)?;
+    let user_name = require("USER_NAME", 3)?;
+    let password = require("PASSWORD", 4)?;
+    Uuid::parse_str(&project_id).map_err(|error| -> Box<dyn std::error::Error> {
+        format!("{PREFIX}PROJECT_ID: {error}").into()
+    })?;
+    Uuid::parse_str(&user_id).map_err(|error| -> Box<dyn std::error::Error> {
+        format!("{PREFIX}USER_ID: {error}").into()
+    })?;
+    Ok(vec![o3k_identity::ExtraProjectSeed {
+        project_id,
+        project_name,
+        user_id,
+        user_name,
+        password: o3k_identity::Secret::new(password),
+    }])
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = o3k_config::Config::from_sources(std::env::args(), std::env::vars())?;
@@ -468,6 +514,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let create_convergence_reconciler = compute_service.spawn_create_convergence_reconciler(5);
     let lifecycle_convergence_reconciler =
         compute_service.spawn_lifecycle_convergence_reconciler(5);
+    let extra_projects = parse_extra_project_seeds()?;
     let identity = match (config.bootstrap_password(), config.token_signing_key()) {
         (Some(password), Some(signing_key)) => {
             let catalog_endpoint = format!("http://{}", config.listen_addr);
@@ -481,6 +528,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|secret| o3k_identity::Secret::new(secret.expose().to_owned())),
                     cinder_endpoint: std::env::var("O3K_CINDER_ENDPOINT").ok(),
                     pbkdf2_iterations: 0,
+                    extra_projects,
                 },
             )
             .await?;
