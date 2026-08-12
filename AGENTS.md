@@ -1,16 +1,29 @@
 # AGENTS.md — mandatory instructions for coding agents
 
-This file is the top-level operating contract for every LLM or automated coding agent working in O3K Rust.
+This file is the top-level operating contract for every LLM or automated coding
+agent working in O3K Rust.
 
 ## Mission
 
-Build a small, understandable, secure, and testable Rust-native OpenStack-compatible control plane for:
+Build O3K as a small, understandable, secure, testable, and extensible
+**Cloud Operating System**.
 
-1. reproducible OpenStack service testbeds;
-2. progressively native Rust OpenStack-compatible services;
-3. small edge clouds targeting approximately 10–20 hypervisors.
+O3K must:
 
-Correct end-to-end behavior and honest profile-specific claims matter more than endpoint count.
+1. preserve selected, evidence-backed OpenStack compatibility;
+2. converge on a shared O3K Cloud Kernel instead of reproducing historical
+   OpenStack project topology internally;
+3. support a native TestLab/cloud and small edge-cloud path;
+4. support selected external OpenStack service testbeds;
+5. make future first-class O3K services cheaper to build by reusing common IAM,
+   authorization, resource ownership, service-registry, operation, audit/event,
+   quota/limit, and reconciliation contracts.
+
+Correct end-to-end behavior and honest profile-specific claims matter more than
+endpoint count.
+
+"Cloud Operating System" is an architecture/product-direction statement, not a
+production-readiness or full-parity claim.
 
 ## Authority order
 
@@ -20,36 +33,38 @@ When instructions conflict, use this order:
 2. accepted ADRs in `docs/adr/`;
 3. normative specs in `docs/specs/`;
 4. public contracts under `contracts/` and `proto/`;
-5. official OpenStack documentation and published specifications;
-6. public OpenStack client, SDK, Terraform, and Tempest behavior;
-7. O3K Rust contracts, tests, and black-box evidence;
+5. official OpenStack documentation and published specifications for OpenStack
+   compatibility questions;
+6. public OpenStack client/SDK/Terraform/Tempest behavior;
+7. O3K Rust contracts/tests/black-box evidence;
 8. public Go O3K as a non-normative secondary reference;
 9. issue acceptance criteria;
 10. tests;
 11. existing implementation.
 
-Do not silently resolve a conflict. Stop, describe it in the issue or PR, and propose the smallest corrective change.
-
-For OpenStack compatibility questions specifically, use this source priority:
-
-1. official OpenStack API documentation and published specifications;
-2. public OpenStack client, SDK, Terraform, and Tempest behavior;
-3. O3K Rust ADRs, contracts, tests, and black-box evidence;
-4. public Go O3K as a non-normative secondary reference.
+Do not silently resolve a conflict. Stop, describe it in the issue/PR, and
+propose the smallest corrective change.
 
 ## Normative source ownership
 
-Read `docs/NORMATIVE_SOURCES.md` before changing architecture, identity,
-workflows, compatibility manifests, execution protocols, product profiles, or
-deployment claims.
+Read `docs/NORMATIVE_SOURCES.md` before changing architecture, IAM,
+authorization, service topology, workflows, compatibility manifests, execution
+protocols, product profiles, or deployment claims.
 
-- Summary documents explain intent and link to normative sources.
-- Do not copy a field-level contract, compensation state machine, authorization
-  rule, or product-claim gate into multiple summaries.
-- When a summary conflicts with the named normative source, correct the summary.
-- An external-hosted service must never be described as O3K-implemented.
-- Runtime and release claims require executable evidence even when the spec is
-  accepted.
+Important authority:
+
+- ADR-0165 — O3K Cloud OS / Cloud Kernel;
+- ADR-0166 + SPEC-0020 — O3K IAM / Keystone compatibility;
+- ADR-0163 + SPEC-0024 — deployment/evidence profiles and claims;
+- ADR-0160 + SPEC-0025 — topology/dependency/rewrite convergence;
+- SPEC-0021 — cross-service workflows/compensation;
+- SPEC-0022 — OpenStack compatibility baseline/evidence;
+- execution/core architecture contracts.
+
+Summary documents explain intent. They do not redefine normative contracts.
+
+Runtime/release claims require executable evidence even when architecture/specs
+are accepted.
 
 ## Mandatory reading order
 
@@ -61,155 +76,282 @@ Before editing code, read:
 4. `docs/ARCHITECTURE.md`;
 5. `docs/NORMATIVE_SOURCES.md`;
 6. `docs/TEST_STRATEGY.md`;
-7. the relevant ADR, SPEC, compatibility profile, product profile, and execution contract;
+7. the relevant ADR/SPEC/compatibility profile/product profile/execution
+   contract;
 8. the assigned issue.
 
-For product scope, identity, service topology, provider boundaries, cross-service workflows, hosted-service profiles, or runner changes, also read:
+For product scope, IAM, topology, provider boundaries, cross-service workflows,
+hosted services, or runner changes, also read:
 
+- `docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md`;
+- `docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md`;
 - `docs/adr/ADR-0160-service-topology-and-execution-boundaries.md`;
-- `docs/adr/ADR-0161-keystone-trust-and-service-identity.md`;
 - `docs/adr/ADR-0162-contract-first-staged-runner-validation.md`;
 - `docs/adr/ADR-0163-product-profiles-and-deployment-posture.md`;
 - `docs/specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md`;
 - `docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md`;
 - `docs/specs/SPEC-0022-service-api-baseline-and-evidence-gates.md`;
-- `docs/specs/SPEC-0023-external-cinder-service-under-test.md` when an external service is involved;
+- `docs/specs/SPEC-0023-external-cinder-service-under-test.md` when relevant;
 - `docs/specs/SPEC-0024-product-profiles-and-claims.md`;
+- `docs/specs/SPEC-0025-rust-rewrite-and-architecture-convergence.md`;
 - `compatibility/product-profiles.yaml`;
-- `contracts/execution-boundaries.md`.
+- `contracts/execution-boundaries.md`;
+- `contracts/core-architecture-boundaries.toml`.
+
+ADR-0161 is superseded by ADR-0166 and must not be used as current authority.
+
+## Cloud Kernel invariants
+
+### OpenStack is compatibility, not the internal architecture
+
+Do not make historical OpenStack service names define a new O3K process, crate,
+store, or domain boundary without an independent architectural reason.
+
+Conceptually:
+
+```text
+Keystone  -> O3K IAM adapter
+Glance    -> O3K Image adapter
+Nova      -> O3K Compute adapter
+Neutron   -> O3K Network adapter
+Placement -> O3K Capacity adapter
+Cinder    -> O3K Volume adapter
+```
+
+Keep OpenStack JSON, headers, microversions, policy names, and error/catalog
+shapes at protocol/compatibility edges.
+
+### O3K IAM is canonical
+
+Keystone-compatible authentication/catalog behavior maps into O3K IAM.
+
+All first-class services consume one normalized typed `AuthContext`.
+
+Protected operations should be expressible through:
+
+```text
+Principal × Action × Resource × Context -> Allow | Deny
+```
+
+A service must not:
+
+- parse Keystone wire credentials as domain state;
+- invent a parallel tenant-isolation model;
+- treat a syntactically valid token as authorization;
+- omit required durable owner/security-scope state;
+- authorize after provider mutation;
+- reveal cross-tenant existence through idempotency behavior.
+
+### O3K owns O3K resource authority
+
+For O3K-owned resources, the control plane owns:
+
+- public O3K ID;
+- resource type;
+- owner/security scope;
+- desired state;
+- operation identity/phase;
+- capacity/scheduling;
+- compensation/reconciliation;
+- provider mapping.
+
+Execution providers own bounded mutation/observation only.
+
+### Existing clouds are not ordinary providers
+
+An external OpenStack cloud, vSphere/vCenter, Proxmox, KubeVirt, or public cloud
+may already own scheduling, quotas, policy, resource identity, and lifecycle.
+
+Do not force such a system through a libvirt-like provider abstraction.
+
+A delegated/federated connector requires a separate accepted authority model.
+
+### New first-class services reuse the kernel
+
+A new O3K service should reuse shared:
+
+- IAM/principals;
+- authorization;
+- ownership;
+- service registration;
+- quota/limit hooks where selected;
+- operations/idempotency/reconciliation;
+- audit/event identity;
+- standard health/failure identity.
+
+Do not create a parallel cloud framework inside a new service.
 
 ## Issue-driven rule
 
 - One issue is the unit of intent.
-- One PR should normally close one issue.
-- Do not implement an untracked feature.
+- One PR should normally close one coherent issue.
+- Do not implement untracked features.
 - Do not expand scope because a nearby improvement looks easy.
-- Missing requirements must become an issue or spec amendment.
-- An endpoint outside the accepted compatibility profile must not be implemented opportunistically.
-- Do not create a micro-issue when the work is an acceptance criterion of an existing coherent issue.
+- Missing requirements become an issue/spec amendment.
+- An endpoint outside the accepted compatibility profile must not be added
+  opportunistically.
+- Do not create micro-issues for acceptance criteria already owned by a coherent
+  issue.
 
 ## Required agent plan
 
-Before code changes, post or record:
+Before code changes, record:
 
-- the issue being solved;
-- the selected product profile: `openstack-service-testbed`, `native-rust-testlab`, `small-edge-cloud`, or another accepted profile;
+- issue being solved;
+- selected deployment/evidence profile;
+- canonical O3K service/domain involved;
+- OpenStack compatibility adapter involved, if any;
+- authority mode: `o3k-implemented`, `external-hosted`, execution provider, or
+  explicitly accepted delegated/federated;
 - files expected to change;
-- contracts and specs affected;
-- public reference inputs, pinned revisions, and provenance records;
-- the declared service/API operation being implemented;
-- whether each service is `o3k-implemented` or `external-hosted`;
-- database and execution-profile assumptions;
-- cross-service dependencies and compensation phases;
-- the required evidence tier: portable, process, component real-host, hosted-service, full-profile, or release;
+- contracts/specs affected;
+- public reference inputs/pinned revisions/provenance;
+- public operations/actions/resources involved;
+- database/execution assumptions;
+- cross-service dependencies/compensation;
+- required evidence tier;
 - tests to add first;
 - known uncertainties;
 - explicit non-goals.
 
 ## Product-profile rules
 
-- Do not conflate the three product profiles.
-- External hosted services retain their own databases, message buses, service processes, backends, migrations, upgrades, and operational ownership.
-- Hosting an endpoint in the O3K catalog does not mean O3K implements that service.
-- Native Rust service development remains a product goal even when an external service-under-test profile exists.
-- The small edge-cloud target is approximately 10–20 hypervisors, but this is not a production claim without multi-host, database, failure, upgrade, policy, and operational evidence.
-- “Connect to another OpenStack” must be decomposed into a hosted-service, external-identity, endpoint-registration, service-consumption, federation, or resource-sharing profile.
-- SQLite is the currently supported default for minimal TestLab and portable profiles.
-- PostgreSQL is a production-oriented target until a real adapter and conformance suite exist. Do not call it supported or recommended for installation before then.
-- Approximately 50 MB is a minimal-control-plane target, not a guarantee. Every footprint claim must name the exact profile, included O3K processes, build, host, workload phase, and excluded external dependencies.
+- O3K has one product identity: O3K Cloud OS.
+- Do not conflate deployment/evidence profiles.
+- External-hosted services retain their own DB/message bus/processes/backend/
+  migrations/upgrades/operations.
+- Hosting an endpoint does not mean O3K implements it.
+- The small edge target is approximately 10–20 hypervisors, not a production
+  claim without evidence.
+- "Connect to another OpenStack" must be decomposed into explicit trust,
+  hosted-service, external-identity, service-consumption, delegation/federation,
+  or resource-sharing behavior.
+- SQLite is the supported minimal TestLab/portable default.
+- PostgreSQL is a production-oriented target until a real adapter/conformance
+  suite exists.
+- Approximately 50 MB is a target, not a guarantee.
+- Architecture examples of database/Kubernetes/AI/etc. are not support claims.
+- The current `v0.2.0-alpha.1` libvirt TestLab gate must not be expanded by
+  Cloud Kernel work unless a human-approved release replan explicitly says so.
 
 ## Service and process rules
 
-- `o3kd` initially owns OpenStack-compatible service semantics, authorization, desired state, scheduling, operations, compensation, and reconciliation.
-- `o3k-compute`, `o3k-network`, and `o3k-storage` are execution boundaries, not independent sources of public OpenStack truth.
-- Logical service/provider separation must precede process separation.
-- Do not introduce a new daemon without an accepted ADR covering privilege, identity, protocol, failure domain, deployment, restart, and cleanup.
-- Keystone-compatible identity is the common trust and discovery root, not the transaction coordinator for servers, ports, volumes, or allocations.
-- Never use a display name where a durable project, user, service, endpoint, resource, or provider ID is required.
-- Native Cinder and `o3k-storage` do not block the first ephemeral-root libvirt guest.
-- A real external Cinder deployment retains its own dependencies and is not the native O3K storage implementation.
+- `o3kd` initially owns Cloud Kernel/service semantics, authorization, desired
+  state, scheduling, operations, compensation, and reconciliation.
+- `o3k-compute`, `o3k-network`, and `o3k-storage` are execution boundaries, not
+  independent sources of public cloud truth.
+- Logical/domain/provider separation precedes process separation.
+- Do not introduce a daemon because OpenStack has a similarly named service.
+- A new daemon requires an accepted ADR covering privilege, identity, protocol,
+  failure domain, deployment, restart, and cleanup.
+- Never use a display name where a durable principal/scope/service/resource/
+  provider ID is required.
+- Native Volume/Cinder work does not block the first ephemeral-root guest.
+- External Cinder remains external and is not the native O3K storage
+  implementation.
 
 ## Compatibility-profile rules
 
-- O3K targets operation-level profiles, not complete OpenStack service parity.
-- Every public operation requires a compatibility record with product profile, service ownership, method, path, API version or microversion, auth scope, request/response/error contract, state transition, dependencies, provider capability, tests, and known deviations.
-- A route without the required profile record is unsupported even when partial implementation exists.
-- Catalog entries advertise only implemented and enabled profiles.
-- Catalog and manifests distinguish `o3k-implemented` services from `external-hosted` services.
-- Separate the upstream reference maximum, O3K advertised range, implemented range, and verified range.
-- Do not advertise `volumev3`, advanced Neutron, metadata HTTP, PostgreSQL support, broad microversion ranges, generic cross-cloud support, or fixed footprint claims before their declared gates pass.
-- Official OpenStack specifications and public client behavior remain normative.
+- O3K targets operation-level OpenStack profiles, not blanket service parity.
+- Every public compatibility operation requires a profile record with service
+  ownership, method/path, API version/microversion, auth action/scope, request/
+  response/error contract, state transition, dependencies, provider capability,
+  tests, and known deviations.
+- A route without the required profile record is unsupported even if partial
+  implementation exists.
+- Compatibility catalogs advertise only implemented/enabled/verified profiles.
+- Distinguish upstream reference maximum, O3K advertised range, implemented
+  range, and verified range.
+- Do not advertise native Volume/Cinder, advanced networking, metadata HTTP,
+  PostgreSQL, broad microversions, cross-cloud support, or fixed footprint
+  before gates pass.
+- Official OpenStack specs/public client behavior remain normative for
+  compatibility behavior.
+- Compatibility requirements do not override accepted O3K internal architecture
+  unless an ADR explicitly changes it.
 
 ## Evidence-ladder rules
 
-Work proceeds in this order unless an accepted issue explicitly justifies otherwise:
+Work proceeds in this order unless an accepted issue justifies otherwise:
 
-1. ADR/SPEC/contract and product/compatibility-profile validation;
-2. domain, store, migration, and policy tests;
-3. stateful provider or external-service conformance tests;
+1. ADR/SPEC/contract/profile validation;
+2. domain/IAM/store/migration/policy tests;
+3. provider/external-service conformance;
 4. portable simulated-profile integration;
-5. process-level client tests;
-6. compute/network/storage component or hosted-service real-host gate;
-7. full native/testbed/edge profile gate;
+5. process-level public-client tests;
+6. execution component or hosted-service real-host gate;
+7. full native/testbed/edge gate;
 8. restart/failure matrix;
 9. release gate.
 
 Rules:
 
-- The protected full-profile runner is a final integration verifier, not the primary requirements-discovery loop.
-- Do not run or modify the full runner to compensate for a missing API/spec/portable test.
-- Do not delay all real execution until an undefined goal of complete Nova, Neutron, Cinder, or Keystone parity.
-- Component real-host gates must preserve inspectable owned state through a bounded protected diagnostic hold before cleanup when diagnosis requires it.
-- A fake-provider, skipped, ready, or repository-only result is not real-host evidence.
-- Record implementation, portable evidence, component or hosted-service evidence, full-profile evidence, and remaining acceptance independently.
-- Evidence from one product profile must not be promoted to another profile without the required profile gate.
+- protected full-profile runner is a final verifier, not requirements discovery;
+- do not modify the full runner to hide a missing contract/portable test;
+- fake/skipped/ready/repository-only results are not real-host evidence;
+- evidence from one profile is not automatically evidence for another.
 
 ## Implementation rules
 
-- Prefer explicit domain types over strings and maps.
+- Prefer explicit typed domain values over strings/maps.
 - Model lifecycle transitions as validated state machines.
 - Keep HTTP/OpenStack representations outside the core domain.
-- Keep provider-specific and external-service client types outside the core domain.
-- Use one normalized typed `AuthContext` for all service authorization.
-- Preserve original user/project audit context and authenticated service identity for cross-service work.
-- Use idempotency keys or deterministic operation identities for retriable mutations.
-- Persist intent and workflow phase before executing external side effects where the spec requires recovery.
-- Define reverse-order compensation for every cross-service mutation.
-- Treat timeouts as unknown outcomes, not automatic failures.
-- Observe before retrying destructive or duplicating mutations.
-- Avoid `unsafe`; each use requires a dedicated ADR, safety comments, tests, and reviewer approval.
+- Keep provider/external client types outside the core domain.
+- Use one typed `AuthContext`.
+- Express protected operations with shared action/resource/ownership semantics.
+- Preserve original actor/scope and authenticated service principal for
+  cross-service work.
+- Persist intent/phase before external side effects where recovery requires it.
+- Use deterministic operation/idempotency identity for retriable mutations.
+- Define compensation for cross-service mutations.
+- Treat timeout as unknown outcome.
+- Observe before retrying destructive/duplicating mutations.
+- Execution providers must never authorize callers or invent public O3K IDs.
+- Avoid `unsafe`; each use requires a dedicated ADR/safety contract/tests/human
+  review.
 - Avoid global mutable state.
-- Never log secrets, tokens, image credentials, private keys, connection information, user-data, connector data, or unredacted provider payloads.
-- Every background task must have shutdown, retry, backoff, reconnect, and observability behavior.
-- New dependencies require justification, license compatibility, maintenance review, and minimal feature selection.
+- Never log secrets/tokens/private keys/connection info/user-data/unredacted
+  provider payloads.
+- Every background task has shutdown/retry/backoff/reconnect/observability
+  behavior.
+- New dependencies require justification/license/maintenance/minimal features.
 
 ## Clean implementation restrictions
 
 Agents must not:
 
-- copy, translate, summarize into code, or structurally reproduce non-public source code;
-- use internal SAP, CobaltCore, NeoNephos, customer, or employer documents as implementation inputs;
-- claim behavior based on memory when a public specification or executable test is available;
-- use another implementation's private tests, schemas, migration files, or internal architecture;
-- add generated code whose source contract is not committed;
-- remove attribution or license notices.
+- copy/translate/structurally reproduce non-public source;
+- use internal SAP/CobaltCore/NeoNephos/customer/employer material as
+  implementation input;
+- claim behavior from memory when a public spec/test is available;
+- use another implementation's private tests/schemas/migrations/architecture;
+- add generated code without committed source contract;
+- remove attribution/license notices.
 
-Public OpenStack documentation, public API schemas, public SDK behavior, public standards, and independently written black-box tests are allowed inputs. The public Apache-2.0 Go O3K repository may also be used as a non-normative secondary reference under [ADR-0151](docs/adr/ADR-0151-public-go-o3k-reference-policy.md). Record every inspected Go path, pinned commit, and official source in the issue/PR or the affected spec.
+Public OpenStack docs/APIs/SDK behavior/standards and independently written
+black-box tests are allowed.
+
+The public Apache-2.0 Go O3K repository may be used only under ADR-0151 as a
+non-normative secondary reference. Record exact inspected paths/commit/public
+sources.
 
 ## Test-first acceptance
 
-A change is incomplete until it has appropriate tests:
+A change is incomplete until it has appropriate:
 
 - domain invariant tests;
+- IAM/authorization tests where relevant;
 - protocol/contract tests;
-- provider or external-service fake and conformance tests;
-- cross-service compensation tests;
-- failure-path tests;
-- regression tests for bugs;
-- process-level tests;
-- component, hosted-service, or full-profile integration tests when required by the evidence tier.
+- provider/external fake/conformance tests;
+- compensation/failure tests;
+- regression tests;
+- process tests;
+- component/hosted/full-profile tests required by evidence tier.
 
-Mocks that only repeat implementation expectations are not evidence. Prefer stateful fakes, real databases, real processes, and black-box HTTP tests. Do not mock away the exact execution boundary that an issue is supposed to prove.
+Mocks that merely repeat implementation expectations are not evidence.
+
+Do not mock away the exact authority/execution boundary an issue is supposed to
+prove.
 
 ## Commands required before completion
 
@@ -219,44 +361,41 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
-Run additional contract, simulated-profile, process, component, hosted-service, or integration commands named by the issue. Report commands and results in the PR.
+Run any additional contract/profile/component/integration commands named by the
+issue.
 
 ## PR response format
 
-Every agent-authored PR description must include:
+Every agent-authored PR description includes:
 
-- **Issue:** linked issue;
-- **Intent:** one paragraph;
-- **Design:** important choices and rejected alternatives;
-- **Product profile:** selected profile and claim impact;
-- **Profile:** service ownership, operations, and evidence tier affected;
-- **Database/footprint:** changed, unchanged, or not applicable;
-- **Contracts:** changed or unchanged;
-- **Workflow:** dependencies, phases, and compensation affected;
-- **Tests:** exact commands and important cases;
-- **Evidence:** portable, component, hosted-service, full-profile, or release status;
-- **Risks:** unresolved concerns;
-- **Provenance:** public sources and AI tools used;
-- **Follow-ups:** separate coherent issues, not hidden TODOs or field-level micro-issues.
+- **Issue**
+- **Intent**
+- **Design**
+- **Product/deployment profile**
+- **Authority model**
+- **OpenStack compatibility impact**
+- **Database/footprint**
+- **Contracts**
+- **Workflow/compensation**
+- **Tests**
+- **Evidence**
+- **Risks**
+- **Provenance**
+- **Follow-ups**
 
-When the public Go O3K repository is consulted, the PR must additionally record:
-
-- the repository URL and exact commit;
-- Go files, handlers, routes, tests, or fixtures inspected;
-- whether any artifact was copied or adapted (normally none);
-- Apache-2.0 attribution and NOTICE handling for every reused artifact.
-
-Go behavior is requirements and comparison evidence only. Official OpenStack specifications and public client behavior remain normative, and mechanical translation or reproduction of Go architecture is prohibited unless a separate accepted decision explicitly authorizes it.
+When public Go O3K is consulted, additionally record exact repository commit,
+paths/artifacts inspected, reuse status, and Apache-2.0 attribution handling.
 
 ## Definition of done
 
 - acceptance criteria satisfied;
-- product profile, compatibility profile, service ownership, and evidence tier identified;
-- tests fail before/fix after when practical;
-- formatting, lint, unit, and relevant integration tests pass;
-- contracts, traceability, and documentation updated;
+- product profile/authority mode/compatibility profile/evidence tier identified;
+- tests fail-before/fix-after when practical;
+- formatting/lint/unit/relevant integration tests pass;
+- contracts/traceability/docs updated;
 - no unrelated change;
-- no unexplained TODO, panic, `unwrap`, or ignored error in production paths;
-- compatibility and product-profile evidence updated when behavior or claims change;
-- no release, catalog, database, edge, cross-cloud, or footprint claim exceeds its evidence;
+- no unexplained TODO/panic/unwrap/ignored production error;
+- product/compatibility evidence updated when behavior/claims change;
+- no release/database/edge/cross-cloud/future-service/footprint claim exceeds
+  evidence;
 - reviewer can understand the change without reconstructing agent reasoning.

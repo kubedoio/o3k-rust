@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="930" viewBox="0 0 1600 930" role="img" aria-labelledby="title desc">
+  <title id="title">O3K current runtime topology</title>
+  <desc id="desc">Current alpha runtime topology showing clients, o3kd integrated control plane, SQLite durable state, direct libvirt execution, and remote o3k-compute execution over gRPC with mTLS.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#08111f"/><stop offset="1" stop-color="#101827"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#67e8f9"/></marker>
+    <style>
+      .title{font:700 40px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fafc}
+      .subtitle{font:400 18px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#a8b8cc}
+      .eyebrow{font:700 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:1.6px;fill:#67e8f9}
+      .h2{font:700 23px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fafc}
+      .h3{font:700 17px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f1f5f9}
+      .body{font:400 15px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#cbd5e1}
+      .small{font:500 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#9fb0c4}
+      .mono{font:600 13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#dbeafe}
+      .card{fill:#111c2f;stroke:#2b3b55;stroke-width:1.4}
+      .control{fill:#0d1d31;stroke:#3b82f6;stroke-width:2}
+      .kernel{fill:#0d2030;stroke:#2dd4bf;stroke-width:1.6}
+      .host{fill:#151d2b;stroke:#64748b;stroke-width:1.4}
+      .line{stroke:#67e8f9;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .soft{stroke:#7791ad;stroke-width:1.6;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#94a3b8;stroke-width:1.5;stroke-dasharray:7 7;fill:none;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1600" height="930" rx="28" fill="url(#bg)"/>
+  <text x="80" y="72" class="eyebrow">CURRENT ALPHA TOPOLOGY</text>
+  <text x="80" y="120" class="title">What actually runs today</text>
+  <text x="80" y="154" class="subtitle">The architectural Cloud Kernel is composed inside o3kd today; process boundaries are introduced only where execution or evidence requires them.</text>
+
+  <rect x="80" y="205" width="330" height="100" rx="18" class="card"/>
+  <text x="104" y="237" class="eyebrow">CLIENTS</text>
+  <text x="104" y="268" class="h3">OpenStack CLI / SDK / tests</text>
+  <text x="104" y="292" class="small">selected compatibility workflows</text>
+  <path d="M410 255 H480" class="line"/>
+  <text x="445" y="243" text-anchor="middle" class="small">HTTP</text>
+
+  <rect x="480" y="190" width="1040" height="470" rx="26" class="control"/>
+  <text x="510" y="226" class="eyebrow">PROCESS</text>
+  <text x="510" y="260" class="h2">bins/o3kd</text>
+  <text x="645" y="259" class="small">integrated control-plane composition</text>
+
+  <rect x="510" y="292" width="300" height="120" rx="15" class="card"/>
+  <text x="532" y="322" class="h3">API / compatibility</text>
+  <text x="532" y="347" class="mono">crates/o3k-api</text>
+  <text x="532" y="374" class="small">request parsing · API shapes</text>
+  <text x="532" y="396" class="small">OpenStack projections</text>
+
+  <rect x="835" y="292" width="300" height="120" rx="15" class="card"/>
+  <text x="857" y="322" class="h3">Identity &amp; domain</text>
+  <text x="857" y="347" class="mono">o3k-identity · o3k-domain</text>
+  <text x="857" y="374" class="small">AuthContext · ownership</text>
+  <text x="857" y="396" class="small">resource state / invariants</text>
+
+  <rect x="1160" y="292" width="330" height="120" rx="15" class="card"/>
+  <text x="1182" y="322" class="h3">Service domains</text>
+  <text x="1182" y="347" class="mono">image · network · placement</text>
+  <text x="1182" y="374" class="mono">compute · cinder integration</text>
+  <text x="1182" y="396" class="small">specialized cloud behavior</text>
+
+  <rect x="510" y="442" width="625" height="145" rx="15" class="kernel"/>
+  <text x="532" y="474" class="h3">Durable control-loop primitives</text>
+  <text x="532" y="502" class="mono">o3k-store · o3k-scheduler · o3k-reconciler</text>
+  <text x="532" y="531" class="body">desired state · operation journal · allocations</text>
+  <text x="532" y="556" class="body">observation · retry/compensation · convergence</text>
+
+  <rect x="1160" y="442" width="330" height="145" rx="15" class="card"/>
+  <text x="1182" y="474" class="h3">Default durable store</text>
+  <text x="1182" y="502" class="mono">SQLite</text>
+  <text x="1182" y="531" class="small">minimal/TestLab profile today</text>
+  <text x="1182" y="556" class="small">PostgreSQL: future support target</text>
+
+  <path d="M810 352 H835" class="soft"/>
+  <path d="M1135 352 H1160" class="soft"/>
+  <path d="M985 412 V442" class="soft"/>
+
+  <rect x="570" y="610" width="860" height="36" rx="11" fill="#101d2a" stroke="#22d3ee" stroke-width="1.4"/>
+  <text x="1000" y="634" text-anchor="middle" class="mono">typed provider boundary: o3k-provider / o3k-provider-contract</text>
+
+  <path d="M770 660 V705" class="line"/>
+  <rect x="250" y="705" width="610" height="160" rx="20" class="host"/>
+  <text x="277" y="738" class="eyebrow">LOCAL PROVIDER PATH</text>
+  <text x="277" y="771" class="h2">o3k-libvirt</text>
+  <text x="277" y="800" class="body">Bounded provider execution inside the control-plane host.</text>
+  <text x="277" y="830" class="mono">libvirt -&gt; QEMU/KVM · bridges · taps · dnsmasq · image cache</text>
+
+  <path d="M1230 660 V700 H1180 V705" class="line"/>
+  <text x="1245" y="692" class="small">gRPC + mTLS</text>
+  <rect x="900" y="705" width="620" height="160" rx="20" class="host"/>
+  <text x="927" y="738" class="eyebrow">REMOTE HOST PATH</text>
+  <text x="927" y="771" class="h2">bins/o3k-compute</text>
+  <text x="927" y="800" class="body">Host-local executor using o3k-compute-agent and provider contracts.</text>
+  <text x="927" y="830" class="mono">compute-agent -&gt; libvirt/QEMU/KVM · host networking · cache</text>
+
+  <text x="80" y="902" class="small">Not shown as current claims: HA control plane, PostgreSQL support, native persistent volume service, or separate network/storage daemons.</text>
+</svg>

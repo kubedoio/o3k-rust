@@ -2,160 +2,539 @@
 
 ## Architectural direction
 
-O3K is a lightweight, Rust-native OpenStack-compatible control plane built as a
-modular monolith first, with explicit logical service, provider, process, and
-product-profile boundaries.
+O3K is a lightweight, open, Rust-native **Cloud Operating System**.
 
-The architecture supports three product profiles:
+The central architectural decision is that O3K does not internally reproduce
+the historical OpenStack project topology.
 
-1. **OpenStack service testbed** — O3K supplies selected surrounding OpenStack
-   APIs to a real independently running service such as Cinder;
-2. **native Rust cloud** — O3K implements declared Keystone-, Glance-, Nova-,
-   Neutron-, Placement-, and later Cinder-compatible behavior itself;
-3. **small edge cloud** — O3K operates a lightweight control plane for
-   approximately 10–20 hypervisors and may integrate explicitly selected
-   external OpenStack services.
+Instead:
 
-The profile definitions, database posture, footprint target, and claim rules
-are normative in [ADR-0163](adr/ADR-0163-product-profiles-and-deployment-posture.md)
-and [SPEC-0024](specs/SPEC-0024-product-profiles-and-claims.md).
+- OpenStack is a first-class northbound compatibility contract;
+- the O3K Cloud Kernel is the canonical internal platform;
+- O3K services consume shared IAM, authorization, resource, operation, audit,
+  quota/limit, service-registry, and reconciliation contracts;
+- infrastructure execution is delegated through typed provider/agent
+  boundaries;
+- existing external clouds use a distinct delegated/federated authority model.
 
-Endpoint count is not an architectural goal. O3K advertises only frozen,
-executable compatibility profiles.
+The normative decision is
+[ADR-0165](adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md).
+
+Current maturity is narrower:
+
+> O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab
+> alpha.
+
+Architecture is direction. Release support remains evidence-gated.
+
+![O3K Cloud OS architecture](architecture/o3k-cloud-os.svg)
+
+A short visual explanation is available in
+[`docs/architecture/O3K_CLOUD_OS_SUMMARY.md`](architecture/O3K_CLOUD_OS_SUMMARY.md).
 
 ## Normative ownership
 
-This document is an overview. Field-level identity semantics, workflow phases,
-compensation order, compatibility operations, product claims, and execution
-protocol invariants are normative only in the sources listed in
+This document is an overview.
+
+Normative sources are listed in
 [`docs/NORMATIVE_SOURCES.md`](NORMATIVE_SOURCES.md).
 
-Runtime behavior and release claims require executable evidence. Documentation
-is not implementation proof.
+Especially important:
+
+- Cloud OS / Cloud Kernel authority: ADR-0165;
+- O3K IAM / Keystone compatibility: ADR-0166 and SPEC-0020;
+- deployment/evidence profiles: ADR-0163 and SPEC-0024;
+- topology/dependency/execution boundaries: ADR-0160, SPEC-0025, and the
+  execution/core-boundary contracts;
+- cross-service workflow/compensation: SPEC-0021;
+- OpenStack compatibility baselines: SPEC-0022 and compatibility manifests.
+
+Runtime behavior and release claims require executable evidence.
+
+## Top-level architecture
+
+```text
+                       NORTHBOUND CONTRACTS
+        +------------------------------------------------+
+        | OpenStack-compatible APIs | future O3K Native |
+        | CLI / SDK / Terraform     | APIs / operators  |
+        +--------------------+---------------------------+
+                             |
+                             v
+                  +-----------------------+
+                  |    O3K CLOUD KERNEL   |
+                  |-----------------------|
+                  | IAM / principals      |
+                  | authorization         |
+                  | resource ownership    |
+                  | service registry      |
+                  | quotas / limits       |
+                  | durable operations    |
+                  | audit / events        |
+                  | regions / AZs         |
+                  | reconciliation        |
+                  +-----------+-----------+
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+          v                   v                   v
+       Compute             Network              Volume
+       Image               Capacity             future services
+       ...                 Placement            database / AI / etc.
+          \                   |                   /
+           +------------------+------------------+
+                              |
+                   typed execution contracts
+                              |
+          +-------------------+-------------------+
+          |                   |                   |
+          v                   v                   v
+     o3k-compute         o3k-network        o3k-storage
+     libvirt/CellHV      Linux/OVN/etc.     LVM/Ceph/etc.
+```
+
+The first alpha physically implements only the subset needed by its selected
+profile.
+
+## The Cloud Kernel
+
+The Cloud Kernel is not "all business logic in one giant crate."
+
+It is the shared contract layer that stops every service from independently
+reinventing cloud platform semantics.
+
+### IAM and principals
+
+Canonical IAM defines:
+
+- principal identity;
+- service principal;
+- authentication context;
+- ownership/security scope;
+- delegation/original-actor identity;
+- expiry/assurance metadata;
+- secret-redaction rules.
+
+Keystone is one compatibility adapter into this model.
+
+See ADR-0166 and SPEC-0020.
+
+### Authorization
+
+Protected operations converge on:
+
+```text
+Principal × Action × Resource × Context -> Allow | Deny
+```
+
+Examples:
+
+```text
+compute:CreateServer
+network:CreatePort
+volume:AttachVolume
+```
+
+A future service defines its own action/resource vocabulary but does not define
+a new tenant-isolation architecture.
+
+Default behavior is deny.
+
+Authorization is evaluated before provider mutation, secret-bearing external
+calls, and cross-tenant resource disclosure.
+
+### Resource identity and ownership
+
+The kernel provides stable concepts for:
+
+- O3K public resource ID;
+- resource type;
+- owner/security scope;
+- service namespace;
+- desired/observed lifecycle association;
+- provider/external mapping;
+- region/AZ metadata where selected;
+- bounded attributes/tags where selected.
+
+OpenStack request paths, provider-native IDs, database row formats, and
+filesystem paths do not become authorization identity.
+
+### Service registry
+
+The O3K service registry is richer than a URL directory.
+
+It is designed to describe, where selected:
+
+- service identity/namespace;
+- ownership mode;
+- API surfaces and versions;
+- regions/endpoints;
+- resource types;
+- action vocabulary;
+- capabilities/features;
+- health/readiness;
+- evidence/claim state.
+
+The Keystone service catalog is an OpenStack-compatible projection of selected
+verified endpoints.
+
+### Quotas and limits
+
+Quota/limit semantics should share a common vocabulary and enforcement contract
+when selected.
+
+This does not mean every service has identical limits.
+
+It means a new O3K service should not create an incompatible quota framework by
+default.
+
+### Durable operations
+
+The current Rust work already implements one of the most important Cloud Kernel
+properties:
+
+```text
+intent
+-> durable operation
+-> side effect
+-> observation
+-> convergence / compensation
+```
+
+A timeout is an unknown outcome, not proof of failure.
+
+Operation identities, phases, idempotency, retries, compensation, and
+reconciliation are shared platform concepts rather than handler-local control
+flow.
+
+### Audit and events
+
+The common identity model should make it possible to answer:
+
+```text
+who
+did what
+to which resource
+in which ownership scope
+through which service
+under which request/operation
+with what decision/outcome
+```
+
+Service-local logging is useful but does not replace canonical audit identity.
+
+### Regions and availability domains
+
+Services and schedulers use stable O3K location identity.
+
+OpenStack region/AZ fields are compatibility projections over selected O3K
+location semantics.
+
+## OpenStack compatibility boundary
+
+OpenStack remains strategically important because it provides:
+
+- standard CLI workflows;
+- SDKs;
+- Terraform ecosystem;
+- service integrations;
+- operator knowledge;
+- mature public API semantics.
+
+O3K should preserve that value without importing historical implementation
+topology.
+
+Conceptual mapping:
+
+```text
+Keystone API
+  -> IAM compatibility adapter
+  -> O3K IAM
+
+Glance API
+  -> Image compatibility adapter
+  -> O3K Image
+
+Nova API
+  -> Compute compatibility adapter
+  -> O3K Compute
+
+Neutron API
+  -> Network compatibility adapter
+  -> O3K Network
+
+Placement API
+  -> Capacity compatibility adapter
+  -> O3K Capacity/Placement
+
+Cinder API
+  -> Volume compatibility adapter
+  -> O3K Volume
+```
+
+Compatibility models remain at protocol edges:
+
+- JSON envelopes;
+- URLs;
+- headers;
+- microversions;
+- OpenStack error shapes;
+- Keystone catalog response shapes;
+- legacy policy names where required.
+
+The core domain must not depend on them.
+
+## O3K-native APIs
+
+A future O3K-native API may exist beside OpenStack compatibility when:
+
+- a new first-class O3K service has no suitable OpenStack API;
+- an O3K capability would be distorted by forcing it through an unrelated
+  historical API;
+- a common Cloud Kernel operation needs a clean native contract.
+
+A native API is not a reason to break supported OpenStack compatibility.
+
+Its public contract requires a separate specification/evidence profile.
 
 ## Architectural layers
 
 ```text
 Protocol adapters
-  OpenStack-compatible HTTP, operator API, selected external-service clients
+  OpenStack-compatible HTTP
+  future O3K-native API
+  operator API
+  selected external-service clients
         |
+        v
 Application services
-  identity, image, compute, network, volume, placement
-  commands, queries, policy, scheduling, orchestration
+  IAM, Image, Compute, Network, Capacity, Volume, future services
+  commands, queries, scheduling, orchestration
         |
-Domain
-  identities, ownership, state machines, operations, compensation
+        v
+Cloud Kernel + Domain
+  principals, authorization, resource identity/ownership
+  state machines, operations, compensation, audit/event identity
         |
-Ports
-  store, clock, signer, policy, provider and external-service contracts
+        v
+Narrow ports
+  store, clock, signer/credential, policy
+  service registry, provider, external-service/federation contracts
         |
+        v
 Adapters
-  SQLite, future PostgreSQL, stateful fakes, agent clients, service clients
+  SQLite, future PostgreSQL
+  stateful fakes
+  agent clients
+  compatibility translators
+  external-service clients
         |
+        v
 Execution boundaries
   libvirt/KVM, Linux networking, LVM/Ceph, optional CellHV
 ```
 
-Dependencies point inward. The domain does not depend on Axum, SQLx,
-protobuf-generated clients, libvirt bindings, external-service client models,
-or OpenStack JSON representations.
+Dependencies point inward.
 
-## Control-plane topology
+The domain does not depend on Axum, SQLx, protobuf-generated clients, libvirt,
+OpenStack JSON, or external-service client models.
 
-`o3kd` is the initial control-plane process.
+## Control-plane process topology
+
+`o3kd` remains the initial modular control-plane process.
 
 ```text
-OpenStack CLI / SDK / Terraform / external OpenStack service
-                            |
-                          o3kd
-                            |
-       identity | image | compute | network | volume | placement
-                            |
-          policy | scheduling | operations | reconciliation
+OpenStack clients / future O3K clients
+                  |
+                o3kd
+                  |
+      Cloud Kernel + service modules
+                  |
+          typed execution ports
 ```
 
 `o3kd` owns:
 
-- public OpenStack-compatible behavior;
-- validated authentication and authorization context;
-- durable projects, users, roles, services, endpoints, resources, and
-  operations;
+- public compatibility/native API behavior;
+- canonical authenticated authorization context;
+- O3K-owned public resource identity;
 - desired state and immutable dependency snapshots;
-- Placement, scheduling, compensation, and reconciliation;
-- public errors, compatibility profiles, release claims, and evidence links;
-- mappings between O3K identities and provider-native identities.
+- policy/authorization decisions;
+- capacity/placement and scheduling;
+- operation/compensation/reconciliation state;
+- service registry and compatibility advertisement;
+- mappings to provider/external identities;
+- public errors/claim/evidence identity.
 
-The logical services are separate at application, domain, store, policy, and
-contract boundaries. They are not required to be separate processes in early
-releases.
+A logical service does not require its own process.
 
-## Keystone-compatible trust root
+## Service modules
 
-Identity is the common trust and service-discovery root, but it is not the
-transaction coordinator for servers, ports, volumes, images, or allocations.
+Current O3K service domains are:
 
-Keystone-compatible responsibilities include:
+### IAM
 
-- domains, projects, users, groups, roles, and assignments;
-- password authentication and token issuance;
-- public token validation for declared hosted-service profiles;
-- a normalized typed `AuthContext`;
-- service users and service projects;
-- services, regions, interfaces, endpoints, and catalog generation;
-- expiry, declared revocation behavior, audit identity, and redaction.
+Responsibilities:
 
-Every service consumes one validated authorization context. Service-specific
-request models must not reinterpret identity independently.
+- canonical principals/service identity;
+- authorization context;
+- ownership/security-scope compatibility mapping;
+- policy/authorization engine boundary;
+- compatibility token/credential handling;
+- service registry identity;
+- Keystone compatibility projection.
 
-The bootstrap identity profile is intentionally smaller than the hosted-service
-profile. A catalog entry is published only when its ownership and evidence are
-explicit.
+It does not own compute/network/storage resource lifecycle.
 
-See [ADR-0161](adr/ADR-0161-keystone-trust-and-service-identity.md),
-[SPEC-0020](specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md), and
-[SPEC-0023](specs/SPEC-0023-external-cinder-service-under-test.md).
+### Image
 
-## Native OpenStack-compatible modules
+Responsibilities:
 
-When O3K owns a service profile, `o3kd` hosts logically separate modules for:
+- image metadata;
+- content authorization;
+- content identity/digest;
+- activation/visibility;
+- provider/cache translation.
 
-- **Identity / Keystone-compatible** — trust, catalog, policy context;
-- **Image / Glance-compatible** — metadata, content authorization, activation;
-- **Compute / Nova-compatible** — flavors, keypairs, servers, actions, console,
-  attachment orchestration;
-- **Network / Neutron-compatible** — networks, subnets, ports, addressing,
-  binding intent;
-- **Placement-compatible** — resource providers, inventories, traits,
-  allocations, generations;
-- **Volume / Cinder-compatible** — later O3K-owned volumes, types, attachments,
-  backend selection, and storage observations.
+Glance is its compatibility API where selected.
 
-Native Cinder-compatible storage is part of the long-term Rust OpenStack goal.
-It is independent from hosting a real external Cinder service.
+### Compute
 
-## External-hosted service profiles
+Responsibilities:
 
-An external-hosted service remains an independently operated OpenStack service.
-O3K may provide the selected satellite APIs and catalog records required by its
-workflow.
+- flavors/keypairs/server intent;
+- dependency snapshots;
+- server lifecycle/orchestration;
+- capacity requests;
+- compute execution mapping;
+- observed-state projection;
+- console authorization.
 
-For a real external Cinder testbed:
+Nova is its compatibility API where selected.
 
-- O3K owns the declared Identity, catalog, token-validation, Glance, Nova, and
-  optional networking/Placement compatibility surfaces;
-- the catalog marks the Cinder endpoint `external-hosted`;
-- Cinder owns its API, database, RabbitMQ or supported message bus, scheduler,
-  workers, volume services, backend, migrations, upgrades, and health;
-- O3K owns only its catalog records, satellite workflow state, attachment
-  orchestration, and explicitly managed test resources.
+### Network
 
-An external endpoint must never be presented as an O3K implementation.
+Responsibilities:
 
-See [SPEC-0023](specs/SPEC-0023-external-cinder-service-under-test.md).
+- network/subnet/port intent;
+- IP/MAC allocation;
+- binding intent;
+- network policy where selected;
+- network execution mapping/observation.
+
+Neutron is its compatibility API where selected.
+
+### Capacity / Placement
+
+Responsibilities:
+
+- resource providers;
+- inventories;
+- traits/capabilities where selected;
+- generation-protected allocations;
+- scheduling inputs.
+
+Placement is its compatibility API where selected.
+
+### Volume
+
+Later native profile responsibilities:
+
+- volume/type/attachment intent;
+- backend selection;
+- attachment orchestration;
+- storage execution observation.
+
+Cinder is its compatibility API where selected.
+
+### Future services
+
+The architecture permits future first-class services such as managed database,
+Kubernetes, AI/ML, DNS, load balancing, object storage, or other capabilities.
+
+These are examples, not current roadmap/support claims.
+
+Every future service consumes the Cloud Kernel and defines its own bounded
+resource/action/API/evidence profile.
+
+## O3K IAM versus Keystone
+
+The old conceptual statement:
+
+> Keystone is the common O3K trust root.
+
+is superseded.
+
+The accepted architecture is:
+
+```text
+Keystone-compatible API
+        |
+        v
+Keystone compatibility mapping
+        |
+        v
+O3K IAM / authorization
+        |
+        v
+all first-class O3K services
+```
+
+Keystone remains critical for OpenStack client/service compatibility.
+
+It is not the internal architecture that every future O3K service must speak.
+
+## Service-to-service authorization
+
+When one service performs work on behalf of another actor, O3K preserves:
+
+```text
+original actor
++ original ownership/security scope
++ calling service principal
++ delegated action
++ request/audit/operation identity
+```
+
+A service principal does not silently become an administrator.
+
+The modular monolith may pass this context in process.
+
+A cross-process boundary requires authenticated service identity and explicit
+delegation.
+
+## Resource authority
+
+For O3K-owned resources, O3K is authoritative for:
+
+- public resource identity;
+- tenant/security-scope ownership;
+- desired state;
+- operation identity/phase;
+- scheduling/capacity allocation;
+- compatibility representation;
+- compensation/reconciliation;
+- provider mapping.
+
+Execution agents/providers are authoritative only for:
+
+- current capabilities/health;
+- provider-native ID;
+- provider existence/observed state;
+- bounded local artifacts;
+- redacted provider failures.
+
+No provider may:
+
+- create an unknown O3K public identity;
+- authorize a caller;
+- change ownership scope;
+- independently reschedule;
+- rewrite desired state.
 
 ## Host execution boundaries
 
-The target host-local process names are:
+Target host-local process boundaries remain:
 
 ```text
                      versioned mTLS contracts
@@ -164,206 +543,258 @@ The target host-local process names are:
           |                   |                   |
           v                   v                   v
     o3k-compute          o3k-network         o3k-storage
-    libvirt/KVM          TAP/bridge/DHCP      LVM/Ceph RBD
+    libvirt/KVM          TAP/bridge/OVN       LVM/Ceph RBD
     image/overlay        routing/policy       volume lifecycle
     config-drive         binding observation  attachment prep
     console              network observation  storage observation
 ```
 
 `o3k-compute` is the only mandatory separate execution process for the first
-libvirt alpha. Minimum network execution may remain behind `NetworkProvider`
-inside `o3k-compute`. Native storage may remain fake or in-process until its
-profile is selected.
+libvirt alpha.
 
-Logical separation precedes physical separation. A new daemon requires an
-accepted decision for:
+Minimum network execution may remain hosted inside it behind a logical network
+provider boundary.
 
-- privilege and deployment location;
-- identity, enrollment, mTLS, heartbeat, and epoch fencing;
-- protocol and versioning;
-- command journal and idempotency;
-- reconnect, resync, restart, and unknown outcome;
-- ownership, cleanup, and failure containment.
+A new daemon requires an accepted decision covering privilege, locality,
+identity, enrollment, mTLS, heartbeat/epoch fencing, protocol versioning,
+journal/idempotency, reconnect/resync, ownership, cleanup, and failure
+containment.
 
-See [ADR-0160](adr/ADR-0160-service-topology-and-execution-boundaries.md) and
-[execution-boundary contracts](../contracts/execution-boundaries.md).
+## Execution provider versus delegated cloud
 
-## Resource authority
+This distinction is mandatory.
 
-O3K is authoritative for:
+### Execution provider
 
-- public O3K/OpenStack-compatible identities and representations;
-- user, project, service, policy, quota, and catalog state;
-- desired state and immutable request snapshots;
-- operation identities, workflow phases, compensation, and reconciliation;
-- scheduling and Placement decisions;
-- mappings to provider or external-service identities;
-- compatibility and release claims.
+O3K owns cloud semantics and lifecycle.
 
-Execution agents are authoritative only for bounded local capabilities,
-provider-native identifiers, existence, observed state, and redacted provider
-failures.
+Examples:
 
-External-hosted services remain authoritative for their own public APIs,
-internal state, database, messaging, workers, backend resources, migrations,
-and service-specific recovery.
+- libvirt;
+- CellHV;
+- Linux bridge/OVN when selected;
+- LVM;
+- Ceph RBD.
 
-No agent or external service may silently create O3K public identities,
-authorize tenants, or rewrite O3K desired state.
+```text
+O3K desired state
+-> provider command
+-> bounded mutation
+-> observation
+-> O3K reconciliation
+```
+
+### Delegated/federated cloud
+
+The external system already owns significant cloud semantics.
+
+Possible future examples:
+
+- another OpenStack cloud;
+- vSphere/vCenter;
+- Proxmox;
+- KubeVirt;
+- public cloud.
+
+It may own:
+
+- scheduling;
+- quotas;
+- authorization;
+- resource IDs;
+- lifecycle;
+- network/storage semantics.
+
+Therefore it requires explicit authority mapping and must not be forced through
+the same provider contract as libvirt.
+
+## External-hosted OpenStack services
+
+An external-hosted OpenStack service remains independently operated.
+
+For an external Cinder testbed:
+
+- O3K owns selected IAM/catalog/token-validation and satellite compatibility
+  surfaces;
+- Cinder owns its API/database/message bus/processes/backend/migrations/
+  upgrades/health;
+- O3K owns only its explicit compatibility records/workflow state/test
+  resources.
+
+An external endpoint is never presented as native O3K implementation.
 
 ## Operation and compensation model
 
 A mutating workflow normally:
 
-1. validates identity, policy, schema, quota, dependency state, and profile
-   support;
+1. validates credential, authorization, schema, quota/limit, dependency state,
+   and profile support;
 2. snapshots immutable inputs and persists desired state;
-3. creates an operation identity and required allocations;
-4. persists the workflow phase before each side effect;
-5. dispatches one typed provider or external-service action;
-6. observes the result;
+3. creates operation identity and required allocations;
+4. persists workflow phase before each external side effect;
+5. dispatches one typed provider/external action;
+6. observes result;
 7. persists convergence, compensation, unknown outcome, or terminal failure;
-8. emits source-bound audit and evidence.
+8. emits audit/evidence identity.
 
-A timeout is an unknown outcome. Reconciliation observes before retrying a
-mutation that could duplicate or destroy resources.
+A timeout is an unknown outcome.
 
-Cross-service workflows are normative in
-[SPEC-0021](specs/SPEC-0021-cross-service-workflows-and-compensation.md).
+Reconciliation observes before retrying a mutation that could duplicate or
+destroy resources.
 
-## Product-profile architectures
+## Process/crate extraction rule
 
-### Portable simulated cloud
+Process boundaries follow:
 
-- one `o3kd` process;
-- real HTTP, identity, stores, scheduling, operations, and reconciliation;
-- SQLite;
-- stateful fake compute, network, storage, and external-service providers;
-- no privileged host mutation.
+- privilege;
+- failure domain;
+- host locality;
+- scaling;
+- deployment ownership;
+- security.
 
-This is the primary fast integration profile.
+Crate boundaries follow:
 
-### Native libvirt TestLab
+- dependency direction;
+- stable domain ownership;
+- compile-time isolation;
+- conformance/testing value.
 
-- `o3kd` plus `o3k-compute`;
-- local `qemu:///system`;
-- image cache, qcow2 overlay, config-drive/cloud-init, console, and minimum flat
-  networking;
-- O3K-owned Identity, Image, Compute, Network, and Placement profiles;
-- native persistent volumes are optional and later.
-
-### External OpenStack service testbed
-
-- `o3kd` provides declared satellite APIs and catalog;
-- the selected real OpenStack service runs independently;
-- external dependencies are explicit;
-- fake-service process tests precede protected real-service integration;
-- external-hosted claims are separate from O3K-native service claims.
-
-### Small edge cloud
-
-- approximately 10–20 hypervisors;
-- one or more explicitly supported control-plane nodes;
-- multi-host inventory, Placement, scheduling, fencing, reconnect, and resync;
-- host-local compute and declared network/storage execution;
-- backup, restore, upgrade, rollback, diagnostics, and measured operations;
-- external OpenStack integration only through explicit profiles.
-
-The target host count does not itself prove production readiness. The selected
-database, availability, failure, network, storage, policy, and operational gates
-must pass.
+Neither follows historical OpenStack project count.
 
 ## Database architecture
 
-SQLite is the currently supported default for minimal TestLab and portable
-profiles. Its architecture includes explicit WAL/concurrency policy, bounded
-lock handling, migrations, crash recovery, backup/restore, and filesystem
-constraints.
+### SQLite
 
-PostgreSQL is the intended production-oriented and stronger-availability
-profile. It is not supported merely because it appears as a port or roadmap
-item. Support requires an adapter, conformance suite, migrations, transaction
-semantics, backup/restore, and failure evidence.
+Currently supported default for minimal TestLab/portable profiles.
 
-A single-controller edge profile may use SQLite only within measured and
-published limits. Multi-controller or HA claims require a separate coordination
-and database decision.
+It requires explicit WAL/concurrency, bounded lock handling, migrations, crash
+recovery, backup/restore, and filesystem constraints.
+
+### PostgreSQL
+
+Intended production-oriented/stronger-availability profile.
+
+It is not supported merely because ports are designed for it.
+
+Support requires adapter/conformance/migrations/transaction/failure/
+backup-restore evidence.
+
+Multi-controller/HA requires a separate coordination/fencing/database decision.
 
 ## Footprint architecture
 
 The minimal O3K control plane targets approximately 50 MB steady-state memory.
-The number is a profile-specific target until measured.
 
-Published measurements separate:
+Every published measurement names exact profile/process/build/host/workload/
+method and reports external dependencies separately.
 
-- `o3kd`;
-- `o3k-compute`, future network, and future storage agents;
-- external Cinder and its database/message bus;
-- PostgreSQL;
-- libvirt and QEMU guests;
-- Ceph, LVM, and other backends.
-
-Binary size, release bundle size, RSS, CPU, startup time, and lifecycle resource
-usage are different metrics and must not be conflated.
-
-## OpenStack interoperation boundaries
-
-“Connect to another OpenStack” is decomposed into separate architectural
-profiles:
-
-- host an external service endpoint in O3K's catalog;
-- trust an external Keystone;
-- register O3K endpoints into an external Keystone;
-- consume external Glance, Cinder, Neutron, or Placement services;
-- federate identities or map projects;
-- share or migrate resources across clouds.
-
-Each requires explicit trust, ownership, outage, retry, policy, and evidence
-semantics. No generic interoperability flag is permitted.
+Cloud Kernel growth must not silently invalidate small-profile footprint goals;
+shared platform services should be compiled/activated according to explicit
+profiles where practical.
 
 ## Compatibility and metadata
 
-O3K uses OpenStack 2026.1 Gazpacho as the primary reference and 2025.2 Flamingo
-as a backward reference where declared. The upstream maximum is not the O3K
-advertised maximum. Only contiguous implemented and verified windows are
-advertised.
+Primary OpenStack reference: 2026.1 Gazpacho.
 
-The first native alpha uses config-drive/cloud-init for guest metadata. An HTTP
-metadata service is not advertised without a separate security/networking
-profile and executable guest isolation evidence.
+Backward reference: 2025.2 Flamingo where declared.
 
-See [SPEC-0022](specs/SPEC-0022-service-api-baseline-and-evidence-gates.md).
+Only implemented/verified contiguous compatibility windows are advertised.
+
+The first native alpha uses config-drive/cloud-init for guest metadata.
+
+HTTP metadata requires a separate accepted security/network profile and
+executable guest-isolation evidence.
 
 ## Validation architecture
 
 ```text
-spec and profile validation
-  -> domain/store/policy tests
-  -> provider and external-service conformance
+architecture/spec/profile validation
+  -> Cloud Kernel/domain/store/policy tests
+  -> provider/external-service conformance
   -> portable simulated profile
   -> process/public-client tests
-  -> compute/network/storage or hosted-service component gate
+  -> execution/hosted-service component gate
   -> full native/testbed/edge profile gate
   -> failure/restart matrix
   -> release gate
 ```
 
-The protected runner is a final integration verifier, not the primary source of
-missing requirements. Diagnostic modes retain owned resources only for a
-bounded protected interval and always perform ownership-checked cleanup.
+The protected runner is a final integration verifier, not a requirements
+discovery loop.
+
+## Product-profile architectures
+
+### Portable simulated cloud
+
+- one `o3kd`;
+- real HTTP/auth/store/scheduler/operations/reconciliation;
+- SQLite;
+- stateful fake execution/external-service providers;
+- no privileged host mutation.
+
+### Native libvirt TestLab
+
+- `o3kd` + `o3k-compute`;
+- local `qemu:///system`;
+- O3K IAM compatibility subset;
+- O3K Image/Compute/Network/Capacity domains exposed through selected OpenStack
+  compatibility APIs;
+- image cache/qcow2/config-drive/console/flat networking;
+- native volumes later.
+
+### External OpenStack service testbed
+
+- O3K Cloud Kernel/compatibility surfaces provide selected surrounding APIs;
+- external service remains independently operated;
+- external dependencies explicit;
+- fake-service tests precede real integration.
+
+### Small edge cloud
+
+- approximately 10–20 hypervisors initially;
+- one or more explicitly supported control-plane nodes;
+- multi-host capacity/scheduling/fencing/reconnect/resync;
+- host-local execution;
+- backup/restore/upgrade/rollback/diagnostics;
+- selected network/storage/security/database evidence.
 
 ## Growth path
 
-1. accept product profiles, trust, compatibility, and execution contracts;
-2. prove the portable simulated profiles;
-3. complete the native ephemeral-root libvirt TestLab;
-4. complete hosted-service Identity and the real external Cinder testbed;
-5. implement native Rust Cinder-compatible storage independently;
-6. prove multi-host scheduling and operations for the 10–20-hypervisor edge
-   profile;
-7. add PostgreSQL only after adapter conformance;
-8. extract `o3k-network` and `o3k-storage` only after contract and failure
-   evidence;
-9. add optional CellHV and explicit external-OpenStack integration profiles;
-10. add multi-controller or HA behavior only after a separate failure and
-    coordination model.
+The release-critical first step does not change:
+
+1. complete and release `v0.2.0-alpha.1` libvirt TestLab;
+2. converge the working IAM path on the accepted O3K IAM/Keystone boundary
+   without breaking the released compatibility workflow;
+3. extract/reuse shared authorization action/resource/ownership primitives;
+4. make service registry/catalog projection explicit;
+5. converge current Image/Compute/Network/Capacity services on Cloud Kernel
+   contracts;
+6. implement native O3K Volume/Cinder compatibility as an independent service
+   domain;
+7. prove multi-host edge behavior;
+8. add PostgreSQL after store conformance;
+9. extract `o3k-network`/`o3k-storage` only when privilege/failure evidence
+   justifies it;
+10. add the first genuinely new O3K-native service only after Cloud Kernel
+    service-extension contracts are strong enough to prove the developer model;
+11. define delegated/federated cloud connectors only when a concrete integration
+    target enters the roadmap;
+12. add multi-controller/HA only after a separate coordination/failure model.
+
+## Architectural fitness questions
+
+Every significant change should answer:
+
+1. Is this O3K canonical domain state or a compatibility/provider
+   representation?
+2. Is the resource O3K-authoritative, external-hosted, or delegated to another
+   cloud?
+3. Is authorization expressed through the shared principal/action/resource/
+   context model?
+4. Does a new service reuse shared operation/ownership/audit primitives?
+5. Does an execution adapter have more authority than it needs?
+6. Is process separation justified by privilege/failure/locality/scale?
+7. Is a release claim backed by the correct profile evidence?
+8. Does this change preserve the current alpha critical path unless explicitly
+   replanned?

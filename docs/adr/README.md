@@ -175,10 +175,12 @@ approval before `Accepted`.
 | [ADR-0154](ADR-0154-engineering-governance-lifecycle.md) | Engineering governance lifecycle | Proposed | governance |
 | [ADR-0155](ADR-0155-agent-local-image-materialization.md) | Agent-local verified image materialization | Proposed | compute, image, identity, governance |
 | [ADR-0160](ADR-0160-service-topology-and-execution-boundaries.md) | Service topology and execution boundaries | Accepted | compute, network, storage, image, placement, identity, governance |
-| [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md) | Keystone trust root and service identity | Proposed | identity, governance |
+| [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md) | Keystone trust root and service identity | Superseded | identity, governance |
 | [ADR-0162](ADR-0162-contract-first-staged-runner-validation.md) | Contract-first development and staged runner validation | Proposed | compute, network, governance |
-| [ADR-0163](ADR-0163-product-profiles-and-deployment-posture.md) | Product profiles and deployment posture | Proposed | governance |
+| [ADR-0163](ADR-0163-product-profiles-and-deployment-posture.md) | Product profiles and deployment posture | Accepted | governance |
 | [ADR-0164](ADR-0164-independent-resource-leak-verifier.md) | Independent resource-leak and foreign-state verifier | Accepted | compute, network, placement, governance |
+| [ADR-0165](ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md) | O3K as a Cloud Operating System with a shared Cloud Kernel | Accepted | governance, identity, compute, network, image, placement, volume, future-services |
+| [ADR-0166](ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md) | O3K IAM and the Keystone compatibility boundary | Accepted | identity, governance, all-first-class-services |
 
 ## Required audit
 

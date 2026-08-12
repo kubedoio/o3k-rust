@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">O3K Cloud Operating System architecture</title>
+  <desc id="desc">Layered O3K architecture showing northbound OpenStack and O3K APIs, the integrated o3kd control plane and Cloud Kernel primitives, domain services, typed execution contracts, and infrastructure providers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#08111f"/>
+      <stop offset="1" stop-color="#101a31"/>
+    </linearGradient>
+    <linearGradient id="hero" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2dd4bf" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#60a5fa" stop-opacity="0.16"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#7dd3fc"/>
+    </marker>
+    <style>
+      .title{font:700 42px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fafc}
+      .subtitle{font:400 19px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#a8b8cc}
+      .eyebrow{font:700 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:1.8px;fill:#67e8f9}
+      .h2{font:700 22px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fafc}
+      .h3{font:700 17px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f1f5f9}
+      .body{font:400 15px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#cbd5e1}
+      .small{font:500 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#9fb0c4}
+      .mono{font:600 13px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#dbeafe}
+      .card{fill:#111c2f;stroke:#263650;stroke-width:1.4}
+      .card2{fill:#0c1728;stroke:#2b4362;stroke-width:1.4}
+      .kernel{fill:#0d2030;stroke:#2dd4bf;stroke-width:2}
+      .domain{fill:#121e34;stroke:#4f6b92;stroke-width:1.2}
+      .line{stroke:#7dd3fc;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .softline{stroke:#5f789a;stroke-width:1.6;fill:none;marker-end:url(#arrow)}
+      .dash{stroke:#64748b;stroke-width:1.5;stroke-dasharray:7 7;fill:none}
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" rx="28" fill="url(#bg)"/>
+  <circle cx="1430" cy="70" r="180" fill="#2563eb" opacity="0.07"/>
+  <circle cx="120" cy="850" r="210" fill="#14b8a6" opacity="0.06"/>
+
+  <text x="80" y="78" class="eyebrow">O3K ARCHITECTURE</text>
+  <text x="80" y="126" class="title">A Cloud OS, not an OpenStack service clone</text>
+  <text x="80" y="160" class="subtitle">OpenStack compatibility stays northbound. O3K owns the internal cloud model, durable control loops, and execution boundaries.</text>
+
+  <rect x="80" y="205" width="430" height="100" rx="18" class="card" filter="url(#shadow)"/>
+  <text x="105" y="237" class="eyebrow">NORTHBOUND</text>
+  <text x="105" y="269" class="h3">OpenStack clients &amp; automation</text>
+  <text x="105" y="292" class="small">openstack CLI · SDKs · Tempest · service integrations</text>
+
+  <rect x="545" y="205" width="330" height="100" rx="18" class="card" filter="url(#shadow)"/>
+  <text x="570" y="237" class="eyebrow">NORTHBOUND</text>
+  <text x="570" y="269" class="h3">O3K-native APIs</text>
+  <text x="570" y="292" class="small">future native UX and automation</text>
+
+  <rect x="910" y="205" width="610" height="100" rx="18" fill="#101a2c" stroke="#334155" stroke-width="1.2"/>
+  <text x="935" y="237" class="eyebrow">COMPATIBILITY CONTRACTS</text>
+  <text x="935" y="270" class="body">Keystone → IAM   ·   Glance → Image   ·   Nova → Compute</text>
+  <text x="935" y="293" class="body">Neutron → Network   ·   Placement → Capacity   ·   Cinder → Volume</text>
+
+  <path d="M295 305 V342 H445" class="line"/>
+  <path d="M710 305 V342 H650" class="line"/>
+
+  <rect x="80" y="345" width="1440" height="430" rx="26" fill="url(#hero)" stroke="#3b82f6" stroke-opacity="0.65" stroke-width="1.8"/>
+  <text x="110" y="382" class="eyebrow">CURRENT CONTROL-PLANE COMPOSITION</text>
+  <text x="110" y="416" class="h2">o3kd — integrated control plane</text>
+  <text x="465" y="415" class="small">Today: one process composes API adapters, domain logic, durable state, scheduling, and reconciliation.</text>
+
+  <rect x="110" y="448" width="450" height="88" rx="15" class="card2"/>
+  <text x="132" y="477" class="h3">Protocol &amp; compatibility adapters</text>
+  <text x="132" y="502" class="mono">crates/o3k-api</text>
+  <text x="132" y="524" class="small">HTTP routes · API shapes · compatibility projections</text>
+
+  <rect x="590" y="448" width="900" height="88" rx="15" class="kernel"/>
+  <text x="612" y="477" class="h3">O3K Cloud Kernel primitives</text>
+  <text x="612" y="503" class="body">IAM/AuthContext · ownership · durable operations · quotas/limits · service identity</text>
+  <text x="612" y="525" class="body">store/migrations · scheduler · failure semantics · compensation · reconciliation · audit/events</text>
+
+  <path d="M560 492 H590" class="softline"/>
+
+  <text x="110" y="575" class="eyebrow">FIRST-CLASS O3K DOMAINS</text>
+  <rect x="110" y="596" width="248" height="108" rx="15" class="domain"/>
+  <text x="132" y="626" class="h3">IAM</text>
+  <text x="132" y="651" class="mono">o3k-identity</text>
+  <text x="132" y="679" class="small">canonical auth context</text>
+
+  <rect x="376" y="596" width="248" height="108" rx="15" class="domain"/>
+  <text x="398" y="626" class="h3">Image</text>
+  <text x="398" y="651" class="mono">o3k-image</text>
+  <text x="398" y="679" class="small">image state &amp; lifecycle</text>
+
+  <rect x="642" y="596" width="248" height="108" rx="15" class="domain"/>
+  <text x="664" y="626" class="h3">Compute</text>
+  <text x="664" y="651" class="mono">o3k-compute</text>
+  <text x="664" y="679" class="small">instance orchestration</text>
+
+  <rect x="908" y="596" width="248" height="108" rx="15" class="domain"/>
+  <text x="930" y="626" class="h3">Network</text>
+  <text x="930" y="651" class="mono">o3k-network</text>
+  <text x="930" y="679" class="small">network domain foundations</text>
+
+  <rect x="1174" y="596" width="316" height="108" rx="15" class="domain"/>
+  <text x="1196" y="626" class="h3">Capacity / Placement</text>
+  <text x="1196" y="651" class="mono">o3k-placement · o3k-scheduler</text>
+  <text x="1196" y="679" class="small">inventory, allocation, host choice</text>
+
+  <text x="110" y="744" class="small">Native persistent Volume is a later milestone; hosted/external Cinder remains a separate compatibility/testbed path.</text>
+
+  <path d="M800 775 V813" class="line"/>
+  <rect x="315" y="814" width="970" height="56" rx="15" fill="#101d2a" stroke="#22d3ee" stroke-width="1.7"/>
+  <text x="800" y="838" text-anchor="middle" class="eyebrow">TYPED EXECUTION BOUNDARY</text>
+  <text x="800" y="859" text-anchor="middle" class="mono">o3k-provider · o3k-provider-contract · versioned gRPC contracts</text>
+
+  <path d="M560 870 V900" class="softline"/>
+  <path d="M1040 870 V900" class="softline"/>
+
+  <rect x="120" y="900" width="640" height="58" rx="15" class="card"/>
+  <text x="145" y="925" class="h3">Local execution</text>
+  <text x="145" y="947" class="small">o3k-libvirt → libvirt/QEMU/KVM · Linux bridges/taps/dnsmasq · image cache</text>
+
+  <rect x="840" y="900" width="640" height="58" rx="15" class="card"/>
+  <text x="865" y="925" class="h3">Remote host execution</text>
+  <text x="865" y="947" class="small">o3kd → gRPC + mTLS → bins/o3k-compute / o3k-compute-agent → host infrastructure</text>
+</svg>

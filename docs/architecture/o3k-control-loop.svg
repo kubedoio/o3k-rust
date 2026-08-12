@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820" role="img" aria-labelledby="title desc">
+  <title id="title">O3K durable control loop</title>
+  <desc id="desc">O3K request lifecycle from client intent through API adapter, authorization, durable desired state and operation journal, scheduler, typed provider command, infrastructure mutation, observation, reconciliation, and status projection. Unknown outcomes return to observation rather than blind retry.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#08111f"/><stop offset="1" stop-color="#111827"/></linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#67e8f9"/></marker>
+    <marker id="amberArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#fbbf24"/></marker>
+    <style>
+      .title{font:700 40px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f8fafc}
+      .subtitle{font:400 18px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#a8b8cc}
+      .eyebrow{font:700 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:1.6px;fill:#67e8f9}
+      .h3{font:700 17px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#f1f5f9}
+      .body{font:400 14px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#cbd5e1}
+      .small{font:500 13px Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;fill:#9fb0c4}
+      .mono{font:600 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#dbeafe}
+      .card{fill:#111c2f;stroke:#31445f;stroke-width:1.4}
+      .durable{fill:#0d2030;stroke:#2dd4bf;stroke-width:1.7}
+      .infra{fill:#171b27;stroke:#64748b;stroke-width:1.5}
+      .line{stroke:#67e8f9;stroke-width:2;fill:none;marker-end:url(#arrow)}
+      .return{stroke:#94a3b8;stroke-width:1.7;stroke-dasharray:7 6;fill:none;marker-end:url(#arrow)}
+      .warn{stroke:#fbbf24;stroke-width:1.8;stroke-dasharray:6 5;fill:none;marker-end:url(#amberArrow)}
+    </style>
+  </defs>
+  <rect width="1600" height="820" rx="28" fill="url(#bg)"/>
+  <text x="80" y="72" class="eyebrow">CONTROL-LOOP SEMANTICS</text>
+  <text x="80" y="120" class="title">Intent becomes durable state before infrastructure mutation</text>
+  <text x="80" y="154" class="subtitle">O3K treats timeout and partial failure as distributed-systems states: observe, reconcile, compensate when required—do not blindly replay side effects.</text>
+
+  <rect x="70" y="225" width="190" height="112" rx="17" class="card"/>
+  <text x="92" y="257" class="eyebrow">1</text>
+  <text x="92" y="284" class="h3">Client intent</text>
+  <text x="92" y="309" class="small">OpenStack / O3K API</text>
+
+  <rect x="300" y="225" width="210" height="112" rx="17" class="card"/>
+  <text x="322" y="257" class="eyebrow">2</text>
+  <text x="322" y="284" class="h3">Adapter + auth</text>
+  <text x="322" y="309" class="small">AuthContext · policy</text>
+
+  <rect x="550" y="205" width="300" height="152" rx="17" class="durable"/>
+  <text x="572" y="237" class="eyebrow">3 · DURABLE</text>
+  <text x="572" y="266" class="h3">Desired state + operation</text>
+  <text x="572" y="292" class="mono">resource state · operation journal</text>
+  <text x="572" y="319" class="small">ownership · idempotency · phase</text>
+  <text x="572" y="341" class="small">recorded before external side effect</text>
+
+  <rect x="890" y="225" width="220" height="112" rx="17" class="card"/>
+  <text x="912" y="257" class="eyebrow">4</text>
+  <text x="912" y="284" class="h3">Resolve / schedule</text>
+  <text x="912" y="309" class="small">capacity · provider target</text>
+
+  <rect x="1150" y="225" width="235" height="112" rx="17" class="card"/>
+  <text x="1172" y="257" class="eyebrow">5</text>
+  <text x="1172" y="284" class="h3">Typed command</text>
+  <text x="1172" y="309" class="small">provider contract</text>
+
+  <rect x="1425" y="225" width="125" height="112" rx="17" class="infra"/>
+  <text x="1447" y="257" class="eyebrow">6</text>
+  <text x="1447" y="284" class="h3">Infra</text>
+  <text x="1447" y="309" class="small">mutation</text>
+
+  <path d="M260 281 H300" class="line"/>
+  <path d="M510 281 H550" class="line"/>
+  <path d="M850 281 H890" class="line"/>
+  <path d="M1110 281 H1150" class="line"/>
+  <path d="M1385 281 H1425" class="line"/>
+
+  <rect x="1180" y="470" width="270" height="122" rx="17" class="card"/>
+  <text x="1202" y="502" class="eyebrow">7</text>
+  <text x="1202" y="530" class="h3">Observe actual state</text>
+  <text x="1202" y="556" class="small">provider / agent observation</text>
+  <text x="1202" y="579" class="small">side-effect identity retained</text>
+
+  <rect x="815" y="470" width="300" height="122" rx="17" class="durable"/>
+  <text x="837" y="502" class="eyebrow">8 · DURABLE</text>
+  <text x="837" y="530" class="h3">Reconcile / compensate</text>
+  <text x="837" y="556" class="small">compare desired ↔ observed</text>
+  <text x="837" y="579" class="small">converge or enter explicit failure</text>
+
+  <rect x="455" y="470" width="290" height="122" rx="17" class="durable"/>
+  <text x="477" y="502" class="eyebrow">9 · DURABLE</text>
+  <text x="477" y="530" class="h3">Persist status / result</text>
+  <text x="477" y="556" class="small">resource observed state</text>
+  <text x="477" y="579" class="small">operation terminal/non-terminal phase</text>
+
+  <rect x="110" y="470" width="275" height="122" rx="17" class="card"/>
+  <text x="132" y="502" class="eyebrow">10</text>
+  <text x="132" y="530" class="h3">Project API status</text>
+  <text x="132" y="556" class="small">client sees durable truth,</text>
+  <text x="132" y="579" class="small">not an unchecked side effect</text>
+
+  <path d="M1487 337 V420 H1315 V470" class="line"/>
+  <path d="M1180 531 H1115" class="line"/>
+  <path d="M815 531 H745" class="line"/>
+  <path d="M455 531 H385" class="line"/>
+
+  <rect x="1050" y="665" width="410" height="88" rx="17" fill="#241f14" stroke="#fbbf24" stroke-width="1.4"/>
+  <text x="1074" y="696" class="h3">Timeout / lost response = unknown outcome</text>
+  <text x="1074" y="724" class="body">Observe first. Reconcile identity. Retry only when the contract proves it safe.</text>
+  <path d="M1267 337 V400 H1010 V470" class="warn"/>
+  <text x="1110" y="392" class="small" fill="#fbbf24">unknown outcome</text>
+  <path d="M1255 665 V620 H1315 V592" class="warn"/>
+
+  <path d="M247 592 V700 H600 V592" class="return"/>
+  <text x="420" y="721" text-anchor="middle" class="small">later reads re-enter the same durable model</text>
+</svg>
