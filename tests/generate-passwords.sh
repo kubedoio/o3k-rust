@@ -45,4 +45,17 @@ if bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$WORK_DIR/parent-lin
   exit 1
 fi
 
+# Reset+reinstall contract: regenerating over an existing file must be
+# byte-idempotent (same values reused, same line positions) so the
+# installer's configuration ledger keeps matching across a reinstall. The
+# fail-before defect reordered the generated keys and made every reinstall
+# fail the operator-modified configuration guard.
+before="$(sha256sum "$output" | awk '{print $1}')"
+if ! bash "$ROOT_DIR/scripts/generate-passwords.sh" --output "$output" >/dev/null 2>&1; then
+  echo "regeneration over an existing file failed" >&2
+  exit 1
+fi
+after="$(sha256sum "$output" | awk '{print $1}')"
+[[ "$before" == "$after" ]] || { echo "regeneration changed the credential file" >&2; exit 1; }
+
 echo "password generator tests passed"

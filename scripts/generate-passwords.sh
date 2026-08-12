@@ -96,11 +96,33 @@ if [[ -z "$signing_key" ]]; then signing_key="$(openssl rand -hex 48)"; fi
 tmp="${OUTPUT_FILE}.tmp.$$"
 trap 'rm -f -- "$tmp"' EXIT
 {
+  # Preserve the original line order and every unrelated line byte-for-byte:
+  # the two generated keys are replaced in place, so regeneration is
+  # idempotent and the installer's configuration ledger (which hashes the
+  # file after installation) keeps matching across reset+reinstall. Reordering
+  # the keys here made every reinstall look like an operator modification and
+  # fail closed.
+  bootstrap_written=0
+  signing_written=0
   if [[ -f "$OUTPUT_FILE" ]]; then
-    awk '!/^(O3K_BOOTSTRAP_PASSWORD|O3K_TOKEN_SIGNING_KEY)=/' "$OUTPUT_FILE"
+    while IFS= read -r line; do
+      case "$line" in
+        O3K_BOOTSTRAP_PASSWORD=*)
+          printf 'O3K_BOOTSTRAP_PASSWORD=%q\n' "$bootstrap"
+          bootstrap_written=1
+          ;;
+        O3K_TOKEN_SIGNING_KEY=*)
+          printf 'O3K_TOKEN_SIGNING_KEY=%q\n' "$signing_key"
+          signing_written=1
+          ;;
+        *)
+          printf '%s\n' "$line"
+          ;;
+      esac
+    done <"$OUTPUT_FILE"
   fi
-  printf 'O3K_BOOTSTRAP_PASSWORD=%q\n' "$bootstrap"
-  printf 'O3K_TOKEN_SIGNING_KEY=%q\n' "$signing_key"
+  [[ $bootstrap_written -eq 1 ]] || printf 'O3K_BOOTSTRAP_PASSWORD=%q\n' "$bootstrap"
+  [[ $signing_written -eq 1 ]] || printf 'O3K_TOKEN_SIGNING_KEY=%q\n' "$signing_key"
 } >"$tmp"
 chmod 0600 "$tmp"
 mv -f -- "$tmp" "$OUTPUT_FILE"
