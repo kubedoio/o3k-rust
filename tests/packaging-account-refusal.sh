@@ -259,4 +259,37 @@ id "${tag}-compute" >/dev/null 2>&1 || fail "installer removed the legitimate co
 [[ ! -e "/etc/polkit-1/rules.d/50-${tag}-libvirt.rules" ]] || fail "polkit rule installed for $tag"
 echo "CASE F passed: legitimate existing identities accepted past account validation"
 
+# CASE G — a COMPLETED libvirt install must place the compute identity file
+# where the agent actually reads it: <compute-data-dir>/agent-id, owned by
+# the compute account. Regression: the installer historically wrote it into
+# the control data dir only, so the installed agent started without its
+# identity and the mTLS registration was always rejected (PermissionDenied),
+# leaving the installed profile permanently not-ready.
+tag="o3kg$$"
+build_bundle "$tag" "$WORK_DIR/bundle-$tag"
+ensure_group "$tag"
+ensure_group "${tag}-compute"
+ensure_group libvirt
+ensure_group kvm
+make_user "$tag" "$tag" "/var/lib/$tag" /usr/sbin/nologin
+make_user "${tag}-compute" "${tag}-compute" "/var/lib/$tag/compute" /usr/sbin/nologin \
+  libvirt kvm
+case_dir="$WORK_DIR/case-g"
+setup_tls "$case_dir/config"
+# The real flow lets bootstrap-certs.sh claim the config parent; mirror its
+# ownership marker (rewritten like the installer's own tokens, including the
+# marker filename) so the installer's config-dir claim succeeds.
+printf '%s-owned-v1 path=%s\n' "$tag" "$case_dir/config" >"$case_dir/config/.${tag}-owned"
+run_installer "$tag" "$case_dir"
+[[ "$RUN_STATUS" -eq 0 ]] || fail "clean libvirt install failed (status $RUN_STATUS): $RUN_OUTPUT"
+agent_id_file="$case_dir/data/compute/agent-id"
+[[ -f "$agent_id_file" ]] || fail "compute agent identity file is missing: $agent_id_file"
+grep -Fxq 'compute-agent' "$agent_id_file" \
+  || fail "compute agent identity content is wrong: $(cat "$agent_id_file")"
+[[ "$(stat -c '%U:%G' "$agent_id_file")" == "${tag}-compute:${tag}-compute" ]] \
+  || fail "compute agent identity ownership is wrong: $(stat -c '%U:%G' "$agent_id_file")"
+rm -f "/etc/systemd/system/${tag}d.service" "/etc/systemd/system/${tag}-compute.service" \
+  "/etc/polkit-1/rules.d/50-${tag}-libvirt.rules" 2>/dev/null || true
+echo "CASE G passed: installed compute identity is placed for the agent"
+
 echo "packaging account-refusal tests passed"

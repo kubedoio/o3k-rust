@@ -334,7 +334,14 @@ if [[ "$PROFILE" == libvirt ]]; then
     key="${setting%%=*}"
     grep -q "^${key}=" "$ENV_FILE" || printf '%s\n' "$setting" >>"$ENV_FILE"
   done
-  install -m 0640 "$TLS_DIR/agent-id" "$DATA_DIR/agent-id"
+  # The compute agent reads its identity from ITS data directory
+  # (bins/o3k-compute/src/main.rs: identity_file = data_dir.join("agent-id")),
+  # so the identity must be installed there, owned by the compute account —
+  # mirroring the disposable-testlab bootstrap. Installing it only under the
+  # control data directory leaves the installed agent without an identity and
+  # the mTLS registration is always rejected (PermissionDenied).
+  install -m 0640 -o o3k-compute -g o3k-compute \
+    "$TLS_DIR/agent-id" "$COMPUTE_DATA_DIR/agent-id"
 fi
 
 # Keep a root-owned content ledger for generated configuration and TLS files.
