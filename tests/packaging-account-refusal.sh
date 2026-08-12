@@ -308,6 +308,17 @@ grep -Fxq 'compute-agent' "$agent_id_file" \
 # "Cannot access storage file ... Permission denied").
 grep -q '^UMask=0027$' "$ROOT_DIR/packaging/o3k-compute.service" \
   || fail "compute unit must use UMask=0027"
+# A reinstall must preserve the QEMU access model on pre-existing runtime
+# files: simulate an agent-created file and prove its group survives the
+# reinstall as kvm (the fail-before defect chowned the subtree back to the
+# compute account and broke every create after reset+reinstall).
+printf 'sentinel\n' >"$case_dir/data/compute/sentinel"
+chown "${tag}-compute:${tag}-compute" "$case_dir/data/compute/sentinel"
+chmod 0640 "$case_dir/data/compute/sentinel"
+run_installer "$tag" "$case_dir"
+[[ "$RUN_STATUS" -eq 0 ]] || fail "reinstall failed (status $RUN_STATUS): $RUN_OUTPUT"
+[[ "$(stat -c '%U:%G %a' "$case_dir/data/compute/sentinel")" == "${tag}-compute:kvm 640" ]] \
+  || fail "reinstall reset the QEMU group on runtime files: $(stat -c '%U:%G %a' "$case_dir/data/compute/sentinel")"
 rm -f "/etc/systemd/system/${tag}d.service" "/etc/systemd/system/${tag}-compute.service" \
   "/etc/polkit-1/rules.d/50-${tag}-libvirt.rules" 2>/dev/null || true
 echo "CASE G passed: installed compute identity is placed for the agent"

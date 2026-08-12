@@ -400,7 +400,17 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k "$LOG_DIR"
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
-  chown -R o3k-compute:o3k-compute "$COMPUTE_DATA_DIR"
+  # Keep the QEMU access model through reinstall: the compute subtree stays
+  # group-kvm (the setgid bit is restored below), so pre-existing runtime
+  # files (base images, overlays, console sinks) remain QEMU-readable after a
+  # reset+reinstall cycle instead of being silently chowned to the compute
+  # account's group.
+  chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
+  # The agent identity file is compute-private identity material, not QEMU
+  # runtime state; restore its compute-primary-group ownership.
+  if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
+    chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+  fi
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$PROFILE" == libvirt ]]; then
     install_owned_system_file "$ROOT_DIR/packaging/o3k-compute.service" \
@@ -421,7 +431,15 @@ fi
 # storage file ... Permission denied".
 if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   chmod 0711 "$DATA_DIR"
-  chown o3k-compute:kvm "$COMPUTE_DATA_DIR"
+  # Recursive: on a reset+reinstall the compute subtree may already hold runtime
+  # files (base images, overlays) owned by the compute account's primary group;
+  # without the recursive re-chown QEMU loses read access to them.
+  chown -R o3k-compute:kvm "$COMPUTE_DATA_DIR"
+  # The agent identity file is compute-private identity material, not QEMU
+  # runtime state; restore its compute-primary-group ownership.
+  if [[ -f "$COMPUTE_DATA_DIR/agent-id" ]]; then
+    chown o3k-compute:o3k-compute "$COMPUTE_DATA_DIR/agent-id"
+  fi
   chmod 2710 "$COMPUTE_DATA_DIR"
   # Pre-create the image-cache overlay chain with group kvm and setgid at
   # every level: the agent creates the leaf qcow2 files with its own primary
