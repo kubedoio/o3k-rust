@@ -288,6 +288,17 @@ grep -Fxq 'compute-agent' "$agent_id_file" \
   || fail "compute agent identity content is wrong: $(cat "$agent_id_file")"
 [[ "$(stat -c '%U:%G' "$agent_id_file")" == "${tag}-compute:${tag}-compute" ]] \
   || fail "compute agent identity ownership is wrong: $(stat -c '%U:%G' "$agent_id_file")"
+# Runtime access model: the compute data directory must be group-kvm setgid
+# and the control data directory other-executable, so the QEMU process can
+# traverse to and read the agent-created overlays (fail-before: the
+# installed profile failed at domain start with "Cannot access storage
+# file ... Permission denied").
+[[ "$(stat -c '%U:%G' "$case_dir/data/compute")" == "${tag}-compute:kvm" ]] \
+  || fail "compute data dir ownership is wrong: $(stat -c '%U:%G' "$case_dir/data/compute")"
+[[ "$(stat -c '%a' "$case_dir/data/compute")" == "2710" ]] \
+  || fail "compute data dir mode is wrong: $(stat -c '%a' "$case_dir/data/compute")"
+[[ "$(stat -c '%a' "$case_dir/data")" == "711" ]] \
+  || fail "control data dir mode is wrong: $(stat -c '%a' "$case_dir/data")"
 rm -f "/etc/systemd/system/${tag}d.service" "/etc/systemd/system/${tag}-compute.service" \
   "/etc/polkit-1/rules.d/50-${tag}-libvirt.rules" 2>/dev/null || true
 echo "CASE G passed: installed compute identity is placed for the agent"

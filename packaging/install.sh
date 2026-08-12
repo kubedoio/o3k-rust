@@ -398,11 +398,9 @@ chmod 0600 "$CONFIG_FILE_LEDGER"
 if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   chown -R o3k:o3k-compute "$DATA_DIR"
   chown -R o3k:o3k "$LOG_DIR"
-  chmod 0710 "$DATA_DIR"
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d ! -path "$COMPUTE_DATA_DIR" -exec chmod 0700 {} +
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type f -exec chmod 0600 {} +
   chown -R o3k-compute:o3k-compute "$COMPUTE_DATA_DIR"
-  chmod 0750 "$COMPUTE_DATA_DIR"
   install_owned_system_file "$ROOT_DIR/packaging/o3kd.service" /etc/systemd/system/o3kd.service 0644
   if [[ "$PROFILE" == libvirt ]]; then
     install_owned_system_file "$ROOT_DIR/packaging/o3k-compute.service" \
@@ -411,5 +409,19 @@ if [[ $EUID -eq 0 && $SYSTEM_INSTALL -eq 1 ]]; then
   systemctl daemon-reload
   systemctl enable --now o3kd.service
   if [[ "$PROFILE" == libvirt ]]; then systemctl enable --now o3k-compute.service; fi
+fi
+# The runtime access model applies to every root install and mirrors the
+# disposable-testlab bootstrap: the QEMU process (primary group kvm) must
+# traverse the control data directory to reach the compute overlays
+# (execute only, never a directory listing; the durable files stay 0600),
+# and the compute data directory must be group-kvm with the setgid bit so
+# every overlay, config-drive publication, and console sink created by the
+# agent inherits group kvm and stays readable by QEMU. Without this the
+# installed libvirt profile fails at domain start with "Cannot access
+# storage file ... Permission denied".
+if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
+  chmod 0711 "$DATA_DIR"
+  chown o3k-compute:kvm "$COMPUTE_DATA_DIR"
+  chmod 2710 "$COMPUTE_DATA_DIR"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"
