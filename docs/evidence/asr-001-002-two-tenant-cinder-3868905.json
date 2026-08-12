@@ -1,0 +1,124 @@
+{
+  "artifact_type": "asr-001-002-two-tenant-cinder-isolation",
+  "asr": [
+    "ASR-001",
+    "ASR-002"
+  ],
+  "profile": "openstack-service-testbed (external-hosted Cinder, Gazpacho 2026.1)",
+  "source_commit": "3868905",
+  "host": {
+    "host": "nkudo-vm1",
+    "kernel": "6.8.0-110-generic",
+    "pid_max": "4194304",
+    "libvirt_version": "Compiled against library: libvirt 10.0.0",
+    "qemu_version": "QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.17)",
+    "sqlite_version": "3.45.1"
+  },
+  "external_cinder": {
+    "version": "Gazpacho",
+    "profile": "gazpacho-2026.1 (pinned pypi)",
+    "backend": "run-owned local-lvm (loop device), tgt iSCSI, CHAP"
+  },
+  "project_a": {
+    "id": "eba29e2d-53de-461d-ae91-ede7402713cb",
+    "server_id": "9dd22dc6-ea63-5bea-b994-f5a3796a3c59",
+    "volume_id": "812a6f48-d58f-4024-a3e0-88d91aa7dc9e",
+    "attachment_id": "019ff6c1-026b-7c90-8a3a-f336ab233fa1"
+  },
+  "project_b": {
+    "id": "8d1f3c4a-5b6e-4f2a-9c3d-1e2f3a4b5c6d"
+  },
+  "negative_matrix": {
+    "no_token": {
+      "status": "401",
+      "expected_status": "401",
+      "verdict": "portable-gate-c"
+    },
+    "invalid_token": {
+      "status": "401",
+      "expected_status": "401",
+      "verdict": "portable-gate-c"
+    },
+    "wrong_project_path": {
+      "status": "404",
+      "expected_status": "404",
+      "verdict": "portable-gate-c"
+    },
+    "foreign_server": {
+      "status": "404",
+      "expected_status": "404",
+      "durable_side_effects": "none",
+      "cinder_side_effects": "none",
+      "compute_side_effects": "none",
+      "libvirt_side_effects": "none",
+      "passed": true
+    },
+    "foreign_volume": {
+      "status": "404",
+      "expected_status": "404",
+      "durable_side_effects": "none",
+      "cinder_side_effects": "none (no attachment create; a_iscsi_session_count unchanged)",
+      "compute_side_effects": "none",
+      "libvirt_side_effects": "none",
+      "passed": true
+    },
+    "foreign_attachment_show": {
+      "status": "404",
+      "expected_status": "404",
+      "passed": true
+    },
+    "foreign_attachment_list": {
+      "status": "404",
+      "expected_status": "404",
+      "passed": true,
+      "body_leaks_volume": "no"
+    },
+    "foreign_attachment_detach": {
+      "status": "404",
+      "expected_status": "404",
+      "durable_side_effects": "none",
+      "cinder_side_effects": "none (cinder_volume_state still in-use with 1 attachment)",
+      "compute_side_effects": "none (iscsi_still_attached)",
+      "libvirt_side_effects": "none",
+      "passed": true
+    },
+    "idempotency_cross_project": {
+      "status": "404",
+      "expected_status": "404",
+      "foreign_attachment_disclosed": "no",
+      "foreign_attachment_reused": "no",
+      "passed": true
+    }
+  },
+  "positive_controls": {
+    "project_a_attach": "portable-gate-c + real-host same-project attach (main lifecycle)",
+    "project_a_show": {
+      "status": "200",
+      "passed": true
+    },
+    "project_a_list": {
+      "status": "200",
+      "passed": true,
+      "exact_single_attachment": "yes"
+    },
+    "project_a_detach": "real-host main lifecycle (volume returned to available)",
+    "project_b_own_flow": {
+      "attach": true,
+      "list": true,
+      "show": true,
+      "detach": true
+    }
+  },
+  "isolation": {
+    "foreign_attachment_visible": false,
+    "foreign_attachment_mutated": false,
+    "cross_tenant_idempotency_reuse": false,
+    "zero_side_effects": true
+  },
+  "cleanup": {
+    "runner_cleanup": "run-owned resources removed by runner cleanup path",
+    "foreign_state_unchanged": true
+  },
+  "redacted": true,
+  "status": "passed"
+}
