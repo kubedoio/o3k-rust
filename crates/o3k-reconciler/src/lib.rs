@@ -2017,6 +2017,11 @@ where
             return Ok(OperationState::Succeeded);
         }
         if let Some(provider_resource_id) = provider_resource_id.as_deref() {
+            let reference = ProviderReference {
+                resource_id: resource.id,
+                provider_name: "compute".to_owned(),
+                provider_resource_id: provider_resource_id.to_owned(),
+            };
             match self
                 .store
                 .get_provider_reference(resource.id, "compute")
@@ -2025,13 +2030,24 @@ where
                 Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
                 Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
                 Err(StoreError::ProviderReferenceNotFound) => {
-                    self.store
-                        .attach_provider_reference(&ProviderReference {
-                            resource_id: resource.id,
-                            provider_name: "compute".to_owned(),
-                            provider_resource_id: provider_resource_id.to_owned(),
-                        })
-                        .await?;
+                    match self.store.attach_provider_reference(&reference).await {
+                        Ok(()) => {}
+                        // A concurrent driver attached between the read above
+                        // and this insert (the same read-then-attach window
+                        // the observation path documents). Converge when the
+                        // attached identity matches; a different identity is a
+                        // genuine drift and stays an error.
+                        Err(StoreError::ProviderReferenceAlreadyExists) => {
+                            let existing = self
+                                .store
+                                .get_provider_reference(resource.id, "compute")
+                                .await?;
+                            if existing.provider_resource_id != provider_resource_id {
+                                return Err(StoreError::ProviderReferenceAlreadyExists.into());
+                            }
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -5080,8 +5096,7 @@ mod tests {
     /// a create whose synchronous pass completed in between) must short-circuit
     /// on the first-writer outcome: no re-attach, no resource churn, no error.
     #[tokio::test]
-    async fn finish_is_idempotent_when_operation_already_succeeded()
-    -> Result<(), ReconcileError> {
+    async fn finish_is_idempotent_when_operation_already_succeeded() -> Result<(), ReconcileError> {
         let (journal, store, _) = journal("finish-idempotent", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
@@ -5161,7 +5176,10 @@ mod tests {
             OperationState::Succeeded
         );
         assert_eq!(
-            store.get_resource(request.o3k_server_id).await?.observed_state,
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
             "ACTIVE"
         );
         Ok(())
@@ -5171,8 +5189,7 @@ mod tests {
     /// genuine identity drift, never a converged duplicate: the second driver
     /// must fail closed instead of overwriting the attached identity.
     #[tokio::test]
-    async fn finish_rejects_provider_reference_identity_drift()
-    -> Result<(), ReconcileError> {
+    async fn finish_rejects_provider_reference_identity_drift() -> Result<(), ReconcileError> {
         let (journal, store, _) = journal("finish-drift", 2).await?;
         let request = request();
         let operation_id = journal.begin_create("project", &request).await?;
@@ -5196,7 +5213,9 @@ mod tests {
                     Some(format!("fake-{}", request.o3k_server_id)),
                 )
                 .await,
-            Err(ReconcileError::Store(StoreError::ProviderReferenceAlreadyExists))
+            Err(ReconcileError::Store(
+                StoreError::ProviderReferenceAlreadyExists
+            ))
         ));
         assert_eq!(
             store.get_operation(operation_id).await?.state,
