@@ -299,6 +299,15 @@ grep -Fxq 'compute-agent' "$agent_id_file" \
   || fail "compute data dir mode is wrong: $(stat -c '%a' "$case_dir/data/compute")"
 [[ "$(stat -c '%a' "$case_dir/data")" == "711" ]] \
   || fail "control data dir mode is wrong: $(stat -c '%a' "$case_dir/data")"
+[[ -d "$case_dir/data/compute/image-cache/overlays" ]] \
+  || fail "image-cache overlay chain was not pre-created"
+[[ "$(stat -c '%U:%G %a' "$case_dir/data/compute/image-cache/overlays")" == "${tag}-compute:kvm 2770" ]] \
+  || fail "overlay dir ownership/mode is wrong: $(stat -c '%U:%G %a' "$case_dir/data/compute/image-cache/overlays")"
+# The compute unit must run with group read/write so agent-created files
+# stay QEMU-readable (the fail-before defect was domain start failing with
+# "Cannot access storage file ... Permission denied").
+grep -q '^UMask=0027$' "$ROOT_DIR/packaging/o3k-compute.service" \
+  || fail "compute unit must use UMask=0027"
 rm -f "/etc/systemd/system/${tag}d.service" "/etc/systemd/system/${tag}-compute.service" \
   "/etc/polkit-1/rules.d/50-${tag}-libvirt.rules" 2>/dev/null || true
 echo "CASE G passed: installed compute identity is placed for the agent"

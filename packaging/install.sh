@@ -423,5 +423,12 @@ if [[ $EUID -eq 0 && "$PROFILE" == libvirt ]]; then
   chmod 0711 "$DATA_DIR"
   chown o3k-compute:kvm "$COMPUTE_DATA_DIR"
   chmod 2710 "$COMPUTE_DATA_DIR"
+  # Pre-create the image-cache overlay chain with group kvm and setgid at
+  # every level: the agent creates the leaf qcow2 files with its own primary
+  # group when the intermediate directory lacks setgid, and the QEMU process
+  # (primary group kvm) must traverse and read them. The console subtree
+  # self-manages its group via the agent's explicit 2730/0660 modes.
+  install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache"
+  install -d -o o3k-compute -g kvm -m 2770 "$COMPUTE_DATA_DIR/image-cache/overlays"
 fi
 echo "installed o3kd profile=$PROFILE at $PREFIX/bin/o3kd; data=$DATA_DIR; config=$ENV_FILE; user=$RUN_USER"

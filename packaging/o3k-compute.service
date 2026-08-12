@@ -12,7 +12,14 @@ EnvironmentFile=-/etc/o3k/o3k-compute.env
 ExecStart=/usr/local/bin/o3k-compute
 Restart=on-failure
 NoNewPrivileges=true
-UMask=0077
+# Group read/write (not world): the QEMU process (primary group kvm) must
+# open the overlays, backing images, config-drive publications, and console
+# sinks the agent creates under the kvm-group compute data directory. A
+# 0077 umask produces 0600 files that the QEMU process cannot read, which
+# fails domain start with "Cannot access storage file ... Permission
+# denied". Secrets never land here: the agent's TLS keys live in
+# /etc/o3k/tls with their own 0640 ownership.
+UMask=0027
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
