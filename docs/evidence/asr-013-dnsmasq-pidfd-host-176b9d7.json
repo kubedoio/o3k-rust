@@ -1,0 +1,55 @@
+{
+  "artifact_type": "real-host-asr013-evidence",
+  "asr": "ASR-013",
+  "canary_digest_after": "cc24140437ae576bb17dbc16ddc92411e6bf829dbe1ae32825d487671a45141d",
+  "canary_digest_before": "cc24140437ae576bb17dbc16ddc92411e6bf829dbe1ae32825d487671a45141d",
+  "cleanup_implementation": {
+    "handle_acquired_before_validation": true,
+    "signal_method": "pidfd_send_signal",
+    "stable_handle": "pidfd"
+  },
+  "dnsmasq_version": "Dnsmasq version 2.90  Copyright (c) 2000-2024 Simon Kelley",
+  "foreign_process": {
+    "unchanged": true
+  },
+  "host": "nkudo-vm1",
+  "kernel": "6.8.0-110-generic",
+  "leak_verifier": "passed",
+  "owned_dnsmasq": {
+    "identity_verified": true,
+    "pidfd_open": "ok",
+    "terminated": true
+  },
+  "pid_max": 4194304,
+  "pid_reuse_test": {
+    "exact_reuse_achieved": true,
+    "iterations": 1,
+    "replacement_survived": true,
+    "stale_handle_result": "ESRCH on the stale handle (expected)"
+  },
+  "profile": "native-rust-testlab",
+  "reason": "real_host_gate_satisfied",
+  "redacted": true,
+  "reserved_dnsmasq_alive": true,
+  "same_user_spoof": {
+    "argv_similarity": true,
+    "created": true,
+    "identity_rejected": "verified",
+    "survived_cleanup": true
+  },
+  "server_retry": {
+    "allocation_count": 1,
+    "domain_count": 1,
+    "status": "ACTIVE"
+  },
+  "service_uid": "993",
+  "source_commit": "176b9d795f32c8980ab0d305bcfd981f9e7314db",
+  "status": "passed",
+  "stress": {
+    "ambiguities": 0,
+    "cleanup_failures": 0,
+    "iterations": 100,
+    "spoof_processes_terminated": 0,
+    "wrong_process_signals": 0
+  }
+}
