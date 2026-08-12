@@ -260,19 +260,122 @@ mod host_network_tests {
             Err(HostNetworkError::RollbackFailed)
         ));
         let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
+        let calls = command.calls();
+        // Creation happens under a provisional random name; the deterministic
+        // name is only assigned by the final rename (issue #602).
+        let temp = calls[4][3].clone();
+        assert!(temp.starts_with("o3ktmp-"));
         assert_eq!(
-            command.calls(),
+            calls,
             vec![
                 vec!["link", "show", "dev", "o3k-br0"],
                 vec!["link", "add", "name", "o3k-br0", "type", "bridge"],
                 vec!["link", "set", "dev", "o3k-br0", "up"],
                 vec!["link", "show", "dev", &tap],
-                vec!["tuntap", "add", "dev", &tap, "mode", "tap"],
-                vec!["link", "set", "dev", &tap, "address", "02:00:00:00:00:01"],
-                vec!["-d", "link", "show", "dev", &tap],
-                vec!["link", "del", "dev", &tap],
+                vec!["tuntap", "add", "dev", &temp, "mode", "tap"],
+                vec!["link", "set", "dev", &temp, "address", "02:00:00:00:00:01"],
+                vec!["-d", "link", "show", "dev", &temp],
+                vec!["link", "del", "dev", &temp],
             ]
         );
+    }
+
+    #[test]
+    fn provisional_tap_residue_is_reaped_without_a_manifest_proof() {
+        // Issue #602: a create that dies before the ownership record is
+        // durable leaves a provisional `o3ktmp-*` link. It is self-identifying
+        // residue, so the startup reap deletes it without a manifest proof
+        // while deterministic `o3ktap-*` and foreign links stay untouched.
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "2: o3ktmp-1a2b3c4d: <BROADCAST> mtu 1500 state DOWN\n\ttun type tap\n\tlink/ether 02:00:00:00:00:09\n\
+                 3: o3ktap-live000: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01\n\
+                 4: eth0: <BROADCAST,UP> state UP\n\tlink/ether 02:00:00:00:00:02",
+            ),
+            Response::status(true), // link del dev o3ktmp-1a2b3c4d
+        ]);
+        let manager = test_manager(command.clone(), None);
+        manager.reap_partial_taps().expect("partial reap");
+        assert_eq!(
+            command.calls(),
+            vec![
+                vec!["-d", "link", "show"],
+                vec!["link", "del", "dev", "o3ktmp-1a2b3c4d"],
+            ]
+        );
+    }
+
+    #[test]
+    fn crash_between_record_and_rename_is_fully_reaped() -> Result<(), HostNetworkError> {
+        // Issue #602 crash window: the create died after record_tap_ownership
+        // but before the rename, so the durable record references the final
+        // (never created) deterministic name while the provisional link still
+        // exists. The dangling record must be cleared without a kernel delete
+        // and the provisional link must be reaped; neither half may survive.
+        let root = std::env::temp_dir().join(format!("o3k-network-partial-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(|_| HostNetworkError::CommandFailed)?;
+        let tap = HostNetworkManager::tap_name("port-1")?;
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                identity: Some("2".to_owned()),
+                gateway: None,
+            }),
+            taps: [(
+                tap.clone(),
+                TapOwnership {
+                    interface: tap.clone(),
+                    instance_id: "server-1".to_owned(),
+                    port_id: "port-1".to_owned(),
+                    mac: "02:00:00:00:00:01".to_owned(),
+                    bridge: "o3k-br0".to_owned(),
+                    created_by_o3k: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        fs::write(
+            root.join("ownership.json"),
+            serde_json::to_vec(&manifest).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+        let command = FakeNetworkCommand::new([
+            Response::output(false, ""), // link show dev <final>: absent
+            Response::output(
+                true,
+                "2: o3ktmp-5e6f7788: <BROADCAST> master o3k-br0 state DOWN\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ),
+            Response::status(true), // link del dev o3ktmp-5e6f7788
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        manager.delete_taps_for_instance("server-1")?;
+        manager.reap_partial_taps()?;
+        let manifest: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert!(manifest.taps.is_empty(), "dangling record must be cleared");
+        assert_eq!(
+            command.calls(),
+            vec![
+                vec!["link", "show", "dev", &tap],
+                vec!["-d", "link", "show"],
+                vec!["link", "del", "dev", "o3ktmp-5e6f7788"],
+            ]
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
     }
 
     #[test]
@@ -364,11 +467,12 @@ mod host_network_tests {
             Response::status(true),
             Response::status(true),
             Response::status(true),
-            Response::status(true),
             Response::output(
                 true,
                 "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
             ),
+            Response::status(true),
+            Response::status(true),
         ]);
         let manager = HostNetworkManager::with_command_and_ownership(
             HostNetworkConfig {
@@ -474,16 +578,17 @@ mod host_network_tests {
             Response::status(true),      // bridge add
             Response::status(true),      // bridge up
             Response::output(false, ""), // tap absent
-            Response::status(true),      // tuntap add
+            Response::status(true),      // tuntap add (provisional name)
             Response::status(true),      // set address
             Response::status(true),      // set master
-            Response::status(true),      // set up
             Response::output(
                 true,
                 &format!(
                     "2: {tap}: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01"
                 ),
             ),
+            Response::status(true), // rename to the deterministic name
+            Response::status(true), // set up
         ]);
         let manager = HostNetworkManager::with_command_and_ownership(
             HostNetworkConfig {
@@ -717,7 +822,6 @@ mod host_network_tests {
             Response::status(true),
             Response::status(true),
             Response::status(true),
-            Response::status(true),
             Response::output(
                 true,
                 "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 1a:8d:9b:1f:2f:b5",
@@ -727,6 +831,8 @@ mod host_network_tests {
                 true,
                 "2: o3ktap-owned: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
             ),
+            Response::status(true),
+            Response::status(true),
         ]);
         let manager = test_manager(command.clone(), None);
         let spec = TapSpec {
@@ -737,13 +843,23 @@ mod host_network_tests {
 
         let name = manager.create_tap(&spec)?;
         let calls = command.calls();
+        // Address setup and stabilization happen under the provisional name;
+        // the deterministic name is assigned by the final rename (issue #602).
+        let temp = calls[4][3].clone();
+        assert!(temp.starts_with("o3ktmp-"));
         let set_calls = calls
             .iter()
             .filter(|args| {
-                args.as_slice() == ["link", "set", "dev", &name, "address", "02:00:00:00:00:01"]
+                args.as_slice() == ["link", "set", "dev", &temp, "address", "02:00:00:00:00:01"]
             })
             .count();
         assert_eq!(set_calls, 2, "address must be re-applied after replacement");
+        assert!(
+            calls
+                .iter()
+                .any(|args| args.as_slice() == ["link", "set", "dev", &temp, "name", &name]),
+            "the provisional link must be renamed to the deterministic name"
+        );
         Ok(())
     }
 
@@ -754,7 +870,6 @@ mod host_network_tests {
             Response::status(true),
             Response::status(true),
             Response::output(false, ""),
-            Response::status(true),
             Response::status(true),
             Response::status(true),
             Response::status(true),
@@ -794,10 +909,13 @@ mod host_network_tests {
         ));
         let tap = HostNetworkManager::tap_name("port-1").expect("valid test tap name");
         let calls = command.calls();
+        // Setup and stabilization run under the provisional name (issue #602).
+        let temp = calls[4][3].clone();
+        assert!(temp.starts_with("o3ktmp-"));
         let reapplies = calls
             .iter()
             .filter(|args| {
-                args.as_slice() == ["link", "set", "dev", &tap, "address", "02:00:00:00:00:01"]
+                args.as_slice() == ["link", "set", "dev", &temp, "address", "02:00:00:00:00:01"]
             })
             .count();
         assert!(reapplies >= 2, "address must be re-applied while unstable");
@@ -807,8 +925,14 @@ mod host_network_tests {
                 "link".to_owned(),
                 "del".to_owned(),
                 "dev".to_owned(),
-                tap.clone()
+                temp.clone()
             ])
+        );
+        assert!(
+            !calls.iter().any(|args| args.len() > 3
+                && args[3] == tap
+                && (args[0] == "tuntap" || (args[0] == "link" && args[1] != "show"))),
+            "the deterministic name must not be mutated before the rename"
         );
     }
 
@@ -1228,6 +1352,17 @@ impl HostNetworkManager {
         }
         Ok(format!("o3ktap-{suffix}"))
     }
+    /// Provisional name for a TAP whose ownership record is not yet durable.
+    /// The random suffix makes the name self-identifying crash residue: no
+    /// manifest record ever references it, no domain ever attaches it, and it
+    /// never collides with a deterministic `o3ktap-` name, so startup
+    /// reconciliation may delete it without a manifest proof (issue #602).
+    fn partial_tap_name() -> String {
+        let id = Uuid::now_v7().simple().to_string();
+        // The random tail of a v7 UUID; 8 hex chars keep the name inside the
+        // 15-byte kernel interface-name limit ("o3ktmp-" + 8).
+        format!("o3ktmp-{}", &id[id.len() - 8..])
+    }
     pub fn deterministic_mac(port_id: &str) -> Result<String, HostNetworkError> {
         if port_id.trim().is_empty() {
             return Err(HostNetworkError::InvalidName);
@@ -1432,7 +1567,16 @@ impl HostNetworkManager {
             self.validate_recorded_tap(&name, spec)?;
             return Ok((name, false));
         }
-        let created_tap = self.run_ip(["tuntap", "add", "dev", &name, "mode", "tap"]);
+        // Create under a provisional random name and rename only after the
+        // ownership record is durable. A crash before the rename leaves an
+        // `o3ktmp-*` link that no manifest record ever references and that
+        // never collides with a deterministic `o3ktap-` name, so startup
+        // reconciliation can delete it without weakening the foreign-interface
+        // fence (issue #602: a crash between link creation and ownership
+        // recording otherwise orphaned a deterministic-name TAP that wedged
+        // every later create on the network).
+        let temp_name = Self::partial_tap_name();
+        let created_tap = self.run_ip(["tuntap", "add", "dev", &temp_name, "mode", "tap"]);
         if let Err(error) = created_tap {
             return Err(if bridge_created {
                 self.rollback_bridge(error)
@@ -1441,26 +1585,44 @@ impl HostNetworkManager {
             });
         }
         let setup = (|| {
-            self.run_ip(["link", "set", "dev", &name, "address", &spec.mac])?;
+            self.run_ip(["link", "set", "dev", &temp_name, "address", &spec.mac])?;
             self.run_ip([
                 "link",
                 "set",
                 "dev",
-                &name,
+                &temp_name,
                 "master",
                 &self.config.bridge_name,
             ])?;
-            self.run_ip(["link", "set", "dev", &name, "up"])?;
             Ok::<(), HostNetworkError>(())
         })();
         if let Err(error) = setup {
-            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
+            return Err(self.rollback_tap_and_bridge(&temp_name, &spec.mac, bridge_created, error));
         }
-        if let Err(error) = self.stabilize_tap_address(&name, &spec.mac) {
-            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
+        if let Err(error) = self.stabilize_tap_address(&temp_name, &spec.mac) {
+            return Err(self.rollback_tap_and_bridge(&temp_name, &spec.mac, bridge_created, error));
         }
         if let Err(error) = self.record_tap_ownership(&name, spec) {
-            return Err(self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error));
+            return Err(self.rollback_tap_and_bridge(&temp_name, &spec.mac, bridge_created, error));
+        }
+        // The link was never brought up, so the rename is accepted; ownership
+        // is already recorded under the final name. From here the recorded
+        // startup reap covers a crash exactly as before.
+        if let Err(error) = self.run_ip(["link", "set", "dev", &temp_name, "name", &name]) {
+            let mut rollback =
+                self.rollback_tap_and_bridge(&temp_name, &spec.mac, bridge_created, error);
+            if self.clear_tap_ownership(&name, spec).is_err() {
+                rollback = HostNetworkError::RollbackFailed;
+            }
+            return Err(rollback);
+        }
+        if let Err(error) = self.run_ip(["link", "set", "dev", &name, "up"]) {
+            let mut rollback =
+                self.rollback_tap_and_bridge(&name, &spec.mac, bridge_created, error);
+            if self.clear_tap_ownership(&name, spec).is_err() {
+                rollback = HostNetworkError::RollbackFailed;
+            }
+            return Err(rollback);
         }
         Ok((name, true))
     }
@@ -1592,6 +1754,27 @@ impl HostNetworkManager {
             return Err(HostNetworkError::CommandFailed);
         }
         Ok(managed_tap_names(&output.stdout, &self.config.bridge_name))
+    }
+
+    /// Deletes provisional `o3ktmp-*` TAPs. Such a link is by construction
+    /// residue of a create that died before the ownership record became
+    /// durable: manifest records use the final deterministic name, so the
+    /// manifest never references a provisional name, no running domain ever
+    /// attaches one, and the random suffix never collides with a legitimate
+    /// interface. The deterministic `o3ktap-` foreign-interface fence is
+    /// unchanged (issue #602).
+    pub fn reap_partial_taps(&self) -> Result<(), HostNetworkError> {
+        let output = self.command_output(["-d", "link", "show"])?;
+        if !output.success {
+            return Err(HostNetworkError::CommandFailed);
+        }
+        let mut first_error = None;
+        for name in partial_tap_names(&output.stdout) {
+            if let Err(error) = self.run_ip(["link", "del", "dev", &name]) {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Resolves a live TAP only when the durable ownership manifest and the
@@ -2067,6 +2250,44 @@ fn managed_tap_names(output: &str, bridge_name: &str) -> Vec<String> {
             && name.starts_with("o3ktap-")
             && interface_output_is_tap(block)
             && interface_is_attached_to(block, bridge_name)
+        {
+            names.push(name);
+        }
+        block.clear();
+    };
+    for line in output.lines() {
+        if let Some((_, rest)) = line.split_once(": ")
+            && line
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+            && rest.split(':').next().is_some_and(|name| !name.is_empty())
+        {
+            finish(&mut current_name, &mut current_output, &mut names);
+            current_name = rest.split(':').next().map(str::to_owned);
+        }
+        if current_name.is_some() {
+            current_output.push_str(line);
+            current_output.push('\n');
+        }
+    }
+    finish(&mut current_name, &mut current_output, &mut names);
+    names
+}
+
+fn partial_tap_names(output: &str) -> Vec<String> {
+    // A provisional TAP is residue regardless of bridge attachment: a crash
+    // can land before `set master`, so no bridge condition applies here.
+    // Names come from the kernel; keep only syntactically valid interface
+    // names with the provisional prefix.
+    let mut names = Vec::new();
+    let mut current_name = None;
+    let mut current_output = String::new();
+    let finish = |name: &mut Option<String>, block: &mut String, names: &mut Vec<String>| {
+        if let Some(name) = name.take()
+            && name.starts_with("o3ktmp-")
+            && interface_output_is_tap(block)
+            && validate_ifname(&name).is_ok()
         {
             names.push(name);
         }

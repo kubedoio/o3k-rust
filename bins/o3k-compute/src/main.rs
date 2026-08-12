@@ -2215,19 +2215,29 @@ fn reconcile_dhcp_on_startup(
 /// issue #88 S3/S4 reruns): the stale-network reap removes the persisted
 /// DHCP bindings and TAPs of instances whose domains provably do not exist,
 /// and the owned-dnsmasq reap stops every owned dnsmasq left behind by a
-/// previous agent process. Ordering invariant: the stale-network reap MUST
-/// run first (a crashed create whose DHCP prep completed persists its
-/// binding, so the stale binding must not survive to be re-served), then
-/// the owned-dnsmasq reap (at startup the supervisor is always None, so
-/// every owned dnsmasq is a leftover regardless of bindings), then live
-/// bindings get a fresh supervisor in [`reconcile_dhcp_on_startup`]. Errors
-/// are logged and never fatal, so residue is retried on the next restart;
-/// startup is never blocked by an unreachable or unknown libvirt.
+/// previous agent process. The provisional-TAP reap removes `o3ktmp-*` links
+/// left by a create that died before its ownership record became durable
+/// (issue #602); such links are self-identifying residue — no manifest record
+/// or domain ever references a provisional name — so deleting them needs no
+/// manifest proof and cannot touch a fenced deterministic `o3ktap-` interface.
+/// Ordering invariant: the provisional-TAP reap runs first (it is independent
+/// of instance state), then the stale-network reap MUST run (a crashed create
+/// whose DHCP prep completed persists its binding, so the stale binding must
+/// not survive to be re-served), then the owned-dnsmasq reap (at startup the
+/// supervisor is always None, so every owned dnsmasq is a leftover regardless
+/// of bindings), then live bindings get a fresh supervisor in
+/// [`reconcile_dhcp_on_startup`]. Errors are logged and never fatal, so
+/// residue is retried on the next restart; startup is never blocked by an
+/// unreachable or unknown libvirt.
 async fn reap_startup_residue(
     network: &o3k_network::HostNetworkManager,
     dhcp: &Arc<Mutex<DhcpRuntime>>,
     presence: &dyn DomainPresence,
 ) -> Result<(), AgentError> {
+    let partial_error = network
+        .reap_partial_taps()
+        .map_err(|error| AgentError::Protocol(format!("provisional TAP reap failed: {error}")))
+        .err();
     let stale_error = reap_stale_instance_networks(network, dhcp, presence)
         .await
         .err();
@@ -2236,9 +2246,9 @@ async fn reap_startup_residue(
         .map_err(|_| AgentError::Protocol("DHCP runtime lock is poisoned".to_owned()))
         .and_then(|runtime| runtime.reap_owned_dnsmasq())
         .err();
-    match (stale_error, reap_error) {
-        (Some(error), _) | (None, Some(error)) => Err(error),
-        (None, None) => Ok(()),
+    match (partial_error, stale_error, reap_error) {
+        (Some(error), _, _) | (None, Some(error), _) | (None, None, Some(error)) => Err(error),
+        (None, None, None) => Ok(()),
     }
 }
 

@@ -105,6 +105,9 @@ recorded as `stale_owned` — that is exactly what the verifier exists for.
     (orphan). Note: the v2 collector previously classified `o3ktap-*` links
     as foreign because it only recognized the `o3k-` prefix; that defect is
     fixed here so leaked TAPs are visible to the owned-link delta.
+  - `o3ktmp-*` provisional TAPs (create residue before the ownership record
+    becomes durable, issue #602): always `stale_owned` — no manifest record
+    or live domain ever references a provisional name.
   - `o3k-br0` (the managed bridge): `active_owned` while a live network or
     instance exists or the ownership manifest records it; otherwise
     `stale_owned` (`cleanup_if_unused` removes the unused bridge,
@@ -424,7 +427,7 @@ def classify_link_lines(output: str) -> tuple[list[str], list[str]]:
         # could stay invisible to the owned-link delta.
         fields = value.split(":", 2)
         name = fields[1].strip().split("@", 1)[0] if len(fields) > 1 else ""
-        if name.startswith("o3k-") or name.startswith("o3ktap-"):
+        if name.startswith("o3k-") or name.startswith("o3ktap-") or name.startswith("o3ktmp-"):
             if SAFE_ID.fullmatch(name) is None:
                 return [], []
             owned.append(name)
@@ -721,6 +724,16 @@ def classify_links(
     """Classify owned links against the durable network ownership manifest."""
     classified: dict[str, dict[str, str]] = {}
     for name in network_links:
+        if name.startswith("o3ktmp-"):
+            # Provisional create-name (crates/o3k-network/src/lib.rs
+            # partial_tap_name): self-identifying crash residue — no manifest
+            # record or live domain ever references it, so its presence after
+            # a run is always a leak (issue #602).
+            classified[name] = {
+                "classification": "stale_owned",
+                "contract": "bins/o3k-compute/src/main.rs reap_startup_residue -> reap_partial_taps; provisional TAP residue",
+            }
+            continue
         if name.startswith("o3ktap-"):
             if not durable_checked:
                 classified[name] = {
@@ -1712,7 +1725,7 @@ def snapshot() -> dict[str, object] | None:
     network_links, foreign_links = classify_link_lines(link_output)
     if not network_links and any(
         line.strip()
-        and line.split(":", 2)[1].strip().split("@", 1)[0].startswith(("o3k-", "o3ktap-"))
+        and line.split(":", 2)[1].strip().split("@", 1)[0].startswith(("o3k-", "o3ktap-", "o3ktmp-"))
         for line in link_output.splitlines()
         if len(line.split(":", 2)) > 1
     ):
