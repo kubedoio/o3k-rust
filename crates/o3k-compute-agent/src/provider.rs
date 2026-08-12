@@ -692,6 +692,22 @@ fn map_agent_error(error: AgentError) -> ProviderError {
     }
 }
 
+/// A transfer that ended without a definitive acknowledgement is an unknown
+/// outcome, never a terminal failure (issue #603; ASR-021 matrix scenario
+/// agent-control-plane-network-interruption): the operation engine must
+/// observe and re-drive it, and the transfer resume path
+/// (`dispatch_artifact_and_wait_from`) makes that re-drive idempotent.
+/// Mapping it terminal stranded an interrupted create in `failed` even though
+/// no provider-side rejection ever occurred.
+fn map_artifact_transfer_error(error: AgentError, operation_id: Uuid) -> ProviderError {
+    match error {
+        AgentError::Protocol(message) if message.contains("outcome is unknown") => {
+            ProviderError::UnknownOutcome { operation_id }
+        }
+        other => map_agent_error(other),
+    }
+}
+
 fn artifact_kind_name(kind: o3k_provider::ArtifactKind) -> &'static str {
     match kind {
         o3k_provider::ArtifactKind::ImageBase => "image_base",
@@ -1460,7 +1476,7 @@ impl ComputeProvider for AgentComputeProvider {
                         error = %error,
                         "create artifact transfer was rejected"
                     );
-                    map_agent_error(error)
+                    map_artifact_transfer_error(error, request.operation_id)
                 })?;
             tracing::warn!(
                 resource_id = %request.o3k_server_id,
@@ -1970,6 +1986,44 @@ mod tests {
                 ..Default::default()
             }),
         }
+    }
+
+    #[test]
+    fn unknown_artifact_transfer_outcome_is_never_terminal() {
+        // Issue #603 (ASR-021 matrix agent-control-plane-network-interruption):
+        // a transfer that ends without a definitive acknowledgement is an
+        // unknown outcome the engine must observe and re-drive, not a terminal
+        // rejection.
+        let operation_id = Uuid::now_v7();
+        assert_eq!(
+            map_artifact_transfer_error(
+                AgentError::Protocol("artifact transfer outcome is unknown".to_owned()),
+                operation_id,
+            ),
+            ProviderError::UnknownOutcome { operation_id }
+        );
+        // Every other classification is delegated unchanged.
+        assert_eq!(
+            map_artifact_transfer_error(
+                AgentError::Protocol("agent control stream is unavailable".to_owned()),
+                operation_id,
+            ),
+            ProviderError::Retryable
+        );
+        assert_eq!(
+            map_artifact_transfer_error(
+                AgentError::Protocol("agent rejected artifact transfer".to_owned()),
+                operation_id,
+            ),
+            ProviderError::InvalidRequest
+        );
+        assert_eq!(
+            map_artifact_transfer_error(
+                AgentError::Protocol("agent epoch is fenced".to_owned()),
+                operation_id,
+            ),
+            ProviderError::StaleState
+        );
     }
 
     #[derive(Debug, Default)]
