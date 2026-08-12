@@ -5889,10 +5889,13 @@ mod tests {
             "same-request".to_owned(),
         );
         let (left, right) = tokio::join!(left, right);
-        assert!(
-            left.is_ok() || right.is_ok(),
-            "both creates failed: {left:?} {right:?}"
-        );
+        // Exactly one request wins; the loser either converges on the winner's
+        // server (begin_create's ResourceAlreadyExists path is idempotent and
+        // a show-path re-drive short-circuits on the first-writer terminal
+        // outcome) or surfaces the name/placement collision as a Conflict.
+        // No other error is legitimate: a stale provider generation cannot
+        // produce NoValidHost here (both providers fit, and same-id commits
+        // short-circuit in the store), so Scheduler errors must not be masked.
         assert!(
             left.is_ok() && (right.is_ok() || matches!(right, Err(ComputeError::Conflict)))
                 || right.is_ok() && matches!(left, Err(ComputeError::Conflict)),

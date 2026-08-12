@@ -71,9 +71,6 @@
     "server_id": "6bb83b26-6c66-5ac0-abae-93cf34e9278f",
     "status": "ACTIVE"
   },
-  "service_account_kvm": "denied",
-  "service_account_libvirt": "denied",
-  "service_account_openstack": "readable",
   "source_commit": "12a540a0639874f7a456fd1c74293fed3575765e",
   "sqlite_version": "3.45.1",
   "started_at": 1786493128,
