@@ -571,6 +571,85 @@ async fn glance_image_lifecycle_is_project_scoped_and_immutable_after_upload()
 }
 
 #[tokio::test]
+async fn glance_upload_rejects_corrupt_qcow2_with_terminal_bad_request()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!("/tmp/o3k-api-truncated-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let image = ImageService::open(&root, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_image(image);
+    let auth_body = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let auth_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth_body.to_string()))?,
+        )
+        .await?;
+    let token = auth_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or_else(|| std::io::Error::other("token missing"))?
+        .to_str()?
+        .to_owned();
+    let create_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2/images")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    r#"{"name":"truncated","visibility":"private","container_format":"bare","disk_format":"qcow2"}"#,
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let create_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(create_response.into_body(), 4096).await?)?;
+    let id = create_json["id"]
+        .as_str()
+        .ok_or_else(|| std::io::Error::other("image id missing"))?
+        .to_owned();
+    // A qcow2-looking prefix whose structures point beyond the payload is a
+    // truncated image; the upload must fail terminally with 400 before the
+    // record can become active.
+    let mut truncated = vec![0_u8; 4096];
+    truncated[0..4].copy_from_slice(b"QFI\xfb");
+    truncated[4..8].copy_from_slice(&3_u32.to_be_bytes());
+    let upload_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2/images/{id}/file"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/octet-stream")
+                .body(Body::from(truncated))?,
+        )
+        .await?;
+    assert_eq!(upload_response.status(), StatusCode::BAD_REQUEST);
+    let show_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v2/images/{id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let show_json: Value =
+        serde_json::from_slice(&axum::body::to_bytes(show_response.into_body(), 4096).await?)?;
+    assert_eq!(show_json["status"], "queued");
+    assert_eq!(show_json["size"], Value::Null);
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn neutron_network_subnet_port_lifecycle_is_deterministic()
 -> Result<(), Box<dyn std::error::Error>> {
     let root = std::path::PathBuf::from(format!("/tmp/o3k-api-network-{}", std::process::id()));

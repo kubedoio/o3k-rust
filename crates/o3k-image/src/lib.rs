@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     fs,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
@@ -23,6 +24,27 @@ const QEMU_IMG_TIMEOUT: Duration = Duration::from_secs(30);
 const QEMU_IMG_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const QEMU_IMG_MAX_ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
 const QEMU_IMG_MAX_OPEN_FILES: u64 = 128;
+
+// qcow2 structural gate constants, from the QEMU qcow2 format documentation
+// (docs/interop/qcow2.rst).
+const QCOW2_VERSION_2_HEADER: u64 = 72;
+const QCOW2_VERSION_3_HEADER: u64 = 104;
+const QCOW2_MAX_HEADER_LENGTH: u64 = 1 << 20;
+const QCOW2_MIN_CLUSTER_BITS: u32 = 9;
+const QCOW2_MAX_CLUSTER_BITS: u32 = 21;
+const QCOW2_MAX_REFCOUNT_ORDER: u32 = 6;
+const QCOW2_MAX_DISK_SIZE: u64 = 1_u64 << 62;
+/// L1 table entries and standard L2 table entries address a host cluster
+/// with bits 9-55; the remaining bits are flags and reserved bits.
+const QCOW2_CLUSTER_OFFSET_MASK: u64 = 0x00ff_ffff_ffff_fe00;
+/// Refcount table entries address a refcount block with bits 9-63.
+const QCOW2_REFCOUNT_BLOCK_OFFSET_MASK: u64 = 0xffff_ffff_ffff_fe00;
+/// Incompatible feature bits accepted by the structural gate. Bit 0 (dirty,
+/// refcounts may be stale) and bit 3 (non-deflate compression, which uses
+/// the same on-disk extent layout) do not affect structural validation.
+/// Everything else -- the corrupt bit, external data files, extended L2
+/// entries, and unknown future layouts -- is rejected.
+const QCOW2_INCOMPATIBLE_ALLOWED: u64 = (1 << 0) | (1 << 3);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -543,6 +565,9 @@ fn validate_verified_base(
     if format == "qcow2" {
         reject_qcow2_dependencies(base)?;
         verify_image_format(qemu_img, base, format)?;
+        // Full metadata self-consistency check (refcounts, overlaps) before
+        // an overlay is derived from the base and handed to libvirt.
+        verify_qcow2_consistency(qemu_img, base)?;
     }
     Ok(())
 }
@@ -583,6 +608,198 @@ fn reject_qcow2_dependencies(path: &Path) -> Result<(), ImageError> {
         }
     }
     Ok(())
+}
+
+/// Structurally validates a qcow2 payload so a truncated or corrupt image is
+/// rejected before its record can be activated. This is the import-time
+/// gate: every on-disk structure reachable from the header -- the L1 table,
+/// L2 tables, data clusters, the refcount table, and refcount blocks -- must
+/// lie completely inside the `len` payload bytes, or the image could never
+/// be materialized and booted. Unallocated entries (offset zero) reference
+/// nothing and are allowed.
+///
+/// Field layout, table entry formats, and compressed cluster sizing follow
+/// the QEMU qcow2 format documentation (docs/interop/qcow2.rst). The walk is
+/// bounded by the payload size: tables must be inside the payload, and each
+/// distinct L2 table is visited at most once.
+fn validate_qcow2_structure(reader: &mut (impl Read + Seek), len: u64) -> Result<(), ImageError> {
+    if len < QCOW2_VERSION_2_HEADER {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let mut header = [0_u8; QCOW2_VERSION_3_HEADER as usize];
+    read_exact_at(reader, 0, &mut header[..QCOW2_VERSION_2_HEADER as usize])?;
+    if &header[0..4] != b"QFI\xfb" {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let version = be_u32(&header[4..8]);
+    if !matches!(version, 2 | 3) {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let cluster_bits = be_u32(&header[20..24]);
+    if !(QCOW2_MIN_CLUSTER_BITS..=QCOW2_MAX_CLUSTER_BITS).contains(&cluster_bits) {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let cluster_size = 1_u64 << cluster_bits;
+    // Uploaded images must be self-contained: a backing file reference would
+    // make later booting depend on a host path controlled by the uploader.
+    // This mirrors `reject_qcow2_dependencies` at the import boundary.
+    if be_u64(&header[8..16]) != 0 || be_u32(&header[16..20]) != 0 {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    // No key material exists to open an encrypted image, so it could never
+    // boot; reject it here instead of after placement.
+    if be_u32(&header[32..36]) != 0 {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    if version == 3 {
+        if len < QCOW2_VERSION_3_HEADER {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+        read_exact_at(
+            reader,
+            QCOW2_VERSION_2_HEADER,
+            &mut header[QCOW2_VERSION_2_HEADER as usize..],
+        )?;
+        let header_length = u64::from(be_u32(&header[100..104]));
+        if header_length < QCOW2_VERSION_3_HEADER
+            || header_length % 8 != 0
+            || header_length > QCOW2_MAX_HEADER_LENGTH
+            || header_length > len
+        {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+        if be_u32(&header[96..100]) > QCOW2_MAX_REFCOUNT_ORDER {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+        if be_u64(&header[72..80]) & !QCOW2_INCOMPATIBLE_ALLOWED != 0 {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+    }
+    let disk_size = be_u64(&header[24..32]);
+    if disk_size == 0 || disk_size > QCOW2_MAX_DISK_SIZE {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let l1_size = u64::from(be_u32(&header[36..40]));
+    if l1_size == 0 {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let l1_table_offset = be_u64(&header[40..48]);
+    // Checked arithmetic: a hostile header must never be able to wrap an
+    // extent sum around u64::MAX and slip past the payload bound.
+    if l1_table_offset == 0
+        || !l1_table_offset.is_multiple_of(cluster_size)
+        || l1_table_offset
+            .checked_add(l1_size * 8)
+            .is_none_or(|end| end > len)
+    {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    // The active L1 table must be able to address the entire virtual disk; a
+    // smaller table would expose a truncated virtual disk. Each L1 entry
+    // covers cluster_size/8 L2 entries of cluster_size bytes each.
+    let covered_per_l1_entry = (cluster_size / 8) * cluster_size;
+    if disk_size.div_ceil(covered_per_l1_entry) > l1_size {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    let refcount_table_clusters = u64::from(be_u32(&header[56..60]));
+    let refcount_table_offset = be_u64(&header[48..56]);
+    if refcount_table_clusters == 0
+        || refcount_table_offset == 0
+        || !refcount_table_offset.is_multiple_of(cluster_size)
+        || refcount_table_offset
+            .checked_add(refcount_table_clusters * cluster_size)
+            .is_none_or(|end| end > len)
+    {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    if be_u32(&header[60..64]) > 0 && be_u64(&header[64..72]) == 0 {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+
+    // Active L1 table: every used entry names an L2 table that must be fully
+    // inside the payload.
+    let mut l1 = vec![0_u8; (l1_size * 8) as usize];
+    read_exact_at(reader, l1_table_offset, &mut l1)?;
+    let mut visited_l2 = HashSet::new();
+    for entry in l1.chunks_exact(8) {
+        let l2_offset = be_u64(entry) & QCOW2_CLUSTER_OFFSET_MASK;
+        if l2_offset == 0 || !visited_l2.insert(l2_offset) {
+            continue;
+        }
+        if !l2_offset.is_multiple_of(cluster_size)
+            || l2_offset
+                .checked_add(cluster_size)
+                .is_none_or(|end| end > len)
+        {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+        // L2 table: standard entries name a whole data cluster; compressed
+        // entries name an (unaligned) extent of 512-byte sectors.
+        let mut l2 = vec![0_u8; cluster_size as usize];
+        read_exact_at(reader, l2_offset, &mut l2)?;
+        for entry in l2.chunks_exact(8) {
+            let entry = be_u64(entry);
+            if entry & (1_u64 << 62) != 0 {
+                let offset_bits = 62 - (cluster_bits - 8);
+                let offset = entry & ((1_u64 << offset_bits) - 1);
+                let additional_sectors =
+                    (entry >> offset_bits) & ((1_u64 << (62 - offset_bits)) - 1);
+                if offset
+                    .checked_add((additional_sectors + 1) * 512)
+                    .is_none_or(|end| end > len)
+                {
+                    return Err(ImageError::FormatVerificationFailed);
+                }
+            } else {
+                let host = entry & QCOW2_CLUSTER_OFFSET_MASK;
+                if host != 0
+                    && (!host.is_multiple_of(cluster_size)
+                        || host.checked_add(cluster_size).is_none_or(|end| end > len))
+                {
+                    return Err(ImageError::FormatVerificationFailed);
+                }
+            }
+        }
+    }
+
+    // Refcount table: every used entry names a refcount block of exactly one
+    // cluster that must be fully inside the payload.
+    let refcount_table_bytes = refcount_table_clusters * cluster_size;
+    let mut refcount_table = vec![0_u8; refcount_table_bytes as usize];
+    read_exact_at(reader, refcount_table_offset, &mut refcount_table)?;
+    for entry in refcount_table.chunks_exact(8) {
+        let block_offset = be_u64(entry) & QCOW2_REFCOUNT_BLOCK_OFFSET_MASK;
+        if block_offset != 0
+            && (!block_offset.is_multiple_of(cluster_size)
+                || block_offset
+                    .checked_add(cluster_size)
+                    .is_none_or(|end| end > len))
+        {
+            return Err(ImageError::FormatVerificationFailed);
+        }
+    }
+    Ok(())
+}
+
+fn read_exact_at(
+    reader: &mut (impl Read + Seek),
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), ImageError> {
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(ImageError::Storage)?;
+    reader.read_exact(buffer).map_err(ImageError::Storage)
+}
+
+fn be_u32(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn be_u64(bytes: &[u8]) -> u64 {
+    u64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 fn ensure_managed_directory(path: &Path) -> Result<(), ImageError> {
@@ -764,6 +981,30 @@ fn verify_image_format(qemu_img: &Path, image: &Path, expected: &str) -> Result<
         .iter()
         .any(|field| info.get(field).is_some_and(|value| !value.is_null()))
     {
+        return Err(ImageError::FormatVerificationFailed);
+    }
+    Ok(())
+}
+
+/// Runs a read-only `qemu-img check` over a verified base so a truncated or
+/// metadata-inconsistent qcow2 (extents beyond the end of the file, wrong
+/// refcounts, overlapping structures) is rejected before an overlay is
+/// derived from it and handed to libvirt.
+///
+/// `qemu-img check` without `-r` never repairs or writes the image. Its exit
+/// code is 0 when the image is clean, 1 when only leaked clusters were found
+/// (wasted space, no data corruption), and 2 when errors were found; any
+/// other outcome (signal, helper failure) also fails closed.
+fn verify_qcow2_consistency(qemu_img: &Path, image: &Path) -> Result<(), ImageError> {
+    let output = run_qemu_img(
+        qemu_img,
+        [
+            "check",
+            image.to_str().ok_or(ImageError::FormatVerificationFailed)?,
+        ],
+    )
+    .map_err(|_| ImageError::FormatVerificationFailed)?;
+    if !matches!(output.status.code(), Some(0) | Some(1)) {
         return Err(ImageError::FormatVerificationFailed);
     }
     Ok(())
@@ -1033,6 +1274,15 @@ impl ImageService {
         if record.status == ImageStatus::Active {
             return Err(ImageError::Conflict);
         }
+        // Import-time structural gate: a truncated or corrupt qcow2 must
+        // never become an active image record, otherwise the create path
+        // would materialize and boot it. The check runs before the content
+        // file is written, so a rejection publishes nothing and the record
+        // stays queued (unusable).
+        if record.disk_format == "qcow2" {
+            let mut reader = std::io::Cursor::new(content);
+            validate_qcow2_structure(&mut reader, content.len() as u64)?;
+        }
         let content_path = content_path(&self.inner.root, id);
         let temporary_path = content_path.with_extension(format!("upload-{}", Uuid::now_v7()));
         if let Err(error) = fs::write(&temporary_path, content) {
@@ -1147,7 +1397,7 @@ mod tests {
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
-                "qcow2".to_owned(),
+                "raw".to_owned(),
             )
             .await?;
         let uploaded = service
@@ -1166,7 +1416,7 @@ mod tests {
         assert_eq!(reopened.get("project-a", image.id).await?, uploaded);
         let artifact = reopened.resolve_artifact("project-a", image.id).await?;
         assert_eq!(artifact.id, image.id);
-        assert_eq!(artifact.format, "qcow2");
+        assert_eq!(artifact.format, "raw");
         assert_eq!(artifact.size, 11);
         assert_eq!(artifact.content, b"image-bytes");
         fs::remove_dir_all(path)?;
@@ -2067,6 +2317,392 @@ esac
         ));
         let _ = fs::remove_dir_all(path);
         let _ = fs::remove_dir_all(outside);
+        Ok(())
+    }
+
+    /// Builds a small structurally valid qcow2: 4 KiB clusters, one L1 entry,
+    /// one L2 table, one refcount table cluster, one refcount block, and
+    /// three allocated data clusters, with consistent refcounts. Layout:
+    /// cluster 0 header, 1 L1 table, 2 L2 table, 3 refcount table,
+    /// 4 refcount block, 5-7 data clusters.
+    fn valid_qcow2_fixture() -> Vec<u8> {
+        const CLUSTER: usize = 4096;
+        let mut image = vec![0_u8; CLUSTER * 8];
+        image[0..4].copy_from_slice(b"QFI\xfb");
+        image[4..8].copy_from_slice(&3_u32.to_be_bytes());
+        image[20..24].copy_from_slice(&12_u32.to_be_bytes());
+        image[24..32].copy_from_slice(&(2 * 1024 * 1024_u64).to_be_bytes());
+        image[36..40].copy_from_slice(&1_u32.to_be_bytes());
+        image[40..48].copy_from_slice(&(CLUSTER as u64).to_be_bytes());
+        image[48..56].copy_from_slice(&(3 * CLUSTER as u64).to_be_bytes());
+        image[56..60].copy_from_slice(&1_u32.to_be_bytes());
+        image[96..100].copy_from_slice(&4_u32.to_be_bytes());
+        image[100..104].copy_from_slice(&104_u32.to_be_bytes());
+        image[CLUSTER..CLUSTER + 8]
+            .copy_from_slice(&((1_u64 << 63) | (2 * CLUSTER as u64)).to_be_bytes());
+        for (index, cluster) in [5_usize, 6, 7].into_iter().enumerate() {
+            let offset = 2 * CLUSTER + index * 8;
+            image[offset..offset + 8].copy_from_slice(
+                &((1_u64 << 63) | (cluster as u64 * CLUSTER as u64)).to_be_bytes(),
+            );
+        }
+        let offset = 3 * CLUSTER;
+        image[offset..offset + 8].copy_from_slice(&(4 * CLUSTER as u64).to_be_bytes());
+        for cluster in 0..8 {
+            let offset = 4 * CLUSTER + cluster * 2;
+            image[offset..offset + 2].copy_from_slice(&1_u16.to_be_bytes());
+        }
+        image
+    }
+
+    fn validate_bytes(content: &[u8]) -> Result<(), ImageError> {
+        let mut reader = std::io::Cursor::new(content);
+        validate_qcow2_structure(&mut reader, content.len() as u64)
+    }
+
+    #[test]
+    fn qcow2_valid_fixture_passes_structural_validation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let image = valid_qcow2_fixture();
+        validate_bytes(&image)?;
+        // Version 2 images use the same table layout and must pass the same
+        // walk (the v3-only fields are ignored).
+        let mut version2 = image.clone();
+        version2[4..8].copy_from_slice(&2_u32.to_be_bytes());
+        validate_bytes(&version2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn qcow2_truncated_payloads_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let image = valid_qcow2_fixture();
+        // ~5% of the image: only the header and part of the L1 area remain.
+        assert!(matches!(
+            validate_bytes(&image[..image.len() / 20]),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        // Metadata intact but the first data cluster cut in half: the L2
+        // extent walk must notice the missing payload.
+        let cut = 5 * 4096 + 2048;
+        assert!(matches!(
+            validate_bytes(&image[..cut]),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        // An empty prefix cannot even carry the header.
+        assert!(matches!(
+            validate_bytes(&[]),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn qcow2_corrupt_headers_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let original = valid_qcow2_fixture();
+        // magic
+        let mut bad = original.clone();
+        bad[0] ^= 0xff;
+        assert!(validate_bytes(&bad).is_err());
+        // version
+        let mut bad = original.clone();
+        bad[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // backing file reference
+        let mut bad = original.clone();
+        bad[8..16].copy_from_slice(&4096_u64.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // encryption
+        let mut bad = original.clone();
+        bad[32..36].copy_from_slice(&2_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // cluster_bits
+        let mut bad = original.clone();
+        bad[20..24].copy_from_slice(&8_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[20..24].copy_from_slice(&22_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // disk_size
+        let mut bad = original.clone();
+        bad[24..32].copy_from_slice(&0_u64.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[24..32].copy_from_slice(&(1_u64 << 63).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // l1_size
+        let mut bad = original.clone();
+        bad[36..40].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // l1_table_offset: zero, misaligned, or beyond EOF
+        let mut bad = original.clone();
+        bad[40..48].copy_from_slice(&0_u64.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[40..48].copy_from_slice(&(4096_u64 + 8).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[40..48].copy_from_slice(&(original.len() as u64).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // L1 table smaller than the virtual disk needs
+        let mut bad = original.clone();
+        bad[24..32].copy_from_slice(&(3 * 1024 * 1024_u64).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // refcount table: no clusters, or offset beyond EOF
+        let mut bad = original.clone();
+        bad[56..60].copy_from_slice(&0_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[48..56].copy_from_slice(&(original.len() as u64).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // snapshots announced without a snapshot table
+        let mut bad = original.clone();
+        bad[60..64].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // v3 header_length: too small, or not a multiple of 8
+        let mut bad = original.clone();
+        bad[100..104].copy_from_slice(&96_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        let mut bad = original.clone();
+        bad[100..104].copy_from_slice(&105_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // v3 refcount_order beyond the allowed width
+        let mut bad = original.clone();
+        bad[96..100].copy_from_slice(&7_u32.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // incompatible feature bits: corrupt, external data file, extended
+        // L2 entries, and unknown bits must fail closed
+        for bit in [2_u64, 4, 16, 1 << 20] {
+            let mut bad = original.clone();
+            bad[72..80].copy_from_slice(&bit.to_be_bytes());
+            assert!(
+                validate_bytes(&bad).is_err(),
+                "incompatible feature bit {bit} must be rejected"
+            );
+        }
+        // dirty and compression-type bits are structurally harmless
+        let mut accepted = original.clone();
+        accepted[72..80].copy_from_slice(&((1_u64 << 0) | (1_u64 << 3)).to_be_bytes());
+        validate_bytes(&accepted)?;
+        Ok(())
+    }
+
+    #[test]
+    fn qcow2_tables_referencing_beyond_eof_are_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let original = valid_qcow2_fixture();
+        let len = original.len() as u64;
+        // L2 table beyond EOF (L1 entry 0).
+        let mut bad = original.clone();
+        bad[4096..4104].copy_from_slice(&((1_u64 << 63) | len).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // Data cluster beyond EOF (L2 entry 0).
+        let mut bad = original.clone();
+        bad[8192..8200].copy_from_slice(&((1_u64 << 63) | len).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // Misaligned data cluster (L2 entry 1).
+        let mut bad = original.clone();
+        bad[8200..8208].copy_from_slice(&((1_u64 << 63) | (5 * 4096 + 512)).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // Compressed cluster whose 512-byte sector extent crosses EOF
+        // (L2 entry 1). With cluster_bits=12 the compressed offset field is
+        // 58 bits wide and the sector count is stored in bits 58-61.
+        let offset_bits = 62 - (12 - 8);
+        let mut bad = original.clone();
+        let entry = (1_u64 << 62) | (len - 2048) | (4_u64 << offset_bits);
+        bad[8200..8208].copy_from_slice(&entry.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // A compressed cluster fully inside the payload is accepted
+        // (L2 entry 2).
+        let mut good = original.clone();
+        let entry = (1_u64 << 62) | (5 * 4096_u64) | (0_u64 << offset_bits);
+        good[8208..8216].copy_from_slice(&entry.to_be_bytes());
+        validate_bytes(&good)?;
+        // Refcount block beyond EOF (refcount table entry 0).
+        let mut bad = original.clone();
+        bad[12288..12296].copy_from_slice(&len.to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        // Misaligned refcount block.
+        let mut bad = original.clone();
+        bad[12288..12296].copy_from_slice(&(4 * 4096_u64 + 512).to_be_bytes());
+        assert!(validate_bytes(&bad).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_rejects_truncated_qcow2_without_activating_the_record()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("upload-truncated-qcow2");
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "truncated".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "qcow2".to_owned(),
+            )
+            .await?;
+        let fixture = valid_qcow2_fixture();
+        for truncated in [&fixture[..fixture.len() / 20], &fixture[..5 * 4096 + 2048]] {
+            assert!(matches!(
+                service.upload("project-a", image.id, truncated).await,
+                Err(ImageError::FormatVerificationFailed)
+            ));
+        }
+        // The record stays queued and unusable: no size, no checksum, no
+        // published content file, no resolvable artifact.
+        let record = service.get("project-a", image.id).await?;
+        assert_eq!(record.status, ImageStatus::Queued);
+        assert_eq!(record.size, None);
+        assert_eq!(record.checksum, None);
+        assert!(!path.join("content").join(image.id.to_string()).exists());
+        assert!(matches!(
+            service.resolve_artifact("project-a", image.id).await,
+            Err(ImageError::NotFound)
+        ));
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_accepts_valid_qcow2_and_rejects_garbage()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("upload-valid-qcow2");
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
+        let image = service
+            .create(
+                "project-a",
+                "valid".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "qcow2".to_owned(),
+            )
+            .await?;
+        let fixture = valid_qcow2_fixture();
+        let uploaded = service.upload("project-a", image.id, &fixture).await?;
+        assert_eq!(uploaded.status, ImageStatus::Active);
+        assert_eq!(uploaded.size, Some(fixture.len() as u64));
+        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        assert_eq!(artifact.content, fixture);
+        // Random bytes and a plausible-looking non-qcow2 file follow the same
+        // format policy: rejected with a terminal error, record stays queued.
+        let garbage = vec![0x5a; 4096];
+        let non_qcow2 = b"not a qcow2 image at all, just a long enough non-magic payload here!";
+        for bad in [&garbage[..], &non_qcow2[..]] {
+            let image = service
+                .create(
+                    "project-a",
+                    "bad".to_owned(),
+                    "private".to_owned(),
+                    "bare".to_owned(),
+                    "qcow2".to_owned(),
+                )
+                .await?;
+            assert!(matches!(
+                service.upload("project-a", image.id, bad).await,
+                Err(ImageError::FormatVerificationFailed)
+            ));
+            assert_eq!(
+                service.get("project-a", image.id).await?.status,
+                ImageStatus::Queued
+            );
+        }
+        fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn qcow2_base_failing_qemu_img_check_is_rejected_before_overlay()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root("cache-qemu-check");
+        let _ = fs::remove_dir_all(&path);
+        let fake_bin = path.join("fake-bin");
+        fs::create_dir_all(&fake_bin)?;
+        let fake_qemu = fake_bin.join("qemu-img");
+        fs::write(
+            &fake_qemu,
+            r#"#!/bin/sh
+set -eu
+case "$1" in
+  create)
+    : > "$8"
+    ;;
+  info)
+    case "$3" in
+      */base/*) printf '{"format":"qcow2"}\n' ;;
+      *) backing="$(find "$(dirname "$3")/../base" -name '*.qcow2' -print -quit)"; printf '{"format":"qcow2","backing-filename":"%s"}\n' "$backing" ;;
+    esac
+    ;;
+  check)
+    if grep -q broken-extent "$2"; then
+      exit 2
+    fi
+    exit 0
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+        )?;
+        fs::set_permissions(&fake_qemu, fs::Permissions::from_mode(0o755))?;
+
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let cache = ImageCache::open_with_qemu_img(&path, 1024 * 1024, &fake_qemu)?;
+            let clean = valid_qcow2_fixture();
+            let clean_checksum = format!("{:x}", Sha256::digest(&clean));
+            let clean_base = cache.cache_base(&clean_checksum, "qcow2", &clean)?;
+            let overlay = cache.create_overlay("clean", &clean_base)?;
+            assert!(overlay.is_file());
+
+            let mut broken = valid_qcow2_fixture();
+            broken[104..120].copy_from_slice(b"broken-extent-pa");
+            let broken_checksum = format!("{:x}", Sha256::digest(&broken));
+            let broken_base = cache.cache_base(&broken_checksum, "qcow2", &broken)?;
+            assert!(matches!(
+                cache.create_overlay("broken", &broken_base),
+                Err(ImageError::FormatVerificationFailed)
+            ));
+            assert!(!path.join("overlays").join("broken.qcow2").exists());
+            assert!(
+                !fs::read_dir(path.join("overlays"))?.flatten().any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".broken.tmp-")
+                })
+            );
+            Ok(())
+        })();
+
+        let _ = fs::remove_dir_all(&path);
+        result
+    }
+
+    #[test]
+    fn real_cirros_truncation_is_rejected_when_fixture_present()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = "/tmp/cirros-0.6.3-x86_64-disk.img.asr021";
+        let Ok(full) = fs::read(fixture) else {
+            eprintln!("skipping: {fixture} is not present on this host");
+            return Ok(());
+        };
+        // The untouched real-host image (compressed and standard clusters,
+        // 112-byte v3 header) must pass the structural walk.
+        validate_bytes(&full)?;
+        // The first 1 MiB of the 21 MiB image -- the exact ASR-021
+        // corrupted-truncated-image injection -- must be rejected.
+        assert!(full.len() > 1024 * 1024);
+        assert!(matches!(
+            validate_bytes(&full[..1024 * 1024]),
+            Err(ImageError::FormatVerificationFailed)
+        ));
         Ok(())
     }
 }

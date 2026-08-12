@@ -85,10 +85,15 @@ pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
                 "image content or path is invalid",
             )
         }
-        ImageError::OverlayFailed | ImageError::FormatVerificationFailed => keystone_error(
+        ImageError::OverlayFailed => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
             "image overlay creation failed",
+        ),
+        ImageError::FormatVerificationFailed => keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "image content failed format verification",
         ),
         ImageError::Storage(_) | ImageError::CorruptMetadata(_) | ImageError::Store(_) => {
             keystone_error(
