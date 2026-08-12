@@ -557,6 +557,8 @@ pub enum StoreError {
     PlacementAllocationConflict,
     #[error("placement allocation intent conflicts with existing intent")]
     PlacementIntentConflict,
+    #[error("placement allocation referenced by the create intent no longer exists")]
+    PlacementAllocationNotFound,
 }
 
 #[async_trait]
@@ -698,6 +700,7 @@ pub trait DurableStore: Send + Sync {
         &self,
         resource: &ResourceRecord,
         operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
     ) -> Result<(), StoreError>;
     async fn readiness_check(&self) -> Result<(), StoreError>;
 }
@@ -3250,10 +3253,28 @@ impl SqliteStore {
                     .collect::<Result<_, _>>()?;
                 intents.push(intent);
             }
+            // ASR-018: the caller-provided consumer snapshot may predate this
+            // transaction. Re-check the durable resources table inside the
+            // same transaction so a consumer that became durable while the
+            // write lock was contended is never treated as orphaned — an
+            // allocation must never be released beneath a live consumer.
+            let mut live_consumer_ids = durable_consumer_ids.to_vec();
+            let resource_rows = sqlx::query(
+                "SELECT id FROM resources WHERE observed_state != 'DELETED'",
+            )
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+            for row in resource_rows {
+                let id: String = row.get("id");
+                if !live_consumer_ids.contains(&id) {
+                    live_consumer_ids.push(id);
+                }
+            }
             let orphaned: Vec<PlacementAllocationRecord> = allocations
                 .iter()
                 .filter(|allocation| {
-                    !durable_consumer_ids
+                    !live_consumer_ids
                         .iter()
                         .any(|consumer_id| consumer_id == &allocation.consumer_id)
                 })
@@ -3262,7 +3283,7 @@ impl SqliteStore {
             let abandoned: Vec<PlacementIntentRecord> = intents
                 .iter()
                 .filter(|intent| {
-                    !durable_consumer_ids
+                    !live_consumer_ids
                         .iter()
                         .any(|consumer_id| consumer_id == &intent.consumer_id)
                 })
@@ -4468,6 +4489,7 @@ impl DurableStore for SqliteStore {
         &self,
         resource: &ResourceRecord,
         operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
         let insert_resource = sqlx::query("INSERT INTO resources (id, kind, project_id, generation, observed_generation, desired_state, observed_state, provider_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
@@ -4487,6 +4509,24 @@ impl DurableStore for SqliteStore {
                 return Err(StoreError::ResourceAlreadyExists);
             }
             Err(error) => return Err(StoreError::Database(error)),
+        }
+        // ASR-018: the consumer intent must not outlive its placement
+        // allocation. The resource insert succeeded (or already existed), so
+        // the durable create intent is only committed when the allocation it
+        // references is still present. A startup orphan reconciliation may
+        // have deleted it while this create was between allocation commit and
+        // intent persistence; that create must fail closed instead of
+        // persisting a consumer without capacity accounting.
+        if let Some(allocation_id) = expected_placement_allocation_id {
+            let allocation_exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM placement_allocations WHERE id = ?")
+                    .bind(allocation_id)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if allocation_exists.is_none() {
+                return Err(StoreError::PlacementAllocationNotFound);
+            }
         }
         sqlx::query("INSERT INTO operations (id, resource_id, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?)")
             .bind(operation.id.to_string())
@@ -7270,7 +7310,7 @@ mod tests {
         };
         assert!(
             store
-                .insert_resource_and_operation(&resource, &operation)
+                .insert_resource_and_operation(&resource, &operation, None)
                 .await
                 .is_err()
         );
@@ -7348,7 +7388,7 @@ mod tests {
         {
             let store = SqliteStore::connect_file(&path).await?;
             store
-                .insert_resource_and_operation(&resource, &operation)
+                .insert_resource_and_operation(&resource, &operation, None)
                 .await?;
             assert_eq!(
                 store.insert_image_overlay(&record).await?,
@@ -7455,7 +7495,7 @@ mod tests {
         {
             let store = SqliteStore::connect_file(&path).await?;
             store
-                .insert_resource_and_operation(&resource, &operation)
+                .insert_resource_and_operation(&resource, &operation, None)
                 .await?;
             assert_eq!(store.insert_agent_command(&command).await?, command);
             assert_eq!(store.insert_agent_command(&command).await?, command);
