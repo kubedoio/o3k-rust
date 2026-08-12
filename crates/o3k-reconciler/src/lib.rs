@@ -2000,14 +2000,41 @@ where
         provider_operation_id: String,
         provider_resource_id: Option<String>,
     ) -> Result<OperationState, ReconcileError> {
+        // A concurrent driver (an idempotent retry whose show path re-drives
+        // a create while the synchronous pass is still dispatching) can reach
+        // `finish` with the operation already converged: both dispatches
+        // raced, the provider returned the same deterministic identity, and
+        // the first driver already attached the reference and projected the
+        // terminal state. Short-circuit on that first-writer outcome instead
+        // of re-attaching the reference (unique violation) and clobbering the
+        // resource generation (stale generation) — the exact
+        // "duplicate reference attach / stale generation" race the create
+        // convergence driver documents above.
+        let current = self.store.get_operation(operation_id).await?;
+        if current.state == OperationState::Succeeded
+            && current.provider_operation_id.as_deref() == Some(provider_operation_id.as_str())
+        {
+            return Ok(OperationState::Succeeded);
+        }
         if let Some(provider_resource_id) = provider_resource_id.as_deref() {
-            self.store
-                .attach_provider_reference(&ProviderReference {
-                    resource_id: resource.id,
-                    provider_name: "compute".to_owned(),
-                    provider_resource_id: provider_resource_id.to_owned(),
-                })
-                .await?;
+            match self
+                .store
+                .get_provider_reference(resource.id, "compute")
+                .await
+            {
+                Ok(existing) if existing.provider_resource_id == provider_resource_id => {}
+                Ok(_) => return Err(StoreError::ProviderReferenceAlreadyExists.into()),
+                Err(StoreError::ProviderReferenceNotFound) => {
+                    self.store
+                        .attach_provider_reference(&ProviderReference {
+                            resource_id: resource.id,
+                            provider_name: "compute".to_owned(),
+                            provider_resource_id: provider_resource_id.to_owned(),
+                        })
+                        .await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
         self.store
             .update_operation(
@@ -2018,16 +2045,41 @@ where
                 None,
             )
             .await?;
-        self.store
-            .update_resource(
-                resource.id,
-                resource.generation,
-                &resource.desired_state,
-                server_state_to_storage(ServerState::Active),
-                resource.generation,
-                provider_resource_id.as_deref(),
-            )
-            .await?;
+        // The resource projection is a generation-guarded CAS, and a
+        // concurrent driver's finish can land between this driver's re-read
+        // and its update. Converge instead of erroring: re-read, short-circuit
+        // on the already-projected terminal state, and retry the CAS on a
+        // bounded number of stale snapshots (no sleeps; the re-read sees the
+        // other driver's committed projection).
+        let mut attempts = 0;
+        loop {
+            let fresh = self.store.get_resource(resource.id).await?;
+            if fresh.observed_state == server_state_to_storage(ServerState::Active)
+                && fresh.provider_id.as_deref() == provider_resource_id.as_deref()
+            {
+                return Ok(OperationState::Succeeded);
+            }
+            match self
+                .store
+                .update_resource(
+                    fresh.id,
+                    fresh.generation,
+                    &fresh.desired_state,
+                    server_state_to_storage(ServerState::Active),
+                    fresh.generation,
+                    provider_resource_id.as_deref(),
+                )
+                .await
+            {
+                Ok(_) => break,
+                Err(StoreError::StaleGeneration)
+                    if attempts < FINISH_RESOURCE_UPDATE_MAX_ATTEMPTS =>
+                {
+                    attempts += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.event(operation_id, resource.id, JournalEventKind::Succeeded);
         Ok(OperationState::Succeeded)
     }
@@ -2111,6 +2163,13 @@ fn provider_error_category_name(category: o3k_provider::ErrorCategory) -> &'stat
 /// Maximum length of a persisted agent failure reason. The durable record
 /// stays bounded even if an agent message grows unexpectedly.
 const MAX_AGENT_FAILURE_MESSAGE_LEN: usize = 240;
+
+/// Maximum stale-snapshot retries for the terminal resource projection in
+/// [`OperationJournal::finish`]. A concurrent driver's finish can commit the
+/// same projection between this driver's re-read and its generation-guarded
+/// CAS; each retry re-reads the committed state and short-circuits on the
+/// converged projection, so the bound is never exercised in a healthy run.
+const FINISH_RESOURCE_UPDATE_MAX_ATTEMPTS: u32 = 3;
 
 /// Bounds and sanitizes the agent-reported failure reason for durable storage
 /// and operator logs. The agent contract already redacts secrets; the control
@@ -5012,6 +5071,145 @@ mod tests {
         assert_eq!(
             store.get_resource(resource.id).await?.observed_state,
             "SHUTOFF"
+        );
+        Ok(())
+    }
+
+    /// A second driver reaching `finish` after the first driver already
+    /// converged the same operation (the idempotent-retry show path re-driving
+    /// a create whose synchronous pass completed in between) must short-circuit
+    /// on the first-writer outcome: no re-attach, no resource churn, no error.
+    #[tokio::test]
+    async fn finish_is_idempotent_when_operation_already_succeeded()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("finish-idempotent", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        let provider_operation_id = store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let provider_resource_id = format!("fake-{}", request.o3k_server_id);
+        let generation_before = resource.generation;
+        assert_eq!(
+            journal
+                .finish(
+                    operation_id,
+                    resource.clone(),
+                    provider_operation_id.clone(),
+                    Some(provider_resource_id.clone()),
+                )
+                .await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(request.o3k_server_id).await?.generation,
+            generation_before,
+            "a converged second finish must not touch the resource"
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "compute")
+                .await?
+                .provider_resource_id,
+            provider_resource_id,
+            "the first-writer reference must be unchanged"
+        );
+        Ok(())
+    }
+
+    /// A second driver that reaches `finish` while the first driver's attach
+    /// already landed (operation still non-terminal) must treat the matching
+    /// provider reference as idempotent and converge the projection.
+    #[tokio::test]
+    async fn finish_converges_when_provider_reference_already_attached()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("finish-attached", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        store
+            .update_operation(operation_id, OperationState::Running, None, None, None)
+            .await?;
+        let provider_resource_id = format!("fake-{}", request.o3k_server_id);
+        store
+            .attach_provider_reference(&ProviderReference {
+                resource_id: request.o3k_server_id,
+                provider_name: "compute".to_owned(),
+                provider_resource_id: provider_resource_id.clone(),
+            })
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            journal
+                .finish(
+                    operation_id,
+                    resource,
+                    "provider-operation-1".to_owned(),
+                    Some(provider_resource_id),
+                )
+                .await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store.get_resource(request.o3k_server_id).await?.observed_state,
+            "ACTIVE"
+        );
+        Ok(())
+    }
+
+    /// A provider reference carrying a DIFFERENT provider resource id is a
+    /// genuine identity drift, never a converged duplicate: the second driver
+    /// must fail closed instead of overwriting the attached identity.
+    #[tokio::test]
+    async fn finish_rejects_provider_reference_identity_drift()
+    -> Result<(), ReconcileError> {
+        let (journal, store, _) = journal("finish-drift", 2).await?;
+        let request = request();
+        let operation_id = journal.begin_create("project", &request).await?;
+        store
+            .update_operation(operation_id, OperationState::Running, None, None, None)
+            .await?;
+        store
+            .attach_provider_reference(&ProviderReference {
+                resource_id: request.o3k_server_id,
+                provider_name: "compute".to_owned(),
+                provider_resource_id: "foreign-domain".to_owned(),
+            })
+            .await?;
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert!(matches!(
+            journal
+                .finish(
+                    operation_id,
+                    resource,
+                    "provider-operation-1".to_owned(),
+                    Some(format!("fake-{}", request.o3k_server_id)),
+                )
+                .await,
+            Err(ReconcileError::Store(StoreError::ProviderReferenceAlreadyExists))
+        ));
+        assert_eq!(
+            store.get_operation(operation_id).await?.state,
+            OperationState::Running,
+            "a drifted finish must not project success"
+        );
+        assert_eq!(
+            store
+                .get_provider_reference(request.o3k_server_id, "compute")
+                .await?
+                .provider_resource_id,
+            "foreign-domain",
+            "the attached identity must be preserved"
         );
         Ok(())
     }
