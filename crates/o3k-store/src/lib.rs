@@ -3254,13 +3254,15 @@ impl SqliteStore {
                 intents.push(intent);
             }
             // ASR-018: the caller-provided consumer snapshot may predate this
-            // transaction. Re-check the durable resources table inside the
-            // same transaction so a consumer that became durable while the
-            // write lock was contended is never treated as orphaned — an
-            // allocation must never be released beneath a live consumer.
+            // transaction. Re-check the durable compute-consumer resources
+            // inside the same transaction (mirroring the caller's
+            // `compute_instance` + non-DELETED filter) so a consumer that
+            // became durable while the write lock was contended is never
+            // treated as orphaned — an allocation must never be released
+            // beneath a live consumer.
             let mut live_consumer_ids = durable_consumer_ids.to_vec();
             let resource_rows = sqlx::query(
-                "SELECT id FROM resources WHERE observed_state != 'DELETED'",
+                "SELECT id FROM resources WHERE kind = 'compute_instance' AND observed_state != 'DELETED'",
             )
             .fetch_all(&mut *connection)
             .await
@@ -7235,6 +7237,105 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(format!("{}-wal", path.display()));
         let _ = fs::remove_file(format!("{}-shm", path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_intent_guard_fails_closed_and_rolls_back_atomically()
+    -> Result<(), Box<dyn Error>> {
+        // ASR-018: the consumer intent must not outlive its placement
+        // allocation. When the referenced allocation is missing (startup
+        // orphan reconciliation deleted it while this create was between
+        // allocation commit and intent persistence), the insert must fail
+        // closed and roll back both rows atomically.
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "{}".to_owned(),
+            observed_state: "REQUESTED".to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        assert!(matches!(
+            store
+                .insert_resource_and_operation(&resource, &operation, Some("allocation-missing"))
+                .await,
+            Err(StoreError::PlacementAllocationNotFound)
+        ));
+        assert!(
+            matches!(
+                store.get_resource(resource.id).await,
+                Err(StoreError::ResourceNotFound)
+            ),
+            "the resource insert must roll back with the guard failure"
+        );
+        assert!(
+            matches!(
+                store.get_operation(operation.id).await,
+                Err(StoreError::OperationNotFound)
+            ),
+            "the operation insert must roll back with the guard failure"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_intent_guard_respects_resource_already_exists_precedence()
+    -> Result<(), Box<dyn Error>> {
+        // The idempotent retry path depends on ResourceAlreadyExists winning
+        // over the allocation guard: a retried create whose resource is
+        // already durable must re-enter the ownership/convergence path, never
+        // the guard failure, even when its allocation reference is stale.
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "{}".to_owned(),
+            observed_state: "REQUESTED".to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: resource.id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        store
+            .insert_resource_and_operation(&resource, &operation, None)
+            .await?;
+        assert!(matches!(
+            store
+                .insert_resource_and_operation(&resource, &operation, Some("allocation-missing"))
+                .await,
+            Err(StoreError::ResourceAlreadyExists)
+        ));
+        // The durable rows are untouched.
+        assert_eq!(
+            store.get_resource(resource.id).await?.observed_state,
+            "REQUESTED"
+        );
+        assert_eq!(
+            store.get_operation(operation.id).await?.state,
+            OperationState::Pending
+        );
         Ok(())
     }
 

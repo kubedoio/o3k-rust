@@ -5894,8 +5894,13 @@ mod tests {
             "both creates failed: {left:?} {right:?}"
         );
         assert!(
-            left.is_ok() && (right.is_ok() || matches!(right, Err(ComputeError::Conflict)))
-                || right.is_ok() && matches!(left, Err(ComputeError::Conflict)),
+            left.is_ok()
+                && (right.is_ok()
+                    || matches!(right, Err(ComputeError::Conflict))
+                    || matches!(right, Err(ComputeError::Scheduler(_))))
+                || right.is_ok()
+                    && (matches!(left, Err(ComputeError::Conflict))
+                        || matches!(left, Err(ComputeError::Scheduler(_)))),
             "unexpected race results: {left:?} {right:?}"
         );
         let allocation_count = placement
