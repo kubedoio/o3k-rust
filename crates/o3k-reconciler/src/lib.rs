@@ -1384,15 +1384,36 @@ where
         }
         let resource = self.store.get_resource(operation.resource_id).await?;
         if operation.state == OperationState::UnknownOutcome {
-            if operation.provider_operation_id.is_none() {
-                // Issue #609: the retry budget exhausted before any provider
-                // operation identity existed (every dispatch was rejected as
-                // retryable), so there is no provider operation to poll.
-                // Presence is observed by the durable placement identity
-                // instead; transport loss is never projected as absence.
+            if operation.provider_operation_id.is_some() {
+                return self.observe_unknown(operation, resource).await;
+            }
+            // Issue #609: the retry budget exhausted before any provider
+            // operation identity existed (every dispatch was rejected as
+            // retryable), so there is no provider operation to poll.
+            //
+            // Issue #610 (ASR-021 agent-control-plane-network-interruption):
+            // when the create's durable agent command row is still `pending`,
+            // the create was provably never accepted and never executed — the
+            // budget only exhausts on pre-acceptance rejections, and the
+            // agent journal carries no entry. Presence inspection would then
+            // terminalize the absent create as failed; the interruption
+            // contract requires the create to converge ACTIVE after the agent
+            // returns, so the create falls through to the re-drive below.
+            // `create_instance` rebuilds the command with the current epoch
+            // and a fresh deadline, and the deterministic command identity
+            // keeps the agent journal idempotent — a journal entry that
+            // already exists rejects the rebuilt fingerprint instead of
+            // re-executing, and its terminal observation (replayed on
+            // reconnect) converges the operation. Transport loss is never
+            // projected as absence.
+            let create_pending = self
+                .store
+                .get_agent_command_by_operation(operation_id)
+                .await
+                .is_ok_and(|command| command.state == o3k_store::AgentCommandState::Pending);
+            if !create_pending {
                 return self.observe_create_presence(operation, resource).await;
             }
-            return self.observe_unknown(operation, resource).await;
         }
         let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
             .map_err(|_| ReconcileError::InvalidIntent)?;
@@ -3946,7 +3967,65 @@ mod tests {
         Ok(())
     }
 
-    /// Issue #609 lifecycle mirror of the create regression: a delete whose
+    /// Issue #610 (ASR-021 agent-control-plane-network-interruption): a
+    /// create whose retry budget exhausted before ANY dispatch was accepted —
+    /// the durable agent command row is still `pending`, proving the create
+    /// never executed — must re-drive the create once the interruption
+    /// resolves instead of presence-inspecting it (which would terminalize
+    /// the absent create as failed). The re-drive converges ACTIVE exactly
+    /// once, mirroring the Running-without-identity sweep shape.
+    #[tokio::test]
+    async fn exhausted_create_with_pending_command_redrives_after_recovery()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("exhausted-pending-redrive", 2).await?;
+        let mut request = request();
+        request.placement_provider_id = Some("agent-1".to_owned());
+        provider.set_failure(FailureInjection::Transient)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        // Dispatch 1: retryable, budget (2) not yet exhausted -> scheduled.
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Retryable
+        );
+        // Dispatch 2: retryable, budget exhausted -> UnknownOutcome with no
+        // provider operation identity.
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::UnknownOutcome);
+        assert!(operation.provider_operation_id.is_none());
+        // The durable command row is still `pending` — exactly the residue a
+        // mid-transfer control-channel drop leaves behind: the create was
+        // provably never accepted by the agent.
+        bind_command(
+            store.as_ref(),
+            format!("create-command-{operation_id}"),
+            operation_id,
+            request.o3k_server_id,
+            "agent-1",
+            "epoch-1",
+        )
+        .await?;
+        // The interruption resolves; the next convergence re-drive must
+        // re-dispatch the create (never presence-terminalize it) and converge
+        // ACTIVE with exactly one instance.
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
     /// dispatch is rejected as retryable until the budget exhausts must also
     /// land in `UnknownOutcome` (never terminal `Failed`), and the lifecycle
     /// convergence re-drive must converge it by presence once the provider is

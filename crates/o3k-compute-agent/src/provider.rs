@@ -377,7 +377,29 @@ impl AgentComputeProvider {
     ) -> Result<Operation, ProviderError> {
         if let Some(store) = &self.store {
             if let Ok(existing) = store.get_agent_command_by_operation(operation_id).await {
-                return self.reuse_recorded_command(existing, operation_id).await;
+                if self.recorded_command_can_be_redelivered(&existing).await {
+                    return self.reuse_recorded_command(existing, operation_id).await;
+                }
+                // Issue #610 (ASR-021 agent-control-plane-network-interruption):
+                // the durable command is still `pending` but its recorded
+                // payload can no longer be delivered — the agent re-registered
+                // under a fresh epoch (the registry fences the recorded epoch),
+                // or the embedded deadline expired (`validate_command` rejects
+                // it). Re-dispatching the recorded payload verbatim could never
+                // reach the agent again, so the freshly built command (current
+                // epoch, fresh deadline) is dispatched instead. The
+                // deterministic command identity (command id, operation,
+                // resource, idempotency key) is unchanged; the agent journal
+                // dedups by that identity, so a command that was never accepted
+                // executes exactly once and an accepted one rejects the rebuilt
+                // fingerprint instead of re-executing.
+                tracing::warn!(
+                    operation_id = %operation_id,
+                    command_id = %existing.command_id,
+                    recorded_epoch = %existing.agent_epoch,
+                    "re-dispatching an undeliverable recorded command with a freshly built command"
+                );
+                return self.dispatch_accepted(command, operation_id).await;
             }
             let pause_ms = DISPATCH_RECORDED_INSERT_PAUSE_MS.load(Ordering::Relaxed);
             if pause_ms > 0 {
@@ -438,6 +460,56 @@ impl AgentComputeProvider {
         let recorded = agent_proto::Command::decode(existing.payload.as_slice())
             .map_err(|_| ProviderError::Storage)?;
         self.dispatch_accepted(recorded, operation_id).await
+    }
+
+    /// Issue #610: decides whether a durable Pending command's RECORDED
+    /// payload can still be delivered over the control plane. A Pending
+    /// create or inspect command whose agent epoch no longer matches the
+    /// registered node (the agent re-registered after a control-channel
+    /// interruption) or whose embedded deadline has expired can never be
+    /// dispatched again — `dispatch_command` fences the stale epoch and
+    /// `validate_command` rejects the expired deadline — so the caller must
+    /// rebuild the command instead of reusing the recorded payload. The
+    /// deterministic command identity keeps the agent journal idempotent: a
+    /// command that was never accepted executes exactly once, an accepted one
+    /// rejects the rebuilt fingerprint (create) or replays the entry
+    /// (inspect) instead of re-executing.
+    ///
+    /// Other lifecycle actions are deliberately excluded: their re-drives
+    /// keep the recorded-payload semantics (issue #87 B2), where a
+    /// deadline-expired re-dispatch is classified as an unknown outcome and
+    /// the reconciler observes the operation — the agent journal replays the
+    /// terminal evidence after the stream recovers. Accepted/Running/Terminal
+    /// rows are always redeliverable: the agent journal replays or returns
+    /// them by identity. A node absent from the registry (a control-plane
+    /// restart while the agent is still in reconnect backoff) keeps the
+    /// recorded payload: the dispatch fails `not registered`/`StaleState` and
+    /// the next re-drive re-decides once the agent's fresh registration
+    /// lands.
+    async fn recorded_command_can_be_redelivered(
+        &self,
+        record: &o3k_store::AgentCommandRecord,
+    ) -> bool {
+        if record.state != AgentCommandState::Pending {
+            return true;
+        }
+        let Ok(recorded) = agent_proto::Command::decode(record.payload.as_slice()) else {
+            return true;
+        };
+        if !matches!(
+            recorded.action,
+            Some(agent_proto::command::Action::Create(_))
+                | Some(agent_proto::command::Action::Inspect(_))
+        ) {
+            return true;
+        }
+        if recorded.deadline_unix_ms <= unix_ms() {
+            return false;
+        }
+        match self.registry.snapshot(&record.agent_id).await {
+            Some(node) => node.agent_epoch == recorded.agent_epoch,
+            None => true,
+        }
     }
 
     async fn dispatch_accepted(
@@ -3406,7 +3478,95 @@ mod tests {
         Ok(())
     }
 
-    /// Issue #88 E3 C3: the `dispatch_recorded` read-then-insert race (the
+    /// Issue #610 (ASR-021 agent-control-plane-network-interruption): a
+    /// control-channel drop followed by the agent's re-registration under a
+    /// fresh epoch must not strand the pending create. The durable command
+    /// row carries the pre-drop epoch, which the registry now fences; the
+    /// re-drive must dispatch a freshly built command (current epoch, fresh
+    /// deadline) instead of the recorded payload, so the create converges
+    /// exactly once after the interruption.
+    #[tokio::test]
+    async fn create_redrive_after_agent_re_registration_dispatches_fresh_command()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        let (sender, receiver) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let mut commands = spawn_agent_reader(registry.clone(), receiver);
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        )
+        .with_artifact_resolver(Arc::new(RaceTestCreateArtifactResolver));
+        let operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+        let request = race_create_request(operation_id, server_id);
+
+        // First dispatch lands under the pre-drop epoch; the agent never
+        // accepts it (the control channel drops mid-transfer).
+        let first = provider
+            .create_instance(request.clone())
+            .await
+            .map_err(|error| format!("the first create dispatch must succeed, got {error:?}"))?;
+        assert_eq!(first.state, o3k_provider::OperationState::Accepted);
+        let delivered = commands
+            .recv()
+            .await
+            .ok_or("the agent stream must carry the first command")?;
+        assert_eq!(delivered.agent_epoch, "epoch-1");
+        let recorded_deadline = delivered.deadline_unix_ms;
+        let durable = store.list_recoverable_agent_commands().await?;
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].state, AgentCommandState::Pending);
+
+        // The control channel drops; the agent re-registers under a fresh
+        // epoch with a new connection.
+        registry.detach_connection("node-a", "epoch-1").await;
+        registry
+            .register(&register_request("node-a", "epoch-2"))
+            .await?;
+        let (sender2, receiver2) = mpsc::channel(32);
+        registry
+            .attach_connection("node-a", "epoch-2", sender2)
+            .await?;
+        let mut commands2 = spawn_agent_reader(registry.clone(), receiver2);
+
+        // The create-convergence re-drive must dispatch a FRESH command for
+        // the current epoch with a fresh deadline — not the fenced recorded
+        // payload (which `dispatch_command` rejects with "agent epoch is
+        // fenced", stranding the create forever).
+        let redriven = provider.create_instance(request).await.map_err(|error| {
+            format!(
+                "the create re-drive must dispatch after re-registration, \
+                     got {error:?}"
+            )
+        })?;
+        assert_eq!(redriven.state, o3k_provider::OperationState::Accepted);
+        let redelivered = commands2
+            .recv()
+            .await
+            .ok_or("the re-registered agent stream must carry the re-dispatched command")?;
+        assert_eq!(
+            redelivered.command_id, delivered.command_id,
+            "the re-dispatch keeps the deterministic command identity"
+        );
+        assert_eq!(
+            redelivered.agent_epoch, "epoch-2",
+            "the re-dispatch must carry the current registered epoch"
+        );
+        assert!(
+            redelivered.deadline_unix_ms > recorded_deadline,
+            "the re-dispatch must carry a fresh deadline, not the recorded one"
+        );
+        Ok(())
+    }
     /// lifecycle path, where the durable command insert IS the dispatch
     /// point). Two dispatches for the same operation read "no row" before
     /// either inserts; the loser's insert must adopt the winner's row and

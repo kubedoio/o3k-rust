@@ -754,6 +754,7 @@ impl ComputeService {
             interval.tick().await;
             loop {
                 interval.tick().await;
+                tracing::debug!("create convergence sweep tick");
                 if let Err(error) = service.drive_all_create_convergence().await {
                     tracing::warn!(%error, "create convergence reconcile pass failed");
                 }
@@ -1566,6 +1567,7 @@ impl ComputeService {
     /// the read path stays available; a converged failure applies the same
     /// reverse-order compensation as the asynchronous agent-failure path.
     async fn drive_create_convergence(&self, resource: &o3k_store::ResourceRecord) {
+        tracing::debug!(resource_id = %resource.id, "create convergence drive entered");
         let Ok(request) = serde_json::from_str::<CreateInstanceRequest>(&resource.desired_state)
         else {
             return;
