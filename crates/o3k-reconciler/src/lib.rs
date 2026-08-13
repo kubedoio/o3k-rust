@@ -883,6 +883,16 @@ where
             LifecycleAction::parse(&operation.kind).ok_or(ReconcileError::InvalidIntent)?;
         let resource = self.store.get_resource(operation.resource_id).await?;
         if operation.state == OperationState::UnknownOutcome {
+            if operation.provider_operation_id.is_none() {
+                // Issue #609: the retry budget exhausted before any provider
+                // operation identity existed (every dispatch was rejected as
+                // retryable), so there is no provider operation to poll.
+                // Presence decides; a reconnected agent's terminal update can
+                // also still arrive through the event stream.
+                return self
+                    .observe_lifecycle_presence(operation, resource, action)
+                    .await;
+            }
             return self.observe_lifecycle(operation, resource, action).await;
         }
         let provider_id = resource
@@ -1050,6 +1060,67 @@ where
                 Ok(OperationState::Failed)
             }
         }
+    }
+
+    /// Issue #609: observes the instance at the execution boundary for a
+    /// lifecycle operation whose retry budget exhausted before any provider
+    /// operation identity existed. There is no provider operation to poll,
+    /// so presence decides exactly like `observe_lifecycle`'s unknown-outcome
+    /// arm: a delete is converged when the instance is provably absent, a
+    /// still-present delete re-drives with the #575 fresh command identity,
+    /// and a start/stop/reboot converges when the instance state matches.
+    /// Everything else stays `UnknownOutcome` — a reconnected agent's
+    /// terminal update still arrives through the event stream, and the
+    /// lifecycle convergence sweep re-drives the operation each pass.
+    async fn observe_lifecycle_presence(
+        &self,
+        operation: OperationRecord,
+        resource: ResourceRecord,
+        action: LifecycleAction,
+    ) -> Result<OperationState, ReconcileError> {
+        let provider_id = resource
+            .provider_id
+            .clone()
+            .ok_or(ReconcileError::InvalidIntent)?;
+        let presence = self.provider.get_instance(&provider_id).await;
+        if action == LifecycleAction::Delete {
+            return match presence {
+                Err(ProviderError::NotFound) => {
+                    self.finish_lifecycle(
+                        operation.id,
+                        resource,
+                        action,
+                        operation.id.to_string(),
+                        provider_id,
+                    )
+                    .await
+                }
+                Ok(_) => self.redrive_delete(operation, resource, provider_id).await,
+                Err(_) => Ok(OperationState::UnknownOutcome),
+            };
+        }
+        let converged = match presence {
+            Ok(instance) => match action {
+                LifecycleAction::Start | LifecycleAction::Reboot => {
+                    instance.state == o3k_provider::InstanceState::Running
+                }
+                LifecycleAction::Stop => instance.state == o3k_provider::InstanceState::Stopped,
+                LifecycleAction::Delete => false,
+            },
+            Err(_) => false,
+        };
+        if converged {
+            return self
+                .finish_lifecycle(
+                    operation.id,
+                    resource,
+                    action,
+                    operation.id.to_string(),
+                    provider_id,
+                )
+                .await;
+        }
+        Ok(OperationState::UnknownOutcome)
     }
 
     /// #575 stale-accepted delete re-drive: mints ONE deterministic fresh
@@ -1313,6 +1384,14 @@ where
         }
         let resource = self.store.get_resource(operation.resource_id).await?;
         if operation.state == OperationState::UnknownOutcome {
+            if operation.provider_operation_id.is_none() {
+                // Issue #609: the retry budget exhausted before any provider
+                // operation identity existed (every dispatch was rejected as
+                // retryable), so there is no provider operation to poll.
+                // Presence is observed by the durable placement identity
+                // instead; transport loss is never projected as absence.
+                return self.observe_create_presence(operation, resource).await;
+            }
             return self.observe_unknown(operation, resource).await;
         }
         let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
@@ -2108,17 +2187,27 @@ where
     ) -> Result<OperationState, ReconcileError> {
         let attempts = self.store.increment_operation_retry(operation_id).await?;
         if attempts >= self.max_attempts {
+            // Issue #609 (ASR-021 agent-control-plane-network-interruption):
+            // a retryable provider outcome is by definition not a
+            // definitively-known failure, so exhausting the retry budget must
+            // never terminalize the operation. The budget only bounds
+            // dispatching: the operation stays `UnknownOutcome` (keeping the
+            // error for diagnosis) and the convergence sweeps keep observing
+            // and re-driving it, so a transient interruption that resolves
+            // still converges after recovery. Presence inspection resolves
+            // genuinely-absent cases; a reconnected agent's terminal update
+            // can also still arrive through the event stream.
             self.store
                 .update_operation(
                     operation_id,
-                    OperationState::Failed,
+                    OperationState::UnknownOutcome,
                     None,
                     Some("retry_exhausted"),
                     Some(&error.to_string()),
                 )
                 .await?;
-            self.event(operation_id, resource_id, JournalEventKind::Failed);
-            Ok(OperationState::Failed)
+            self.event(operation_id, resource_id, JournalEventKind::UnknownObserved);
+            Ok(OperationState::UnknownOutcome)
         } else {
             self.store
                 .update_operation(
@@ -3791,23 +3880,124 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #609 (ASR-021 agent-control-plane-network-interruption): a
+    /// retryable provider outcome is by definition not a definitively-known
+    /// failure, so exhausting the retry budget must leave the create in
+    /// `UnknownOutcome` (error_category `retry_exhausted`, error kept for
+    /// diagnosis) — never terminal `Failed` — and the next convergence
+    /// re-drive must still converge it to `Succeeded` exactly once when the
+    /// provider is healthy. The exhausted create carries no provider
+    /// operation identity, so the re-drive observes presence by the durable
+    /// placement identity instead of polling (or re-dispatching).
     #[tokio::test]
-    async fn retry_budget_becomes_visible_failure() -> Result<(), ReconcileError> {
+    async fn retry_budget_exhaustion_leaves_unknown_outcome_and_recovers()
+    -> Result<(), ReconcileError> {
         let (journal, store, provider) = journal("retry", 2).await?;
         provider.set_failure(FailureInjection::Transient)?;
-        let request = request();
+        let mut request = request();
+        // The exhausted create is re-observed by the durable placement
+        // identity (SPEC-0021 observe-before-decide), so the intent must
+        // name the execution agent.
+        request.placement_provider_id = Some("agent-1".to_owned());
         let operation_id = journal.begin_create("project", &request).await?;
+        // Dispatch 1: retryable, budget (2) not yet exhausted -> scheduled.
         assert_eq!(
             journal.reconcile_once(operation_id).await?,
             OperationState::Retryable
         );
+        // Dispatch 2: retryable, budget exhausted -> UnknownOutcome, and the
+        // exhaustion transition fires the unknown-outcome journal event.
         assert_eq!(
             journal.reconcile_once(operation_id).await?,
-            OperationState::Failed
+            OperationState::UnknownOutcome
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::UnknownOutcome);
+        assert_eq!(operation.error_category.as_deref(), Some("retry_exhausted"));
+        assert!(
+            operation.error_message.is_some(),
+            "the exhausted branch must keep the provider error for diagnosis"
+        );
+        assert!(journal.events().iter().any(|event| {
+            event.operation_id == operation_id && event.kind == JournalEventKind::UnknownObserved
+        }));
+        // The interruption resolves. The create actually landed at the
+        // execution boundary during the outage (only the acknowledgement was
+        // lost — a timeout is an unknown outcome, not a failure), so exactly
+        // one instance exists at the provider.
+        provider.set_failure(FailureInjection::None)?;
+        provider.create_instance(request.clone()).await?;
+        assert_eq!(provider.instance_count(), 1);
+        // The next convergence re-drive observes presence and adopts the
+        // landed create: Succeeded, resource ACTIVE, still exactly one
+        // instance (no re-dispatch, no duplicate).
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
         );
         assert_eq!(
-            store.get_operation(operation_id).await?.state,
-            OperationState::Failed
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
+        assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    /// Issue #609 lifecycle mirror of the create regression: a delete whose
+    /// dispatch is rejected as retryable until the budget exhausts must also
+    /// land in `UnknownOutcome` (never terminal `Failed`), and the lifecycle
+    /// convergence re-drive must converge it by presence once the provider is
+    /// healthy — the instance is still present, so the delete is re-driven
+    /// and the goal converges to DELETED with zero residue.
+    #[tokio::test]
+    async fn delete_retry_exhaustion_stays_unknown_and_presence_converges()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("delete-retry-exhaustion", 2).await?;
+        let request = request();
+        let create_operation = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(create_operation).await?,
+            OperationState::Succeeded
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        let operation_id = Uuid::now_v7();
+        journal
+            .begin_lifecycle(resource.id, operation_id, LifecycleAction::Delete)
+            .await?;
+        provider.set_failure(FailureInjection::Transient)?;
+        // Dispatch 1: retryable, budget (2) not yet exhausted -> scheduled.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Retryable
+        );
+        // Dispatch 2: retryable, budget exhausted -> UnknownOutcome, and the
+        // exhausted operation carries no provider operation identity.
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let operation = store.get_operation(operation_id).await?;
+        assert_eq!(operation.state, OperationState::UnknownOutcome);
+        assert_eq!(operation.error_category.as_deref(), Some("retry_exhausted"));
+        assert!(operation.provider_operation_id.is_none());
+        // The interruption resolves: the delete never executed during the
+        // outage, so the instance is still present and the presence-driven
+        // re-drive must re-dispatch the delete and converge to DELETED.
+        provider.set_failure(FailureInjection::None)?;
+        assert_eq!(
+            journal.reconcile_lifecycle_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(provider.instance_count(), 0);
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "DELETED"
         );
         Ok(())
     }
