@@ -349,6 +349,24 @@ impl DhcpRuntime {
                 .remove_binding(port)
                 .map_err(|_| AgentError::Protocol("DHCP binding cleanup failed".to_owned()))?;
         }
+        if self.service.configuration().is_none() {
+            // A create that crashed before DHCP configuration never wrote a
+            // dnsmasq.conf, so there is nothing to render, reload, or stop
+            // (the supervisor cannot exist without a configuration). Never-
+            // configured state is absent state, not an aborting error (issue
+            // #608): the delete/reap must continue into TAP and bridge
+            // cleanup. Bindings cannot be added without a configuration, but
+            // clear any that may remain so nothing stale can be re-served.
+            for port_id in self
+                .service
+                .bindings()
+                .map(|binding| binding.port_id.clone())
+                .collect::<Vec<_>>()
+            {
+                let _ = self.service.remove_binding(&port_id);
+            }
+            return Ok(());
+        }
         self.service
             .write_config()
             .map_err(|_| AgentError::Protocol("DHCP configuration cleanup failed".to_owned()))?;
@@ -2267,12 +2285,13 @@ fn reconcile_dhcp_on_startup(
 /// issue #88 S3/S4 reruns): the stale-network reap removes the persisted
 /// DHCP bindings and TAPs of instances whose domains provably do not exist,
 /// and the owned-dnsmasq reap stops every owned dnsmasq left behind by a
-/// previous agent process. The provisional-TAP reap removes `o3ktmp-*` links
-/// left by a create that died before its ownership record became durable
-/// (issue #602); such links are self-identifying residue — no manifest record
-/// or domain ever references a provisional name — so deleting them needs no
-/// manifest proof and cannot touch a fenced deterministic `o3ktap-` interface.
-/// Ordering invariant: the provisional-TAP reap runs first (it is independent
+/// previous agent process. The provisional-link reap removes `o3ktmp-*` TAPs
+/// and `o3kbm-*` bridges left by a create that died before its ownership
+/// record became durable (issues #602, #608); such links are self-identifying
+/// residue — no manifest record or domain ever references a provisional name
+/// — so deleting them needs no manifest proof and cannot touch a fenced
+/// deterministic `o3ktap-`/`o3k-b*` interface.
+/// Ordering invariant: the provisional-link reap runs first (it is independent
 /// of instance state), then the stale-network reap MUST run (a crashed create
 /// whose DHCP prep completed persists its binding, so the stale binding must
 /// not survive to be re-served), then the owned-dnsmasq reap (at startup the
@@ -2287,8 +2306,8 @@ async fn reap_startup_residue(
     presence: &dyn DomainPresence,
 ) -> Result<(), AgentError> {
     let partial_error = network
-        .reap_partial_taps()
-        .map_err(|error| AgentError::Protocol(format!("provisional TAP reap failed: {error}")))
+        .reap_partial_links()
+        .map_err(|error| AgentError::Protocol(format!("provisional link reap failed: {error}")))
         .err();
     let stale_error = reap_stale_instance_networks(network, dhcp, presence)
         .await
@@ -2762,6 +2781,72 @@ mod tests {
             runtime.service.bindings().count(),
             0,
             "removing an absent binding must be a no-op"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Issue #608: `remove_ports` on a DHCP service that was never configured
+    /// (the crashed create never wrote dnsmasq.conf) is absent state, not an
+    /// error. Nothing can be rendered, reloaded, or stopped — the supervisor
+    /// cannot exist without a configuration — and the delete/reap must
+    /// continue into TAP and bridge cleanup. The pre-fix code aborted with
+    /// "DHCP configuration cleanup failed" (render_config -> InvalidConfig),
+    /// which stopped `cleanup_instance_network` before any TAP or bridge
+    /// cleanup.
+    #[test]
+    fn remove_ports_without_configuration_is_absent_state() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut runtime = DhcpRuntime::open(&root, "/does/not/exist", "o3k-br0".to_owned())?;
+        assert!(runtime.service.configuration().is_none());
+
+        runtime.remove_ports(&["port-1".to_owned()])?;
+
+        assert!(
+            runtime.service.bindings().next().is_none(),
+            "a never-configured DHCP cannot hold bindings"
+        );
+        assert!(
+            runtime.supervisor.is_none(),
+            "no supervisor may exist without a configuration"
+        );
+        assert!(
+            !root.join("dnsmasq.conf").exists(),
+            "a never-configured DHCP must not render a config during cleanup"
+        );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Issue #608: the instance delete/reap of a never-configured instance
+    /// (create crashed before DHCP configuration) must continue through the
+    /// DHCP cleanup into TAP and bridge cleanup and reach zero residue. The
+    /// manifest is empty, so a successful cleanup issues no host command; the
+    /// pre-fix DHCP abort failed here before the TAP and bridge cleanup could
+    /// run.
+    #[test]
+    fn cleanup_of_a_never_configured_instance_reaches_zero_residue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = env::temp_dir().join(format!("o3k-compute-dhcp-never-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dhcp_root = root.join("dhcp");
+        let runtime = DhcpRuntime::open(&dhcp_root, "/does/not/exist", "o3k-br0".to_owned())?;
+        let dhcp = Arc::new(Mutex::new(runtime));
+        let network = o3k_network::HostNetworkManager::with_ownership_root(
+            o3k_network::HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            root.join("network"),
+        )?;
+
+        cleanup_instance_network(&network, &dhcp, "server-never-configured")?;
+
+        assert!(
+            !dhcp_root.join("dnsmasq.conf").exists(),
+            "no dnsmasq.conf may be written for a never-configured DHCP"
         );
         std::fs::remove_dir_all(root)?;
         Ok(())
