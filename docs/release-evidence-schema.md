@@ -1,6 +1,19 @@
 # Release evidence schema
 
-`packaging/release-gate.sh` accepts only artifacts that identify their purpose;
+`packaging/release-gate.sh` accepts only artifacts that identify their purpose
+and exact candidate provenance. Every invocation must supply
+`--candidate-evidence-manifest` alongside the six machine artifacts. The
+manifest is a JSON object with `artifact_type: "candidate-evidence-manifest"`,
+the 40-character `candidate_sha`, and lowercase SHA-256 digests for
+`o3kd_sha256`, `o3k_compute_sha256`, and `bundle_tree_sha256`. Its `artifacts`
+map must contain one entry for each gate input, naming the artifact and its
+SHA-256 digest. Each machine artifact must contain a matching `source_commit`,
+the three binary/bundle digests, and its manifest `artifact_sha256`; missing,
+null, stale, or mismatched values block readiness. The gate recomputes all
+digests and does not trust summary booleans. This prevents an otherwise valid
+human review from making stale evidence release-eligible.
+
+The gate accepts only artifacts that identify their purpose;
 it does not accept a generic `{"status":"passed"}` file. Every artifact must
 be a JSON object with:
 
@@ -27,7 +40,8 @@ The required artifact types are:
 | `--benchmark` | `benchmark` | `guest_and_libvirt.status: measured`; `release_eligible: true`; all evaluated targets true; and `raw_sha256` binding the summary to `--benchmark-raw` |
 | `--benchmark-raw` | `benchmark` | `status: measured`; `profile: libvirt`; `redacted: true`; `release_eligible: true`; fresh `finished_at`; non-empty `environment.uname` and `environment.rustc`; positive `samples`; measured `guest_and_libvirt`; and `targets.startup_readiness_ms`, `targets.idle_rss_mib`, `targets.token_p95_ms` |
 
-The gate also requires `--human-review` and `--source-commit`. The human
+The gate also requires `--human-review`, `--source-commit`, and
+`--candidate-evidence-manifest`. The human
 review path must pass
 `packaging/validate-human-review.sh --require-approved`, and its
 `reviewed_commit` must equal the supplied 40-character lowercase

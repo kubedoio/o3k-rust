@@ -91,6 +91,28 @@ python3 "${ROOT_DIR}/scripts/validate-release-e2e-evidence.py" --example \
     >"${ARTIFACT_DIR}/e2e.json"
 cp "${ARTIFACT_DIR}/e2e.json" "${ARTIFACT_DIR}/e2e.pristine.json"
 
+python3 - "${ARTIFACT_DIR}" <<'PY'
+import hashlib, json, pathlib, sys, os
+root = pathlib.Path(sys.argv[1])
+source = os.environ["SOURCE_COMMIT"]
+hashes = {"o3kd_sha256": "a" * 64, "o3k_compute_sha256": "b" * 64, "bundle_tree_sha256": "c" * 64}
+names = {"real_libvirt_e2e":"e2e.json", "clean_ubuntu_install":"ubuntu.json", "clean_debian_install":"debian.json", "failure_recovery":"recovery.json", "benchmark":"benchmark.json", "benchmark_raw":"benchmark-raw.json"}
+manifest = {"artifact_type":"candidate-evidence-manifest", "candidate_sha":source, **hashes, "artifacts":{}}
+for logical, filename in names.items():
+    path = root / filename
+    value = json.loads(path.read_text(encoding="utf-8"))
+    value.update({"source_commit":source, "candidate_sha":source, **hashes})
+    path.write_text(json.dumps(value), encoding="utf-8")
+    manifest["artifacts"][logical] = {"artifact":filename, "artifact_sha256":hashlib.sha256(path.read_bytes()).hexdigest()}
+raw = json.loads((root / "benchmark-raw.json").read_text(encoding="utf-8"))
+summary_path = root / "benchmark.json"
+summary = json.loads(summary_path.read_text(encoding="utf-8"))
+summary["raw_sha256"] = hashlib.sha256(json.dumps(raw, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+summary_path.write_text(json.dumps(summary), encoding="utf-8")
+manifest["artifacts"]["benchmark"]["artifact_sha256"] = hashlib.sha256(summary_path.read_bytes()).hexdigest()
+(root / "candidate-evidence-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+PY
+
 HUMAN_REVIEW="${ARTIFACT_DIR}/human-review.json"
 OUTPUT="${ARTIFACT_DIR}/valid-release.json"
 
@@ -109,6 +131,7 @@ if [[ "${SOURCE_COMMIT}" == "952dcf9c4a1ae958996e4ae9444763e5524eddc5" ]]; then
         --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
         --human-review "${HUMAN_REVIEW}" \
         --source-commit "${SOURCE_COMMIT}" \
+        --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
         --output "${OUTPUT}"; then
         echo "release gate accepted the permanently rejected historical candidate" >&2
         exit 1
@@ -127,6 +150,7 @@ bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --human-review "${HUMAN_REVIEW}" \
     --source-commit "${SOURCE_COMMIT}" \
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${OUTPUT}"
 grep -q '"status": "ready"' "${OUTPUT}"
 
@@ -138,6 +162,7 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --benchmark "${ARTIFACT_DIR}/benchmark.json" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --source-commit "${SOURCE_COMMIT}" \
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${ARTIFACT_DIR}/missing-human-review.json"; then
     echo "release gate accepted missing human review evidence" >&2
     exit 1
@@ -152,6 +177,7 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --human-review "${HUMAN_REVIEW}" \
     --source-commit "${SOURCE_COMMIT}" \
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${ARTIFACT_DIR}/missing-benchmark.json"; then
     echo "release gate accepted missing benchmark evidence" >&2
     exit 1
@@ -167,7 +193,43 @@ GATE_ARGS=(
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json"
     --human-review "${HUMAN_REVIEW}"
     --source-commit "${SOURCE_COMMIT}"
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json"
 )
+
+# Provenance regressions: a structurally valid artifact with missing or stale
+# binding must never become ready merely because human review is present.
+cp "${ARTIFACT_DIR}/e2e.json" "${ARTIFACT_DIR}/e2e-unbound.json"
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["source_commit"] = None
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" "${GATE_ARGS[@]}" \
+    --output "${ARTIFACT_DIR}/missing-source-binding.json"; then
+    echo "release gate accepted evidence without source binding" >&2
+    exit 1
+fi
+grep -q 'real_libvirt_e2e: source_commit must match candidate evidence manifest' \
+    "${ARTIFACT_DIR}/missing-source-binding.json"
+cp "${ARTIFACT_DIR}/e2e-unbound.json" "${ARTIFACT_DIR}/e2e.json"
+
+python3 - "${ARTIFACT_DIR}/e2e.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.loads(open(path, encoding="utf-8").read())
+value["o3kd_sha256"] = "0" * 64
+open(path, "w", encoding="utf-8").write(json.dumps(value))
+PY
+if bash "${ROOT_DIR}/packaging/release-gate.sh" "${GATE_ARGS[@]}" \
+    --output "${ARTIFACT_DIR}/mismatched-binary-binding.json"; then
+    echo "release gate accepted evidence for a different binary" >&2
+    exit 1
+fi
+grep -q 'real_libvirt_e2e: o3kd_sha256 must match candidate evidence manifest' \
+    "${ARTIFACT_DIR}/mismatched-binary-binding.json"
+cp "${ARTIFACT_DIR}/e2e-unbound.json" "${ARTIFACT_DIR}/e2e.json"
 
 # Contract negatives for the e2e artifact. Each mutation must block the gate;
 # membership/vocabulary errors come from the shared validator, and the
@@ -268,6 +330,7 @@ if bash "${ROOT_DIR}/packaging/release-gate.sh" \
     --benchmark-raw "${ARTIFACT_DIR}/benchmark-raw.json" \
     --human-review "${HUMAN_REVIEW}" \
     --source-commit "${SOURCE_COMMIT}" \
+    --candidate-evidence-manifest "${ARTIFACT_DIR}/candidate-evidence-manifest.json" \
     --output "${ARTIFACT_DIR}/missing-recovery-evidence.json"; then
     echo "release gate accepted a scenario without evidence" >&2
     exit 1

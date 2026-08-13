@@ -12,6 +12,7 @@ BENCHMARK=
 BENCHMARK_RAW=
 HUMAN_REVIEW=
 SOURCE_COMMIT=
+CANDIDATE_EVIDENCE_MANIFEST=
 while (($#)); do
   case "$1" in
     --e2e) E2E="${2:?missing E2E artifact}"; shift 2;;
@@ -22,6 +23,7 @@ while (($#)); do
     --benchmark-raw) BENCHMARK_RAW="${2:?missing raw benchmark artifact}"; shift 2;;
     --human-review) HUMAN_REVIEW="${2:?missing human-review artifact}"; shift 2;;
     --source-commit) SOURCE_COMMIT="${2:?missing source commit}"; shift 2;;
+    --candidate-evidence-manifest) CANDIDATE_EVIDENCE_MANIFEST="${2:?missing candidate evidence manifest}"; shift 2;;
     --output) OUTPUT="${2:?missing output path}"; shift 2;;
     *) echo "unknown option: $1" >&2; exit 2;;
   esac
@@ -38,7 +40,7 @@ else
     HUMAN_REVIEW_VALIDATION_ERROR="human_review: validator rejected artifact: ${HUMAN_REVIEW_VALIDATION_OUTPUT//$'\n'/; }"
   fi
 fi
-export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW HUMAN_REVIEW OUTPUT SOURCE_COMMIT HUMAN_REVIEW_VALIDATION_ERROR REPOSITORY_ROOT
+export E2E INSTALL_UBUNTU INSTALL_DEBIAN RECOVERY BENCHMARK BENCHMARK_RAW HUMAN_REVIEW OUTPUT SOURCE_COMMIT CANDIDATE_EVIDENCE_MANIFEST HUMAN_REVIEW_VALIDATION_ERROR REPOSITORY_ROOT
 python3 <<'PY'
 import hashlib
 import json
@@ -84,8 +86,37 @@ if max_age_error:
     errors.append(max_age_error)
 evidence = {}
 paths = {}
-human_review_path = os.environ["HUMAN_REVIEW"]
 source_commit = os.environ["SOURCE_COMMIT"]
+manifest = None
+manifest_path = os.environ.get("CANDIDATE_EVIDENCE_MANIFEST", "")
+if not manifest_path:
+    errors.append("candidate_evidence_manifest: artifact path was not supplied")
+else:
+    try:
+        with open(manifest_path, encoding="utf-8") as stream:
+            manifest = json.load(stream)
+    except (OSError, json.JSONDecodeError) as error:
+        errors.append(f"candidate_evidence_manifest: cannot read JSON artifact ({error})")
+    if not isinstance(manifest, dict):
+        errors.append("candidate_evidence_manifest: artifact root must be an object")
+        manifest = None
+if isinstance(manifest, dict):
+    if manifest.get("artifact_type") != "candidate-evidence-manifest":
+        errors.append("candidate_evidence_manifest: artifact_type must be 'candidate-evidence-manifest'")
+    if manifest.get("candidate_sha") != source_commit:
+        errors.append("candidate_evidence_manifest: candidate_sha must match source_commit")
+    for field in ("o3kd_sha256", "o3k_compute_sha256", "bundle_tree_sha256"):
+        if not isinstance(manifest.get(field), str) or not re.fullmatch(r"[0-9a-f]{64}", manifest[field]):
+            errors.append(f"candidate_evidence_manifest: {field} must be a lowercase SHA-256 hex digest")
+    if not isinstance(manifest.get("artifacts"), dict):
+        errors.append("candidate_evidence_manifest: artifacts must be an object")
+    else:
+        manifest_real_path = os.path.realpath(manifest_path)
+        if manifest_real_path in paths:
+            errors.append("candidate_evidence_manifest: artifact reuses another gate input")
+        else:
+            paths[manifest_real_path] = "candidate_evidence_manifest"
+human_review_path = os.environ["HUMAN_REVIEW"]
 human_review_validation_error = os.environ["HUMAN_REVIEW_VALIDATION_ERROR"]
 if human_review_validation_error:
     errors.append(human_review_validation_error)
@@ -169,6 +200,21 @@ for name, (path, artifact_type) in required.items():
         "profile": value.get("profile"),
         "status": status,
     }
+    binding = manifest.get("artifacts", {}).get(name) if isinstance(manifest, dict) and isinstance(manifest.get("artifacts"), dict) else None
+    if not isinstance(binding, dict):
+        errors.append(f"{name}: candidate evidence manifest entry is required")
+    else:
+        if not isinstance(binding.get("artifact"), str) or not binding["artifact"].strip():
+            errors.append(f"{name}: manifest artifact path is required")
+        elif os.path.realpath(os.path.join(os.path.dirname(manifest_path), binding["artifact"])) != os.path.realpath(path):
+            errors.append(f"{name}: artifact path does not match candidate evidence manifest")
+        actual_sha256 = hashlib.sha256(open(path, "rb").read()).hexdigest()
+        if binding.get("artifact_sha256") != actual_sha256:
+            errors.append(f"{name}: artifact_sha256 does not match candidate evidence manifest")
+        for field in ("source_commit", "o3kd_sha256", "o3k_compute_sha256", "bundle_tree_sha256"):
+            expected = manifest.get("candidate_sha") if field == "source_commit" else manifest.get(field)
+            if not isinstance(value.get(field), str) or value.get(field) != expected:
+                errors.append(f"{name}: {field} must match candidate evidence manifest")
     if value.get("artifact_type") != artifact_type:
         errors.append(f"{name}: artifact_type must be {artifact_type!r}")
     if value.get("profile") != "libvirt":

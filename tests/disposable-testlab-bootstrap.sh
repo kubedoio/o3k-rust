@@ -36,6 +36,13 @@ assert '.o3k-supplementary-groups-added' in bootstrap
 assert 'usermod --append --groups "$group" o3k-compute' in bootstrap
 assert 'usermod --append --groups "$group" o3k\n' not in bootstrap
 assert 'gpasswd --delete o3k' in bootstrap
+assert 'gpasswd --delete o3k-compute' in cleanup
+assert 'o3k-disposable-compute-account-v1' in bootstrap
+assert 'o3k-disposable-compute-group-v1' in bootstrap
+assert 'compute_account_created' in cleanup
+assert 'compute_group_created' in cleanup
+assert 'install -d -o root -g root -m 0755' in bootstrap
+assert 'agent-inspect-probe.json' in bootstrap
 assert 'cleanup-disposable-testlab.sh' in bootstrap
 assert 'ownership ledger until libvirt, network, and DHCP state have' in bootstrap
 assert 'O3K_TESTLAB_IMAGE_PATH="${IMAGE_PATH:-}"' in bootstrap
