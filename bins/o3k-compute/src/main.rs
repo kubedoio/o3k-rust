@@ -62,6 +62,10 @@ struct LibvirtCommandExecutor {
     image_materializer: o3k_compute_agent::ImageMaterializer,
     network: o3k_network::HostNetworkManager,
     dhcp: Arc<Mutex<DhcpRuntime>>,
+    /// The agent's configured disk capacity (`O3K_COMPUTE_MAX_DISK_GB`). The
+    /// same value is published to placement as the DISK_GB inventory; the
+    /// create arm uses it as an agent-side backstop (issue #606).
+    max_disk_gb: u64,
 }
 
 struct DhcpRuntime {
@@ -1216,6 +1220,26 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 success("domain deleted", proto::ResourceState::Deleted)
             }
             Some(proto::command::Action::Create(_)) => {
+                // Agent-side disk-capacity backstop (issue #606): reject an
+                // over-capacity create BEFORE any host mutation. The
+                // placement gate normally rejects it earlier, but in the
+                // agent-restart staleness window the ledger can still carry
+                // the pre-restart capacity; the capacity classification makes
+                // this indistinguishable from a placement rejection on the
+                // control plane. The guard reads only the resolved protobuf
+                // inputs, so no TAP, bridge, overlay, or domain exists yet.
+                if let Some(disk_gib) = create_disk_gib(command)
+                    && disk_gib > self.max_disk_gb
+                {
+                    tracing::warn!(
+                        resource_id = %command.resource_id,
+                        disk_gib,
+                        max_disk_gb = self.max_disk_gb,
+                        "create rejected before host mutation: requested disk \
+                         exceeds the agent capacity"
+                    );
+                    return Ok(capacity_failure_result(disk_gib, self.max_disk_gb));
+                }
                 // Failures that provably happened before libvirt could create
                 // the domain are definitive: the instance does not exist, so
                 // the operation is terminally Failed rather than of unknown
@@ -1854,6 +1878,34 @@ fn definitive_failure_result(error: &AgentError) -> CommandExecutionResult {
     }
 }
 
+/// Result for a create rejected by the agent's disk-capacity backstop
+/// (issue #606). The rejection provably happens before any host mutation, so
+/// the capacity classification mirrors the placement gate's rejection and the
+/// control plane persists the same durable `capacity` category.
+fn capacity_failure_result(disk_gib: u64, max_disk_gb: u64) -> CommandExecutionResult {
+    CommandExecutionResult {
+        state: proto::OperationState::Failed as i32,
+        error_category: proto::ErrorCategory::Capacity as i32,
+        resource_state: proto::ResourceState::Error as i32,
+        redacted_message: format!(
+            "create requires {disk_gib} GiB disk but the agent capacity is {max_disk_gb} GiB"
+        ),
+        provider_resource_id: String::new(),
+        console_log: None,
+        block_device: None,
+    }
+}
+
+/// The create command's resolved disk demand, or `None` when the command is
+/// not a create or carries no resolved inputs. Pure protobuf read: no host
+/// state is touched, so the create arm can evaluate it before any mutation.
+fn create_disk_gib(command: &proto::Command) -> Option<u64> {
+    let proto::command::Action::Create(create) = command.action.as_ref()? else {
+        return None;
+    };
+    create.resolved.as_ref().map(|resolved| resolved.disk_gib)
+}
+
 fn resource_state(inspection: &o3k_libvirt::DomainInspection) -> proto::ResourceState {
     match o3k_libvirt::project_domain_state(inspection.active, &inspection.state) {
         o3k_provider::InstanceState::Running => proto::ResourceState::Running,
@@ -2351,6 +2403,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         network,
         dhcp,
+        max_disk_gb: config.capabilities.max_disk_gb,
     });
     info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
@@ -3443,6 +3496,74 @@ mod tests {
                     .contains("artifact references are incomplete")
             );
         }
+    }
+
+    /// Issue #606 agent-side capacity backstop: an over-capacity create is
+    /// classified `Capacity` (the same durable category the placement gate
+    /// produces) and the guard that produces it is a pure protobuf read, so
+    /// no TAP, bridge, overlay, or domain can exist when it fires.
+    #[test]
+    fn over_capacity_create_is_rejected_with_capacity_classification() {
+        let mut command = proto::Command {
+            command_id: "command-1".to_owned(),
+            operation_id: "operation-1".to_owned(),
+            resource_id: "server-1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            action: Some(proto::command::Action::Create(proto::CreateCommand {
+                image_id: "image".to_owned(),
+                flavor_id: "flavor".to_owned(),
+                network_port_ids: vec!["port-1".to_owned()],
+                resolved: Some(proto::ResolvedCreateInputs {
+                    image_artifact_id: "image-artifact".to_owned(),
+                    image_sha256: "a".repeat(64),
+                    image_format: "qcow2".to_owned(),
+                    vcpus: 1,
+                    memory_mib: 512,
+                    disk_gib: 10,
+                    config_drive_artifact_id: "config-artifact".to_owned(),
+                    config_drive_sha256: "b".repeat(64),
+                    project_id: "project-1".to_owned(),
+                    network_attachments: vec![network_attachment("port-1", "192.0.2.10", "", "")],
+                    ..Default::default()
+                }),
+            })),
+            ..Default::default()
+        };
+        assert_eq!(create_disk_gib(&command), Some(10));
+
+        let result = capacity_failure_result(10, 1);
+        assert_eq!(result.state, proto::OperationState::Failed as i32);
+        assert_eq!(
+            result.error_category,
+            proto::ErrorCategory::Capacity as i32,
+            "the agent-side rejection must carry the capacity classification"
+        );
+        assert_eq!(result.resource_state, proto::ResourceState::Error as i32);
+        assert!(
+            result.provider_resource_id.is_empty(),
+            "a pre-mutation rejection must reference no provider resource"
+        );
+        assert!(result.redacted_message.contains("10 GiB"));
+        assert!(result.redacted_message.contains("1 GiB"));
+
+        // A within-capacity demand stays under the configured ceiling.
+        if let Some(proto::command::Action::Create(create)) = command.action.as_mut()
+            && let Some(resolved) = create.resolved.as_mut()
+        {
+            resolved.disk_gib = 1;
+        }
+        assert_eq!(create_disk_gib(&command), Some(1));
+
+        // Non-create commands have no resolved disk demand.
+        command.action = Some(proto::command::Action::Inspect(proto::InspectCommand {}));
+        assert_eq!(create_disk_gib(&command), None);
+        let unresolved = proto::Command {
+            action: Some(proto::command::Action::Create(
+                proto::CreateCommand::default(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(create_disk_gib(&unresolved), None);
     }
 
     #[test]

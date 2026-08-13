@@ -222,14 +222,22 @@ pub async fn sync_agent_inventory(
 }
 
 /// Starts the bounded periodic inventory publisher used by `o3kd`.
+/// `registration` is woken by every successful agent registration, so a
+/// freshly registered agent's capacity is published immediately instead of
+/// waiting up to one tick (issue #606); the 5 s tick remains the steady-state
+/// sync.
 pub fn spawn_agent_inventory_publisher(
     registry: Arc<dyn AgentNodeRegistry>,
     placement: o3k_placement::PlacementLedger,
+    registration: Arc<tokio::sync::Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = registration.notified() => {}
+            }
             if let Err(error) = sync_agent_inventory(registry.as_ref(), &placement).await {
                 tracing::warn!(%error, "agent inventory publication failed");
             }
@@ -2898,6 +2906,57 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #606: the inventory publisher must publish a registered agent's
+    /// capacity immediately when the registration notify fires, without
+    /// waiting for the next 5 s tick. The publisher starts with an empty
+    /// registry and its immediate first tick is consumed before the agent is
+    /// upserted, so the sub-second appearance below can only come from the
+    /// notify, not from the periodic cadence.
+    #[tokio::test]
+    async fn registration_notify_publishes_inventory_before_the_next_tick()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = PathBuf::from(format!(
+            "/tmp/o3k-placement-agent-registration-{}",
+            Uuid::now_v7()
+        ));
+        let placement_store = o3k_store::testkit::open_memory().await?;
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> =
+            Arc::new(placement_store);
+        let placement = o3k_placement::PlacementLedger::open(&root, placement_repository).await?;
+        let registry = FakeAgentRegistry::default();
+        let registration = Arc::new(tokio::sync::Notify::new());
+        let task = spawn_agent_inventory_publisher(
+            Arc::new(registry.clone()),
+            placement.clone(),
+            registration.clone(),
+        );
+        // Let the publisher's immediate first tick (empty registry, nothing
+        // to publish) complete before the agent exists; the next tick is
+        // 5 s away, so only the registration notify can publish it within
+        // the sub-second bound below.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        registry.upsert(agent_node("agent-a", 4, 4096, 20)).await;
+        registration.notify_one();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if placement.provider("agent-a").await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        let provider = placement.provider("agent-a").await?;
+        assert_eq!(provider.state, o3k_placement::ProviderState::Enabled);
+        assert_eq!(provider.inventories[o3k_placement::VCPU].total, 4);
+        assert_eq!(provider.inventories[o3k_placement::MEMORY_MB].total, 4096);
+        assert_eq!(provider.inventories[o3k_placement::DISK_GB].total, 20);
+        task.abort();
+        let _ = task.await;
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn action_waits_for_asynchronous_provider_completion()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -5311,6 +5370,119 @@ mod tests {
                 .await?
                 .state,
             o3k_store::AgentCommandState::Failed
+        );
+        std::fs::remove_file(database_path)?;
+        Ok(())
+    }
+
+    /// Issue #606: an agent-side capacity rejection (the create arm's
+    /// disk-capacity backstop) must land in the durable ledger with the same
+    /// `capacity` classification the placement gate produces, so the failed
+    /// operation is indistinguishable from a placement rejection.
+    #[tokio::test]
+    async fn capacity_classified_agent_failure_persists_capacity_category()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-compute-capacity-projection-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&database_path).await?);
+        let projector = Arc::new(RecordingProjector::default());
+        let service = ComputeService::new(store.clone(), Arc::new(FakeComputeProvider::new()))
+            .with_binding_projector(projector.clone());
+        let request = CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "capacity-server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 10,
+            image_id: Some("image-1".to_owned()),
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec!["port-1".to_owned()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "capacity-projection".to_owned(),
+        };
+        service
+            .journal
+            .begin_create("project-a", &request)
+            .await
+            .map_err(ComputeError::Reconcile)?;
+        service
+            .store
+            .insert_agent_command(&o3k_store::AgentCommandRecord {
+                command_id: format!("command-{}", request.operation_id),
+                idempotency_key: request.idempotency_key.clone(),
+                operation_id: request.operation_id,
+                resource_id: request.o3k_server_id,
+                agent_id: "agent-1".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+                payload_fingerprint_sha256: "0".repeat(64),
+                payload: Vec::new(),
+                state: o3k_store::AgentCommandState::Pending,
+                accepted_sequence: 0,
+                last_sequence: 0,
+                provider_operation_id: None,
+                provider_resource_id: None,
+            })
+            .await?;
+        let failed = AgentOperationUpdate {
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            operation_sequence: 1,
+            operation_id: request.operation_id,
+            resource_id: request.o3k_server_id,
+            state: AgentOperationState::Failed,
+            error_category: Some(AgentErrorCategory::Capacity),
+            redacted_message: Some(
+                "create requires 10 GiB disk but the agent capacity is 1 GiB".to_owned(),
+            ),
+            provider_resource_id: None,
+        };
+        assert_eq!(
+            service.apply_agent_update(&failed).await?,
+            o3k_store::OperationState::Failed
+        );
+        let operation = store.get_operation(request.operation_id).await?;
+        assert_eq!(operation.state, o3k_store::OperationState::Failed);
+        assert_eq!(
+            operation.error_category.as_deref(),
+            Some("capacity"),
+            "the durable operation must carry the placement-gate category"
+        );
+        assert!(
+            operation
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("10 GiB"))
+        );
+        assert_eq!(
+            store
+                .get_agent_command_by_operation(request.operation_id)
+                .await?
+                .state,
+            o3k_store::AgentCommandState::Failed
+        );
+        let resource = store.get_resource(request.o3k_server_id).await?;
+        assert_eq!(
+            server_state_from_storage(&resource.observed_state)?,
+            ServerState::Error,
+            "a terminally failed create must project the durable ERROR state"
+        );
+        assert_eq!(
+            projector_calls(&projector),
+            vec![ProjectorCall::CreateOutcome {
+                project: "project-a".to_owned(),
+                port: "port-1".to_owned(),
+                succeeded: false,
+            }]
         );
         std::fs::remove_file(database_path)?;
         Ok(())

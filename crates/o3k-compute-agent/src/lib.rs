@@ -35,7 +35,7 @@ use rustls::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
-    sync::{RwLock, Semaphore, broadcast, mpsc},
+    sync::{Notify, RwLock, Semaphore, broadcast, mpsc},
     time,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector};
@@ -326,6 +326,10 @@ pub struct NodeRegistry {
     /// agent control is enabled; a `None` store keeps the transport primitive
     /// functional without durable record-keeping.
     store: Option<Arc<dyn o3k_store::ComputeRepository>>,
+    /// Fired on every successful registration so the inventory publisher can
+    /// sync the freshly registered agent's capacity immediately instead of
+    /// waiting for its next periodic tick (issue #606).
+    registration_notify: Arc<Notify>,
 }
 
 struct NodeEpochLease {
@@ -345,6 +349,7 @@ impl Default for NodeRegistry {
             artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
             store: None,
+            registration_notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -372,6 +377,14 @@ impl NodeRegistry {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<ProviderAgentEvent> {
         self.events.subscribe()
+    }
+
+    /// Wake handle the inventory publisher waits on: every successful
+    /// registration notifies it, so a freshly registered agent's capacity is
+    /// published to placement without waiting for the next periodic tick
+    /// (issue #606).
+    pub fn registration_notify(&self) -> Arc<Notify> {
+        self.registration_notify.clone()
     }
 
     /// Attaches the durable agent-command store used by
@@ -875,6 +888,11 @@ impl NodeRegistry {
         };
         nodes.insert(request.agent_id.clone(), snapshot);
         info!(agent_id = %request.agent_id, epoch = %request.agent_epoch, "compute agent registered");
+        drop(nodes);
+        // Wake the inventory publisher so the registered agent's real
+        // capacity is visible to placement immediately (issue #606); the
+        // publisher keeps its periodic tick as the steady-state sync.
+        self.registration_notify.notify_one();
         Ok(proto::RegisterResponse {
             agent_id: request.agent_id.clone(),
             agent_epoch: request.agent_epoch.clone(),
@@ -4526,6 +4544,22 @@ mod tests {
         let node = registry.snapshot("node").await.ok_or("node retained")?;
         assert_eq!(node.availability, Availability::Unavailable);
         assert_eq!(node.capabilities.architecture, "x86_64");
+        Ok(())
+    }
+
+    /// Issue #606: every successful registration must wake the inventory
+    /// publisher immediately, so a restarted agent's real capacity is visible
+    /// to placement without waiting for the next 5 s tick. A re-registration
+    /// (restart) wakes it again.
+    #[tokio::test]
+    async fn registration_wakes_the_inventory_publisher_notify()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = NodeRegistry::default();
+        let notify = registry.registration_notify();
+        registry.register(&register("node", "epoch-1")).await?;
+        tokio::time::timeout(Duration::from_millis(100), notify.notified()).await?;
+        registry.register(&register("node", "epoch-2")).await?;
+        tokio::time::timeout(Duration::from_millis(100), notify.notified()).await?;
         Ok(())
     }
 

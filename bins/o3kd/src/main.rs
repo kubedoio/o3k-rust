@@ -471,7 +471,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("external Cinder attachment client enabled");
     }
     let inventory_task = agent_control_enabled.then(|| {
-        o3k_compute::spawn_agent_inventory_publisher(Arc::new(registry.clone()), placement.clone())
+        o3k_compute::spawn_agent_inventory_publisher(
+            Arc::new(registry.clone()),
+            placement.clone(),
+            registry.registration_notify(),
+        )
     });
     let compute_ready = if config.provider == o3k_config::Provider::Agent && agent_control_enabled {
         // The authenticated agent is deliberately started after o3kd's health
