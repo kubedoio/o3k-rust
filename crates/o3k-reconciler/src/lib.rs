@@ -1385,34 +1385,47 @@ where
         let resource = self.store.get_resource(operation.resource_id).await?;
         if operation.state == OperationState::UnknownOutcome {
             if operation.provider_operation_id.is_some() {
-                return self.observe_unknown(operation, resource).await;
-            }
-            // Issue #609: the retry budget exhausted before any provider
-            // operation identity existed (every dispatch was rejected as
-            // retryable), so there is no provider operation to poll.
-            //
-            // Issue #610 (ASR-021 agent-control-plane-network-interruption):
-            // when the create's durable agent command row is still `pending`,
-            // the create was provably never accepted and never executed — the
-            // budget only exhausts on pre-acceptance rejections, and the
-            // agent journal carries no entry. Presence inspection would then
-            // terminalize the absent create as failed; the interruption
-            // contract requires the create to converge ACTIVE after the agent
-            // returns, so the create falls through to the re-drive below.
-            // `create_instance` rebuilds the command with the current epoch
-            // and a fresh deadline, and the deterministic command identity
-            // keeps the agent journal idempotent — a journal entry that
-            // already exists rejects the rebuilt fingerprint instead of
-            // re-executing, and its terminal observation (replayed on
-            // reconnect) converges the operation. Transport loss is never
-            // projected as absence.
-            let create_pending = self
-                .store
-                .get_agent_command_by_operation(operation_id)
-                .await
-                .is_ok_and(|command| command.state == o3k_store::AgentCommandState::Pending);
-            if !create_pending {
-                return self.observe_create_presence(operation, resource).await;
+                // Issue #611 (ASR-021 agent-control-plane-network-interruption):
+                // an ACCEPTED create whose provider operation never produced a
+                // provider resource (Accepted/Running with no
+                // provider_resource_id) provably never executed — e.g. the
+                // agent reported an unknown outcome because the committed
+                // artifacts were missing after the control-channel
+                // interruption. The create must be re-driven (the transfer
+                // loop re-offers the missing artifact) instead of being parked
+                // Running forever. Presence is never projected from transport
+                // loss; the provider operation state is the authority.
+                if !self.accepted_create_never_executed(operation_id).await? {
+                    return self.observe_unknown(operation, resource).await;
+                }
+            } else {
+                // Issue #609: the retry budget exhausted before any provider
+                // operation identity existed (every dispatch was rejected as
+                // retryable), so there is no provider operation to poll.
+                //
+                // Issue #610 (ASR-021 agent-control-plane-network-interruption):
+                // when the create's durable agent command row is still
+                // `pending`, the create was provably never accepted and never
+                // executed — the budget only exhausts on pre-acceptance
+                // rejections, and the agent journal carries no entry. Presence
+                // inspection would then terminalize the absent create as
+                // failed; the interruption contract requires the create to
+                // converge ACTIVE after the agent returns, so the create falls
+                // through to the re-drive below. `create_instance` rebuilds
+                // the command with the current epoch and a fresh deadline, and
+                // the deterministic command identity keeps the agent journal
+                // idempotent — a journal entry that already exists rejects the
+                // rebuilt fingerprint instead of re-executing, and its
+                // terminal observation (replayed on reconnect) converges the
+                // operation. Transport loss is never projected as absence.
+                let create_pending = self
+                    .store
+                    .get_agent_command_by_operation(operation_id)
+                    .await
+                    .is_ok_and(|command| command.state == o3k_store::AgentCommandState::Pending);
+                if !create_pending {
+                    return self.observe_create_presence(operation, resource).await;
+                }
             }
         }
         let request: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
@@ -1545,6 +1558,39 @@ where
                 Ok(OperationState::Failed)
             }
         }
+    }
+
+    /// Issue #611 (ASR-021 agent-control-plane-network-interruption): decides
+    /// whether an unknown-outcome create's provider operation is still
+    /// Accepted/Running WITHOUT a provider resource — the create provably
+    /// never executed (no instance exists), e.g. the agent reported an unknown
+    /// outcome because the committed artifacts were missing after the control
+    /// channel was interrupted mid-transfer. Such a create must be re-driven
+    /// (the provider's transfer loop re-offers the missing artifact) instead
+    /// of being parked Running forever with no recovery path.
+    async fn accepted_create_never_executed(
+        &self,
+        operation_id: Uuid,
+    ) -> Result<bool, ReconcileError> {
+        let Some(provider_operation_id) = self
+            .store
+            .get_operation(operation_id)
+            .await?
+            .provider_operation_id
+        else {
+            return Ok(false);
+        };
+        let provider_operation = self
+            .provider
+            .get_operation(
+                Uuid::parse_str(&provider_operation_id)
+                    .map_err(|_| ReconcileError::InvalidIntent)?,
+            )
+            .await?;
+        Ok(matches!(
+            provider_operation.state,
+            o3k_provider::OperationState::Accepted | o3k_provider::OperationState::Running
+        ) && provider_operation.provider_resource_id.is_none())
     }
 
     async fn observe_unknown(
@@ -3785,6 +3831,106 @@ mod tests {
         Ok(())
     }
 
+    /// Issue #611 test seam: the fake provider's idempotency replay returns
+    /// the recorded (Accepted/None) operation on the create re-drive; the
+    /// real provider re-executes the create (the transfer re-offer completes
+    /// it) and advances the operation to Succeeded with a provider resource.
+    /// This wrapper advances the recorded operation exactly when the re-drive
+    /// reaches `create_instance` with the operation still Accepted.
+    struct AdvancingCreateProvider {
+        inner: FakeComputeProvider,
+        provider_operation_id: Uuid,
+    }
+
+    impl AdvancingCreateProvider {
+        fn new(inner: FakeComputeProvider, provider_operation_id: Uuid) -> Self {
+            Self {
+                inner,
+                provider_operation_id,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_provider::ComputeProvider for AdvancingCreateProvider {
+        async fn capabilities(
+            &self,
+        ) -> Result<o3k_provider::Capabilities, o3k_provider::ProviderError> {
+            self.inner.capabilities().await
+        }
+
+        async fn create_instance(
+            &self,
+            request: CreateInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            if let Ok(operation) = self.inner.get_operation(self.provider_operation_id).await
+                && operation.state == o3k_provider::OperationState::Accepted
+            {
+                self.inner.set_operation_state(
+                    self.provider_operation_id,
+                    o3k_provider::OperationState::Succeeded,
+                )?;
+                self.inner.set_operation_provider_resource_id(
+                    self.provider_operation_id,
+                    Some(format!("fake-{}", request.o3k_server_id)),
+                )?;
+            }
+            self.inner.create_instance(request).await
+        }
+
+        async fn get_instance(
+            &self,
+            provider_instance_id: &str,
+        ) -> Result<o3k_provider::Instance, o3k_provider::ProviderError> {
+            self.inner.get_instance(provider_instance_id).await
+        }
+
+        async fn inspect_instance(
+            &self,
+            provider_id: &str,
+            resource_id: &str,
+            provider_instance_id: &str,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .inspect_instance(
+                    provider_id,
+                    resource_id,
+                    provider_instance_id,
+                    operation_id,
+                    idempotency_key,
+                )
+                .await
+        }
+
+        async fn delete_instance(
+            &self,
+            request: o3k_provider::DeleteInstanceRequest,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.delete_instance(request).await
+        }
+
+        async fn action_instance(
+            &self,
+            provider_instance_id: &str,
+            action: o3k_provider::InstanceAction,
+            operation_id: Uuid,
+            idempotency_key: &str,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner
+                .action_instance(provider_instance_id, action, operation_id, idempotency_key)
+                .await
+        }
+
+        async fn get_operation(
+            &self,
+            provider_operation_id: Uuid,
+        ) -> Result<o3k_provider::Operation, o3k_provider::ProviderError> {
+            self.inner.get_operation(provider_operation_id).await
+        }
+    }
+
     /// Wraps the stateful fake provider so every instance is observed in the
     /// Stopped state, modeling the issue-87 crash-between-define-and-start
     /// residue: on restart the domain exists (defined) but was never started,
@@ -3964,6 +4110,64 @@ mod tests {
             "ACTIVE"
         );
         assert_eq!(provider.instance_count(), 1);
+        Ok(())
+    }
+
+    /// Issue #611 (ASR-021 agent-control-plane-network-interruption): an
+    /// ACCEPTED create whose provider operation never produced a provider
+    /// resource (Accepted/Running with no provider_resource_id — the create
+    /// provably never executed, e.g. the agent reported an unknown outcome
+    /// because the committed artifacts were missing) must be re-driven by the
+    /// unknown-outcome recovery — the transfer loop re-offers the missing
+    /// artifact and the create converges ACTIVE — instead of being parked
+    /// Running forever with no recovery path.
+    #[tokio::test]
+    async fn accepted_create_without_provider_resource_is_redriven_not_parked()
+    -> Result<(), ReconcileError> {
+        let (journal, store, provider) = journal("accepted-never-executed", 2).await?;
+        let mut request = request();
+        request.placement_provider_id = Some("agent-1".to_owned());
+        // The create is accepted and then reported unknown (the interrupted
+        // artifact delivery shape), leaving an UnknownOutcome operation with a
+        // provider operation identity.
+        provider.set_failure(FailureInjection::Timeout)?;
+        let operation_id = journal.begin_create("project", &request).await?;
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::UnknownOutcome
+        );
+        let operation = store.get_operation(operation_id).await?;
+        let provider_operation_id = operation
+            .provider_operation_id
+            .ok_or(ReconcileError::InvalidIntent)?
+            .parse()
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        // The provider operation is still Accepted and carries no provider
+        // resource: the create provably never executed.
+        provider.set_operation_state(
+            provider_operation_id,
+            o3k_provider::OperationState::Accepted,
+        )?;
+        provider.set_operation_provider_resource_id(provider_operation_id, None)?;
+        // The interruption resolves; the next convergence re-drive must
+        // re-dispatch the create (never park it Running) and converge ACTIVE.
+        provider.set_failure(FailureInjection::None)?;
+        let provider = Arc::new(AdvancingCreateProvider::new(
+            provider.as_ref().clone(),
+            provider_operation_id,
+        ));
+        let journal = OperationJournal::new(store.clone(), provider.clone(), 2);
+        assert_eq!(
+            journal.reconcile_once(operation_id).await?,
+            OperationState::Succeeded
+        );
+        assert_eq!(
+            store
+                .get_resource(request.o3k_server_id)
+                .await?
+                .observed_state,
+            "ACTIVE"
+        );
         Ok(())
     }
 

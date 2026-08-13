@@ -358,7 +358,17 @@ impl ArtifactStore {
     }
 
     pub fn resolve(&self, offer: &proto::ArtifactOffer) -> Result<PathBuf, ArtifactStoreError> {
-        validate_offer(offer, &self.agent_id)?;
+        // Issue #611 (ASR-021 agent-control-plane-network-interruption): the
+        // committed-artifact resolution applies the IDENTITY fence only, never
+        // the admission expiry fence. A committed transfer legitimately
+        // outlives its offer (offers expire seconds after creation — the same
+        // rationale as the reconnect status replay), and the create re-drive
+        // may legitimately resolve it long after the control-channel
+        // interruption: failing on the stale offer would terminalize a create
+        // whose artifact was actually committed, exactly the real-host failure
+        // at 0844144 ("committed image artifact is unavailable" with the
+        // committed manifest and final present).
+        validate_offer_identity(offer, &self.agent_id)?;
         let manifest = read_manifest(&self.manifest_path(&offer.transfer_id)?)?;
         same_offer(&manifest.offer, offer)?;
         if manifest.state != proto::ArtifactTransferState::Committed as i32 {
@@ -399,7 +409,9 @@ impl ArtifactStore {
             return Err(ArtifactStoreError::UnownedPath);
         }
         let manifest = read_manifest(&manifest_path)?;
-        validate_offer(&manifest.offer, &self.agent_id)?;
+        // Identity-only fence: a committed image legitimately outlives its
+        // offer (issue #611 — see `resolve`).
+        validate_offer_identity(&manifest.offer, &self.agent_id)?;
         if manifest.state != proto::ArtifactTransferState::Committed as i32
             || manifest.offer.kind != proto::ArtifactKind::ImageBase as i32
             || manifest.offer.transfer_id != query.transfer_id
@@ -1087,6 +1099,31 @@ mod tests {
             store.begin(&offer),
             Err(ArtifactStoreError::InvalidOffer)
         ));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Issue #611 (ASR-021 agent-control-plane-network-interruption): a
+    /// COMMITTED transfer whose offer has expired must still resolve. The
+    /// committed artifact legitimately outlives its offer — the create
+    /// re-drive after a control-channel interruption can resolve it long
+    /// after the offer was minted — and failing on the stale offer
+    /// terminalizes a create whose artifact was actually committed
+    /// (real-host "committed image artifact is unavailable" with the
+    /// committed manifest and final present). The admission expiry fence
+    /// applies to NEW transfers only, never to committed resolution.
+    #[test]
+    fn committed_transfer_with_expired_offer_still_resolves() {
+        let root =
+            std::env::temp_dir().join(format!("o3k-artifact-committed-expired-{}", Uuid::now_v7()));
+        let (store, offer, content, path) = committed_fixture(&root);
+        assert!(path.is_file());
+        let mut expired = offer.clone();
+        expired.expires_at_unix_ms = 1;
+        let resolved = store
+            .resolve(&expired)
+            .expect("committed artifact must resolve");
+        assert_eq!(resolved, path);
+        assert_eq!(std::fs::read(&resolved).unwrap(), content);
         std::fs::remove_dir_all(root).ok();
     }
 

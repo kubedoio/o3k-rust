@@ -683,8 +683,28 @@ impl NodeRegistry {
         // transfer remains in flight after ArtifactEnd until its outcome is
         // known, including when the outcome later becomes unknown on timeout.
         let _transfer_slot = self.acquire_artifact_transfer_slot(&agent_id).await?;
-        self.dispatch_artifact_from(offer, bytes, start_chunk_index)
-            .await?;
+        // Issue #611 (ASR-021 agent-control-plane-network-interruption): the
+        // send phase is bounded exactly like the acknowledgement wait. The
+        // chunk sends drain through the agent's response stream; when a
+        // control-channel interruption leaves that stream's receiver stalled
+        // without being dropped, an unbounded send blocks the caller forever.
+        // The create-convergence sweep drives transfers from its single
+        // sequential task, so one stalled send froze the entire sweep for
+        // minutes in the gate runs (the create stayed Running with no re-drive
+        // for ~5 min, and the late re-drive then failed on the never-reoffered
+        // artifact). The send timeout fails the drive as a retryable outcome;
+        // the durable transfer row stays offered/receiving and the next
+        // re-drive re-offers it.
+        time::timeout(
+            timeout,
+            self.dispatch_artifact_from(offer, bytes, start_chunk_index),
+        )
+        .await
+        .map_err(|_| {
+            AgentError::Protocol(
+                "artifact transfer send timeout; the control stream is stalled".to_owned(),
+            )
+        })??;
         time::timeout(timeout, async move {
             loop {
                 let event = events.recv().await.map_err(|error| match error {

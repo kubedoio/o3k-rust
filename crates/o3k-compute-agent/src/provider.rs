@@ -3567,6 +3567,66 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Issue #611 (ASR-021 agent-control-plane-network-interruption): the
+    /// artifact-transfer SEND phase is bounded. A control-channel interruption
+    /// can leave the agent's response-stream receiver stalled without being
+    /// dropped; the chunk sends then fill the bounded channel and block. The
+    /// create-convergence sweep drives transfers from its single sequential
+    /// task, so one such stalled send froze the entire sweep for minutes in
+    /// the gate runs (the create stayed Running with no re-drive for ~5 min,
+    /// and the late re-drive then failed on the never-reoffered artifact).
+    /// The drive must fail within the transfer timeout with a retryable
+    /// outcome — never hang — and the durable transfer row must stay
+    /// resumable for the next re-drive.
+    #[tokio::test]
+    async fn stalled_artifact_transfer_send_is_bounded_and_retryable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store: Arc<dyn ComputeRepository> = Arc::new(o3k_store::testkit::open_memory().await?);
+        let registry = NodeRegistry::default();
+        registry
+            .register(&register_request("node-a", "epoch-1"))
+            .await?;
+        // The agent's response-stream receiver stays ALIVE but is never
+        // polled, and the channel is smaller than one transfer's message
+        // count (offer + chunk + end): the sends fill it and then block
+        // forever — the stalled-stream shape the gate runs observed. (A
+        // dropped receiver would instead fail the sends immediately.)
+        let (sender, _stalled_receiver) = mpsc::channel(2);
+        registry
+            .attach_connection("node-a", "epoch-1", sender)
+            .await?;
+        let provider = AgentComputeProvider::new_with_store(
+            registry.clone(),
+            Arc::new(RaceTestResolvedCreateResolver),
+            Some(store.clone()),
+        )
+        .with_command_timeout(Duration::from_millis(500))
+        .with_artifact_resolver(Arc::new(RaceTestCreateArtifactResolver));
+        let operation_id = Uuid::now_v7();
+        let server_id = Uuid::now_v7();
+        seed_create_durable_rows(store.as_ref(), operation_id, server_id).await?;
+        let request = race_create_request(operation_id, server_id);
+
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(10), provider.create_instance(request)).await;
+        match outcome {
+            Ok(Err(ProviderError::Retryable)) => {}
+            other => {
+                return Err(format!(
+                    "a stalled artifact-transfer send must fail the drive as a \
+                     retryable outcome within the transfer timeout, got {other:?}"
+                )
+                .into());
+            }
+        }
+        // The interrupted transfer stays durably resumable for the next
+        // re-drive (the create-path loop re-offers offered/receiving rows).
+        let durable = store.list_recoverable_artifact_transfers().await?;
+        assert_eq!(durable.len(), 1, "exactly one durable transfer row");
+        assert_eq!(durable[0].state, ArtifactTransferState::Offered);
+        Ok(())
+    }
     /// lifecycle path, where the durable command insert IS the dispatch
     /// point). Two dispatches for the same operation read "no row" before
     /// either inserts; the loser's insert must adopt the winner's row and

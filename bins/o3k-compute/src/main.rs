@@ -1307,15 +1307,32 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 ) {
                     Ok(value) => value,
                     Err(error) => {
-                        return definitive_failure(return_after_create_rollback(
-                            &self.network,
-                            &self.dhcp,
-                            &preparation,
-                            &self.image_materializer,
+                        // Issue #611 (ASR-021 agent-control-plane-network-interruption):
+                        // a missing committed artifact is a CONTROL-PLANE delivery
+                        // problem, not a definitive absence. The artifact transfer
+                        // can be re-offered by the create re-drive, so this failure
+                        // must never be reported as a terminal absence-proven
+                        // failure (which would strand the server in ERROR with no
+                        // recovery path). The create provably never executed (the
+                        // failure is upstream of the define/start boundary), so the
+                        // unknown-outcome classification is safe: the reconciler
+                        // re-drives the create and the transfer loop re-offers the
+                        // missing artifact. The network/console rollback still runs,
+                        // exactly as for the definitive classification.
+                        return unknown_create_outcome_result(
                             &self.artifact_root,
+                            &command.agent_id,
                             &command.resource_id,
-                            error,
-                        ));
+                            return_after_create_rollback(
+                                &self.network,
+                                &self.dhcp,
+                                &preparation,
+                                &self.image_materializer,
+                                &self.artifact_root,
+                                &command.resource_id,
+                                error,
+                            ),
+                        );
                     }
                 };
                 let spec = match resolve_create_domain_spec(command, Some(&committed)) {
@@ -1894,6 +1911,37 @@ fn definitive_failure_result(error: &AgentError) -> CommandExecutionResult {
         console_log: None,
         block_device: None,
     }
+}
+
+/// Result for a create that failed before libvirt could define the domain
+/// because a REQUIRED COMMITTED ARTIFACT was missing (issue #611,
+/// ASR-021 agent-control-plane-network-interruption). Absence is proven by
+/// construction (the failure is upstream of the define/start boundary), but
+/// the missing artifact is a control-plane delivery problem the create
+/// re-drive can fix by re-offering the transfer — so the outcome is UNKNOWN,
+/// never terminal. The reconciler's unknown-outcome recovery re-drives the
+/// create, and the provider's transfer loop re-offers the missing artifact.
+fn unknown_create_outcome_result(
+    artifact_root: &std::path::Path,
+    agent_id: &str,
+    resource_id: &str,
+    error: AgentError,
+) -> Result<CommandExecutionResult, AgentError> {
+    tracing::warn!(
+        error = %error,
+        resource_id = %resource_id,
+        "create could not resolve committed artifacts; reporting an unknown outcome"
+    );
+    reap_config_drive_artifacts(artifact_root, agent_id, resource_id);
+    Ok(CommandExecutionResult {
+        state: proto::OperationState::UnknownOutcome as i32,
+        error_category: proto::ErrorCategory::UnknownOutcome as i32,
+        resource_state: proto::ResourceState::Error as i32,
+        redacted_message: error.to_string(),
+        provider_resource_id: String::new(),
+        console_log: None,
+        block_device: None,
+    })
 }
 
 /// Result for a create rejected by the agent's disk-capacity backstop
