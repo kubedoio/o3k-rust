@@ -6,343 +6,147 @@ O3K develops one product:
 
 > **O3K Cloud OS — a lightweight, open, Rust-native Cloud Operating System.**
 
-The project uses three primary deployment/evidence profiles:
+Primary product targets are:
 
-1. native O3K TestLab/cloud;
-2. external OpenStack service testbed;
-3. small edge cloud for approximately 10–20 hypervisors.
+1. OpenStack-compatible native TestLab/cloud;
+2. selected external OpenStack service testbeds;
+3. a small edge cloud for roughly 10–20 hypervisors;
+4. **first-class deployment of the O3K control plane on Kubernetes.**
 
-The profiles share the O3K Cloud Kernel architecture but have separate
-dependencies and evidence gates.
-
-See:
-
-- [ADR-0165](adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
-- [ADR-0163](adr/ADR-0163-product-profiles-and-deployment-posture.md)
-- [SPEC-0024](specs/SPEC-0024-product-profiles-and-claims.md)
+Kubernetes is a deployment substrate target, not a separate cloud-authority
+model. See ADR-0165, ADR-0167, and SPEC-0024.
 
 ## Non-negotiable sequencing rule
 
-The accepted Cloud OS architecture does **not** replan the current alpha.
+The current release remains `v0.2.0-alpha.1`, a Rust-native
+OpenStack-compatible libvirt TestLab alpha. Kubernetes packaging, PostgreSQL,
+multi-controller HA, native volumes, and broader Cloud Kernel work do not expand
+that release gate without a separate human-approved replan.
 
-The immediate release remains:
+## Track A — Finish the native libvirt alpha
 
-> `v0.2.0-alpha.1` — Rust-native OpenStack-compatible libvirt TestLab alpha.
+Prove the selected Keystone/Image/Network/Placement/Compute workflow through
+`o3k-compute` and real libvirt/QEMU/KVM with restart, reconciliation, cleanup,
+foreign-state protection, evidence, and release packaging.
 
-Broad IAM redesign, native APIs, managed databases, Kubernetes, AI/ML,
-federation, PostgreSQL, or other Cloud Kernel expansion must not enter the
-first-alpha critical path unless a separate accepted human decision explicitly
-replans the release.
+## Track B — Cloud Kernel convergence
 
-## Phase 0 — Repository and engineering baseline
+After the alpha:
 
-- Rust workspace/toolchain/CI/supply-chain/provenance;
-- ADR/SPEC/contract/test/evidence lifecycle;
-- core domain/store/operation foundations;
-- machine-readable OpenStack targets/profiles;
-- architecture-boundary ratchets.
+- converge current auth on O3K IAM / `AuthContext`;
+- introduce shared Action/Resource/Ownership authorization primitives;
+- make the service registry and Keystone catalog projection explicit;
+- converge resource/operation/audit semantics across current domains;
+- strengthen architecture fitness functions.
 
-## Phase 1 — Current architecture and first-alpha contract freeze
+## Track C — PostgreSQL persistence
 
-- accepted service/execution topology;
-- provider/agent authority;
-- durable operation/reconciliation model;
-- selected OpenStack 2026.1 compatibility baseline;
-- external-hosted-service ownership;
-- database/footprint claim discipline;
-- first-alpha real-host evidence matrix.
-
-Outputs include ADR-0160/0162 and the existing execution/rewrite contracts.
-
-## Track A — Finish and release the native libvirt alpha
-
-### A1. Real compute/network gate
-
-Compute:
-
-- secure `o3k-compute` registration/heartbeat/reconnect/resync;
-- local `qemu:///system` capabilities;
-- image transfer/cache/qcow2 overlay;
-- config-drive;
-- console;
-- deterministic owned domain XML;
-- restart discovery;
-- complete owned cleanup.
-
-Network:
-
-- typed network-provider boundary;
-- TAP/bridge/DHCP/MAC/IP binding;
-- restart reconciliation;
-- foreign-link protection;
-- complete network cleanup.
-
-### A2. Release `v0.2.0-alpha.1`
-
-```text
-Keystone compatibility
--> O3K IAM/AuthContext subset
--> Glance compatibility / O3K Image
--> Neutron compatibility / O3K Network
--> Placement compatibility / O3K Capacity
--> Nova compatibility / O3K Compute
--> o3k-compute
--> libvirt/QEMU guest
-```
-
-Required evidence remains:
-
-- standard OpenStack CLI discovery/lifecycle;
-- real image/overlay/config-drive/network/guest/console;
-- restart identity preservation;
-- no duplicate mutation;
-- no owned leaks;
-- unchanged foreign state;
-- clean install/reset/reinstall/uninstall/purge;
-- measured profile footprint/latency;
-- human architecture/security review;
-- SBOM/provenance/checksums/known limitations/signed release.
-
-Native volumes do not block this release.
-
-## Phase 2 — Cloud Kernel convergence after the alpha
-
-This phase converts the already-working vertical slice into the reusable
-platform architecture without starting a second cloud implementation.
-
-### K1. Canonical O3K IAM boundary
-
-- accept/use ADR-0166 and SPEC-0020;
-- keep the existing Keystone-compatible user journey working;
-- make `AuthContext` canonical;
-- ensure services consume typed principal/scope/service identity;
-- remove any service-local Keystone token interpretation;
-- prove cross-scope denial before provider dispatch.
-
-### K2. Shared authorization model
-
-Introduce stable:
-
-```text
-Principal
-Action
-Resource
-Context
-Decision
-```
-
-for current O3K services.
+PostgreSQL is a main production-oriented target and the required persistence
+foundation before an HA Kubernetes control-plane claim.
 
 Required work:
 
-- typed action IDs;
-- typed resource types;
-- durable owner/security-scope requirement;
-- default-deny policy engine boundary;
-- service-principal/delegation checks;
-- shared authorization conformance suite;
-- compatibility role/policy translation at edges.
+- real `o3k-store` PostgreSQL adapter;
+- migrations and SQLite/PostgreSQL conformance suite;
+- transaction/isolation decisions;
+- upgrade/rollback and backup/restore;
+- reconnect/failure behavior;
+- no authoritative controller state dependent on a local filesystem.
 
-Do not build a huge generic policy language before the current service
-vocabulary proves the required semantics.
+Shared SQLite or distributed-filesystem workarounds are not an HA design.
 
-### K3. Service registry and compatibility projection
+## Track D — Kubernetes-native control plane
 
-- canonical service identity/namespace;
-- ownership mode;
-- API/version/region/endpoint metadata;
-- resource/action vocabulary;
-- bounded capability metadata;
-- evidence/advertisement state;
-- Keystone catalog generated as a compatibility projection.
+Kubernetes deployability is a **main O3K product target**, not community
+packaging added later.
 
-Dynamic plugin installation is not required initially.
+### D1. Single-controller cloud-native packaging
 
-### K4. Shared resource/operation/audit primitives
+- OCI image for `o3kd`;
+- explicit config and credential adapters suitable for container deployment;
+- `/healthz` and `/readyz` wired to Kubernetes probes;
+- graceful termination/readiness drain contract;
+- small Helm chart or equivalent rendered manifests;
+- one-controller Kubernetes smoke/e2e evidence;
+- pod-local filesystem classified as cache/scratch only for authoritative state.
 
-Converge current services on:
+This phase may remain non-HA and must be advertised honestly.
 
-- resource identity/ownership;
-- operation identity/phase;
-- idempotency;
-- unknown outcome;
-- audit identity;
-- standard failure categories;
-- common region/AZ identity;
-- quota/limit hooks where actually required.
+### D2. Multi-controller foundation
 
-### K5. Architecture fitness functions
+After PostgreSQL exists:
 
-Extend machine-readable/CI checks so new code cannot:
+- multiple `o3kd` API replicas;
+- durable background-work ownership;
+- controller generation/fencing or equivalent stale-owner protection;
+- safe scheduler/reconciler/compensator ownership transfer;
+- DB-backed coordination as the preferred first portable implementation;
+- optional Kubernetes Lease adapter only where useful, never as the sole cloud
+  correctness mechanism.
 
-- make OpenStack wire types canonical domain types;
-- make Keystone token structures application-domain state;
-- introduce service-local tenant ownership without a kernel contract;
-- let provider adapters authorize callers;
-- let provider-native IDs replace O3K public IDs;
-- treat delegated clouds as ordinary execution providers.
+### D3. Kubernetes HA evidence
 
-## Track B — Native O3K Volume / Cinder compatibility
+Before a Kubernetes HA support claim:
 
-After the first alpha and enough Cloud Kernel convergence:
+- rolling update;
+- pod deletion and abrupt process loss;
+- node drain / disruption behavior;
+- PostgreSQL reconnect/failover;
+- background-work ownership transfer;
+- no duplicate provider mutation;
+- no loss of durable desired state or operations;
+- documented upgrade/rollback and operational recovery.
 
-- O3K Volume canonical state machine;
-- selected Cinder-compatible API projection;
-- `volumev3` advertised only after portable verification;
-- Nova compatibility attachment integration;
-- typed storage provider;
-- `o3k-storage`;
-- local LVM reference backend;
-- optional Ceph RBD;
-- secret-safe connection information;
-- unknown-outcome/attachment cleanup;
-- boot-from-volume only after a separate profile.
+### D4. Operator only when justified
 
-## Track C — External OpenStack service testbed
+Helm comes first. A dedicated O3K Operator is a later decision only if
+O3K-specific lifecycle automation such as coordinated migrations, certificate
+rotation, backup/restore, or profile management clearly needs one.
 
-### C1. Hosted-service IAM/catalog
-
-- service principals/roles/scopes through O3K IAM;
-- Keystone-compatible token validation/catalog projection;
-- explicit `external-hosted` ownership;
-- disabled/unverified endpoint omission.
-
-### C2. First real external service: Cinder
-
-- selected Cinder version/workflow frozen;
-- selected Image compatibility surface;
-- selected Compute volume-attachment compatibility;
-- typed outbound Cinder client;
-- fake external-Cinder failure/compensation matrix;
-- focused client/Tempest evidence;
-- protected real integration.
-
-The external service keeps its own database/message bus/processes/backend/
-migrations/upgrades/health.
-
-### C3. Additional service-under-test profiles
-
-Each new hosted service requires:
-
-- required compatibility API inventory;
-- IAM/service identity model;
-- dependency/version declaration;
-- fake and real integration gates;
-- security/failure/cleanup/claim evidence.
-
-## Track D — Small edge cloud
-
-### D1. Multi-host foundation
+## Track E — Small edge cloud
 
 - approximately 10–20 hypervisors;
-- multi-host capability inventory/capacity;
-- scheduling/allocations;
-- host enrollment/mTLS/epochs/heartbeat/reconnect/resync;
-- failure-safe operation replay/fencing;
-- host-aware network binding/cleanup;
+- multi-host inventory/capacity/scheduling;
+- host enrollment, mTLS, epochs, heartbeat, reconnect/resync;
+- failure-safe replay/fencing;
+- host-aware networking and cleanup;
 - backup/restore/upgrade/rollback/diagnostics;
-- authorization/quotas appropriate to selected profile.
+- database profile matching the claimed concurrency/availability.
 
-### D2. Database and availability
+Kubernetes may host this profile's control plane, but hypervisor execution stays
+host-local by default.
 
-- measured single-controller SQLite limits may support an initial edge profile;
-- PostgreSQL adapter/conformance before PostgreSQL support claim;
-- multi-controller/HA requires explicit coordination/fencing/failover/database
-  evidence.
+## Track F — Native Volume / Cinder compatibility
 
-### D3. Execution-process growth
+After the alpha and enough Cloud Kernel convergence:
 
-Only after stable contracts and measured need:
+- canonical O3K Volume state;
+- selected Cinder compatibility;
+- typed storage provider and `o3k-storage`;
+- local LVM reference backend;
+- optional Ceph RBD;
+- attachment recovery/cleanup.
 
-- separate `o3k-network`;
-- separate `o3k-storage`;
-- CellHV provider conformance;
-- richer network/storage provider profiles.
+## Track G — First genuinely new O3K-native service
 
-## Track E — First genuinely new O3K-native cloud service
+Choose the first new service for product value and architectural learning. It
+must reuse Cloud Kernel IAM, authorization, ownership, operations, audit, and
+service registration rather than build a parallel framework.
 
-This track begins only after the Cloud Kernel has proved that service
-extensibility is real rather than theoretical.
+## Track H — Delegated/federated clouds
 
-The first service should be chosen for product value and architectural learning,
-not for marketing breadth.
+Existing OpenStack, vSphere/vCenter, Proxmox, KubeVirt, or public clouds require
+an explicit authority model. Do not create a lowest-common-denominator generic
+provider abstraction.
 
-Candidate classes may include:
-
-- managed database;
-- Kubernetes/container platform;
-- AI inference/training;
-- DNS/load balancing/object/secrets.
-
-No candidate is committed by this roadmap.
-
-Before implementation, freeze:
-
-- service namespace;
-- resource/action vocabulary;
-- ownership/authorization;
-- quota/limit semantics;
-- API contract;
-- durable operations;
-- provider/external execution model;
-- audit/events;
-- failure/recovery;
-- evidence gate.
-
-Success criterion:
-
-> The service should reuse Cloud Kernel IAM, authorization, ownership,
-> operations, audit, and registry primitives instead of constructing a parallel
-> cloud framework.
-
-## Track F — Delegated/federated clouds
-
-Do not begin with a generic "multi-cloud provider" abstraction.
-
-Select a concrete target first, then define:
-
-- authority boundary;
-- principal/scope mapping;
-- resource-ID mapping;
-- scheduler responsibility;
-- quota/policy ownership;
-- desired-state/drift ownership;
-- outage/retry/unknown-outcome behavior;
-- adoption/import semantics;
-- deletion authority;
-- evidence.
-
-Possible future targets may include external OpenStack, vSphere/vCenter,
-Proxmox, KubeVirt, or public-cloud APIs.
-
-## Footprint roadmap
-
-The minimal control plane retains an approximately 50 MB steady-state target.
-
-Measure separately:
-
-- portable/TestLab `o3kd`;
-- `o3kd + o3k-compute`;
-- Cloud Kernel convergence overhead;
-- hosted-service testbed O3K processes;
-- edge profile at supported host count;
-- external dependencies.
-
-Cloud Kernel features should be profile-selectable where practical so product
-extensibility does not automatically turn the minimal TestLab into a large
-platform installation.
+KubeVirt remains in this category even when O3K itself runs on Kubernetes.
 
 ## Roadmap governance
 
-- the Cloud OS vision does not replace release evidence;
-- OpenStack endpoint count is not progress by itself;
-- OpenStack service names do not mandate crate/process boundaries;
-- new first-class services must reuse Cloud Kernel contracts;
-- new public APIs require specifications/evidence;
-- new process boundaries require privilege/failure/locality justification;
-- external-hosted and O3K-implemented services remain distinct;
-- delegated clouds remain distinct from execution providers;
-- PostgreSQL, HA, edge-production, native Cinder, metadata HTTP, federation,
-  future service breadth, and footprint guarantees fail closed until their
-  profiles pass;
-- normative rules live in `docs/NORMATIVE_SOURCES.md`.
+- OpenStack service names do not mandate process boundaries;
+- Kubernetes APIs do not become Cloud Kernel/domain dependencies;
+- Kubernetes CRDs do not become the canonical tenant-resource database;
+- host execution remains outside Kubernetes by default;
+- PostgreSQL, Kubernetes HA, edge-production, native Cinder, federation, and
+  future service breadth remain evidence-gated;
+- architecture direction does not replace release evidence.
