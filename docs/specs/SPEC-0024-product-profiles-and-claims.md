@@ -1,10 +1,12 @@
 # SPEC-0024 — Product profiles and claims
 
-Status: Proposed
+Status: Accepted
 
 Related decisions and specifications:
 
 - [ADR-0163](../adr/ADR-0163-product-profiles-and-deployment-posture.md)
+- [ADR-0165](../adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
+- [ADR-0166](../adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
 - [SPEC-0020](SPEC-0020-keystone-trust-catalog-and-auth-context.md)
 - [SPEC-0022](SPEC-0022-service-api-baseline-and-evidence-gates.md)
 - [SPEC-0023](SPEC-0023-external-cinder-service-under-test.md)
@@ -12,113 +14,155 @@ Related decisions and specifications:
 
 ## Purpose
 
-This specification defines the supported O3K product profiles, their claims,
-required dependencies, compatibility boundaries, database posture, and evidence
-gates.
+This specification defines the deployment/evidence profiles through which the
+single O3K Cloud OS product is verified and released.
 
-O3K is one Rust-native OpenStack-compatible platform with multiple deployment
-profiles. A feature or measurement from one profile must not be silently
-promoted to another.
+A profile controls dependencies, supported compatibility surfaces, execution
+boundaries, database posture, footprint accounting, and release claims.
+
+A feature or measurement from one profile must not be silently promoted to
+another.
+
+The profiles do **not** define separate internal cloud architectures. O3K's
+canonical architecture is the Cloud Kernel in ADR-0165.
+
+## Product identity versus profile identity
+
+The product identity is:
+
+> O3K — a lightweight, open, Rust-native Cloud Operating System with OpenStack
+> compatibility and pluggable infrastructure execution.
+
+Current release wording must still identify actual maturity, for example:
+
+> O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab
+> alpha.
+
+"Cloud Operating System" describes architecture/direction. It is not evidence
+for production readiness, HA, full OpenStack parity, database support, or
+service breadth.
 
 ## Profile A — OpenStack service testbed
 
 ### User outcome
 
 A developer or CI system can run a selected real OpenStack service against O3K
-without installing a complete DevStack or full OpenStack control plane.
+without installing a complete DevStack/full OpenStack control plane.
 
-The first declared hosted-service scenario is real external Cinder.
+The first declared hosted-service scenario is external Cinder.
 
 ### O3K responsibilities
 
 Depending on the selected hosted service, O3K may provide declared subsets of:
 
-- Keystone-compatible authentication, projects, users, roles, token issuance,
-  public token validation, service identity, service catalog, regions, and
-  endpoints;
-- Glance-compatible image metadata and authenticated content access;
-- Nova-compatible server and attachment APIs;
-- Neutron-compatible networks, ports, bindings, or other explicitly selected
-  satellite behavior;
-- Placement-compatible capacity and allocation behavior;
-- fake, simulated, or real compute/network execution appropriate to the test.
+- O3K IAM exposed through the selected Keystone-compatible authentication,
+  token validation, service identity, catalog, region, and endpoint surface;
+- Glance-compatible image operations;
+- Nova-compatible compute/attachment operations;
+- Neutron-compatible network/port behavior;
+- Placement-compatible capacity behavior;
+- Cloud Kernel operations, audit identity, and ownership state required by the
+  selected workflow;
+- fake, simulated, or real infrastructure execution appropriate to the test.
 
 ### External service responsibilities
 
 The hosted service retains its own:
 
-- service code and API implementation;
+- service/API implementation;
 - supported database and migrations;
 - message bus where required;
-- scheduler, worker, and service processes;
-- backend and backend-specific dependencies;
+- scheduler/workers/service processes;
+- backend dependencies;
 - upgrades, health, and operational ownership.
 
-Catalog registration uses `ownership_mode: external-hosted`. It must not imply
-that O3K implements the external service.
+Catalog registration uses an explicit external-hosted ownership mode.
+
+It must not imply that O3K implements the external service.
 
 ### Acceptance
 
 The profile is accepted only when:
 
-- the selected external service version is pinned;
-- its required O3K satellite operations are frozen in compatibility manifests;
-- service-user authentication and public token validation pass;
-- catalog endpoint discovery passes;
-- selected client or Tempest-compatible workflows pass;
-- failure boundaries identify O3K versus the external service precisely;
-- secrets and connector information are redacted;
-- cleanup covers O3K-owned and explicitly managed external test resources.
+- selected external service version is pinned;
+- required O3K compatibility operations are frozen;
+- service authentication and public token validation pass;
+- endpoint discovery passes;
+- selected client/Tempest-compatible workflow passes;
+- failure boundaries identify O3K versus external-service ownership;
+- secrets/connection information are redacted;
+- cleanup covers O3K-owned and explicitly managed test resources.
 
-## Profile B — Native Rust OpenStack-compatible cloud
+## Profile B — Native O3K Cloud / TestLab
 
 ### User outcome
 
-O3K provides its own Rust-native implementation of a declared OpenStack service
-profile through standard OpenStack clients and public APIs.
+O3K owns the selected Cloud Kernel and cloud-service state and exposes declared
+OpenStack-compatible behavior through standard clients.
 
-### Native service direction
+The internal service domains are O3K domains. OpenStack service names describe
+compatibility adapters.
 
-The native roadmap includes declared subsets of:
+### Current native service direction
 
-- Keystone-compatible identity;
-- Glance-compatible image;
-- Nova-compatible compute;
-- Neutron-compatible networking;
-- Placement-compatible capacity and allocations;
-- Cinder-compatible volumes and attachments.
+The current IaaS roadmap contains:
 
-A service route is not sufficient evidence. Every supported operation requires
-specification, executable contracts, implementation, policy, durable state,
-portable evidence, and the real-host evidence appropriate to the operation.
+- O3K IAM with Keystone compatibility;
+- O3K Image with Glance compatibility;
+- O3K Compute with Nova compatibility;
+- O3K Network with Neutron compatibility;
+- O3K Capacity/Placement with Placement compatibility;
+- O3K Volume with Cinder compatibility.
+
+Future O3K services may exist without a one-to-one historical OpenStack service.
+Those services require explicit API/product/evidence profiles before support is
+claimed.
 
 ### First native milestone
 
-The first native real-cloud milestone is an ephemeral-root libvirt TestLab:
+The first real-cloud milestone remains an ephemeral-root libvirt TestLab:
 
 ```text
-authenticate
+authenticate through Keystone compatibility
 -> upload image
 -> create network/subnet/port
 -> create flavor/keypair
--> allocate compute resources
+-> allocate compute capacity
 -> create and boot server
--> inspect console and lifecycle
+-> inspect console/lifecycle
 -> restart and reconcile
 -> delete and prove cleanup
 ```
 
-Native Cinder-compatible persistent volumes are a later profile and do not block
-this first guest.
+Native persistent volumes are later and do not block this guest.
+
+### Cloud Kernel maturity
+
+The TestLab may use a deliberately smaller Cloud Kernel implementation than a
+future production cloud.
+
+A release must identify which shared primitives are actually implemented and
+verified, including at least:
+
+- IAM/AuthContext subset;
+- authorization policy subset;
+- resource ownership;
+- operations/reconciliation;
+- service/catalog registration;
+- quota/limit support if claimed;
+- audit/event behavior if claimed.
+
+Architecture intent alone does not promote a kernel primitive to supported
+status.
 
 ## Profile C — Small edge cloud
 
 ### User outcome
 
-An operator can run O3K as a lightweight control plane for approximately 10–20
-hypervisors and optionally integrate selected external OpenStack services.
+An operator can run O3K as a lightweight multi-host Cloud OS for approximately
+10–20 hypervisors in the initial edge profile.
 
-The host-execution topology is:
+Target host-execution topology:
 
 ```text
 o3kd
@@ -127,118 +171,112 @@ o3kd
   -> future o3k-storage
 ```
 
-Logical `ComputeProvider`, `NetworkProvider`, and `StorageProvider` boundaries
-are required before process extraction.
+Logical execution-provider contracts are required before process extraction.
 
 ### Required edge capabilities
 
-An edge release claim requires evidence for at least:
+An edge release claim requires evidence for:
 
-- multi-host inventory, scheduling, and Placement allocations;
+- multi-host inventory and scheduling;
+- capacity allocations;
 - host enrollment, identity, epoch fencing, heartbeat, reconnect, and resync;
-- no duplicate mutation after retry, restart, or network interruption;
-- host-local compute, network, and selected storage ownership;
-- project isolation and policy;
-- upgrades, backup/restore, diagnostic and recovery procedures;
-- resource and latency budgets;
-- failure and cleanup behavior across the supported host count;
-- a database profile appropriate to the claimed availability and concurrency.
+- no duplicate mutation after retry/restart/network interruption;
+- host-local compute and declared network/storage ownership;
+- project/security-scope isolation and authorization;
+- quotas/limits where claimed;
+- upgrades, backup/restore, diagnostics, rollback;
+- resource/latency budgets;
+- failure/cleanup behavior across supported host count;
+- database profile appropriate to claimed concurrency/availability.
 
-### Interoperation with existing OpenStack environments
+## Future delegated/federated cloud profiles
 
-“Connect to another OpenStack” is not a single capability. The following are
-separate profiles or decisions:
+An existing cloud control plane is not equivalent to an O3K execution provider.
 
-- external-hosted services registered in O3K's catalog;
-- O3K using an external Keystone;
-- O3K registering endpoints into an external Keystone;
-- consuming external Glance, Cinder, Neutron, or Placement services;
-- federation, project mapping, or resource sharing across clouds.
+The following require separate decisions/profiles:
 
-No broad cross-cloud compatibility claim is permitted without operation-level
-contracts, trust boundaries, failure semantics, and executable evidence.
+- host an external service in the O3K compatibility catalog;
+- trust external identity;
+- register O3K endpoints into another identity/catalog system;
+- consume another cloud's compute/network/storage/image services;
+- federate principals/scopes;
+- map resources across clouds;
+- delegate lifecycle ownership to an existing OpenStack/vSphere/Proxmox/
+  KubeVirt/public-cloud control plane.
+
+No generic "runs on any cloud" or "connects to every OpenStack cloud" claim is
+permitted.
 
 ## Database profiles
 
 ### SQLite
 
-SQLite is the currently supported default database for the minimal TestLab and
-portable simulated-cloud profiles.
+SQLite is the currently supported default for minimal TestLab/portable profiles.
 
 Support requires:
 
 - foreign keys;
 - bounded busy timeout;
-- reviewed WAL and synchronous policy;
+- reviewed WAL/synchronous policy;
 - deterministic migrations;
 - concurrent API/reconciler tests;
 - crash/restart tests;
-- documented backup, restore, checkpoint, and filesystem requirements.
+- documented backup/restore/checkpoint/filesystem requirements.
 
-A single-controller edge profile may use SQLite only within measured and
-published limits.
+A single-controller edge profile may use SQLite only within measured published
+limits.
 
 ### PostgreSQL
 
-PostgreSQL is the intended database for production-oriented, stronger
-availability, or multi-controller profiles.
+PostgreSQL is the intended database for production-oriented,
+stronger-availability, or possible multi-controller profiles.
 
-It is not supported merely because the architecture mentions it. Support
-requires:
+It is not supported merely because architecture mentions it.
 
-- a real adapter and store-conformance suite;
-- migrations and upgrade/rollback behavior;
-- transaction and isolation semantics;
-- backup/restore and operational documentation;
-- process and failure tests;
-- release artifacts that identify PostgreSQL as verified.
+Support requires:
 
-Until these gates pass, user-facing text must say `planned` or
-`production-profile target`, not `supported` or `recommended installation`.
+- real adapter;
+- store-conformance suite;
+- migrations/upgrade/rollback behavior;
+- transaction/isolation semantics;
+- backup/restore documentation;
+- process/failure evidence;
+- release artifacts identifying the verified profile.
+
+Until then, user-facing text must say `planned` or
+`production-profile target`.
 
 ## Footprint claims
 
 The minimal O3K control plane targets approximately 50 MB steady-state memory.
-This target is profile-specific and evidence-backed.
 
-Every published footprint artifact records:
+Every footprint artifact records:
 
-- product profile;
-- exact O3K processes included;
-- external processes excluded or reported separately;
-- binary or bundle size separately from RSS;
-- source commit, Rust toolchain, build profile, and features;
-- host CPU, memory, kernel, filesystem, and virtualization details;
-- idle and workload phases;
-- measurement duration and method.
+- exact product/deployment profile;
+- included O3K processes;
+- excluded/report-separately external processes;
+- binary/bundle size separately from RSS;
+- source commit/toolchain/build/features;
+- host/kernel/filesystem/virtualization context;
+- idle/workload phase;
+- measurement duration/method.
 
-The following must not be hidden inside an O3K-only number:
+External Cinder, RabbitMQ, PostgreSQL, libvirt, QEMU guests, Ceph, LVM, and
+other external dependencies are not hidden inside an O3K-only number.
 
-- PostgreSQL;
-- RabbitMQ;
-- external Cinder services;
-- libvirt daemon;
-- QEMU guests;
-- Ceph, LVM, or other storage backends;
-- external identity or networking services.
+## Machine-readable profile registry
 
-## Product-profile manifest
+`compatibility/product-profiles.yaml` records:
 
-`compatibility/product-profiles.yaml` is the machine-readable profile registry.
-Each profile records:
-
-- profile ID and maturity;
+- profile ID/maturity;
 - user outcome;
-- O3K-owned services;
+- O3K-owned capabilities;
 - external-hosted services;
-- required database posture;
-- required execution boundaries;
-- compatibility and evidence dependencies;
+- database posture;
+- execution boundaries;
+- compatibility/evidence dependencies;
 - release-claim state;
 - footprint-claim state.
-
-The manifest is descriptive until CI validation and release-claim enforcement
-are implemented. It must never promote planned work to verified support.
 
 ## Claim states
 
@@ -254,33 +292,59 @@ full-profile-verified
 release-claimed
 ```
 
-Database, footprint, service, microversion, metadata, edge-scale, and external
-integration claims are tracked independently.
+OpenStack compatibility, Cloud Kernel primitives, database, footprint,
+metadata, edge scale, external service integration, Kubernetes control-plane
+deployment, and future native services are tracked independently.
+
+## Kubernetes control-plane deployment claims
+
+Kubernetes control-plane deployment is an independent claim family governed by
+[ADR-0167](../adr/ADR-0167-kubernetes-native-control-plane-deployment.md) and
+the `kubernetes_control_plane` rule in `compatibility/product-profiles.yaml`:
+
+- single-controller OCI image + Helm packaging evidence precedes any broader
+  claim;
+- an HA Kubernetes claim additionally requires the PostgreSQL adapter with
+  conformance evidence, durable multi-controller work ownership/fencing, and
+  rolling-update, pod-loss, node-drain, and database-failover evidence;
+- pod-local filesystem state is never authoritative for recoverable cloud
+  state;
+- "O3K is Kubernetes-native" without that evidence is an invalid standalone
+  claim.
 
 ## Required product wording
 
-A valid concise description is:
+Valid architectural/product wording:
 
-> O3K is a lightweight, Rust-native OpenStack-compatible control plane for
-> reproducible OpenStack service testbeds, progressively native Rust cloud
-> services, and small edge clouds.
+> O3K is a lightweight, open, Rust-native Cloud Operating System. It preserves
+> selected OpenStack compatibility while using its own Cloud Kernel and typed
+> infrastructure execution providers.
 
-The following standalone claims are invalid without qualifying evidence:
+Valid current-release wording:
 
-- “O3K supports all of Gazpacho.”
-- “O3K replaces Cinder.”
-- “O3K runs in 50 MB.”
-- “PostgreSQL is supported for production.”
-- “O3K connects to any OpenStack cloud.”
+> O3K v0.2.0-alpha.1 is a Rust-native OpenStack-compatible libvirt TestLab
+> alpha.
+
+Invalid standalone claims without qualifying evidence include:
+
+- "O3K supports all of OpenStack 2026.1."
+- "O3K is production ready."
+- "O3K replaces Cinder" when only external Cinder is hosted.
+- "O3K runs in 50 MB."
+- "PostgreSQL is supported for production."
+- "O3K connects to any OpenStack cloud."
+- "O3K supports AWS-like databases/AI/Kubernetes" merely because the Cloud
+  Kernel is designed to enable future services.
 
 ## Release-gate requirements
 
 Every release identifies:
 
-- included product profile or profiles;
-- O3K-implemented versus external-hosted services;
+- included deployment/evidence profile(s);
+- O3K-implemented versus external-hosted capabilities;
+- implemented Cloud Kernel primitives;
 - database support state;
-- exact compatibility operations and microversions;
-- component and full-profile evidence;
-- footprint measurements or explicit absence of them;
+- exact OpenStack compatibility operations/microversions;
+- component/full-profile evidence;
+- footprint measurement or explicit absence;
 - known limitations and unsupported integrations.

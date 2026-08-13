@@ -2,124 +2,233 @@
 
 ## Purpose
 
-O3K is a lightweight, Rust-native OpenStack-compatible control plane for three
-primary uses:
+O3K is a lightweight, open, Rust-native **Cloud Operating System**.
 
-1. reproducible test environments around selected real OpenStack services;
-2. progressively native Rust implementations of declared OpenStack service
-   profiles;
-3. small edge clouds targeting approximately 10–20 hypervisors.
+Its long-term architecture is deliberately different from a historical
+OpenStack reimplementation:
 
-O3K implements declared, executable compatibility profiles. Endpoint count or
-nominal support for an entire OpenStack release is not progress by itself.
+- OpenStack APIs remain first-class compatibility contracts;
+- the O3K Cloud Kernel is the canonical internal platform;
+- O3K IAM is the canonical identity/authorization model;
+- first-class cloud services share common resource, policy, quota, operation,
+  audit, event, and service-registry primitives;
+- infrastructure execution is pluggable through typed provider boundaries;
+- existing external clouds use explicit delegated/federated authority models,
+  not the same abstraction as libvirt or Ceph.
 
-The normative product-profile definition is
-[SPEC-0024](specs/SPEC-0024-product-profiles-and-claims.md), backed by
-[ADR-0163](adr/ADR-0163-product-profiles-and-deployment-posture.md).
+O3K is intended to become a next-generation OpenStack in the architectural
+sense: preserve useful OpenStack ecosystem compatibility while rebuilding the
+cloud control plane around cleaner shared primitives and lower operational
+complexity.
+
+This is a product/architecture direction, not a claim of current production
+maturity or complete OpenStack parity.
+
+The normative Cloud OS decision is
+[ADR-0165](adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md).
+
+## Current release reality
+
+O3K remains alpha software.
+
+The immediate release target is:
+
+> **O3K v0.2.0-alpha.1 — Rust-native OpenStack-compatible libvirt TestLab
+> alpha.**
+
+The current release must not claim production readiness, HA, full OpenStack
+parity, PostgreSQL support, native Cinder support, broad federation, or fixed
+footprint without the required executable evidence.
+
+The Cloud OS architecture must not derail this bounded release.
 
 ## Product promises
 
-- provide a useful minimal profile quickly;
-- let a selected real OpenStack service run against O3K without a full DevStack
-  control plane when the required satellite APIs are implemented;
-- progressively provide O3K-owned Rust implementations of Keystone-, Glance-,
-  Nova-, Neutron-, Placement-, and Cinder-compatible profiles;
-- expose only documented and executable OpenStack behavior;
-- omit unsupported or unverified services from the catalog;
-- use Keystone-compatible identity as the common trust and discovery root;
-- keep authorization, desired state, scheduling, operations, compensation, and
-  reconciliation in the control plane;
-- separate control-plane orchestration from bounded compute, network, and
-  storage execution;
-- recover safely from interruption, duplicate delivery, and unknown outcome;
-- use libvirt/KVM as the primary real compute backend through `o3k-compute`;
-- define `o3k-network` and `o3k-storage` as stable target execution boundaries
-  before activating them as separate processes;
-- integrate selected external OpenStack services only through explicit hosted-
-  service profiles;
-- integrate with CellHV through the same typed provider model as an optional
-  later profile;
+O3K will:
+
+- expose only specified, implemented, evidence-backed compatibility behavior;
+- keep OpenStack protocol models separate from the canonical O3K domain;
+- make identity/authorization a shared Cloud Kernel concern rather than
+  service-specific plumbing;
+- give every first-class O3K service one common resource ownership and
+  authorization model;
+- keep desired state, operations, scheduling, compensation, and reconciliation
+  under O3K authority for O3K-owned resources;
+- separate cloud authority from bounded host/provider execution;
+- recover safely from interruption, duplicate delivery, stale observations, and
+  unknown outcomes;
+- use standard QEMU/KVM through libvirt as the first primary real compute
+  execution backend;
+- retain CellHV and future infrastructure implementations behind typed
+  capability/provider contracts;
+- add network/storage process boundaries only when privilege, locality, scaling,
+  or failure isolation justifies them;
+- make future cloud services materially cheaper to add by reusing IAM,
+  authorization, ownership, quotas/limits, operations, audit/events, and service
+  registration;
+- keep external service and delegated-cloud authority explicit;
 - remain operable by small infrastructure teams;
-- publish source-bound evidence for compatibility, performance, security,
-  cleanup, recovery, database, and footprint claims.
+- publish source-bound evidence for compatibility, recovery, security,
+  performance, footprint, and cleanup claims.
 
-## Product profiles
+## O3K Cloud Kernel
 
-### OpenStack service testbed
+The shared Cloud Kernel provides stable platform contracts for:
 
-A real service such as Cinder runs independently while O3K supplies the
-declared identity, catalog, token-validation, image, compute, attachment,
-network, or placement surfaces required by the selected test workflow.
+- principals and service identity;
+- authentication context;
+- authorization;
+- resource identity and ownership/security scope;
+- service registry/capability discovery;
+- quotas and limits;
+- durable operations;
+- audit and events;
+- regions and availability domains;
+- compensation and reconciliation;
+- shared failure/evidence identity.
 
-The hosted service keeps its own supported database, message bus, workers,
-backend, migrations, upgrades, and operational ownership. O3K must not present
-an external-hosted service as an O3K implementation.
+Metering/billing, secrets, richer organization/account hierarchy, and other
+platform-wide services may be added by later accepted decisions.
 
-### Native Rust cloud
+They are not implied to be implemented today.
 
-O3K owns the declared service APIs, durable state, policy, orchestration,
-execution, and evidence. The first real native milestone is an ephemeral-root
-QEMU/KVM TestLab. Native Cinder-compatible storage follows later.
+## OpenStack compatibility
 
-### Small edge cloud
+OpenStack remains strategically important.
 
-O3K grows from one control-plane process into a small multi-host cloud for
-approximately 10–20 hypervisors. Multi-host scheduling, fencing, restart,
-backup/restore, database, network, storage, failure, and operational claims
-require profile-specific evidence.
+The compatibility direction is:
 
-“Connect to another OpenStack” is not one capability. External Keystone,
-endpoint registration, hosted services, external service consumption,
-federation, and resource sharing require separate decisions and contracts.
+```text
+Keystone  -> O3K IAM adapter
+Glance    -> O3K Image adapter
+Nova      -> O3K Compute adapter
+Neutron   -> O3K Network adapter
+Placement -> O3K Capacity/Placement adapter
+Cinder    -> O3K Volume adapter
+```
+
+The OpenStack client ecosystem—CLI, SDKs, Terraform, service integrations, and
+operator knowledge—should continue to work for declared compatibility profiles.
+
+Endpoint count or nominal support for an entire OpenStack release is not progress
+by itself.
+
+## Deployment/evidence profiles
+
+O3K has one product identity with three primary profiles.
+
+### 1. OpenStack service testbed
+
+A real OpenStack service such as Cinder runs independently while O3K supplies
+the selected compatibility APIs and Cloud Kernel state required by the test
+workflow.
+
+The hosted service keeps its own database, message bus, processes, backend,
+migrations, upgrades, and operational ownership.
+
+O3K must never present an external-hosted service as O3K-implemented.
+
+### 2. Native O3K Cloud / TestLab
+
+O3K owns the selected Cloud Kernel and service-domain state.
+
+The first native milestone is an ephemeral-root QEMU/KVM TestLab through the
+selected Keystone/Glance/Neutron/Placement/Nova compatibility workflow.
+
+Native persistent volumes follow later.
+
+### 3. Small edge cloud
+
+O3K grows into a lightweight multi-host Cloud OS targeting approximately
+10–20 hypervisors in the initial edge profile.
+
+Multi-host scheduling, fencing, restart, database, network, storage, upgrade,
+backup/restore, security, and operational claims require profile-specific
+evidence.
+
+The normative profile/claim rules are
+[ADR-0163](adr/ADR-0163-product-profiles-and-deployment-posture.md) and
+[SPEC-0024](specs/SPEC-0024-product-profiles-and-claims.md).
+
+### 4. Kubernetes-native control-plane deployment
+
+Kubernetes is a first-class deployment target for the O3K control plane
+([ADR-0167](adr/ADR-0167-kubernetes-native-control-plane-deployment.md)), not a
+Cloud Kernel dependency and not the tenant-resource database. Single-controller
+OCI/Helm packaging precedes any HA claim; HA additionally requires PostgreSQL,
+durable work ownership/fencing, and failure evidence.
+
+## Infrastructure authority
+
+For O3K-owned resources:
+
+```text
+user intent
+-> O3K Cloud Kernel
+-> O3K scheduling/orchestration
+-> typed execution contract
+-> infrastructure provider
+-> observation
+-> O3K reconciliation
+```
+
+The provider does not invent O3K public identities, authorize tenants, or
+rewrite O3K desired state.
+
+An existing external cloud is different. It already has its own scheduler,
+policy, quotas, resource identity, and lifecycle authority. Such systems require
+a separately accepted delegated/federated connector model.
 
 ## Primary users
 
-1. OpenStack service developers and CI systems that need a lightweight
-   surrounding control plane;
-2. infrastructure developers who need ephemeral OpenStack-compatible
-   environments;
-3. storage, network, identity, SDK, and Terraform teams running integration
+1. infrastructure operators building small private/edge clouds;
+2. OpenStack developers and CI systems needing a lightweight surrounding
+   control plane;
+3. SDK/Terraform/storage/network/identity teams running reproducible integration
    scenarios;
-4. edge operators targeting approximately 10–20 hypervisors;
-5. MSPs and SMEs evaluating a supported small private cloud.
+4. future O3K service developers who need a shared cloud platform rather than
+   per-service IAM/orchestration plumbing;
+5. MSPs/SMEs evaluating a smaller open private-cloud operating model.
 
 ## First release outcome
 
-A user can install the native TestLab profile on one supported Linux node, use
-standard OpenStack CLI commands to authenticate and manage the declared
-identity/image/network/placement/compute workflow, execute a real ephemeral-root
-QEMU/KVM guest through `o3k-compute` and local `qemu:///system`, inspect the
-resource before cleanup, restart the control plane, compute agent, and libvirt,
-reconcile without duplication, and remove all O3K-owned state.
+A user can install the native TestLab profile on one supported Linux node and:
 
-The first alpha delivers guest metadata through config-drive/cloud-init. It
-does not advertise an HTTP metadata service without a separately accepted and
-verified profile.
+- authenticate using the selected OpenStack-compatible identity flow;
+- upload an image;
+- create the selected network/subnet/port resources;
+- create flavor/keypair;
+- allocate compute capacity;
+- boot a real QEMU/KVM guest through `o3k-compute`;
+- inspect lifecycle/console state;
+- restart `o3kd`, `o3k-compute`, and libvirt;
+- reconcile without duplication;
+- delete and prove complete O3K-owned cleanup;
+- leave foreign state unchanged.
 
-The external-Cinder service-testbed profile may progress in parallel but does
-not replace or block the first native guest release unless a later accepted
-release decision changes the gate.
+The first alpha uses config-drive/cloud-init for guest metadata.
+
+The external-Cinder testbed may progress in parallel but does not replace or
+block this release unless a later accepted decision changes the gate.
 
 ## Database posture
 
-- SQLite is the currently supported default for minimal TestLab and portable
+- SQLite is the currently supported default for minimal TestLab/portable
   profiles.
-- SQLite support includes explicit concurrency, WAL, crash recovery,
-  migrations, backup/restore, and filesystem constraints.
-- PostgreSQL is the intended production-oriented and stronger-availability
-  profile.
-- PostgreSQL is not claimed as supported or recommended for installation until
-  a real adapter and conformance evidence exist.
+- SQLite support includes explicit concurrency/WAL/crash/migration/
+  backup-restore/filesystem constraints.
+- PostgreSQL is the intended production-oriented profile.
+- PostgreSQL is not currently a supported production claim until its adapter and
+  evidence gates pass.
 
 ## Footprint posture
 
-The minimal O3K control plane targets an approximately 50 MB steady-state
-memory footprint. This is a measured target, not a blanket guarantee.
+The minimal O3K control plane targets approximately 50 MB steady-state memory.
 
-Every footprint claim identifies the exact profile, O3K processes, build,
-host, workload phase, and excluded external dependencies. External Cinder,
-RabbitMQ, PostgreSQL, libvirt, QEMU guests, and storage backends are reported
-separately.
+This is a measured target, not a blanket guarantee.
+
+Every footprint claim names the exact profile, processes, build, host, workload,
+measurement method, and excluded external dependencies.
 
 ## Development model
 
@@ -127,21 +236,17 @@ O3K uses a contract-first evidence ladder:
 
 ```text
 ADR/SPEC/contract
--> domain/store/provider tests
+-> domain/store/policy/provider tests
 -> portable simulated cloud
--> process tests
--> compute/network/storage component gates
--> full-profile or hosted-service runner
+-> process/public-client tests
+-> execution component gates
+-> full-profile/hosted-service runner
 -> failure/restart matrix
 -> release gate
 ```
 
-The protected runner verifies integration. It is not the primary
-requirements-discovery loop for missing endpoints.
-
-Normative ownership is listed in
-[`docs/NORMATIVE_SOURCES.md`](NORMATIVE_SOURCES.md). Charter and roadmap text are
-summaries and do not override the referenced specs and contracts.
+The protected runner verifies integration. It is not the requirements-discovery
+loop for random endpoint growth.
 
 ## Governance
 
@@ -149,38 +254,45 @@ summaries and do not override the referenced specs and contracts.
 - public issues, ADRs, specs, contracts, tests, compatibility manifests, and
   evidence;
 - issue-driven changes;
-- operation-level and profile-specific OpenStack compatibility claims;
-- human approval for architecture, security, licensing, public contracts,
-  persistent-state changes, privileged execution, and release decisions;
-- LLM agents may research and implement but do not own product decisions or
-  human approval.
+- human approval for architecture, IAM/security, public contracts, persistence,
+  privileged execution, destructive cleanup, and release decisions;
+- LLM agents may research/implement/review but do not replace human product or
+  security approval;
+- accepted ADRs are authoritative and superseded decisions remain historical;
+- product vision never overrides executable release evidence.
 
 ## Success measures
 
-- time to create a selected service-under-test environment;
-- time from clean host to first native server;
-- time from a failed workflow to the identified service/execution boundary;
-- portable simulated-cloud pass rate;
-- hosted-service, component, and full-profile contract pass rate;
-- measured per-profile memory, CPU, startup, and lifecycle footprint;
-- deterministic reinstall, restart, compensation, backup, restore, and cleanup
-  rate;
-- percentage of mutations that are idempotent and failure-tested;
-- zero foreign-resource modification in acceptance tests;
-- successful external service and edge pilot completion.
+Long-term success includes:
+
+- time from clean host to first useful cloud resource;
+- time/effort to add a new first-class O3K cloud service;
+- percentage of new services using shared IAM/authorization/resource/operation
+  contracts without service-local reimplementation;
+- deterministic restart/recovery/cleanup;
+- zero foreign-resource mutation in acceptance tests;
+- compatible OpenStack client journeys for declared profiles;
+- measured per-profile CPU/memory/startup/lifecycle footprint;
+- successful small edge-cloud pilots;
+- clear diagnosis of failures at Cloud Kernel, service, execution, or
+  external-hosted boundaries.
 
 ## Explicit non-goals for the bootstrap and first alpha
 
 - complete OpenStack API parity;
-- implementing every Nova, Neutron, Cinder, or Keystone endpoint before
-  integration;
-- replacing the internal dependencies of an externally hosted OpenStack
-  service;
-- Cinder or boot-from-volume as a prerequisite for the first ephemeral guest;
-- immediate separate deployment of every logical service or execution agent;
+- implementing every Keystone/Nova/Neutron/Cinder endpoint;
+- implementing the full future Cloud Kernel before the first libvirt alpha;
+- managed database, Kubernetes, AI, serverless, or other future service breadth
+  merely to justify the Cloud OS name;
+- immediate organization/account hierarchy;
 - broad federation or unspecified cross-cloud interoperability;
-- production SLA, HA, PostgreSQL-support, or fixed-footprint claims without
-  executable evidence;
-- support for every hypervisor, network system, or storage backend;
+- production SLA/HA/PostgreSQL/fixed-footprint claims without evidence;
+- support for every hypervisor/network/storage backend;
+- one daemon/crate per historical OpenStack service;
+- a generic provider abstraction that treats an existing cloud control plane as
+  equivalent to libvirt;
 - direct source compatibility or mechanical translation from another O3K
   implementation.
+
+Normative ownership is listed in
+[`docs/NORMATIVE_SOURCES.md`](NORMATIVE_SOURCES.md).

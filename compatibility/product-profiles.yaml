@@ -1,15 +1,23 @@
 schema_version: 1
-status: proposed
+status: accepted
 normative_spec: docs/specs/SPEC-0024-product-profiles-and-claims.md
+product_identity:
+  name: O3K Cloud OS
+  architecture: cloud-operating-system
+  normative_adr: docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md
+  openstack_role: northbound-compatibility-contract
+  canonical_internal_platform: o3k-cloud-kernel
 profiles:
   - id: openstack-service-testbed
     maturity: specified
-    user_outcome: run a selected real OpenStack service without a complete DevStack or full OpenStack control plane
+    user_outcome: run a selected real OpenStack service against O3K without a complete DevStack or full OpenStack control plane
     o3k_owned_capabilities:
-      - identity
-      - service-catalog
+      - iam
+      - keystone-compatibility
+      - service-registry
       - token-validation
       - declared-satellite-apis
+      - operations-and-reconciliation-as-selected
       - portable-or-real-execution-as-selected
     external_hosted_services:
       - selected-service-under-test
@@ -24,13 +32,16 @@ profiles:
 
   - id: native-rust-testlab
     maturity: implemented-partial
-    user_outcome: run a declared OpenStack-compatible workflow using O3K-owned Rust service implementations
+    user_outcome: run a declared OpenStack-compatible workflow using O3K-owned Cloud Kernel and Rust service implementations
     o3k_owned_capabilities:
-      - identity
+      - iam
+      - keystone-compatibility
       - image
       - compute
       - network
-      - placement
+      - capacity-placement
+      - durable-operations
+      - reconciliation
     external_hosted_services: []
     database:
       default: sqlite
@@ -49,11 +60,13 @@ profiles:
     target_hypervisors:
       minimum: 10
       maximum: 20
-    user_outcome: operate a lightweight multi-host O3K cloud and integrate explicitly selected external OpenStack services
+    user_outcome: operate a lightweight multi-host O3K Cloud OS and integrate only explicitly selected external services or delegated clouds
     o3k_owned_capabilities:
+      - cloud-kernel
       - control-plane
-      - multi-host-placement
+      - multi-host-capacity
       - compute-scheduling
+      - durable-operations
       - reconciliation
       - declared-network-and-storage-profiles
     external_hosted_services:
@@ -66,12 +79,16 @@ profiles:
       - o3k-compute
       - future-o3k-network
       - future-o3k-storage
-    cross_cloud_support: requires-separate-profile
+    delegated_cloud_support: requires-separate-profile-and-adr
     release_blocking_for_first_alpha: false
     footprint_claim: unmeasured
     evidence_state: planned
 
 claim_rules:
+  cloud_operating_system:
+    type: architecture-and-product-direction
+    implies_production_readiness: false
+    implies_full_openstack_parity: false
   approximate_50mb:
     type: target
     requires_profile_specific_measurement: true
@@ -80,11 +97,24 @@ claim_rules:
     type: production-profile-target
     support_status: planned
     may_be_claimed_supported_only_after_adapter_and_conformance: true
+  kubernetes_control_plane:
+    type: deployment-target
+    normative_adr: docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md
+    packaging_target: oci-image-and-helm
+    support_status: planned
+    ha_claim_requires:
+      - postgresql-adapter-and-conformance-evidence
+      - durable-multi-controller-work-ownership-and-fencing
+      - rolling-update-pod-loss-node-drain-and-database-failover-evidence
   openstack_release_compatibility:
     type: operation-level
     blanket_release_parity_forbidden: true
   external_hosted_service:
     must_not_be_claimed_o3k_implemented: true
+  delegated_cloud:
+    must_not_be_treated_as_execution_provider_without_authority_adr: true
   cross_cloud_interoperation:
     generic_claim_forbidden: true
     requires_explicit_integration_profile: true
+  future_native_services:
+    architecture_examples_are_not_support_claims: true
