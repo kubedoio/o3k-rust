@@ -42,9 +42,11 @@ Today:
 - `bins/o3kd` composes the HTTP compatibility layer, identity/domain logic,
   durable state, scheduling, and reconciliation;
 - SQLite is the supported minimal/TestLab store;
-- direct local libvirt execution exists behind the provider boundary;
-- remote compute execution uses `bins/o3k-compute` / `o3k-compute-agent` over
-  gRPC + mTLS;
+- direct local libvirt execution exists behind the provider boundary only
+  through the `o3k-compute` host agent (the in-daemon direct libvirt path is
+  deliberately fail-closed per ADR-0086);
+- remote compute execution uses the `bins/o3k-compute` host agent
+  (`o3k-compute-agent` crate) over gRPC + mTLS;
 - native persistent Volume and separate native network/storage daemons are later
   milestones;
 - external/hosted Cinder remains an independently authoritative service in the
@@ -79,6 +81,11 @@ the provider is authoritative only for what it actually observed/executed.
 A timeout is an **unknown outcome**, not proof that the side effect failed. O3K
 must observe and reconcile before retrying an operation whose effect may already
 have happened.
+
+Today's authorization enforcement is Keystone-compatible token verification
+with project-scoped isolation; the shared
+`Principal × Action × Resource × Context` engine is the ADR-0166 convergence
+target, not a shipped component.
 
 ## 4. O3K IAM and Keystone
 
@@ -151,5 +158,5 @@ complete OpenStack parity.
 - [Architecture](../ARCHITECTURE.md)
 - [ADR-0165 — O3K Cloud Operating System and Cloud Kernel](../adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166 — O3K IAM and Keystone compatibility boundary](../adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
-- [SPEC-0020 — Keystone trust, catalog, and auth context](../specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md)
+- [SPEC-0020 — O3K IAM, Keystone compatibility, catalog, and authorization context](../specs/SPEC-0020-keystone-trust-catalog-and-auth-context.md)
 - [SPEC-0024 — product profiles and claims](../specs/SPEC-0024-product-profiles-and-claims.md)

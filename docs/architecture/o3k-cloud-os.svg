@@ -104,7 +104,7 @@
   <text x="1196" y="651" class="mono">o3k-placement · o3k-scheduler</text>
   <text x="1196" y="679" class="small">inventory, allocation, host choice</text>
 
-  <text x="110" y="744" class="small">Native persistent Volume is a later milestone; hosted/external Cinder remains a separate compatibility/testbed path.</text>
+  <text x="110" y="744" class="small">Volume is a first-class domain; native persistent volumes are a later milestone; external Cinder is a separate testbed path.</text>
 
   <path d="M800 775 V813" class="line"/>
   <rect x="315" y="814" width="970" height="56" rx="15" fill="#101d2a" stroke="#22d3ee" stroke-width="1.7"/>
@@ -115,10 +115,10 @@
   <path d="M1040 870 V900" class="softline"/>
 
   <rect x="120" y="900" width="640" height="58" rx="15" class="card"/>
-  <text x="145" y="925" class="h3">Local execution</text>
-  <text x="145" y="947" class="small">o3k-libvirt → libvirt/QEMU/KVM · Linux bridges/taps/dnsmasq · image cache</text>
+  <text x="145" y="925" class="h3">Host agent execution</text>
+  <text x="145" y="947" class="small">in bins/o3k-compute: o3k-libvirt → libvirt/QEMU/KVM · bridges/taps · image cache</text>
 
   <rect x="840" y="900" width="640" height="58" rx="15" class="card"/>
   <text x="865" y="925" class="h3">Remote host execution</text>
-  <text x="865" y="947" class="small">o3kd → gRPC + mTLS → bins/o3k-compute / o3k-compute-agent → host infrastructure</text>
+  <text x="865" y="947" class="small">o3kd → gRPC + mTLS → bins/o3k-compute (agent) → host infrastructure</text>
 </svg>

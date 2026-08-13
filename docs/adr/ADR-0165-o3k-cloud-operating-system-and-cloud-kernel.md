@@ -168,6 +168,11 @@ Current infrastructure services become O3K service domains:
 - Capacity/Placement;
 - Volume.
 
+The Identity/IAM domain owns identity records, service registration, and the
+Keystone compatibility projection. The shared IAM/authorization contracts and
+the policy engine remain Cloud Kernel contracts (§2) that every service
+consumes — they are not service-local.
+
 Future services may include, for example:
 
 - managed database;

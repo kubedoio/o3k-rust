@@ -97,6 +97,15 @@ claim_rules:
     type: production-profile-target
     support_status: planned
     may_be_claimed_supported_only_after_adapter_and_conformance: true
+  kubernetes_control_plane:
+    type: deployment-target
+    normative_adr: docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md
+    packaging_target: oci-image-and-helm
+    support_status: planned
+    ha_claim_requires:
+      - postgresql-adapter-and-conformance-evidence
+      - durable-multi-controller-work-ownership-and-fencing
+      - rolling-update-pod-loss-node-drain-and-database-failover-evidence
   openstack_release_compatibility:
     type: operation-level
     blanket_release_parity_forbidden: true

@@ -5,7 +5,7 @@ Status: Proposed
 Related decisions:
 
 - [ADR-0160](../docs/adr/ADR-0160-service-topology-and-execution-boundaries.md)
-- [ADR-0161](../docs/adr/ADR-0161-keystone-trust-and-service-identity.md)
+- [ADR-0166](../docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md) (supersedes ADR-0161)
 - [SPEC-0021](../docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md)
 
 ## Purpose

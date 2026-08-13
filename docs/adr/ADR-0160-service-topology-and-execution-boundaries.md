@@ -375,7 +375,7 @@ Rejected because O3K supports declared profiles, not complete OpenStack parity.
 ## Required follow-up
 
 - define product profiles in ADR-0163 and SPEC-0024;
-- define Keystone trust in ADR-0161 and SPEC-0020;
+- define Keystone trust in ADR-0166 and SPEC-0020;
 - define execution invariants in `contracts/execution-boundaries.md`;
 - define cross-service workflows in SPEC-0021;
 - freeze API operations in SPEC-0022;

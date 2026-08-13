@@ -55,6 +55,8 @@ Important authority:
 
 - ADR-0165 — O3K Cloud OS / Cloud Kernel;
 - ADR-0166 + SPEC-0020 — O3K IAM / Keystone compatibility;
+- ADR-0167 — Kubernetes-native control-plane deployment; PostgreSQL and durable
+  work ownership/fencing are required before any Kubernetes HA claim;
 - ADR-0163 + SPEC-0024 — deployment/evidence profiles and claims;
 - ADR-0160 + SPEC-0025 — topology/dependency/rewrite convergence;
 - SPEC-0021 — cross-service workflows/compensation;
@@ -85,6 +87,7 @@ hosted services, or runner changes, also read:
 
 - `docs/adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md`;
 - `docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md`;
+- `docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md`;
 - `docs/adr/ADR-0160-service-topology-and-execution-boundaries.md`;
 - `docs/adr/ADR-0162-contract-first-staged-runner-validation.md`;
 - `docs/adr/ADR-0163-product-profiles-and-deployment-posture.md`;
@@ -229,6 +232,11 @@ Before code changes, record:
 - SQLite is the supported minimal TestLab/portable default.
 - PostgreSQL is a production-oriented target until a real adapter/conformance
   suite exists.
+- Kubernetes is a first-class control-plane deployment target (ADR-0167):
+  Kubernetes APIs do not become Cloud Kernel/domain dependencies; CRDs are not
+  the canonical tenant-resource database; pod-local filesystem state is
+  non-authoritative; no Kubernetes HA claim before PostgreSQL plus durable
+  work-ownership/fencing evidence.
 - Approximately 50 MB is a target, not a guarantee.
 - Architecture examples of database/Kubernetes/AI/etc. are not support claims.
 - The current `v0.2.0-alpha.1` libvirt TestLab gate must not be expanded by

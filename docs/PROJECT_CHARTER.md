@@ -150,6 +150,14 @@ The normative profile/claim rules are
 [ADR-0163](adr/ADR-0163-product-profiles-and-deployment-posture.md) and
 [SPEC-0024](specs/SPEC-0024-product-profiles-and-claims.md).
 
+### 4. Kubernetes-native control-plane deployment
+
+Kubernetes is a first-class deployment target for the O3K control plane
+([ADR-0167](adr/ADR-0167-kubernetes-native-control-plane-deployment.md)), not a
+Cloud Kernel dependency and not the tenant-resource database. Single-controller
+OCI/Helm packaging precedes any HA claim; HA additionally requires PostgreSQL,
+durable work ownership/fencing, and failure evidence.
+
 ## Infrastructure authority
 
 For O3K-owned resources:

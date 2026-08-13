@@ -170,7 +170,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0154](ADR-0154-engineering-governance-lifecycle.md)
 - [ADR-0155](ADR-0155-agent-local-image-materialization.md)
 - [ADR-0160](ADR-0160-service-topology-and-execution-boundaries.md)
-- [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md)
+- [ADR-0161](ADR-0161-keystone-trust-and-service-identity.md) (superseded by ADR-0166)
 - [ADR-0162](ADR-0162-contract-first-staged-runner-validation.md)
 - [ADR-0163](ADR-0163-product-profiles-and-deployment-posture.md)
 - [ADR-0164](ADR-0164-independent-resource-leak-verifier.md)

@@ -19,7 +19,7 @@ remain verifiable across restart when the same key is retained.
 
 This spec defines only the implemented bootstrap subset. Durable identity
 resources, service identity, authorization context, catalog policy, and future
-expansion are governed by SPEC-0020 and ADR-0161.
+expansion are governed by SPEC-0020 and ADR-0166 (superseding ADR-0161).
 
 ## Bootstrap records
 

@@ -293,8 +293,24 @@ release-claimed
 ```
 
 OpenStack compatibility, Cloud Kernel primitives, database, footprint,
-metadata, edge scale, external service integration, and future native services
-are tracked independently.
+metadata, edge scale, external service integration, Kubernetes control-plane
+deployment, and future native services are tracked independently.
+
+## Kubernetes control-plane deployment claims
+
+Kubernetes control-plane deployment is an independent claim family governed by
+[ADR-0167](../adr/ADR-0167-kubernetes-native-control-plane-deployment.md) and
+the `kubernetes_control_plane` rule in `compatibility/product-profiles.yaml`:
+
+- single-controller OCI image + Helm packaging evidence precedes any broader
+  claim;
+- an HA Kubernetes claim additionally requires the PostgreSQL adapter with
+  conformance evidence, durable multi-controller work ownership/fencing, and
+  rolling-update, pod-loss, node-drain, and database-failover evidence;
+- pod-local filesystem state is never authoritative for recoverable cloud
+  state;
+- "O3K is Kubernetes-native" without that evidence is an invalid standalone
+  claim.
 
 ## Required product wording
 

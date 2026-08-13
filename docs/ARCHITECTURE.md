@@ -43,6 +43,7 @@ Especially important:
 
 - Cloud OS / Cloud Kernel authority: ADR-0165;
 - O3K IAM / Keystone compatibility: ADR-0166 and SPEC-0020;
+- Kubernetes-native control-plane deployment: ADR-0167;
 - deployment/evidence profiles: ADR-0163 and SPEC-0024;
 - topology/dependency/execution boundaries: ADR-0160, SPEC-0025, and the
   execution/core-boundary contracts;
@@ -386,6 +387,11 @@ Responsibilities:
 
 It does not own compute/network/storage resource lifecycle.
 
+Relationship to the Cloud Kernel: the kernel owns the shared IAM and
+authorization contracts (`Principal × Action × Resource × Context`); this
+module implements the policy-engine boundary and owns identity records,
+service registration, and the Keystone compatibility projection.
+
 ### Image
 
 Responsibilities:
@@ -680,7 +686,32 @@ It is not supported merely because ports are designed for it.
 Support requires adapter/conformance/migrations/transaction/failure/
 backup-restore evidence.
 
-Multi-controller/HA requires a separate coordination/fencing/database decision.
+Multi-controller/HA requires PostgreSQL plus durable work ownership and
+fencing ([ADR-0167](adr/ADR-0167-kubernetes-native-control-plane-deployment.md)).
+
+## Kubernetes deployment target
+
+Kubernetes is a first-class control-plane deployment target for O3K, not a
+Cloud Kernel dependency and not the tenant-resource database
+([ADR-0167](adr/ADR-0167-kubernetes-native-control-plane-deployment.md)).
+
+The direction:
+
+- OCI images plus a small Helm chart are the first packaging target; a
+  dedicated O3K Operator is deferred until O3K-specific lifecycle automation
+  justifies it;
+- `o3kd` becomes horizontally deployable only with PostgreSQL and explicit
+  durable work ownership/fencing — pod replication or leader election alone is
+  not correctness;
+- a Kubernetes HA claim additionally requires rolling-update, pod-loss,
+  node-drain, and database-failover evidence;
+- host-local execution stays outside the Kubernetes cluster by default
+  (`o3k-compute` + libvirt/QEMU/KVM on hypervisor hosts);
+- Kubernetes CRDs may later manage the O3K installation, but canonical O3K
+  servers, networks, volumes, operations, and audit state never become CRDs or
+  pod-local state.
+
+The Cloud Kernel and domain crates must not depend on Kubernetes APIs.
 
 ## Footprint architecture
 
@@ -774,13 +805,15 @@ The release-critical first step does not change:
    domain;
 7. prove multi-host edge behavior;
 8. add PostgreSQL after store conformance;
-9. extract `o3k-network`/`o3k-storage` only when privilege/failure evidence
-   justifies it;
-10. add the first genuinely new O3K-native service only after Cloud Kernel
+9. build single-controller Kubernetes packaging (OCI image + Helm) per ADR-0167;
+10. extract `o3k-network`/`o3k-storage` only when privilege/failure evidence
+    justifies it;
+11. add the first genuinely new O3K-native service only after Cloud Kernel
     service-extension contracts are strong enough to prove the developer model;
-11. define delegated/federated cloud connectors only when a concrete integration
+12. define delegated/federated cloud connectors only when a concrete integration
     target enters the roadmap;
-12. add multi-controller/HA only after a separate coordination/failure model.
+13. add multi-controller/HA only after the ADR-0167 work-ownership/fencing and
+    evidence requirements are met.
 
 ## Architectural fitness questions
 

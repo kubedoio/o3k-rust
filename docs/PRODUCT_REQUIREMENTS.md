@@ -12,6 +12,7 @@ The normative product/architecture decisions are:
 
 - [ADR-0165 — O3K Cloud Operating System and Cloud Kernel](adr/ADR-0165-o3k-cloud-operating-system-and-cloud-kernel.md)
 - [ADR-0166 — O3K IAM and Keystone compatibility](adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md)
+- [ADR-0167 — Kubernetes-native control-plane deployment](adr/ADR-0167-kubernetes-native-control-plane-deployment.md)
 - [ADR-0163 — deployment/evidence profiles](adr/ADR-0163-product-profiles-and-deployment-posture.md)
 
 The primary OpenStack compatibility reference remains OpenStack 2026.1
