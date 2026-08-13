@@ -25,6 +25,16 @@ const QEMU_IMG_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 const QEMU_IMG_MAX_ADDRESS_SPACE_BYTES: u64 = 1024 * 1024 * 1024;
 const QEMU_IMG_MAX_OPEN_FILES: u64 = 128;
 
+/// TEST-ONLY failpoint (issue #607): `1` makes every `run_qemu_img`
+/// invocation fail with a deterministic bounded `io::Error` before any host
+/// process is spawned. The setpriv `--reset-env` sandbox makes PATH-shim
+/// injection impossible, so the failpoint must be read by this process
+/// itself, before the sandbox is consulted — it is therefore honored
+/// regardless of PATH. Disabled by default; any value other than exactly
+/// `1` leaves behavior unchanged. Never a public API; used by the failure
+/// matrix harness and the unit test only.
+const O3K_TEST_QEMU_IMG_FAIL: &str = "O3K_TEST_QEMU_IMG_FAIL";
+
 // qcow2 structural gate constants, from the QEMU qcow2 format documentation
 // (docs/interop/qcow2.rst).
 const QCOW2_VERSION_2_HEADER: u64 = 72;
@@ -1014,6 +1024,15 @@ fn run_qemu_img<'a, I>(qemu_img: &Path, args: I) -> io::Result<Output>
 where
     I: IntoIterator<Item = &'a str>,
 {
+    // Test-only failpoint (issue #607): read by this process before any
+    // spawn, so it cannot be bypassed by PATH manipulation. The exact value
+    // "1" injects a bounded, deterministic failure; unset or any other value
+    // keeps the normal sandboxed invocation.
+    if std::env::var_os(O3K_TEST_QEMU_IMG_FAIL).is_some_and(|value| value == "1") {
+        return Err(io::Error::other(
+            "qemu-img failure injected by O3K_TEST_QEMU_IMG_FAIL",
+        ));
+    }
     let args = args.into_iter().collect::<Vec<_>>();
     let setpriv = Path::new("/usr/bin/setpriv");
     if !setpriv.is_file() {
@@ -2683,6 +2702,87 @@ esac
 
         let _ = fs::remove_dir_all(&path);
         result
+    }
+
+    /// Issue #607: `O3K_TEST_QEMU_IMG_FAIL=1` must make the sandboxed helper
+    /// fail deterministically before any spawn (honored regardless of PATH,
+    /// because the process reads it itself), and verification call sites must
+    /// fail closed with `FormatVerificationFailed`. The env var is
+    /// process-global and the workspace forbids unsafe code, so the armed
+    /// assertions run in a child process of this test binary — the child
+    /// re-runs `qemu_img_failpoint_env_armed_asserts_injected_failure` with
+    /// the env var set. On unarmed code the child's assertions fail, so this
+    /// test fails before the failpoint exists and passes after. Unset, the
+    /// helper keeps its normal behavior (proven here and by every other test
+    /// in this crate, which all run unarmed).
+    #[cfg(unix)]
+    #[test]
+    fn qemu_img_test_failpoint_env_var_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = std::process::Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "tests::qemu_img_failpoint_env_armed_asserts_injected_failure",
+            ])
+            .env(O3K_TEST_QEMU_IMG_FAIL, "1")
+            .spawn()?;
+        let status = child.wait()?;
+        assert!(
+            status.success(),
+            "the armed failpoint child must pass its injected-failure assertions"
+        );
+        // Unset (the default in this process), the helper keeps its normal
+        // behavior: the sandboxed spawn still happens and the missing
+        // qemu-img binary surfaces as a failed output, never as the injected
+        // io error.
+        let unchanged = run_qemu_img(Path::new("does-not-exist-qemu-img"), ["info", "unused"]);
+        let unchanged = match unchanged {
+            Ok(output) => output,
+            Err(error) => {
+                return Err(format!(
+                    "the unset failpoint must preserve the normal helper behavior: {error}"
+                )
+                .into());
+            }
+        };
+        assert!(
+            !unchanged.status.success(),
+            "the unchanged helper must fail on the missing qemu-img binary"
+        );
+        Ok(())
+    }
+
+    /// Runs only as the child of `qemu_img_test_failpoint_env_var_fails_closed`
+    /// with `O3K_TEST_QEMU_IMG_FAIL=1`: asserts the injected `io::Error` at
+    /// the helper boundary and the closed failure at a verification call
+    /// site. A direct (unarmed) run has nothing to assert and passes.
+    #[cfg(unix)]
+    #[test]
+    fn qemu_img_failpoint_env_armed_asserts_injected_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        if std::env::var_os(O3K_TEST_QEMU_IMG_FAIL).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            return Ok(());
+        }
+        let injected = match run_qemu_img(Path::new("does-not-exist-qemu-img"), ["info", "unused"])
+        {
+            Err(error) => error,
+            Ok(_) => return Err("the armed failpoint must inject an io error".into()),
+        };
+        assert_eq!(injected.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            injected.to_string(),
+            "qemu-img failure injected by O3K_TEST_QEMU_IMG_FAIL"
+        );
+        let path = root("qemu-failpoint-child");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)?;
+        let image = path.join("image.qcow2");
+        fs::write(&image, b"not a qcow2")?;
+        assert!(matches!(
+            verify_image_format(Path::new("does-not-exist-qemu-img"), &image, "qcow2"),
+            Err(ImageError::FormatVerificationFailed)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        Ok(())
     }
 
     #[test]
