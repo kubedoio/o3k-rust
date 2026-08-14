@@ -77,3 +77,16 @@ if bash "${ROOT_DIR}/packaging/validate-human-review.sh" --input "${WORK_DIR}/pe
 fi
 
 echo "human review package validation tests passed"
+
+# Evidence packages must be publishable without credentials or private keys.
+mkdir -p "${WORK_DIR}/safe" "${WORK_DIR}/unsafe"
+printf '{"password":"<redacted>","token":"${{ secrets.TEST_TOKEN }}"}\n' >"${WORK_DIR}/safe/result.json"
+printf '%s\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'not-a-key' '-----END OPENSSH PRIVATE KEY-----' >"${WORK_DIR}/unsafe/key.txt"
+printf '%s\n' 'OS_PASSWORD="real-secret-value"' >"${WORK_DIR}/unsafe/runtime.log"
+bash "${ROOT_DIR}/packaging/scan-release-evidence.sh" "${WORK_DIR}/safe"
+if bash "${ROOT_DIR}/packaging/scan-release-evidence.sh" "${WORK_DIR}/unsafe"; then
+  echo "accepted secret-bearing evidence package" >&2
+  exit 1
+fi
+
+echo "evidence secret scan tests passed"

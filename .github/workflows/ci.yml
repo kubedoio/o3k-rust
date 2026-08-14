@@ -86,6 +86,10 @@ jobs:
         run: bash tests/release-e2e-evidence.sh
       - name: Test human review evidence package
         run: bash tests/human-review-package.sh
+      - name: Test generated review diff package
+        run: bash tests/review-diff-package.sh
+      - name: Test candidate evidence manifest
+        run: bash tests/release-evidence-manifest.sh
       - name: Test program tracker contract
         run: bash tests/program-tracker.sh
       - name: Test product-profile status governance

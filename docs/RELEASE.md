@@ -66,8 +66,10 @@ signed merely because it contains checksums.
 
 The libvirt alpha also requires `packaging/release-gate.sh` to report
 `status: ready` from real E2E, recovery, clean Ubuntu/Debian installation,
-and benchmark artifacts. The invocation must supply `--source-commit` and
-`--human-review`; the latter is checked with
+and benchmark artifacts. The invocation must supply `--source-commit`,
+`--candidate-evidence-manifest`, and `--human-review`; the manifest must be
+generated for the exact candidate and bind every machine artifact to the
+candidate binaries and bundle. The latter is checked with
 `validate-human-review.sh --require-approved` and its `reviewed_commit` must
 match the source commit. Missing, skipped, stale, or unapproved evidence
 blocks the gate. This check records a requirement; it does not create or

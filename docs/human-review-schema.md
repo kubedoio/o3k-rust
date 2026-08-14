@@ -25,6 +25,53 @@ packaging/validate-human-review.sh --input human-review.json
 packaging/validate-human-review.sh --input human-review.json --require-approved
 ```
 
+Complete example (the placeholder identity and URL must be replaced by the
+independent human reviewer):
+
+```json
+{
+  "artifact_type": "human-architecture-security-review",
+  "schema_version": 1,
+  "status": "approved",
+  "reviewer": {
+    "name": "Real Reviewer",
+    "organization": "Independent Security Organization",
+    "role": "Architecture and security reviewer",
+    "is_implementing_agent": false
+  },
+  "reviewed_commit": "0123456789abcdef0123456789abcdef01234567",
+  "review_record_url": "https://review.example.invalid/issue-92",
+  "scope": [
+    "Keystone and project isolation",
+    "Compute-agent mTLS",
+    "Journal and reconciliation",
+    "Placement and scheduler",
+    "Images and paths",
+    "Config-drive",
+    "Libvirt and ownership",
+    "Bridge/TAP/DHCP",
+    "Console and logs",
+    "Installer/reset/uninstall/runner"
+  ],
+  "findings": [],
+  "approvals": {
+    "release_blocking_findings": true,
+    "destructive_cleanup": true,
+    "foreign_state_safeguards": true
+  },
+  "unresolved_risks": []
+}
+```
+
+Before publication, scan the entire generated review/evidence package. The
+scanner rejects private-key PEM blocks, non-placeholder password/token/secret
+assignments, and symlinks so raw host evidence cannot silently escape the
+package boundary:
+
+```text
+packaging/scan-release-evidence.sh review-package target/evidence
+```
+
 The validator is deliberately fail-closed for missing identity, missing
 findings/dispositions, missing approval declarations, malformed commit
 evidence, and a non-approved release decision. It does not verify that a person actually

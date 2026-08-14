@@ -100,11 +100,17 @@ case "$state_metadata" in
 esac
 account_created=false
 group_created=false
+compute_account_created=false
+compute_group_created=false
 supplementary_groups_added=false
 sudo -n grep -Fqx 'o3k-disposable-account-v1' "$STATE_ROOT/.o3k-account-created" 2>/dev/null \
   && account_created=true
 sudo -n grep -Fqx 'o3k-disposable-group-v1' "$STATE_ROOT/.o3k-group-created" 2>/dev/null \
   && group_created=true
+sudo -n grep -Fqx 'o3k-disposable-compute-account-v1' "$STATE_ROOT/.o3k-compute-account-created" 2>/dev/null \
+  && compute_account_created=true
+sudo -n grep -Fqx 'o3k-disposable-compute-group-v1' "$STATE_ROOT/.o3k-compute-group-created" 2>/dev/null \
+  && compute_group_created=true
 sudo -n test -s "$STATE_ROOT/.o3k-supplementary-groups-added" \
   && supplementary_groups_added=true
 
@@ -115,9 +121,9 @@ remove_added_supplementary_groups() {
     while IFS= read -r group; do
       [[ -n "$group" ]] || continue
       getent group "$group" >/dev/null 2>&1 || continue
-      id o3k >/dev/null 2>&1 || continue
-      if id -nG o3k | tr " " "\n" | grep -Fqx "$group"; then
-        gpasswd --delete o3k "$group" >/dev/null
+      id o3k-compute >/dev/null 2>&1 || continue
+      if id -nG o3k-compute | tr " " "\n" | grep -Fqx "$group"; then
+        gpasswd --delete o3k-compute "$group" >/dev/null
       fi
     done <"$1"
   ' _ "$STATE_ROOT/.o3k-supplementary-groups-added" \
@@ -283,13 +289,17 @@ done
 [[ "$alive" == false ]] || { echo "cleanup: service did not stop" >&2; exit 1; }
 assert_no_owned_host_state || exit 1
 remove_added_supplementary_groups || exit 1
-if [[ "$account_created" == true || "$group_created" == true ]]; then
+if [[ "$account_created" == true || "$group_created" == true || \
+      "$compute_account_created" == true || "$compute_group_created" == true ]]; then
   sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
     set -euo pipefail
     pgrep -u o3k >/dev/null 2>&1 && exit 0 || true
+    pgrep -u o3k-compute >/dev/null 2>&1 && exit 0 || true
     if [[ "$1" == true ]] && id o3k >/dev/null 2>&1; then userdel o3k || true; fi
     if [[ "$2" == true ]] && getent group o3k >/dev/null 2>&1; then groupdel o3k || true; fi
-  ' _ "$account_created" "$group_created" || true
+    if [[ "$3" == true ]] && id o3k-compute >/dev/null 2>&1; then userdel o3k-compute || true; fi
+    if [[ "$4" == true ]] && getent group o3k-compute >/dev/null 2>&1; then groupdel o3k-compute || true; fi
+  ' _ "$account_created" "$group_created" "$compute_account_created" "$compute_group_created" || true
 fi
 sudo -n rm -rf -- "$STATE_ROOT"
 rm -rf -- "$PID_ROOT"

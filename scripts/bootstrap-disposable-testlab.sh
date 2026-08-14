@@ -321,24 +321,35 @@ done < <(id -nG "$COMPUTE_ACCOUNT" | tr ' ' '\n')
 [[ ! -e "$PID_ROOT" && ! -L "$PID_ROOT" ]] || fail "run pid state already exists"
 install -d -m 0700 "$PID_ROOT"
 [[ ! -e "$STATE_ROOT" && ! -L "$STATE_ROOT" ]] || fail "run state already exists"
-sudo -n install -d -o "$(id -u)" -g "$(id -g)" -m 0755 \
+sudo -n install -d -o root -g root -m 0755 \
   "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
+# The run root is shared by the control and compute service identities.  Keep
+# it root-owned and traversable; private children below it carry the service
+# ownership.  Cleanup validates this exact posture before removing state.
 sudo -n chmod 0755 "$STATE_ROOT" "$STATE_ROOT/bin" "$STATE_ROOT/log" "$STATE_ROOT/tls"
 sudo -n install -d -o "$(id -u "$SERVICE_ACCOUNT")" -g "$(id -g "$SERVICE_ACCOUNT")" -m 0700 \
   "$STATE_ROOT/data"
 sudo -n install -d -o "$(id -u "$COMPUTE_ACCOUNT")" -g kvm -m 2710 \
   "$STATE_ROOT/compute-data"
-printf 'o3k-disposable-testlab-v1\ncommit=%s\nrun=%s\n' "$SOURCE_COMMIT" "$RUN_ID" >"$STATE_ROOT/.o3k-run-owned"
-chmod 0600 "$STATE_ROOT/.o3k-run-owned"
-printf 'o3k-owned-v1 path=%s\n' "$STATE_ROOT" >"$STATE_ROOT/.o3k-owned"
-chmod 0640 "$STATE_ROOT/.o3k-owned"
+sudo -n bash -c 'printf "o3k-disposable-testlab-v1\\ncommit=%s\\nrun=%s\\n" "$1" "$2" >"$3"; chmod 0600 "$3"' \
+  _ "$SOURCE_COMMIT" "$RUN_ID" "$STATE_ROOT/.o3k-run-owned"
+sudo -n bash -c 'printf "o3k-owned-v1 path=%s\\n" "$1" >"$2"; chmod 0640 "$2"' \
+  _ "$STATE_ROOT" "$STATE_ROOT/.o3k-owned"
 if [[ "$ACCOUNT_CREATED" == true ]]; then
-  printf 'o3k-disposable-account-v1\n' >"$STATE_ROOT/.o3k-account-created"
-  chmod 0600 "$STATE_ROOT/.o3k-account-created"
+  sudo -n bash -c 'printf "o3k-disposable-account-v1\\n" >"$1"; chmod 0600 "$1"' \
+    _ "$STATE_ROOT/.o3k-account-created"
 fi
 if [[ "$GROUP_CREATED" == true ]]; then
-  printf 'o3k-disposable-group-v1\n' >"$STATE_ROOT/.o3k-group-created"
-  chmod 0600 "$STATE_ROOT/.o3k-group-created"
+  sudo -n bash -c 'printf "o3k-disposable-group-v1\\n" >"$1"; chmod 0600 "$1"' \
+    _ "$STATE_ROOT/.o3k-group-created"
+fi
+if [[ "$COMPUTE_ACCOUNT_CREATED" == true ]]; then
+  sudo -n bash -c 'printf "o3k-disposable-compute-account-v1\\n" >"$1"; chmod 0600 "$1"' \
+    _ "$STATE_ROOT/.o3k-compute-account-created"
+fi
+if [[ "$COMPUTE_GROUP_CREATED" == true ]]; then
+  sudo -n bash -c 'printf "o3k-disposable-compute-group-v1\\n" >"$1"; chmod 0600 "$1"' \
+    _ "$STATE_ROOT/.o3k-compute-group-created"
 fi
 SUPPLEMENTARY_GROUPS_ADDED=true
 sudo -n flock -x "$ACCOUNT_LOCK" bash -c '
@@ -386,12 +397,12 @@ PASSWORD="$(openssl rand -hex 32)"
 [[ "$PASSWORD" =~ ^[0-9a-f]{64}$ ]] || fail "generated password format is unsafe"
 echo "::add-mask::${PASSWORD}"
 SIGNING_KEY="$(openssl rand -hex 48)"
-password_tmp="$STATE_ROOT/.password.tmp.$$"
+password_tmp="$(mktemp "${RUNNER_TEMP%/}/o3k-password.XXXXXX")"
 printf '%s\n' "$PASSWORD" >"$password_tmp"
 chmod 0600 "$password_tmp"
-mv -f -- "$password_tmp" "$STATE_ROOT/.password"
-o3kd_env_tmp="$STATE_ROOT/o3kd.env.tmp.$$"
-compute_env_tmp="$STATE_ROOT/o3k-compute.env.tmp.$$"
+sudo -n mv -f -- "$password_tmp" "$STATE_ROOT/.password"
+o3kd_env_tmp="$(mktemp "${RUNNER_TEMP%/}/o3kd.env.XXXXXX")"
+compute_env_tmp="$(mktemp "${RUNNER_TEMP%/}/o3k-compute.env.XXXXXX")"
 cat >"$o3kd_env_tmp" <<EOF
 O3K_DATA_DIR=$(printf '%q' "$STATE_ROOT/data")
 O3K_LISTEN_ADDR=$(printf '%q' "127.0.0.1:${AUTH_PORT}")
@@ -452,8 +463,8 @@ if [[ "${O3K_AGENT_INSPECT_PROBE_ENABLED:-false}" == true ]]; then
     >>"$o3kd_env_tmp"
 fi
 chmod 0600 "$o3kd_env_tmp" "$compute_env_tmp"
-mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
-mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
+sudo -n mv -f -- "$o3kd_env_tmp" "$STATE_ROOT/o3kd.env"
+sudo -n mv -f -- "$compute_env_tmp" "$STATE_ROOT/o3k-compute.env"
 sudo -n chown "$SERVICE_ACCOUNT:$SERVICE_ACCOUNT" "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password"
 sudo -n chown "$COMPUTE_ACCOUNT:$COMPUTE_ACCOUNT" "$STATE_ROOT/o3k-compute.env"
 sudo -n chmod 0600 "$STATE_ROOT/o3kd.env" "$STATE_ROOT/.password" "$STATE_ROOT/o3k-compute.env"
@@ -472,6 +483,11 @@ sudo -n install -m 0640 -o "$COMPUTE_ACCOUNT" -g "$COMPUTE_ACCOUNT" \
 sudo -n install -d -o "$COMPUTE_ACCOUNT" -g kvm -m 0710 "$STATE_ROOT/compute-data/agent-id.artifacts"
 sudo -n install -m 0600 -o "$SERVICE_ACCOUNT" -g "$SERVICE_ACCOUNT" /dev/null "$STATE_ROOT/log/o3kd.log"
 sudo -n install -m 0600 -o "$COMPUTE_ACCOUNT" -g "$COMPUTE_ACCOUNT" /dev/null "$STATE_ROOT/log/o3k-compute.log"
+# o3kd writes this probe result as its own service identity.  The run root is
+# intentionally not writable by service accounts, so provision the file
+# before startup while retaining the stable path consumed by the workflow.
+sudo -n install -m 0600 -o "$SERVICE_ACCOUNT" -g "$SERVICE_ACCOUNT" /dev/null \
+  "$STATE_ROOT/agent-inspect-probe.json"
 # Host-network realization (TAP, bridge, gateway, and DHCP setup) is owned by
 # the dedicated compute service. Validate the ambient-capability launch path
 # before starting it, using a run-unique temporary link and deleting only that

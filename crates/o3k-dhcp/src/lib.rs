@@ -448,7 +448,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DhcpError> {
 mod tests {
     use super::*;
     fn service() -> Result<DhcpService, DhcpError> {
-        DhcpService::open(std::env::temp_dir().join("o3k-dhcp-tests"))
+        DhcpService::open(
+            std::env::temp_dir().join(format!("o3k-dhcp-tests-{}", uuid::Uuid::now_v7())),
+        )
     }
     fn config() -> Result<DhcpConfig, DhcpError> {
         Ok(DhcpConfig {
@@ -483,11 +485,7 @@ mod tests {
         // intent is `start,static[,lease]`, which spans the interface subnet.
         assert!(rendered.contains("dhcp-range=192.0.2.1,static,3600"));
         assert!(rendered.contains("dhcp-leasefile="));
-        assert!(
-            service
-                .managed_lease_path()
-                .ends_with("o3k-dhcp-tests/dnsmasq.leases")
-        );
+        assert!(service.managed_lease_path().ends_with("dnsmasq.leases"));
         Ok(())
     }
 
@@ -533,11 +531,7 @@ mod tests {
     #[test]
     fn foreign_paths_are_not_used() -> Result<(), DhcpError> {
         let service = service()?;
-        assert!(
-            service
-                .managed_config_path()
-                .ends_with("o3k-dhcp-tests/dnsmasq.conf")
-        );
+        assert!(service.managed_config_path().ends_with("dnsmasq.conf"));
         Ok(())
     }
 
