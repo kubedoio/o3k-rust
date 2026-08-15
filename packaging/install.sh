@@ -6,6 +6,7 @@ CONFIG_DIR=/etc/o3k
 LOG_DIR=/var/log/o3k
 BINARY=
 COMPUTE_BINARY=
+O3K_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
 while (($#)); do
@@ -16,6 +17,7 @@ while (($#)); do
     --log-dir) LOG_DIR="$2"; shift 2;;
     --binary) BINARY="$2"; shift 2;;
     --compute-binary) COMPUTE_BINARY="$2"; shift 2;;
+    --o3k-binary) O3K_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
@@ -81,12 +83,15 @@ fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
 # o3k doctor is profile-independent: installed in every profile (issue #617).
 # The release bundle carries bin/o3k next to bin/o3kd; repo-tree/dev installs
-# build it from the workspace like the o3kd fallback above.
-if [[ -x "$ROOT_DIR/bin/o3k" ]]; then
-  O3K_BINARY="$ROOT_DIR/bin/o3k"
-else
-  cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k
-  O3K_BINARY="$ROOT_DIR/target/release/o3k"
+# build it from the workspace like the o3kd fallback above unless the caller
+# supplies --o3k-binary (used by tests to avoid in-script release builds).
+if [[ -z "$O3K_BINARY" ]]; then
+  if [[ -x "$ROOT_DIR/bin/o3k" ]]; then
+    O3K_BINARY="$ROOT_DIR/bin/o3k"
+  else
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k
+    O3K_BINARY="$ROOT_DIR/target/release/o3k"
+  fi
 fi
 [[ -x "$O3K_BINARY" ]] || { echo "o3k binary is not executable: $O3K_BINARY" >&2; exit 1; }
 TLS_DIR="$CONFIG_DIR/tls"

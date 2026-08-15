@@ -9,6 +9,14 @@ if [[ ! -x "$BINARY" ]]; then
   cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd >/dev/null
 fi
 [[ -x "$BINARY" ]] || { echo "packaging test binary is missing: $BINARY" >&2; exit 2; }
+# The installer's repo-tree fallback would build o3k in release mode inside
+# every install run; prebuild once and pass --o3k-binary so this test stays
+# deterministic and fast (the fallback itself remains the dev-install path).
+O3K_BINARY="${O3K_PACKAGING_O3K_BINARY:-${ROOT_DIR}/target/release/o3k}"
+if [[ ! -x "$O3K_BINARY" ]]; then
+  cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k >/dev/null
+fi
+[[ -x "$O3K_BINARY" ]] || { echo "packaging o3k test binary is missing: $O3K_BINARY" >&2; exit 2; }
 
 # Disk-space evidence is a safety precondition, not an optional diagnostic.
 # A command that exits successfully without producing a parseable df row must
@@ -127,7 +135,7 @@ fi
 grep -Fqx 'foreign binary' "$WORK_DIR/foreign-uninstall-prefix/bin/o3kd"
 
 bash "$ROOT_DIR/packaging/install.sh" \
-  --profile fake --noninteractive --binary "$BINARY" \
+  --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
   --prefix "$WORK_DIR/prefix" --data-dir "$WORK_DIR/data" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
 grep -Fqx "o3k-installed-v1 prefix=$WORK_DIR/prefix" "$WORK_DIR/prefix/share/o3k/.o3k-installed"
@@ -251,7 +259,7 @@ systemd_line="$(grep -n 'systemctl disable --now o3kd.service' "$ROOT_DIR/packag
 [[ -n "$ownership_line" && -n "$systemd_line" && "$ownership_line" -lt "$systemd_line" ]]
 
 bash "$ROOT_DIR/packaging/install.sh" \
-  --profile fake --noninteractive --binary "$BINARY" \
+  --profile fake --noninteractive --binary "$BINARY" --o3k-binary "$O3K_BINARY" \
   --prefix "$WORK_DIR/purge-prefix" --data-dir "$WORK_DIR/purge-data" \
   --config-dir "$WORK_DIR/purge-config" --log-dir "$WORK_DIR/purge-log"
 printf 'foreign state\n' >"$WORK_DIR/purge-data/foreign-canary"
