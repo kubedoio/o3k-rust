@@ -121,15 +121,35 @@ impl SystemExec {
         }
     }
 
-    /// Bounded `virsh -c qemu:///system uri`, optionally under
-    /// `sudo -u <user> --` when running as root.
+    /// Bounded `virsh -c qemu:///system uri`, optionally under `sudo` when
+    /// running as root. For the compute identity the supplementary groups
+    /// mirror the compute unit's `SupplementaryGroups=libvirt kvm` so the
+    /// probe reproduces the real agent's socket access (plain `sudo -u`
+    /// drops them); the control-identity probe keeps no extra groups so a
+    /// granted connection still means a boundary breach.
     async fn virsh_uri_inner(&self, user: Option<&str>) -> Result<String, String> {
         let mut command = Command::new("sudo");
         if self.is_root {
             let Some(user) = user else {
                 return self.virsh_uri_inner_unprivileged().await;
             };
-            command.args(["-u", user, "--", "virsh", "-c", "qemu:///system", "uri"]);
+            if user == "o3k-compute" {
+                command.args([
+                    "-u",
+                    user,
+                    "-g",
+                    user,
+                    "-G",
+                    "libvirt,kvm",
+                    "--",
+                    "virsh",
+                    "-c",
+                    "qemu:///system",
+                    "uri",
+                ]);
+            } else {
+                command.args(["-u", user, "--", "virsh", "-c", "qemu:///system", "uri"]);
+            }
         } else {
             return self.virsh_uri_inner_unprivileged().await;
         }
