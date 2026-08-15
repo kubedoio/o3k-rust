@@ -121,6 +121,31 @@ impl SystemExec {
         }
     }
 
+    /// argv for the compute-identity `runuser` virsh probe. util-linux does
+    /// not split `-G` values on commas (`getgrnam` receives the whole optarg),
+    /// so each supplementary group needs its own `-G` flag. Kept as an
+    /// associated function so the exact argv is covered by a unit test.
+    fn compute_probe_argv() -> Vec<String> {
+        [
+            "-u",
+            "o3k-compute",
+            "-g",
+            "o3k-compute",
+            "-G",
+            "libvirt",
+            "-G",
+            "kvm",
+            "--",
+            "virsh",
+            "-c",
+            "qemu:///system",
+            "uri",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    }
+
     /// Bounded `virsh -c qemu:///system uri`, optionally under `sudo` when
     /// running as root. For the compute identity `runuser` (util-linux) sets
     /// the supplementary groups mirroring the compute unit's
@@ -134,25 +159,15 @@ impl SystemExec {
                 return self.virsh_uri_inner_unprivileged().await;
             };
             if user == "o3k-compute" {
-                // runuser (util-linux) supports setting supplementary groups,
-                // which sudo on both target distros does not (`-G` is
-                // unavailable in Ubuntu's sudo build). The groups mirror the
-                // compute unit's SupplementaryGroups=libvirt kvm so the probe
-                // reproduces the real agent's socket access.
+                // runuser (util-linux) sets supplementary groups, which sudo
+                // on both target distros cannot (`-G` is unavailable in
+                // Ubuntu's sudo build). util-linux does not split `-G` values
+                // on commas (getgrnam on the whole optarg), so each group
+                // needs its own `-G`. The groups mirror the compute unit's
+                // SupplementaryGroups=libvirt kvm so the probe reproduces the
+                // real agent's socket access.
                 let mut run = Command::new("runuser");
-                run.args([
-                    "-u",
-                    user,
-                    "-g",
-                    user,
-                    "-G",
-                    "libvirt,kvm",
-                    "--",
-                    "virsh",
-                    "-c",
-                    "qemu:///system",
-                    "uri",
-                ]);
+                run.args(Self::compute_probe_argv());
                 run
             } else {
                 let mut run = Command::new("sudo");
@@ -556,5 +571,39 @@ impl HttpClient for SystemHttpClient {
 
     async fn post_json(&self, url: &str, body: &str) -> Result<HttpResponse, String> {
         request(url, "POST", Some(body))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_probe_argv_uses_repeated_supp_group_flags() {
+        let argv = SystemExec::compute_probe_argv();
+        assert_eq!(
+            argv,
+            [
+                "-u",
+                "o3k-compute",
+                "-g",
+                "o3k-compute",
+                "-G",
+                "libvirt",
+                "-G",
+                "kvm",
+                "--",
+                "virsh",
+                "-c",
+                "qemu:///system",
+                "uri",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+        // No single -G may carry a comma-separated list: util-linux runuser
+        // passes the whole optarg to getgrnam without splitting.
+        assert!(argv.windows(2).all(|w| w[1] != "-G" || !w[0].contains(',')));
     }
 }
