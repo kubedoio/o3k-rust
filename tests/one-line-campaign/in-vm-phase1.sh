@@ -52,10 +52,14 @@ fi
 # The platform line is "✓ <PRETTY_NAME> <machine>" — derive it from the actual
 # os-release instead of hardcoding a point release (e.g. Ubuntu 24.04.4 LTS).
 PLATFORM_MARKER="✓ $(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release) $(uname -m)"
+# The version marker is checked as a regex BEFORE the fixed-string loop: the
+# exact pinned version is asserted by tests/installer-negative.sh, not here,
+# so a version bump never silently breaks the campaign.
+grep -Eq '✓ O3K v[0-9][0-9A-Za-z.+-]* verified' "$ONELINER_OUT" \
+  || { echo "ERROR: missing output marker: O3K v<version> verified" >&2; exit 1; }
 for marker in \
   'O3K Cloud OS — TestLab' \
   "$PLATFORM_MARKER" \
-  '✓ O3K v0.2.0-alpha.2 verified' \
   '✓ mTLS identities ready' \
   '✓ o3kd installed' \
   '✓ o3k-compute installed' \
