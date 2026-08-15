@@ -5,7 +5,7 @@
 # release generator exports this file byte-for-byte as dist/install.sh
 # (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
 # alpha invocation is
-#   curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
+#   curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.3.0-alpha.1/install.sh | sudo sh -
 # get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
 #
@@ -28,7 +28,7 @@
 #   download or verification failure aborts.
 #
 # An optional endpoint may serve this same file with an added FIRST line
-#   O3K_PINNED_VERSION="v0.2.0-alpha.2"
+#   O3K_PINNED_VERSION="v0.3.0-alpha.1"
 # which is a plain shell assignment when the stream is piped to sh. It is
 # kept for optional future /v<version> endpoint paths (packaging/get-o3k-worker)
 # and handled by the resolution order below; its absence is not an error.
@@ -72,7 +72,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.2.0-alpha.2"
+O3K_INSTALLER_VERSION="v0.3.0-alpha.1"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -111,7 +111,7 @@ check_version_format() {
   printf '%s\n' "$version" \
     | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' \
     || {
-      printf 'unsupported version: %s — expected a published release version like v0.2.0-alpha.2; refusing to fall back to main/latest\n' "$1" >&2
+      printf 'unsupported version: %s — expected a published release version like v0.3.0-alpha.1; refusing to fall back to main/latest\n' "$1" >&2
       exit 1
     }
 }

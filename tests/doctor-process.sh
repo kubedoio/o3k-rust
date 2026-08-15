@@ -214,7 +214,7 @@ bin/o3k-compute
 share/o3k/release-manifest.json
 share/o3k/SHA256SUMS
 EOF
-printf '{"version":"0.2.0-alpha.2","profile":"libvirt"}\n' \
+printf '{"version":"0.3.0-alpha.1","profile":"libvirt"}\n' \
   >"$SANDBOX_PREFIX/share/o3k/release-manifest.json"
 O3K_SHA256="$(sha256sum "$SANDBOX_PREFIX/bin/o3k" | awk '{print $1}')"
 O3K_COMPUTE_SHA256="$(sha256sum "$SANDBOX_PREFIX/bin/o3k-compute" | awk '{print $1}')"
@@ -317,7 +317,7 @@ import sys
 PORT = int(sys.argv[1])
 READY = (
     b'{"status":"ready","agent_id":"compute-agent",'
-    b'"agent_epoch":"epoch-sandbox","software_version":"0.2.0-alpha.2",'
+    b'"agent_epoch":"epoch-sandbox","software_version":"0.3.0-alpha.1",'
     b'"capabilities":{"max_vcpus":8,"max_memory_mib":16384,"max_disk_gb":10}}\n'
 )
 
