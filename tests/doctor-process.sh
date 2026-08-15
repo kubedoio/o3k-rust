@@ -246,7 +246,7 @@ cat >"$SANDBOX_SHIM_BIN/ip" <<'EOF'
 # has no ownership record (stale-TAP negative).
 printf '1: lo: <LOOPBACK,UP,LOWER_UP>\n'
 printf '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP>\n'
-printf '3: o3ktap-0123456789abcdef: <BROADCAST,MULTICAST,UP,LOWER_UP>\n'
+printf '3: o3ktap-99999999: <BROADCAST,MULTICAST,UP,LOWER_UP>\n'
 exit 0
 EOF
 cat >"$SANDBOX_SHIM_BIN/df" <<'EOF'
