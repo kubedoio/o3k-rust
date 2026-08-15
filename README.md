@@ -33,7 +33,7 @@ Core principles:
   O3K control plane, but it does not become O3K's VM scheduler, tenant-resource
   database, or Cloud Kernel.
 
-> **Current status:** alpha. `v0.2.0-alpha.1` remains a Rust-native,
+> **Current status:** alpha. `v0.2.0-alpha.2` remains a Rust-native,
 > OpenStack-compatible libvirt TestLab direction. Production HA, PostgreSQL,
 > Kubernetes HA, native persistent volumes, and full OpenStack parity are not
 > current support claims.
@@ -46,15 +46,28 @@ On a clean Ubuntu 24.04 or Debian 12 x86_64 VM:
 curl -sfL https://get.o3k.io | sudo sh -
 ```
 
-This installs the verified `v0.2.0-alpha.1` release bundle, bootstraps the
-libvirt TestLab (`test-vm` ACTIVE, console verified), and writes client
-credentials to `/etc/o3k/admin-openrc` and `/etc/o3k/clouds.yaml` — the admin
-password is never printed.
+`get.o3k.io` is only a convenience redirect to the official GitHub Release
+asset. The canonical direct alpha URL is:
+
+```bash
+curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
+```
+
+The future stable URL will be
+`https://github.com/kubedoio/o3k-rust/releases/latest/download/install.sh` —
+it is **not** the alpha source and must not be used before a stable release
+exists.
+
+The installer is pinned to its own release: it installs the verified
+`v0.2.0-alpha.2` release bundle, bootstraps the libvirt TestLab (`test-vm`
+ACTIVE, console verified), and writes client credentials to
+`/etc/o3k/admin-openrc` and `/etc/o3k/clouds.yaml` — the admin password is
+never printed.
 
 **Supported:** Ubuntu 24.04 x86_64, Debian 12 x86_64, libvirt TestLab alpha.
-Version pinning (`/v0.2.0-alpha.1`, `O3K_VERSION`), the alpha channel model,
-credentials, idempotent re-run, uninstall/purge, and troubleshooting:
-[docs/INSTALLER.md](docs/INSTALLER.md).
+Version pinning and the dev/test overrides (`O3K_VERSION`,
+`O3K_RELEASE_BASE`), credentials, idempotent re-run, uninstall/purge, and
+troubleshooting: [docs/INSTALLER.md](docs/INSTALLER.md).
 
 **Not claimed:** production, HA, Kubernetes HA, PostgreSQL, full OpenStack,
 native Cinder, advanced networking, ARM/RHEL/etc.

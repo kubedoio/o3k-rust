@@ -1,13 +1,25 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# make-release-archive.sh — produce the downloadable release artifacts from an
+# make-release-archive.sh — produce the downloadable release assets from an
 # existing verified bundle directory (dist/o3k-<version>/, created by
 # packaging/make-release.sh). Issue #613 one-line installer.
 #
 # Usage: packaging/make-release-archive.sh VERSION [BUNDLE_DIR]
 #
-# Outputs (the GitHub Release assets that packaging/get-o3k.sh downloads):
+# Release asset contract for the GitHub Release (produced together with
+# packaging/make-release.sh):
+#   dist/install.sh                            one-line installer (0755),
+#                                              byte-identical export of
+#                                              packaging/get-o3k.sh —
+#                                              re-verified here before
+#                                              archiving (drift gate);
+#   dist/o3k-<version>-linux-x86_64.tar.gz     this script's outputs
+#   dist/o3k-<version>-linux-x86_64.tar.gz.sha256
+#   plus o3kd, o3k-compute, SHA256SUMS, sbom.spdx.json, and manifest.json
+#   from the bundle directory (the manifest records install.sh's SHA-256).
+#
+# Outputs (the assets that packaging/get-o3k.sh downloads):
 #
 #   dist/o3k-<version>-linux-x86_64.tar.gz
 #   dist/o3k-<version>-linux-x86_64.tar.gz.sha256
@@ -52,6 +64,20 @@ mkdir -p -- "$DIST_DIR"
 TARBALL="$DIST_DIR/o3k-$VERSION-linux-x86_64.tar.gz"
 SHA_FILE="$TARBALL.sha256"
 
+# install.sh drift gate at release time: the published installer must be the
+# byte-identical export of packaging/get-o3k.sh created by make-release.sh.
+# The archive is never produced from a drifted installer source.
+INSTALL_SH="$DIST_DIR/install.sh"
+[[ -f "$INSTALL_SH" && ! -L "$INSTALL_SH" ]] || {
+  echo "install.sh release asset is missing: $INSTALL_SH (run packaging/make-release.sh first)" >&2
+  exit 1
+}
+cmp -s -- "$ROOT_DIR/packaging/get-o3k.sh" "$INSTALL_SH" || {
+  echo "install.sh release asset drifted from packaging/get-o3k.sh — refusing to archive" >&2
+  exit 1
+}
+INSTALL_SH_SHA256="$(sha256sum "$INSTALL_SH" | awk '{print $1}')"
+
 tar -C "$(dirname "$BUNDLE_DIR")" -czf "$TARBALL" "./$BUNDLE_NAME"
 
 # Verify the archive shape before publishing anything: every entry must start
@@ -78,3 +104,4 @@ printf '%s  %s\n' "$DIGEST" "o3k-$VERSION-linux-x86_64.tar.gz" >"$SHA_FILE"
 
 echo "release archive: $TARBALL ($ENTRY_COUNT entries, all ./ prefixed)"
 echo "published SHA-256: $SHA_FILE"
+echo "install.sh release asset: $INSTALL_SH (sha256 $INSTALL_SH_SHA256)"

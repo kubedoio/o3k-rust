@@ -1,10 +1,19 @@
-# get.o3k.io endpoint — Cloudflare Worker artifact
+# get.o3k.io endpoint — Cloudflare Worker artifact (OPTIONAL, non-authoritative)
 
-Minimal, independently deployable Cloudflare Worker (ES module, no framework,
-no KV) that serves the one-line O3K TestLab installer described in
-[`docs/INSTALLER.md`](../../docs/INSTALLER.md). This directory is the complete
-deployable artifact; the Worker source lives in this repository so the served
-content is reviewable and versioned with the code.
+> **This Worker is NOT required for installation and is NOT a trust
+> dependency.** The production path is a Cloudflare Redirect Rule that 302s
+> `get.o3k.io` directly to the tagged GitHub Release asset — see
+> [`cloudflare-redirect.md`](cloudflare-redirect.md) for the exact
+> configuration. GitHub Releases is the authoritative distribution source.
+> This Worker is retained only for optional future channel/version
+> functionality and may be bypassed entirely; installation works identically
+> through the direct GitHub URL.
+
+This directory is a complete, independently deployable Cloudflare Worker (ES
+module, no framework, no KV) that serves the one-line O3K TestLab installer
+described in [`docs/INSTALLER.md`](../../docs/INSTALLER.md). The Worker source
+lives in this repository so the served content is reviewable and versioned
+with the code.
 
 ## Route map
 
@@ -28,18 +37,20 @@ script downloads them directly from
 ## How the channel table works
 
 `packaging/channels.yaml` maps channel names to exact published release
-versions (never git branches, never `latest`):
+versions (never git branches, never `latest`) and is advisory/future
+functionality only:
 
 ```yaml
 channels:
-  alpha: v0.2.0-alpha.1
+  alpha: v0.2.0-alpha.2
 ```
 
-`GET /channel/alpha` returns `v0.2.0-alpha.1` as plain text. The wrapper
-script resolves the version with precedence
-`O3K_VERSION` env > `O3K_PINNED_VERSION` (the `/v<version>` first line) >
-`GET /channel/alpha`, and refuses to fall back to main/latest. Adding a
-`stable` channel later is a one-line table change plus a deploy — no redesign.
+`GET /channel/alpha` returns `v0.2.0-alpha.2` as plain text. The published
+installer never consults this table: it is pinned to its own release version
+(baked `O3K_INSTALLER_VERSION` in `packaging/get-o3k.sh`), with resolution
+precedence `O3K_VERSION` env > `O3K_PINNED_VERSION` (the `/v<version>` first
+line) > the baked pin. Adding a `stable` channel later is a one-line table
+change plus a deploy — no redesign.
 
 ## Keeping assets in sync (single source of truth)
 
@@ -63,8 +74,8 @@ node --test packaging/get-o3k-worker/test.mjs
 ```
 
 Covers: `/install.sh` matches `packaging/get-o3k.sh` byte-for-byte; `/version`
-returns the alpha target; `/channel/alpha` returns `v0.2.0-alpha.1`; unknown
-channel is `404`; `/v0.2.0-alpha.1` starts with the exact pin line and then
+returns the alpha target; `/channel/alpha` returns `v0.2.0-alpha.2`; unknown
+channel is `404`; `/v0.2.0-alpha.2` starts with the exact pin line and then
 equals the script; `/v/bogus` is `400`.
 
 ## Deployment
@@ -75,7 +86,10 @@ npx wrangler login            # once per operator
 npx wrangler deploy           # preview on *.workers.dev
 ```
 
-For production `get.o3k.io`: configure the owning Cloudflare account (fill
-`account_id` in `wrangler.toml` or let wrangler resolve it interactively) and
-uncomment the `routes` custom-domain block. Publishing to the live
-`get.o3k.io` domain is a release step, not part of this repository's tests.
+For production `get.o3k.io`: prefer the Cloudflare Redirect Rule in
+[`cloudflare-redirect.md`](cloudflare-redirect.md). If the Worker's optional
+routes are deployed on the domain, configure the owning Cloudflare account
+(fill `account_id` in `wrangler.toml` or let wrangler resolve it
+interactively) and uncomment the `routes` custom-domain block. Publishing to
+the live `get.o3k.io` domain is a release step, not part of this repository's
+tests.

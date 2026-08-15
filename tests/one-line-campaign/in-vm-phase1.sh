@@ -41,8 +41,7 @@ log "pre-checks passed (no o3k accounts, /etc/o3k absent, canaries planted)"
 # ---- (b) the exact one-liner, verbatim capture ---------------------------------
 log "running the one-liner (exact command, output captured to $ONELINER_OUT)"
 if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_INSTALL_BASE=http://10.0.2.2:18000 \
-        O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
+    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
     | tee "$ONELINER_OUT"; then
   log "one-liner exited 0"
 else
@@ -56,7 +55,7 @@ PLATFORM_MARKER="✓ $(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release) $(
 for marker in \
   'O3K Cloud OS — TestLab' \
   "$PLATFORM_MARKER" \
-  '✓ O3K v0.2.0-alpha.1 verified' \
+  '✓ O3K v0.2.0-alpha.2 verified' \
   '✓ mTLS identities ready' \
   '✓ o3kd installed' \
   '✓ o3k-compute installed' \

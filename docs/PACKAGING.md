@@ -27,7 +27,7 @@ release gate. Release artifacts are not claims of CellHV support; the CellHV
 profile remains separately environment-gated.
 
 The version must use the numeric release format with an optional alphanumeric
-prerelease suffix (for example, `0.2.0-alpha.1`). Unsafe path or control
+prerelease suffix (for example, `0.2.0-alpha.2`). Unsafe path or control
 characters are rejected before build or output cleanup.
 
 Reset is explicit and preserves credentials:
@@ -47,18 +47,26 @@ migrations must remain forward-compatible before an upgrade is published.
 ## One-line installer
 
 For a clean Ubuntu 24.04 / Debian 12 host, the supported entry point is the
-one-line installer (`curl -sfL https://get.o3k.io | sudo sh -`) documented in
+one-line installer (`curl -sfL https://get.o3k.io | sudo sh -` — a
+convenience 302 redirect to the tagged GitHub Release asset) documented in
 [docs/INSTALLER.md](INSTALLER.md). Its packaging artifacts:
 
-- `packaging/get-o3k.sh` — the thin wrapper served by the endpoint; resolves
-  the version, installs host dependencies, downloads and verifies the
-  release archive, then drives the bundle scripts below;
-- `packaging/channels.yaml` — the channel table (`alpha -> v0.2.0-alpha.1`)
-  served by the endpoint and embedded in the worker
-  (`packaging/get-o3k-worker/`, generated snapshot `src/assets.js`, kept in
-  sync by `sync.sh --check`);
+- `packaging/get-o3k.sh` — the thin installer wrapper, exported
+  byte-for-byte as the `install.sh` GitHub Release asset by
+  `packaging/make-release.sh` (drift-gated by `cmp`, SHA-256 recorded in the
+  bundle manifest); it is pinned to its own release version
+  (`O3K_INSTALLER_VERSION`), never consults a channel service, installs host
+  dependencies, downloads and verifies the release archive, then drives the
+  bundle scripts below;
+- `packaging/channels.yaml` — the advisory channel table
+  (`alpha -> v0.2.0-alpha.2`) for future channel/version functionality only;
+  embedded in the optional worker (`packaging/get-o3k-worker/`, generated
+  snapshot `src/assets.js`, kept in sync by `sync.sh --check`); the
+  production `get.o3k.io` path is the Cloudflare Redirect Rule in
+  `packaging/get-o3k-worker/cloudflare-redirect.md`;
 - `packaging/make-release-archive.sh` — produces the GitHub Release assets
   (`o3k-<version>-linux-x86_64.tar.gz` + published `.sha256`) the wrapper
-  downloads, and verifies the archive shape before publishing;
+  downloads, verifies the archive shape before publishing, and re-checks the
+  `dist/install.sh` byte-identity gate before archiving;
 - `packaging/bootstrap-testlab.sh` — idempotent public-API TestLab bootstrap
   (CirrOS, network, subnet, port, flavor, keypair, `test-vm`, console).

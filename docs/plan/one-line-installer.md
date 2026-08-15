@@ -1,5 +1,11 @@
 # One-line O3K TestLab installer — agent plan
 
+> **Superseded by [docs/plan/alpha-2-release.md](alpha-2-release.md)** for the
+> release model changes (install.sh as a first-class GitHub Release asset,
+> installer pinned to its own release version, no channel-service dependency,
+> get.o3k.io reduced to a redirect). The record below documents the original
+> #613 milestone as implemented.
+
 - Issue: [#613](https://github.com/kubedoio/o3k-rust/issues/613)
 - Full specification: goal file circulated as `/tmp/p1-goal.md` (same content as the issue body; this plan is the implementation record, not a redefinition).
 - Deployment/evidence profile: libvirt TestLab alpha, `o3k-implemented` authority mode.

@@ -1,5 +1,11 @@
 // get.o3k.io installer endpoint — minimal Cloudflare Worker (ES module).
 //
+// NOT REQUIRED FOR INSTALLATION. The production installation path is a
+// Cloudflare Redirect Rule (see cloudflare-redirect.md): get.o3k.io 302s
+// directly to the tagged GitHub Release install.sh asset. This worker is
+// retained ONLY for optional future channel/version functionality and is
+// not a trust dependency of the installer.
+//
 // No framework, no KV, no release-asset proxying. The channel table is tiny
 // and versioned with the code: it is embedded as src/assets.js, regenerated
 // from the repo's single sources of truth by sync.sh
@@ -18,7 +24,8 @@
 //
 // The O3K_PINNED_VERSION line is a plain shell assignment when the stream is
 // piped to sh; packaging/get-o3k.sh resolves it with precedence
-// O3K_VERSION env > O3K_PINNED_VERSION > GET /channel/alpha.
+// O3K_VERSION env > O3K_PINNED_VERSION > the baked O3K_INSTALLER_VERSION
+// release pin. The installer never consults a channel service.
 
 import { SCRIPT, CHANNELS, ALPHA_TARGET } from './assets.js';
 
@@ -87,7 +94,7 @@ export default {
       const bare = version.startsWith('v') ? version.slice(1) : version;
       if (!VERSION_RE.test(bare)) {
         return text(
-          `invalid version path: /v${version} — expected a published release version like /v0.2.0-alpha.1\n`,
+          `invalid version path: /v${version} — expected a published release version like /v0.2.0-alpha.2\n`,
           { status: 400, cache: false },
         );
       }

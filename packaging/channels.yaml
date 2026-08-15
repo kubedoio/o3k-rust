@@ -1,8 +1,13 @@
-# O3K release channel table — served by the get.o3k.io endpoint.
+# O3K release channel table — ADVISORY / FUTURE FUNCTIONALITY ONLY.
 #
-# The endpoint answers GET /channel/<name> with the mapped value as plain text;
-# packaging/get-o3k.sh resolves the alpha channel when no explicit version is
-# pinned (O3K_VERSION env or the endpoint-injected O3K_PINNED_VERSION line).
+# Channels are NOT part of the trusted installation path. The published
+# installer (packaging/get-o3k.sh, exported byte-for-byte as the install.sh
+# GitHub Release asset) is pinned to its own release version
+# (O3K_INSTALLER_VERSION) and NEVER consults this file or any channel
+# service. The optional get.o3k.io Cloudflare Worker
+# (packaging/get-o3k-worker/) serves this table for future channel/version
+# functionality; production installation goes through the Cloudflare
+# redirect rule documented in packaging/get-o3k-worker/cloudflare-redirect.md.
 #
 # Rules:
 #   - a channel maps to an EXACT published release version — never a git
@@ -11,4 +16,4 @@
 #   - alpha is a prerelease, so it must not point at GitHub /releases/latest;
 #   - `stable` will be added later without redesigning this table.
 channels:
-  alpha: v0.2.0-alpha.1
+  alpha: v0.2.0-alpha.2

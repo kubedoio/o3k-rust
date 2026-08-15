@@ -125,4 +125,33 @@ else
   [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
 fi
 
+# ---- install.sh first-class release asset (successful fake-profile build) ----
+# make-release.sh refuses a dirty source tree (its own contract, exercised
+# above), so the success-path build runs only on a clean checkout — normal CI.
+# On a dirty developer tree the identity gate is instead enforced at
+# make-release/make-release-archive time on the release machine, so the asset
+# assertions skip with an explicit message rather than fail spuriously.
+if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
+  ASSET_DIST="$WORK_DIR/asset-dist"
+  O3K_RELEASE_DIST_DIR="$ASSET_DIST" \
+  O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
+    bash "$ROOT_DIR/packaging/make-release.sh" 0.0-installerasset fake
+  [[ -f "$ASSET_DIST/install.sh" && -x "$ASSET_DIST/install.sh" ]] \
+    || { echo "install.sh release asset missing or not 0755" >&2; exit 1; }
+  cmp -s "$ROOT_DIR/packaging/get-o3k.sh" "$ASSET_DIST/install.sh" \
+    || { echo "dist/install.sh drifted from packaging/get-o3k.sh" >&2; exit 1; }
+  EXPECTED_INSTALLER_SHA256="$(sha256sum "$ROOT_DIR/packaging/get-o3k.sh" | awk '{print $1}')"
+  python3 - "$ASSET_DIST/o3k-0.0-installerasset/manifest.json" "$EXPECTED_INSTALLER_SHA256" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+assert manifest.get("installer_asset") == "install.sh", manifest
+assert manifest.get("installer_sha256") == sys.argv[2], manifest
+PY
+  echo "install.sh release asset contract passed (byte-identity + manifest installer_sha256)"
+else
+  echo "skipping install.sh asset build assertions: source tree is not clean"
+fi
+
 echo "release bundle installer test passed"

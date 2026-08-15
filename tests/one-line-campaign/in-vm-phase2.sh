@@ -175,8 +175,7 @@ RERUN_STATUS=passed
 ENV_HASH_BEFORE="$(sha256sum /etc/o3k/o3kd.env | awk '{print $1}')"
 TLS_HASH_BEFORE="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_INSTALL_BASE=http://10.0.2.2:18000 \
-        O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
+    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
     | tee "$EVID/rerun-output.txt"; then
   log "one-liner re-run exited 0"
 else
@@ -300,8 +299,7 @@ log "uninstall: $UNINSTALL_STATUS"
 # ---- (e) reinstall through the one-liner ----------------------------------------
 REINSTALL_STATUS=passed
 if curl -sfL http://10.0.2.2:18000/ \
-    | sudo env O3K_INSTALL_BASE=http://10.0.2.2:18000 \
-        O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
+    | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
     | tee "$EVID/reinstall-output.txt"; then
   log "one-liner reinstall exited 0"
 else
@@ -415,7 +413,6 @@ doc = {
     "install_method": "one-line-local-endpoint",
     "endpoint_base": "http://10.0.2.2:18000",
     "installer_command": "curl -sfL http://10.0.2.2:18000/ | sudo env "
-        "O3K_INSTALL_BASE=http://10.0.2.2:18000 "
         "O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh -",
     "public_api_only": True,
     "install": {

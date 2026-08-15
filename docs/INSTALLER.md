@@ -6,11 +6,25 @@ On a clean supported Linux VM, this is the entire install:
 curl -sfL https://get.o3k.io | sudo sh -
 ```
 
-The endpoint serves a small, auditable wrapper script
-([`packaging/get-o3k.sh`](../packaging/get-o3k.sh)) that downloads the
-certified release bundle from GitHub Releases, verifies it, and drives the
-same packaging scripts a manual install uses — it is a thin orchestrator, not
-a second implementation of installation, TLS, accounts, or state ownership.
+`get.o3k.io` is only a convenience 302 redirect to the official GitHub
+Release asset. The canonical direct alpha URL is:
+
+```sh
+curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
+```
+
+The future stable URL will be
+`https://github.com/kubedoio/o3k-rust/releases/latest/download/install.sh` —
+it is **not** the alpha source and must not be used before a stable release
+exists.
+
+The `install.sh` asset is the byte-identical export of
+[`packaging/get-o3k.sh`](../packaging/get-o3k.sh), the single auditable
+installer source in the repository. It is a small, auditable wrapper script
+that downloads the certified release bundle from GitHub Releases, verifies
+it, and drives the same packaging scripts a manual install uses — it is a
+thin orchestrator, not a second implementation of installation, TLS,
+accounts, or state ownership.
 
 ## Supported platforms
 
@@ -27,8 +41,11 @@ RHEL/Fedora, other releases, and other profiles are not supported.
    non-root runs;
 2. creates a private `mktemp -d` temp dir with trap cleanup — nothing is
    executed from unverified content;
-3. resolves the version (`O3K_VERSION` env > URL-pinned version > the `alpha`
-   channel; no fallback to `main`/`latest` ever);
+3. resolves the version from the pin baked into the installer
+   (`O3K_INSTALLER_VERSION=v0.2.0-alpha.2`); precedence is the `O3K_VERSION`
+   env override (dev/test only) > an optional endpoint-injected
+   `O3K_PINNED_VERSION` first line > the baked pin. The installer never
+   consults a channel service and never falls back to `main`/`latest`;
 4. apt-installs the certified dependency set (the only place the wrapper may
    install packages) and enables `libvirtd`;
 5. downloads `o3k-<version>-linux-x86_64.tar.gz` and its published
@@ -57,36 +74,53 @@ The TestLab bootstrap replaces the manual steps of
 [`docs/cirros-walkthrough.md`](cirros-walkthrough.md) but produces the same
 public-API resources.
 
-## Channels and version pinning
+## Pinned versions and overrides
 
-`get.o3k.io` serves a small channel table
-([`packaging/channels.yaml`](../packaging/channels.yaml)):
+Every published installer is pinned to its own release version (the baked
+`O3K_INSTALLER_VERSION` constant in `packaging/get-o3k.sh`), so the plain
+`curl | sudo sh -` form installs exactly `v0.2.0-alpha.2` by default. The
+installer never asks any endpoint which version to install.
 
-```text
-GET /channel/alpha      -> v0.2.0-alpha.1
-GET /version            -> v0.2.0-alpha.1 (current advertised version)
-```
+Version resolution precedence:
 
-The plain `curl | sudo sh -` form resolves the `alpha` channel. Pin an exact
-published release instead:
+1. `O3K_VERSION` environment variable (explicit dev/test override, highest
+   precedence):
 
-```sh
-curl -sfL https://get.o3k.io/v0.2.0-alpha.1 | sudo sh -
-```
+   ```sh
+   curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.2.0-alpha.2 sh -
+   ```
 
-or through the environment (highest precedence):
+2. an optional `O3K_PINNED_VERSION="<version>"` first line, kept for the
+   optional Worker's `/v<version>` endpoint paths
+   ([`packaging/get-o3k-worker/`](../packaging/get-o3k-worker/README.md));
+3. the baked `O3K_INSTALLER_VERSION` release pin.
 
-```sh
-curl -sfL https://get.o3k.io | sudo env O3K_VERSION=v0.2.0-alpha.1 sh -
-```
+There is no channel fetch and no fallback to `main`/`latest`: a version can
+only resolve to an exact published release version.
 
-Channels map to exact published release versions — never git branches and
-never `latest` — so a channel can never resolve to unpublished build state.
-A `stable` channel can be introduced later without redesign. The endpoint is
-implemented as a minimal Cloudflare Worker
-([`packaging/get-o3k-worker/`](../packaging/get-o3k-worker/README.md));
-release archives are served by GitHub Releases, not proxied through the
-endpoint.
+## What is verified
+
+Exactly this chain is verified before anything from the archive runs:
+
+- the tagged GitHub Release asset over HTTPS (production URLs are pinned to
+  HTTPS; HTTP is permitted only through the documented `O3K_RELEASE_BASE`
+  dev/test override);
+- the published SHA-256 of the tarball, checked **before** extraction;
+- the bundle's own `SHA256SUMS` (exactly the regular bundle files) and the
+  glibc baseline via the bundled `verify-release-bundle.sh`;
+- the SSH-signed release tag is the authenticity anchor of the published
+  release itself (v0.2.0-alpha.1 model: ssh-ed25519 signature on the tag).
+
+The checksums are integrity checks, not an authenticity signature; see
+[`docs/RELEASE.md`](RELEASE.md) for the signing position.
+
+`packaging/channels.yaml` and the optional Worker remain for future
+channel/version functionality only; they are **not** part of the trusted
+installation path. The production `get.o3k.io` behavior is a Cloudflare
+Redirect Rule (see
+[`packaging/get-o3k-worker/cloudflare-redirect.md`](../packaging/get-o3k-worker/cloudflare-redirect.md));
+release archives are served by GitHub Releases, not proxied through any
+Cloudflare service.
 
 ## Credentials
 
@@ -114,7 +148,9 @@ key is `/etc/o3k/testlab-key.pem` (mode 0600, ledger-owned).
 A second run converges instead of creating duplicates. This is the verbatim
 second-run output (modulo apt/curl progress noise, shown here from the
 passing Ubuntu 24.04 campaign in
-`target/real-host-workflow-artifacts/asr-022-cd15263/one-line-ubuntu-passed/rerun-output.txt`):
+`target/real-host-workflow-artifacts/asr-022-cd15263/one-line-ubuntu-passed/rerun-output.txt`);
+the v0.2.0-alpha.2 output is identical except that every version string reads
+`v0.2.0-alpha.2`:
 
 ```text
 O3K v0.2.0-alpha.1 already installed
@@ -179,7 +215,7 @@ configuration files. Foreign files and foreign state are always preserved.
 |---|---|
 | `unsupported kernel/architecture/distribution` | Run on Ubuntu 24.04 or Debian 12 x86_64 only; other systems are refused by design. |
 | `preflight failed (--profile libvirt ...)` | The host does not meet the certified TestLab requirements — usually missing `/dev/kvm` (enable nested KVM or run on a KVM-capable VM), missing libvirt, or insufficient disk. The wrapper aborts; nothing is installed. |
-| `download failed: ...` | The endpoint or GitHub Releases was unreachable, or the release asset is missing (404). Check network/proxy access to `get.o3k.io` and `github.com`; retry converges. |
+| `download failed: ...` | GitHub Releases was unreachable, or the release asset is missing (404). Check network/proxy access to `get.o3k.io` and `github.com`; retry converges. |
 | `published SHA-256 verification failed` | The downloaded archive does not match the published checksum. The installer refuses to extract or execute anything — verify your proxy/network is not tampering, then retry. |
 | `release archive is not a readable gzip tarball` / unsafe entry message | The download was truncated or the archive shape is invalid. Nothing is extracted; retry. |
 | `release bundle verification failed` | The bundled `verify-release-bundle.sh` rejected the archive. Do not bypass it. |
@@ -205,8 +241,10 @@ This is an **alpha TestLab installer**. It does not claim:
 - ARM, RHEL/Fedora, Ubuntu 26.04, or any platform beyond the two listed;
 - anything on hosts that fail the certified preflight.
 
-Alpha framing applies to the installer itself as much as to `v0.2.0-alpha.1`:
+Alpha framing applies to the installer itself as much as to `v0.2.0-alpha.2`:
 the real-VM campaigns (fresh Ubuntu 24.04 and Debian 12 installs, reboot
 recovery, re-run, uninstall/reinstall/purge) and the live `get.o3k.io`
 publication are release-gated evidence steps, tracked in
-[`docs/plan/one-line-installer.md`](plan/one-line-installer.md).
+[`docs/plan/alpha-2-release.md`](plan/alpha-2-release.md) (the release-model
+changes) and [`docs/plan/one-line-installer.md`](plan/one-line-installer.md)
+(the original one-line installer milestone record).
