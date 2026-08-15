@@ -60,7 +60,7 @@ struct LibvirtCommandExecutor {
     adapter: LibvirtAdapter,
     artifact_root: PathBuf,
     image_materializer: o3k_compute_agent::ImageMaterializer,
-    network: o3k_network::HostNetworkManager,
+    network: Arc<o3k_network::HostNetworkManager>,
     dhcp: Arc<Mutex<DhcpRuntime>>,
     /// The agent's configured disk capacity (`O3K_COMPUTE_MAX_DISK_GB`). The
     /// same value is published to placement as the DISK_GB inventory; the
@@ -2329,6 +2329,291 @@ fn reconcile_dhcp_on_startup(
         .map_err(|error| format!("DHCP reconciliation failed: {error}"))
 }
 
+/// Bounded window for the startup domain restoration. A host reboot leaves
+/// every qemu domain defined but inactive; the restore observes each owned
+/// domain, starts the ones whose last lifecycle mutation provably left them
+/// running, and retries failed attempts inside this window (libvirtd can
+/// still be accepting its first connections when the agent starts). Startup
+/// never blocks on the restore: the pass is best-effort and re-runs on the
+/// next agent restart.
+const STARTUP_DOMAIN_RESTORE_WINDOW: Duration = Duration::from_secs(60);
+const STARTUP_DOMAIN_RESTORE_RETRY: Duration = Duration::from_millis(1000);
+
+/// Observe-and-restore port for one O3K-owned domain. The real adapter
+/// classifies libvirt outcomes; tests inject fakes without the libvirt
+/// feature.
+#[async_trait]
+trait StartupDomainRestore: Send + Sync {
+    /// Observes the owned domain and, when it is defined but inactive,
+    /// starts it and confirms the start with a second inspection. Returns
+    /// `Ok(true)` when a restore happened, `Ok(false)` when none was needed
+    /// (the domain is absent or already active), and `Err` when the outcome
+    /// is unknown (retried by the bounded window).
+    async fn restore_owned_domain(&self, resource_id: &str) -> Result<bool, AgentError>;
+}
+
+#[async_trait]
+impl StartupDomainRestore for LibvirtAdapter {
+    async fn restore_owned_domain(&self, resource_id: &str) -> Result<bool, AgentError> {
+        let name = stable_domain_name(resource_id);
+        let inspection = match self.inspect(name.clone()).await {
+            Ok(inspection) => inspection,
+            Err(error) if error.category == ErrorCategory::NotFound => return Ok(false),
+            Err(error) => return Err(agent_error(error)),
+        };
+        verify_owned_domain(&inspection, resource_id)?;
+        if inspection.active {
+            return Ok(false);
+        }
+        self.start_owned(name.clone(), resource_id.to_owned())
+            .await
+            .map_err(agent_error)?;
+        let confirmed = self.inspect(name.clone()).await.map_err(agent_error)?;
+        verify_owned_domain(&confirmed, resource_id)?;
+        Ok(confirmed.active)
+    }
+}
+
+/// Observe-and-restore port for the owned TAP devices of one O3K-owned
+/// instance (issue #613 blocker A): a host reboot deletes the ephemeral TAP
+/// devices while the persisted domain XML still references them, so the
+/// domain start would fail. The real implementation reuses the create-time
+/// [`o3k_network::HostNetworkManager::ensure_tap`] ownership path; tests
+/// inject fakes without touching the host network.
+#[async_trait]
+trait StartupTapRestore: Send + Sync {
+    /// Ensures every TAP recorded as O3K-owned for the instance exists and
+    /// is attached to the managed bridge before the domain start. An absent
+    /// TAP is re-created under the recorded deterministic name, a present
+    /// owned TAP is verified and reused, and a foreign link at the recorded
+    /// name fails closed without being touched. `Err` means the outcome is
+    /// unknown or foreign: the caller must hold back the instance's domain
+    /// start and retries inside the bounded window.
+    async fn restore_owned_taps(&self, resource_id: &str) -> Result<(), AgentError>;
+}
+
+/// Real TAP restoration driven by the durable network ownership manifest.
+/// Each recorded spec is re-verified by `ensure_tap` against both the
+/// manifest and the kernel, so a forged or stale record can never create or
+/// mutate a foreign interface.
+struct NetworkStartupTapRestore {
+    network: Arc<o3k_network::HostNetworkManager>,
+}
+
+#[async_trait]
+impl StartupTapRestore for NetworkStartupTapRestore {
+    async fn restore_owned_taps(&self, resource_id: &str) -> Result<(), AgentError> {
+        let specs = self
+            .network
+            .owned_tap_specs_for_instance(resource_id)
+            .map_err(|error| AgentError::Protocol(format!("owned TAP lookup failed: {error}")))?;
+        for spec in specs {
+            let (name, created) = self.network.ensure_tap(&spec).map_err(|error| {
+                AgentError::Protocol(format!("owned TAP restoration failed: {error}"))
+            })?;
+            if created {
+                tracing::info!(
+                    resource_id = %resource_id,
+                    tap = %name,
+                    "re-created owned TAP during startup domain restoration"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Re-reads the durable command journal at the start of every restore pass
+/// (stale-snapshot fence, see [`restore_expected_running_domains`]). The
+/// real implementation observes the same journal file the control
+/// connection writes; tests inject fakes whose snapshot changes between
+/// passes.
+trait StartupJournalRefresh: Send + Sync {
+    fn latest_lifecycle_states(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (u64, proto::ResourceState)>, AgentError>;
+}
+
+/// Journal re-read driven by the durable command journal file. Read-only:
+/// the live journal instance owned by the control connection is opened
+/// separately by the agent, and this snapshot only ever observes.
+struct CommandJournalStartupRefresh {
+    identity_path: PathBuf,
+    agent_id: String,
+}
+
+impl StartupJournalRefresh for CommandJournalStartupRefresh {
+    fn latest_lifecycle_states(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (u64, proto::ResourceState)>, AgentError> {
+        o3k_compute_agent::load_journal_lifecycle_resource_states(
+            &self.identity_path,
+            &self.agent_id,
+        )
+    }
+}
+
+/// Startup restoration of O3K-owned libvirt domains (one-line TestLab host
+/// reboot contract, issue #613 blocker A): a host reboot leaves every qemu
+/// domain defined but inactive while the control plane's durable server
+/// state stays ACTIVE, and no control-plane operation is left non-terminal
+/// to re-drive. The agent's command journal records the last lifecycle
+/// mutation it executed per resource, so the domains whose last mutation
+/// provably left them running are restored here by starting them again.
+///
+/// Ordering: a reboot also deletes the ephemeral TAP devices, so the owned
+/// TAPs recorded in the network ownership manifest are re-created (or
+/// ownership-verified and reused) BEFORE the domain start — the persisted
+/// domain XML references them with `managed="no"` and libvirt refuses to
+/// start without them. The bridge is guaranteed to exist first: the startup
+/// DHCP reconciliation ran before this pass, and `ensure_tap` re-ensures
+/// the bridge itself.
+///
+/// Observe-before-mutate: every TAP restoration is ownership-verified
+/// against the manifest and the kernel, every start is preceded by an
+/// ownership-verified inspection and confirmed by a second inspection, so a
+/// retried attempt can never double-start a domain that came up after an
+/// unknown outcome. A failed TAP restoration holds back that instance's
+/// domain start (fail closed: an unverified or foreign interface must never
+/// be mutated, and a start without its TAP cannot succeed). Absent domains
+/// are left alone (their convergence is owned by the control plane), and
+/// failures are retried inside the bounded window and logged; the agent
+/// never fails startup on a restore.
+///
+/// Stale-snapshot race: the seed snapshot is taken before the control
+/// connection starts, so a lifecycle command accepted afterwards (a fresh
+/// user stop or start) is invisible to it. At the start of EVERY retry pass
+/// the durable journal is re-read and every still-pending resource whose
+/// latest terminal lifecycle state is no longer `Running` is dropped (only
+/// the per-resource state is re-snapshotted — the pending set itself is
+/// never rebuilt from scratch). The re-read closes the race for commands
+/// accepted before the pass begins; a stop accepted after the re-read but
+/// before that pass's start of the resource can still be undone, so a
+/// residual single-pass window remains (the executor and the restore use
+/// separate libvirt connections with no mutual exclusion).
+async fn restore_expected_running_domains(
+    tap_restorer: &dyn StartupTapRestore,
+    restorer: &dyn StartupDomainRestore,
+    journal_refresh: &dyn StartupJournalRefresh,
+    states: &std::collections::HashMap<String, (u64, proto::ResourceState)>,
+) -> Result<(), AgentError> {
+    restore_expected_running_domains_with_window(
+        tap_restorer,
+        restorer,
+        journal_refresh,
+        states,
+        STARTUP_DOMAIN_RESTORE_WINDOW,
+        STARTUP_DOMAIN_RESTORE_RETRY,
+    )
+    .await
+}
+
+async fn restore_expected_running_domains_with_window(
+    tap_restorer: &dyn StartupTapRestore,
+    restorer: &dyn StartupDomainRestore,
+    journal_refresh: &dyn StartupJournalRefresh,
+    states: &std::collections::HashMap<String, (u64, proto::ResourceState)>,
+    window: Duration,
+    retry: Duration,
+) -> Result<(), AgentError> {
+    let mut pending: std::collections::BTreeSet<String> = states
+        .iter()
+        .filter(|(_, (_, state))| *state == proto::ResourceState::Running)
+        .map(|(resource_id, _)| resource_id.clone())
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + window;
+    let mut first_error = None;
+    loop {
+        // Stale-snapshot fence: re-read the durable journal before mutating
+        // anything this pass. A resource whose fresh last terminal
+        // lifecycle state is no longer `Running` was stopped (or deleted)
+        // by the control connection since the seed snapshot and must not be
+        // re-started. Only the per-resource state is re-snapshotted — the
+        // pending set is never rebuilt from scratch, so a resource that
+        // already converged or was dropped stays dropped. See the
+        // `restore_expected_running_domains` doc comment for the residual
+        // single-pass window.
+        match journal_refresh.latest_lifecycle_states() {
+            Ok(latest) => {
+                pending.retain(|resource_id| {
+                    latest
+                        .get(resource_id)
+                        .is_some_and(|(_, state)| *state == proto::ResourceState::Running)
+                });
+                if pending.is_empty() {
+                    return Ok(());
+                }
+                let mut next = std::collections::BTreeSet::new();
+                for resource_id in &pending {
+                    if let Err(error) = tap_restorer.restore_owned_taps(resource_id).await {
+                        tracing::warn!(
+                            resource_id = %resource_id,
+                            error = %error,
+                            "owned TAP restoration failed; holding back the domain start and \
+                             retrying inside the startup window"
+                        );
+                        next.insert(resource_id.clone());
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    match restorer.restore_owned_domain(resource_id).await {
+                        Ok(true) => {
+                            tracing::info!(
+                                resource_id = %resource_id,
+                                "restored O3K-owned domain to running"
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                resource_id = %resource_id,
+                                error = %error,
+                                "domain restore attempt failed; retrying inside the startup window"
+                            );
+                            next.insert(resource_id.clone());
+                            first_error.get_or_insert(error);
+                        }
+                    }
+                }
+                pending = next;
+                if pending.is_empty() {
+                    return Ok(());
+                }
+            }
+            Err(error) => {
+                // Fail closed: without a fresh journal snapshot the last
+                // lifecycle state cannot be proven, so this pass mutates
+                // nothing (no TAP restoration, no domain start) and retries
+                // inside the window.
+                tracing::warn!(
+                    error = %error,
+                    "command journal could not be re-read before the restore pass; \
+                     holding back the pass and retrying inside the startup window"
+                );
+                first_error.get_or_insert(error);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(retry).await;
+    }
+    if let Some(error) = first_error {
+        tracing::warn!(
+            pending = pending.len(),
+            error = %error,
+            "startup domain restoration did not converge within the startup window; \
+             retried on the next agent restart"
+        );
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
 /// Startup residue cleanup for crash residue (issue #87 S3 rerun #5 and
 /// issue #88 S3/S4 reruns): the stale-network reap removes the persisted
 /// DHCP bindings and TAPs of instances whose domains provably do not exist,
@@ -2402,14 +2687,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("network");
-    let network = o3k_network::HostNetworkManager::with_ownership_root(
+    let network = Arc::new(o3k_network::HostNetworkManager::with_ownership_root(
         o3k_network::HostNetworkConfig {
             bridge_name: env::var("O3K_COMPUTE_BRIDGE_NAME")
                 .unwrap_or_else(|_| "o3k-br0".to_owned()),
             uplink: env::var("O3K_COMPUTE_UPLINK").ok(),
         },
         network_root,
-    )?;
+    )?);
     let bridge_name = env::var("O3K_COMPUTE_BRIDGE_NAME").unwrap_or_else(|_| "o3k-br0".to_owned());
     let service_root = agent
         .identity_file()
@@ -2457,6 +2742,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              retries on the next restart or create"
         );
     }
+    // Host-reboot restoration (issue #613 blocker A): domains whose last
+    // lifecycle mutation provably left them running are started again inside
+    // a bounded window. The restore runs as a task next to the control
+    // connection so a slow restore can never delay agent registration, and
+    // it only ever starts domains the agent's own journal proves were
+    // running. A failed restore is logged and retried on the next restart.
+    let restore_states = match o3k_compute_agent::load_journal_lifecycle_resource_states(
+        agent.identity_file(),
+        &agent_id,
+    ) {
+        Ok(states) => states,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "command journal could not be read for domain restoration; \
+                 restoration skipped for this start"
+            );
+            std::collections::HashMap::new()
+        }
+    };
+    let restore_journal_refresh = CommandJournalStartupRefresh {
+        identity_path: agent.identity_file().to_path_buf(),
+        agent_id: agent_id.clone(),
+    };
+    let restore_task = tokio::spawn({
+        let adapter = libvirt.clone();
+        let network = Arc::clone(&network);
+        async move {
+            let tap_restorer = NetworkStartupTapRestore { network };
+            // The unconverged outcome is logged once inside the restore pass
+            // (with the pending count); the returned error needs no second
+            // log site here.
+            let _ = restore_expected_running_domains(
+                &tap_restorer,
+                &adapter,
+                &restore_journal_refresh,
+                &restore_states,
+            )
+            .await;
+        }
+    });
     let executor = Arc::new(LibvirtCommandExecutor {
         adapter: libvirt.clone(),
         artifact_root,
@@ -2483,8 +2809,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let health_server = axum::serve(TcpListener::bind(health_addr).await?, health_router(state));
     tokio::select! {
-        result = agent.run_with_executor(shutdown_signal(), executor) => { result?; }
-        result = health_server.with_graceful_shutdown(shutdown_signal()) => { result?; }
+        result = agent.run_with_executor(shutdown_signal(), executor) => {
+            restore_task.abort();
+            let _ = restore_task.await;
+            result?;
+        }
+        result = health_server.with_graceful_shutdown(shutdown_signal()) => {
+            restore_task.abort();
+            let _ = restore_task.await;
+            result?;
+        }
     }
     info!("o3k-compute stopped");
     Ok(())
@@ -4268,6 +4602,509 @@ mod tests {
             "another resource's committed final must be preserved"
         );
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    /// Startup restoration (issue #613 blocker A): a host reboot leaves every
+    /// qemu domain defined but inactive; the restore pass must start exactly
+    /// the owned domains whose last lifecycle mutation recorded a running
+    /// outcome, and leave absent/stopped/deleted resources alone. A reboot
+    /// also deletes the ephemeral TAP devices, so the pass must restore the
+    /// recorded TAPs BEFORE the domain start and hold the start back when a
+    /// TAP restoration fails closed.
+    struct StartupEvents {
+        log: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl StartupEvents {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                log: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn push(&self, event: String) {
+            let _ = self.log.lock().map(|mut log| log.push(event));
+        }
+
+        fn snapshot(&self) -> Vec<String> {
+            self.log.lock().map(|log| log.clone()).unwrap_or_default()
+        }
+    }
+
+    struct FakeStartupDomainRestore {
+        restored: std::sync::Mutex<Vec<String>>,
+        fails_before_start: std::sync::atomic::AtomicUsize,
+        events: Arc<StartupEvents>,
+    }
+
+    impl FakeStartupDomainRestore {
+        fn new(fails_before_start: usize) -> Self {
+            Self::with_events(fails_before_start, StartupEvents::new())
+        }
+
+        fn with_events(fails_before_start: usize, events: Arc<StartupEvents>) -> Self {
+            Self {
+                restored: std::sync::Mutex::new(Vec::new()),
+                fails_before_start: std::sync::atomic::AtomicUsize::new(fails_before_start),
+                events,
+            }
+        }
+
+        fn restored_ids(&self) -> Vec<String> {
+            self.restored
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    #[async_trait]
+    impl StartupDomainRestore for FakeStartupDomainRestore {
+        async fn restore_owned_domain(&self, resource_id: &str) -> Result<bool, AgentError> {
+            self.events.push(format!("domain:{resource_id}"));
+            let remaining = self
+                .fails_before_start
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |value| (value > 0).then(|| value - 1),
+                )
+                .unwrap_or(0);
+            if remaining > 0 {
+                return Err(AgentError::Protocol("injected restore failure".to_owned()));
+            }
+            self.restored
+                .lock()
+                .map(|mut guard| guard.push(resource_id.to_owned()))
+                .map_err(|_| AgentError::Protocol("restore lock is poisoned".to_owned()))?;
+            Ok(true)
+        }
+    }
+
+    struct FakeStartupTapRestore {
+        failures: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+        events: Arc<StartupEvents>,
+    }
+
+    impl FakeStartupTapRestore {
+        fn new() -> Self {
+            Self::with_events(StartupEvents::new())
+        }
+
+        fn with_events(events: Arc<StartupEvents>) -> Self {
+            Self {
+                failures: std::sync::Mutex::new(std::collections::HashMap::new()),
+                events,
+            }
+        }
+
+        /// Injects `remaining` consecutive TAP restoration failures for one
+        /// resource, modeling an unknown outcome or a foreign interface at
+        /// the recorded name.
+        fn set_failures(&self, resource_id: &str, remaining: usize) {
+            let _ = self
+                .failures
+                .lock()
+                .map(|mut failures| failures.insert(resource_id.to_owned(), remaining));
+        }
+
+        /// Wires a foreign link at the recorded TAP name for one resource:
+        /// every restoration fails closed, so the instance's domain start is
+        /// held back forever. The zero-mutation command behavior of the real
+        /// manager is proven in the network crate's command-fake tests.
+        fn set_foreign(&self, resource_id: &str) {
+            self.set_failures(resource_id, usize::MAX);
+        }
+    }
+
+    #[async_trait]
+    impl StartupTapRestore for FakeStartupTapRestore {
+        async fn restore_owned_taps(&self, resource_id: &str) -> Result<(), AgentError> {
+            let failed = self
+                .failures
+                .lock()
+                .ok()
+                .map(|mut failures| match failures.get_mut(resource_id) {
+                    Some(remaining) if *remaining > 0 => {
+                        *remaining -= 1;
+                        true
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+            if failed {
+                self.events.push(format!("tap-fail:{resource_id}"));
+                return Err(AgentError::Protocol(
+                    "injected TAP restoration failure".to_owned(),
+                ));
+            }
+            self.events.push(format!("tap-ok:{resource_id}"));
+            Ok(())
+        }
+    }
+
+    /// Journal re-read fake for the stale-snapshot fence: every call returns
+    /// the next snapshot, the last one sticking for every later call. A
+    /// `None` store models an unreadable journal (the fail-closed branch).
+    type JournalSnapshot = std::collections::HashMap<String, (u64, proto::ResourceState)>;
+
+    struct FakeStartupJournalRefresh {
+        snapshots: std::sync::Mutex<Option<std::collections::VecDeque<JournalSnapshot>>>,
+    }
+
+    impl FakeStartupJournalRefresh {
+        fn sticky(states: JournalSnapshot) -> Self {
+            Self::sequence([states])
+        }
+
+        fn sequence(snapshots: impl IntoIterator<Item = JournalSnapshot>) -> Self {
+            Self {
+                snapshots: std::sync::Mutex::new(Some(snapshots.into_iter().collect())),
+            }
+        }
+
+        fn unreadable() -> Self {
+            Self {
+                snapshots: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl StartupJournalRefresh for FakeStartupJournalRefresh {
+        fn latest_lifecycle_states(&self) -> Result<JournalSnapshot, AgentError> {
+            let mut snapshots = self
+                .snapshots
+                .lock()
+                .map_err(|_| AgentError::Protocol("journal refresh lock is poisoned".to_owned()))?;
+            let Some(snapshots) = snapshots.as_mut() else {
+                return Err(AgentError::Protocol(
+                    "injected journal re-read failure".to_owned(),
+                ));
+            };
+            let current = snapshots.front().cloned().unwrap_or_default();
+            if snapshots.len() > 1 {
+                snapshots.pop_front();
+            }
+            Ok(current)
+        }
+    }
+
+    fn lifecycle_state(
+        resource_id: &str,
+        state: proto::ResourceState,
+    ) -> std::collections::HashMap<String, (u64, proto::ResourceState)> {
+        std::collections::HashMap::from([(resource_id.to_owned(), (1, state))])
+    }
+
+    #[tokio::test]
+    async fn restore_pass_starts_only_last_known_running_domains() -> Result<(), AgentError> {
+        let tap = FakeStartupTapRestore::new();
+        let restorer = FakeStartupDomainRestore::new(0);
+        let mut states = lifecycle_state("server-running", proto::ResourceState::Running);
+        states.insert(
+            "server-stopped".to_owned(),
+            (2, proto::ResourceState::Stopped),
+        );
+        states.insert(
+            "server-deleted".to_owned(),
+            (3, proto::ResourceState::Deleted),
+        );
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        restore_expected_running_domains(&tap, &restorer, &journal, &states).await?;
+        assert_eq!(
+            restorer.restored_ids(),
+            vec!["server-running".to_owned()],
+            "only the last-known-running domain may be restored"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_with_no_running_domains_is_a_no_op() -> Result<(), AgentError> {
+        let tap = FakeStartupTapRestore::new();
+        let restorer = FakeStartupDomainRestore::new(0);
+        let states = lifecycle_state("server-stopped", proto::ResourceState::Stopped);
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        restore_expected_running_domains(&tap, &restorer, &journal, &states).await?;
+        assert!(
+            restorer.restored_ids().is_empty(),
+            "a stopped-only journal must not restore anything"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_retries_failed_attempts_inside_the_window() -> Result<(), AgentError> {
+        let tap = FakeStartupTapRestore::new();
+        let restorer = FakeStartupDomainRestore::new(2);
+        let states = lifecycle_state("server-running", proto::ResourceState::Running);
+        // Two failed attempts then success: the bounded retry window absorbs
+        // transient startup failures (libvirtd still coming up) without
+        // re-mutating an already-restored domain.
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        restore_expected_running_domains(&tap, &restorer, &journal, &states).await?;
+        assert_eq!(
+            restorer.restored_ids(),
+            vec!["server-running".to_owned()],
+            "the retry loop must converge inside the window"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_reports_unconverged_failures_without_aborting() -> Result<(), AgentError>
+    {
+        let tap = FakeStartupTapRestore::new();
+        let restorer = FakeStartupDomainRestore::new(usize::MAX);
+        let states = lifecycle_state("server-running", proto::ResourceState::Running);
+        // The always-failing restorer must surface the failure after the
+        // (tiny, test-scoped) window instead of hanging or silently
+        // succeeding: the caller logs it and the agent stays up.
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        let result = restore_expected_running_domains_with_window(
+            &tap,
+            &restorer,
+            &journal,
+            &states,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unconverged restore must report its pending failure"
+        );
+        assert!(
+            restorer.restored_ids().is_empty(),
+            "a failing restorer must never record a successful start"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_recreates_recorded_taps_before_starting_domains() -> Result<(), AgentError>
+    {
+        // Issue #613 blocker A: the reboot deleted the TAP while the domain
+        // definition survived. The restore must re-create the recorded TAP
+        // FIRST and only then start the domain — the persisted domain XML
+        // references the TAP with `managed="no"`, so a start without the TAP
+        // fails. Pre-fix the pass never consulted the TAP restorer and the
+        // domain start came first.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        let restorer = FakeStartupDomainRestore::with_events(0, events.clone());
+        let states = lifecycle_state("server-running", proto::ResourceState::Running);
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        restore_expected_running_domains(&tap, &restorer, &journal, &states).await?;
+        assert_eq!(
+            events.snapshot(),
+            vec![
+                "tap-ok:server-running".to_owned(),
+                "domain:server-running".to_owned()
+            ],
+            "the recorded TAP must be restored before the domain start"
+        );
+        assert_eq!(
+            restorer.restored_ids(),
+            vec!["server-running".to_owned()],
+            "the domain must be started exactly once after its TAP is restored"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_holds_back_domain_start_when_tap_restoration_fails_closed()
+    -> Result<(), AgentError> {
+        // A foreign TAP at the recorded name (or any unknown TAP outcome)
+        // fails closed: the instance's domain must never be started against
+        // an unverified interface, other instances still converge, and the
+        // unconverged instance is reported without aborting the pass.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        tap.set_failures("server-foreign", usize::MAX);
+        let restorer = FakeStartupDomainRestore::with_events(0, events.clone());
+        let mut states = lifecycle_state("server-foreign", proto::ResourceState::Running);
+        states.insert("server-ok".to_owned(), (2, proto::ResourceState::Running));
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        let result = restore_expected_running_domains_with_window(
+            &tap,
+            &restorer,
+            &journal,
+            &states,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the fail-closed instance must remain unconverged"
+        );
+        assert_eq!(
+            restorer.restored_ids(),
+            vec!["server-ok".to_owned()],
+            "a foreign TAP must hold back only its own domain start"
+        );
+        assert!(
+            events
+                .snapshot()
+                .iter()
+                .all(|event| event != "domain:server-foreign"),
+            "the fail-closed instance's domain must never be started"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_retries_tap_restoration_without_duplicate_domain_starts()
+    -> Result<(), AgentError> {
+        // A transient TAP restoration failure (unknown outcome) must be
+        // retried inside the window; the retried restoration is idempotent
+        // (a now-present TAP is verified and reused) and the domain is
+        // started exactly once, on the pass whose TAP restoration succeeded.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        tap.set_failures("server-running", 1);
+        let restorer = FakeStartupDomainRestore::with_events(0, events.clone());
+        let states = lifecycle_state("server-running", proto::ResourceState::Running);
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        restore_expected_running_domains(&tap, &restorer, &journal, &states).await?;
+        assert_eq!(
+            events.snapshot(),
+            vec![
+                "tap-fail:server-running".to_owned(),
+                "tap-ok:server-running".to_owned(),
+                "domain:server-running".to_owned(),
+            ],
+            "a failed TAP restoration must hold back the domain start until it succeeds"
+        );
+        assert_eq!(
+            restorer.restored_ids(),
+            vec!["server-running".to_owned()],
+            "the domain must be started exactly once"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_drops_a_resource_whose_fresh_journal_state_is_stopped()
+    -> Result<(), AgentError> {
+        // Stale-snapshot race (issue #613 review): the seed snapshot says
+        // Running, the first pass fails transiently, and by the second pass
+        // the control connection has completed a user stop — the fresh
+        // journal says Stopped. The second pass must NOT start the domain.
+        // Fail-before: the pending set was a frozen pre-connection snapshot
+        // and the second pass started it; fix-after: the per-pass re-read
+        // drops the resource.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        let restorer = FakeStartupDomainRestore::with_events(1, events.clone());
+        let running = lifecycle_state("server-running", proto::ResourceState::Running);
+        let stopped = lifecycle_state("server-running", proto::ResourceState::Stopped);
+        let journal = FakeStartupJournalRefresh::sequence([running.clone(), stopped]);
+        restore_expected_running_domains_with_window(
+            &tap,
+            &restorer,
+            &journal,
+            &running,
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )
+        .await?;
+        assert!(
+            restorer.restored_ids().is_empty(),
+            "the second pass must not start a domain whose fresh journal state is stopped"
+        );
+        assert_eq!(
+            events.snapshot(),
+            vec![
+                "tap-ok:server-running".to_owned(),
+                "domain:server-running".to_owned(),
+            ],
+            "the domain must be attempted exactly once, on the pass whose journal \
+             state was still running"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_holds_back_mutations_when_the_journal_cannot_be_re_read()
+    -> Result<(), AgentError> {
+        // Fail closed: without a fresh journal snapshot the last lifecycle
+        // state cannot be proven, so no pass may mutate (no TAP
+        // restoration, no domain start) and the window must report the
+        // unconverged outcome.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        let restorer = FakeStartupDomainRestore::with_events(0, events.clone());
+        let journal = FakeStartupJournalRefresh::unreadable();
+        let states = lifecycle_state("server-running", proto::ResourceState::Running);
+        let result = restore_expected_running_domains_with_window(
+            &tap,
+            &restorer,
+            &journal,
+            &states,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an unreadable journal must report the unconverged outcome"
+        );
+        assert!(
+            events.snapshot().is_empty(),
+            "no tap or domain mutation may happen without a fresh journal snapshot"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restore_pass_holds_back_a_foreign_tap_domain_and_reports_other_unconverged_instances()
+    -> Result<(), AgentError> {
+        // A foreign link at the recorded TAP name fails closed at the
+        // StartupTapRestore port (the real manager proves the zero-mutation
+        // command behavior — no `tuntap add`, no `link del` — in the
+        // network crate's command-fake tests): the loop must never start
+        // that instance's domain, and a second instance whose domain
+        // restore keeps failing must both be reported as unconverged after
+        // the window without aborting the agent.
+        let events = StartupEvents::new();
+        let tap = FakeStartupTapRestore::with_events(events.clone());
+        tap.set_foreign("server-foreign");
+        let restorer = FakeStartupDomainRestore::with_events(usize::MAX, events.clone());
+        let mut states = lifecycle_state("server-foreign", proto::ResourceState::Running);
+        states.insert(
+            "server-other".to_owned(),
+            (2, proto::ResourceState::Running),
+        );
+        let journal = FakeStartupJournalRefresh::sticky(states.clone());
+        let result = restore_expected_running_domains_with_window(
+            &tap,
+            &restorer,
+            &journal,
+            &states,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "the foreign-tap instance and the failing instance must be reported"
+        );
+        assert!(
+            restorer.restored_ids().is_empty(),
+            "no domain may record a successful start"
+        );
+        let events = events.snapshot();
+        assert!(
+            events.iter().all(|event| event != "domain:server-foreign"),
+            "the foreign-tap instance's domain must never be started"
+        );
+        assert!(
+            events.iter().any(|event| event == "domain:server-other"),
+            "the other instance must be attempted inside the window"
+        );
         Ok(())
     }
 }

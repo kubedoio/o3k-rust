@@ -690,6 +690,233 @@ mod host_network_tests {
     }
 
     #[test]
+    fn ensure_tap_recreates_a_recorded_but_absent_tap_and_reuses_a_present_one()
+    -> Result<(), HostNetworkError> {
+        // Issue #613 blocker A (host reboot): the durable record survives but
+        // the ephemeral TAP is gone, while the persisted domain XML still
+        // references the deterministic name. The first `ensure_tap` must
+        // re-create the TAP under the recorded name (one `tuntap add`, no
+        // duplicate record); the second call must verify and reuse the live
+        // TAP without creating another one. The same manager serves both
+        // calls, exactly like the startup restoration followed by the next
+        // retry pass.
+        let root = std::env::temp_dir().join(format!("o3k-network-restore-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(|_| HostNetworkError::CommandFailed)?;
+        let tap = HostNetworkManager::tap_name("port-1")?;
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                identity: Some("2".to_owned()),
+                gateway: None,
+            }),
+            taps: [(
+                tap.clone(),
+                TapOwnership {
+                    interface: tap.clone(),
+                    instance_id: "server-1".to_owned(),
+                    port_id: "port-1".to_owned(),
+                    mac: "02:00:00:00:00:01".to_owned(),
+                    bridge: "o3k-br0".to_owned(),
+                    created_by_o3k: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        fs::write(
+            root.join("ownership.json"),
+            serde_json::to_vec(&manifest).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+        // First call: bridge exists (recorded identity matches), TAP absent,
+        // so the create path runs under the provisional name and renames to
+        // the deterministic one.
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // link show dev o3k-br0 (exists)
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // full bridge probe (owned)
+            Response::status(true),      // link set dev o3k-br0 up
+            Response::output(false, ""), // link show dev <tap>: absent
+            Response::status(true),      // tuntap add (provisional name)
+            Response::status(true),      // link set dev <temp> address
+            Response::status(true),      // link set dev <temp> master
+            Response::output(
+                true,
+                "2: o3ktap-92bdccea: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ), // address stabilization probe
+            Response::status(true),      // rename to the deterministic name
+            Response::status(true),      // link set dev <tap> up
+            // Second call: TAP present and owned, so no creation happens.
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // link show dev o3k-br0 (exists)
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // full bridge probe (owned)
+            Response::status(true), // link set dev o3k-br0 up
+            Response::output(true, "2: o3ktap-92bdccea: <BROADCAST>"), // tap exists
+            Response::output(
+                true,
+                "2: o3ktap-92bdccea: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:01",
+            ), // owned-tap probe
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        let spec = TapSpec {
+            instance_id: "server-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+        assert_eq!(
+            manager.owned_tap_specs_for_instance("server-1")?,
+            vec![spec.clone()],
+            "the durable record must drive the restoration"
+        );
+        assert!(
+            manager
+                .owned_tap_specs_for_instance("server-other")?
+                .is_empty(),
+            "another instance's records must never be selected"
+        );
+        assert_eq!(
+            manager.ensure_tap(&spec)?,
+            (tap.clone(), true),
+            "the absent recorded TAP must be re-created"
+        );
+        assert_eq!(
+            manager.ensure_tap(&spec)?,
+            (tap.clone(), false),
+            "the present owned TAP must be verified and reused, not re-created"
+        );
+        assert_eq!(
+            command
+                .calls()
+                .iter()
+                .filter(|args| args[..2] == ["tuntap", "add"])
+                .count(),
+            1,
+            "exactly one TAP creation may ever be issued for the recorded TAP"
+        );
+        let manifest: NetworkOwnershipManifest = serde_json::from_slice(
+            &fs::read(root.join("ownership.json")).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(HostNetworkError::CorruptOwnership)?;
+        assert_eq!(
+            manifest.taps.len(),
+            1,
+            "the restoration must never duplicate the ownership record"
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_tap_fails_closed_on_a_foreign_link_at_the_recorded_name()
+    -> Result<(), HostNetworkError> {
+        // Issue #613 blocker A restore path: a FOREIGN link exists at the
+        // recorded deterministic TAP name (a TAP attached to the bridge but
+        // with a different MAC). `ensure_tap` must fail closed with
+        // `ForeignInterface` and issue ZERO mutation commands — no
+        // `tuntap add`, no `link del` — so the startup restoration holds
+        // the instance's domain start back instead of touching the foreign
+        // interface.
+        let root = std::env::temp_dir().join(format!("o3k-network-foreign-tap-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).map_err(|_| HostNetworkError::CommandFailed)?;
+        let tap = HostNetworkManager::tap_name("port-1")?;
+        let manifest = NetworkOwnershipManifest {
+            bridge: Some(BridgeOwnership {
+                name: "o3k-br0".to_owned(),
+                uplink: None,
+                created_by_o3k: true,
+                identity: Some("2".to_owned()),
+                gateway: None,
+            }),
+            taps: [(
+                tap.clone(),
+                TapOwnership {
+                    interface: tap.clone(),
+                    instance_id: "server-1".to_owned(),
+                    port_id: "port-1".to_owned(),
+                    mac: "02:00:00:00:00:01".to_owned(),
+                    bridge: "o3k-br0".to_owned(),
+                    created_by_o3k: true,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        fs::write(
+            root.join("ownership.json"),
+            serde_json::to_vec(&manifest).map_err(|_| HostNetworkError::CommandFailed)?,
+        )
+        .map_err(|_| HostNetworkError::CommandFailed)?;
+        let command = FakeNetworkCommand::new([
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // link show dev o3k-br0 (exists)
+            Response::output(
+                true,
+                "2: o3k-br0: <BROADCAST,UP>\n\tbridge forward_delay 1500",
+            ), // full bridge probe (owned)
+            Response::status(true), // link set dev o3k-br0 up
+            Response::output(true, "2: o3ktap-92bdccea: <BROADCAST>"), // tap exists
+            Response::output(
+                true,
+                "2: o3ktap-92bdccea: <BROADCAST,UP> master o3k-br0 state UP\n\ttun type tap\n\tlink/ether 02:00:00:00:00:02",
+            ), // owned-tap probe: foreign MAC at the recorded name
+        ]);
+        let manager = HostNetworkManager::with_command_and_ownership(
+            HostNetworkConfig {
+                bridge_name: "o3k-br0".to_owned(),
+                uplink: None,
+            },
+            Arc::new(command.clone()),
+            &root,
+        )?;
+        let spec = TapSpec {
+            instance_id: "server-1".to_owned(),
+            port_id: "port-1".to_owned(),
+            mac: "02:00:00:00:00:01".to_owned(),
+        };
+        assert!(matches!(
+            manager.ensure_tap(&spec),
+            Err(HostNetworkError::ForeignInterface)
+        ));
+        assert!(
+            !command
+                .calls()
+                .iter()
+                .any(|args| args[..2] == ["tuntap", "add"]),
+            "a foreign link must never trigger a TAP creation"
+        );
+        assert!(
+            !command
+                .calls()
+                .iter()
+                .any(|args| args[..2] == ["link", "del"]),
+            "a foreign link must never be deleted"
+        );
+        fs::remove_dir_all(root).map_err(|_| HostNetworkError::CommandFailed)?;
+        Ok(())
+    }
+
+    #[test]
     fn crash_residue_is_enumerated_and_reaped_across_restart() -> Result<(), HostNetworkError> {
         // Issue-87 S3 rerun #5: the create prepared the host network (bridge,
         // TAP, DHCP bindings) and the agent died before defining the domain.
@@ -1957,6 +2184,34 @@ impl HostNetworkManager {
             .filter(|record| record.instance_id == instance_id)
             .map(|record| record.port_id.clone())
             .collect())
+    }
+
+    /// Returns the create-time specs of the TAPs recorded as O3K-owned for
+    /// one instance. The startup domain restoration (issue #613 blocker A)
+    /// re-creates these TAPs after a host reboot: the ephemeral devices are
+    /// gone while the persisted domain XML still references them. Foreign or
+    /// malformed records are never selected for mutation; `ensure_tap`
+    /// re-verifies every returned spec against the manifest and the kernel
+    /// before creating or reusing anything.
+    pub fn owned_tap_specs_for_instance(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<TapSpec>, HostNetworkError> {
+        validate_reference(instance_id)?;
+        Ok(self
+            .ownership_snapshot(|manifest| {
+                manifest
+                    .taps
+                    .values()
+                    .filter(|record| record.created_by_o3k && record.instance_id == instance_id)
+                    .map(|record| TapSpec {
+                        instance_id: record.instance_id.clone(),
+                        port_id: record.port_id.clone(),
+                        mac: record.mac.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })?
+            .unwrap_or_default())
     }
 
     /// Returns the distinct instance identities recorded in the ownership

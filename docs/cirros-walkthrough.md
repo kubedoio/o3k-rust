@@ -1,5 +1,11 @@
 # CirrOS TestLab walkthrough
 
+> The one-line installer (`curl -sfL https://get.o3k.io | sudo sh -`, see
+> [docs/INSTALLER.md](INSTALLER.md)) automates this walkthrough via
+> `packaging/bootstrap-testlab.sh` and leaves the same public-API resources
+> behind. The steps below remain the manual reference for the public-API
+> workflow.
+
 After a real libvirt installation and a successful release gate, configure
 the CLI from `examples/clouds.yaml`, replace the placeholder credentials, and
 run the public-API workflow:

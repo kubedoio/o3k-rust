@@ -112,6 +112,10 @@ jobs:
         run: bash tests/packaging-sbom.sh
       - name: Test release bundle installer
         run: bash tests/packaging-bundle.sh
+      - name: Test get.o3k.io worker endpoint
+        run: node --test packaging/get-o3k-worker/test.mjs
+      - name: Check get.o3k.io worker assets are in sync
+        run: bash packaging/get-o3k-worker/sync.sh --check
       - name: Test packaging account-reuse refusal
         run: bash tests/packaging-account-refusal.sh
       - name: Test release bundle integrity
@@ -185,6 +189,16 @@ jobs:
             target/testlab-artifacts/result.json
             target/testlab-artifacts/sbom.spdx.json
             target/testlab-artifacts/SHA256SUMS
+  # The installer negative matrix SKIPs itself on any host that is not
+  # Ubuntu 24.04/Debian 12 (it would become a vacuous pass on a newer
+  # ubuntu-latest). Pin it to ubuntu-24.04 explicitly so the matrix stays
+  # meaningful when ubuntu-latest moves forward.
+  installer-negative:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Test one-line installer negative matrix
+        run: sudo bash tests/installer-negative.sh
   supply-chain:
     runs-on: ubuntu-latest
     steps:

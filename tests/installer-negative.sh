@@ -1,0 +1,726 @@
+#!/usr/bin/env bash
+# installer-negative.sh — portable negative matrix for the one-line installer
+# path (issue #613, goal §16). No KVM required.
+#
+# Coverage — every destructive/foreign-state case must FAIL CLOSED:
+#   - platform guard (kernel/arch/distro) and the ADR-0130 version fence,
+#     exercised against the wrapper's OWN function definitions (sed-extracted,
+#     run in subshells with faked inputs — packaging/get-o3k.sh hardcodes
+#     /etc/os-release and has no self-test flag, so extraction is the least
+#     invasive mechanism and tests the exact shipped text);
+#   - full-wrapper aborts driven through a local python3 http endpoint and a
+#     shim bundle: endpoint unreachable, release endpoint unreachable, missing
+#     release asset (404), corrupted archive, wrong SHA-256 (abort BEFORE
+#     extraction), malformed bundle, unsafe extraction ("../" and absolute
+#     entries, plus symlink and device/fifo entries rejected from the
+#     `tar -tvzf` listing), preflight failure, foreign install path
+#     pass-through, interrupted installer (trap cleanup), interrupted
+#     bootstrap, TLS partial-set fail-closed, TLS complete-set
+#     skip-and-preserve, converged second run, and a first-run success
+#     control.
+#
+# Not duplicated here (owned by existing tests): the /dev/kvm, libvirt, and
+# disk-space checks live in packaging/preflight.sh and are exercised by
+# tests/packaging-safety.sh plus the real-VM campaigns — this test proves the
+# wrapper aborts when preflight fails; foreign o3k/o3k-compute accounts,
+# systemd units, and polkit rules are fenced by packaging/install.sh and
+# proven by tests/packaging-safety.sh and tests/packaging-account-refusal.sh;
+# the installer's foreign-populated-path fence is proven by
+# tests/packaging-safety.sh.
+#
+# Fixture note: every script in the shim bundle and every executable in the
+# shim bin dir is a labeled TEST FIXTURE that only records its invocation —
+# nothing real is installed, enabled, or started. All fixtures live under a
+# private mktemp tree and are deleted by the exit trap. Root-only sections
+# (full wrapper runs, /etc/o3k TLS fixtures) are guarded and SKIP with an
+# explicit message otherwise, like tests/packaging-safety.sh.
+set -Eeuo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WRAPPER="$ROOT_DIR/packaging/get-o3k.sh"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer-negative.XXXXXX")"
+HTTP_PID=""
+HEALTH_PID_18080=""
+HEALTH_PID_9100=""
+ETC_O3K_CREATED=0
+PASS=0
+FAIL=0
+SKIP=0
+
+cleanup() {
+  [[ -n "$HTTP_PID" ]] && kill "$HTTP_PID" 2>/dev/null || true
+  [[ -n "$HEALTH_PID_18080" ]] && kill "$HEALTH_PID_18080" 2>/dev/null || true
+  [[ -n "$HEALTH_PID_9100" ]] && kill "$HEALTH_PID_9100" 2>/dev/null || true
+  [[ "$ETC_O3K_CREATED" -eq 1 ]] && rm -rf -- /etc/o3k || true
+  rm -rf -- "$WORK_DIR"
+}
+trap cleanup EXIT
+
+record_pass() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
+record_fail() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
+record_skip() { SKIP=$((SKIP + 1)); printf 'skip %s\n' "$1"; }
+
+# ---------------------------------------------------------------- helpers ---
+
+free_port() {
+  python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+start_http_server() { # start_http_server DIR PORT PID_VAR
+  local dir="$1" port="$2" var="$3" pid="" attempt
+  python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" \
+    >"$MATRIX/channel-http.log" 2>&1 &
+  pid=$!
+  for attempt in $(seq 1 100); do
+    if curl -sf -o /dev/null "http://127.0.0.1:$port/channel/alpha"; then
+      eval "$var=$pid"
+      return 0
+    fi
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null || true
+  echo "http server on port $port did not come up; log:" >&2
+  cat "$MATRIX/channel-http.log" >&2
+  return 1
+}
+
+# ---- full-wrapper negative matrix (root, supported host, clean /etc/o3k) ----
+
+run_full_matrix() {
+  local MATRIX SHIM_BIN SRC_BUNDLE TMP_ROOT WWW CHANNEL_PORT DEAD_PORT
+  local HEALTH_UP=1
+  MATRIX="$WORK_DIR/matrix"
+  SHIM_BIN="$MATRIX/bin"
+  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.2.0-alpha.1"
+  TMP_ROOT="$MATRIX/tmp"
+  WWW="$MATRIX/www"
+  mkdir -p "$SHIM_BIN" "$SRC_BUNDLE/packaging" "$SRC_BUNDLE/bin" "$TMP_ROOT" \
+    "$WWW/channel" "$WWW/releases/v0.2.0-alpha.1"
+
+  if [[ $EUID -ne 0 ]]; then
+    record_skip "full-wrapper negative matrix requires root (run: sudo bash tests/installer-negative.sh)"
+    return
+  fi
+  if [[ -e /etc/o3k || -L /etc/o3k ]]; then
+    record_skip "full-wrapper negative matrix requires an absent /etc/o3k (found one; refusing to touch it)"
+    return
+  fi
+  # shellcheck disable=SC1091
+  . /etc/os-release 2>/dev/null || true
+  case "${ID:-}:${VERSION_CODENAME:-}" in
+    ubuntu:noble|debian:bookworm) ;;
+    *) record_skip "full-wrapper matrix needs Ubuntu 24.04/Debian 12 (host is ${ID:-unknown}:${VERSION_CODENAME:-unknown})"; return ;;
+  esac
+  for tool in curl python3 tar sha256sum awk sed grep mktemp cat; do
+    command -v "$tool" >/dev/null 2>&1 || { record_skip "full-wrapper matrix needs $tool"; return; }
+  done
+
+  # ---- TEST FIXTURE: apt/systemd shims (record only, never touch the host) ----
+  cat >"$SHIM_BIN/apt-get" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; performs no package operations.
+printf '%s\n' "$*" >>"${O3K_TEST_APT_LOG:?}"
+exit 0
+EOF
+  cat >"$SHIM_BIN/systemctl" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; performs no service operations.
+printf '%s\n' "$*" >>"${O3K_TEST_SYSTEMCTL_LOG:?}"
+exit 0
+EOF
+  chmod +x "$SHIM_BIN/apt-get" "$SHIM_BIN/systemctl"
+
+  # ---- TEST FIXTURE: shim release bundle (record only, delete with WORK_DIR) ----
+  cat >"$SRC_BUNDLE/packaging/verify-release-bundle.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation and exits with O3K_TEST_VERIFY_EXIT.
+printf 'verify-release-bundle %s\n' "$1" >>"${O3K_TEST_SCRIPT_LOG:?}"
+exit "${O3K_TEST_VERIFY_EXIT:-0}"
+EOF
+  cat >"$SRC_BUNDLE/packaging/preflight.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation and exits with O3K_TEST_PREFLIGHT_EXIT.
+# The real preflight checks (/dev/kvm, libvirt, disk) are exercised by
+# tests/packaging-safety.sh; here the wrapper's abort-on-failure is proven.
+printf 'preflight %s\n' "$*" >>"${O3K_TEST_SCRIPT_LOG:?}"
+exit "${O3K_TEST_PREFLIGHT_EXIT:-0}"
+EOF
+  cat >"$SRC_BUNDLE/packaging/bootstrap-certs.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; creates no TLS material.
+printf 'bootstrap-certs %s\n' "$*" >>"${O3K_TEST_CERT_LOG:?}"
+exit 0
+EOF
+  cat >"$SRC_BUNDLE/packaging/install.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; modes: ok | foreign | interrupted | converge.
+printf 'install %s\n' "$*" >>"${O3K_TEST_SCRIPT_LOG:?}"
+case "${O3K_TEST_INSTALL_MODE:-ok}" in
+  foreign)
+    printf 'foreign populated install path\n' >&2
+    exit 1
+    ;;
+  interrupted)
+    bundle_dir="$(cd "$(dirname "$0")/.." && pwd)"
+    tmp_root="$(dirname "$bundle_dir")"
+    printf '%s\n' "$tmp_root" >"${O3K_TEST_INSTALL_TMP_LOG:?}"
+    : >"$tmp_root/interrupted-installer-canary"
+    exit 1
+    ;;
+  converge)
+    printf 'configuration preserved\n'
+    printf 'credentials preserved\n'
+    ;;
+esac
+exit 0
+EOF
+  cat >"$SRC_BUNDLE/packaging/bootstrap-testlab.sh" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — records the invocation; modes: ok | fail | converge.
+printf 'bootstrap-testlab %s\n' "$*" >>"${O3K_TEST_SCRIPT_LOG:?}"
+if [ "${O3K_TEST_BOOTSTRAP_MODE:-ok}" = fail ]; then
+  printf 'bootstrap interrupted\n' >&2
+  exit 1
+fi
+if [ "${O3K_TEST_BOOTSTRAP_MODE:-ok}" = converge ]; then
+  printf 'TestLab resources already present\n'
+fi
+exit 0
+EOF
+  for file in verify-release-bundle.sh preflight.sh bootstrap-certs.sh install.sh bootstrap-testlab.sh; do
+    chmod +x "$SRC_BUNDLE/packaging/$file"
+  done
+  cat >"$SRC_BUNDLE/bin/o3kd" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — must never be executed by the wrapper.
+printf 'shim binary must not be executed\n' >&2
+exit 97
+EOF
+  cat >"$SRC_BUNDLE/bin/o3k-compute" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — must never be executed by the wrapper.
+printf 'shim binary must not be executed\n' >&2
+exit 97
+EOF
+  chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute"
+
+  build_good_tarball() { # build_good_tarball TARBALL
+    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.2.0-alpha.1
+  }
+  publish_tarball() { # publish_tarball TARBALL — copies into WWW + writes .sha256
+    local digest
+    cp "$1" "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz"
+    digest="$(sha256sum "$1" | awk '{print $1}')"
+    printf '%s  %s\n' "$digest" "o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+  }
+  publish_sha_digest() { # publish_sha_digest HEX64 — publishes a specific digest
+    printf '%s  %s\n' "$1" "o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+  }
+
+  printf 'v0.2.0-alpha.1\n' >"$WWW/channel/alpha"
+  CHANNEL_PORT="$(free_port)"
+  DEAD_PORT="$(free_port)" # a port with nothing listening: connection refused
+  start_http_server "$WWW" "$CHANNEL_PORT" HTTP_PID
+
+  export O3K_INSTALL_BASE="http://127.0.0.1:$CHANNEL_PORT"
+  export O3K_RELEASE_BASE="http://127.0.0.1:$CHANNEL_PORT/releases"
+  export TMPDIR="$TMP_ROOT"
+  export O3K_TEST_SCRIPT_LOG="$MATRIX/scripts.log"
+  export O3K_TEST_APT_LOG="$MATRIX/apt.log"
+  export O3K_TEST_SYSTEMCTL_LOG="$MATRIX/systemctl.log"
+  export O3K_TEST_CERT_LOG="$MATRIX/cert.log"
+
+  run_wrapper() { # run_wrapper OUT ERR — runs the real wrapper with the matrix env
+    PATH="$SHIM_BIN:$PATH" bash "$WRAPPER" >"$1" 2>"$2"
+  }
+
+  expect_abort() { # expect_abort DESC MESSAGE [OUT ERR] — non-zero exit + message
+    local desc="$1" message="$2" out="$3" err="$4" status=0
+    if ! run_wrapper "$out" "$err"; then
+      status=1
+    fi
+    [[ $status -ne 0 ]] || { record_fail "$desc (expected non-zero exit)"; return; }
+    if grep -Fq -- "$message" "$err"; then
+      record_pass "$desc"
+    else
+      record_fail "$desc (missing message: $message; stderr was: $(head -c 300 "$err"))"
+    fi
+  }
+
+  assert_no_script_run() { # assert_no_script_run DESC — nothing at all was executed
+    if [[ -s "$O3K_TEST_SCRIPT_LOG" ]]; then
+      record_fail "$1 (a bundled script ran: $(head -n1 "$O3K_TEST_SCRIPT_LOG"))"
+    else
+      record_pass "$1"
+    fi
+  }
+  assert_no_install_run() { # assert_no_install_run DESC — install.sh never ran
+    if grep -q '^install ' "$O3K_TEST_SCRIPT_LOG" 2>/dev/null; then
+      record_fail "$1 (install ran: $(grep '^install ' "$O3K_TEST_SCRIPT_LOG" | head -n1))"
+    else
+      record_pass "$1"
+    fi
+  }
+  assert_tmp_clean() { # assert_tmp_clean DESC — the trap removed its temp dir
+    if [[ -z "$(find "$TMP_ROOT" -mindepth 1 -print -quit)" ]]; then
+      record_pass "$1"
+    else
+      record_fail "$1 (files remain under $TMP_ROOT)"
+    fi
+  }
+
+  # ---- health endpoints on the ports the wrapper probes (success paths) -----
+  start_health_servers() {
+    if curl -sf -o /dev/null --max-time 2 http://127.0.0.1:18080/healthz 2>/dev/null \
+      || curl -sf -o /dev/null --max-time 2 http://127.0.0.1:9100/readyz 2>/dev/null; then
+      return 1 # ports already occupied by something foreign
+    fi
+    python3 - 18080 "$MATRIX/health-18080.log" <<'PY' &
+import http.server
+import sys
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(sys.argv[2], "a", encoding="utf-8") as stream:
+            stream.write(self.path + "\n")
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+    HEALTH_PID_18080=$!
+    python3 - 9100 "$MATRIX/health-9100.log" <<'PY' &
+import http.server
+import sys
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(sys.argv[2], "a", encoding="utf-8") as stream:
+            stream.write(self.path + "\n")
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+    HEALTH_PID_9100=$!
+    local attempt
+    for attempt in $(seq 1 50); do
+      if curl -sf -o /dev/null http://127.0.0.1:18080/healthz \
+        && curl -sf -o /dev/null http://127.0.0.1:9100/readyz; then
+        return 0
+      fi
+      sleep 0.1
+    done
+    kill "$HEALTH_PID_18080" "$HEALTH_PID_9100" 2>/dev/null || true
+    HEALTH_PID_18080=""
+    HEALTH_PID_9100=""
+    return 1
+  }
+  if ! start_health_servers; then
+    HEALTH_UP=0
+    record_skip "success/health-path cases need ports 18080 and 9100 free (skipping those cases)"
+  fi
+
+  fresh_logs() { # fresh_logs CASE — new log files per case
+    : >"$O3K_TEST_SCRIPT_LOG"
+    : >"$O3K_TEST_APT_LOG"
+    : >"$O3K_TEST_SYSTEMCTL_LOG"
+    rm -f -- "$O3K_TEST_CERT_LOG" "$MATRIX/install-tmp.log"
+    unset O3K_TEST_VERIFY_EXIT O3K_TEST_PREFLIGHT_EXIT O3K_TEST_INSTALL_MODE \
+      O3K_TEST_BOOTSTRAP_MODE O3K_TEST_INSTALL_TMP_LOG
+    O3K_TEST_INSTALL_TMP_LOG="$MATRIX/install-tmp.log"
+    export O3K_TEST_INSTALL_TMP_LOG
+  }
+
+  local out="$MATRIX/out.log" err="$MATRIX/err.log"
+
+  # 1. channel endpoint unreachable -> abort before anything is downloaded.
+  fresh_logs endpoint-down
+  O3K_INSTALL_BASE="http://127.0.0.1:$DEAD_PORT" \
+    expect_abort "unreachable channel endpoint aborts" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/channel/alpha" "$out" "$err"
+  assert_no_script_run "no bundled script ran after channel failure"
+
+  # 2. release endpoint unreachable -> abort after channel resolution.
+  fresh_logs release-down
+  O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
+    expect_abort "unreachable release endpoint aborts" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+    "$out" "$err"
+  assert_no_script_run "no bundled script ran after release download failure"
+
+  # 3. missing release asset (404) -> abort.
+  fresh_logs missing-asset
+  rm -f -- "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+    "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+  expect_abort "missing release asset (404) aborts" \
+    "download failed: http://127.0.0.1:$CHANNEL_PORT/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+    "$out" "$err"
+  assert_no_script_run "no bundled script ran after a 404 asset"
+
+  # 4. corrupted archive (truncated tarball, matching hash) -> abort at listing.
+  fresh_logs corrupted-archive
+  build_good_tarball "$MATRIX/good.tar.gz"
+  tarball_size="$(stat -c %s "$MATRIX/good.tar.gz")"
+  head -c $((tarball_size / 2)) "$MATRIX/good.tar.gz" >"$MATRIX/corrupt.tar.gz"
+  [[ -s "$MATRIX/corrupt.tar.gz" && "$(stat -c %s "$MATRIX/corrupt.tar.gz")" -lt "$tarball_size" ]]
+  publish_tarball "$MATRIX/corrupt.tar.gz"
+  expect_abort "corrupted archive aborts at listing" \
+    "release archive is not a readable gzip tarball" "$out" "$err"
+  assert_no_script_run "no bundled script ran from a corrupted archive"
+
+  # 5. wrong SHA-256 -> abort BEFORE extraction.
+  fresh_logs wrong-sha
+  build_good_tarball "$MATRIX/good.tar.gz"
+  publish_tarball "$MATRIX/good.tar.gz"
+  publish_sha_digest "0000000000000000000000000000000000000000000000000000000000000000"
+  expect_abort "wrong published SHA-256 aborts before extraction" \
+    "published SHA-256 verification failed" "$out" "$err"
+  assert_no_script_run "no bundled script ran on a hash mismatch"
+  assert_tmp_clean "nothing extracted before hash verification"
+
+  # 6. malformed bundle (verify-release-bundle.sh fails) -> abort.
+  fresh_logs malformed-bundle
+  publish_tarball "$MATRIX/good.tar.gz"
+  O3K_TEST_VERIFY_EXIT=1 \
+    expect_abort "malformed bundle aborts at verify-release-bundle.sh" \
+    "release bundle verification failed" "$out" "$err"
+  assert_no_install_run "install never ran for a malformed bundle"
+
+  # 7+8. unsafe extraction: "../" and absolute entries, matching hash.
+  fresh_logs unsafe-extraction
+  python3 - "$MATRIX/evil.tar.gz" "$SRC_BUNDLE" "../evil-canary-$$" <<'PY'
+import io
+import os
+import sys
+import tarfile
+
+tarball, bundle, evil = sys.argv[1], sys.argv[2], sys.argv[3]
+base = os.path.dirname(bundle)
+with tarfile.open(tarball, "w:gz") as tar:
+    for root, dirs, files in os.walk(bundle):
+        for name in files:
+            path = os.path.join(root, name)
+            tar.add(path, arcname="./" + os.path.relpath(path, base))
+    info = tarfile.TarInfo(evil)
+    data = b"evil escape payload\n"
+    info.size = len(data)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(data))
+PY
+  publish_tarball "$MATRIX/evil.tar.gz"
+  expect_abort "unsafe extraction (../ entry) aborts" \
+    "unsafe release archive entry (must start with ./): ../evil-canary-$$" "$out" "$err"
+  [[ ! -e "$MATRIX/evil-canary-$$" ]] && record_pass "no ../ escape payload written outside the temp dir" \
+    || record_fail "a ../ escape payload was written outside the temp dir"
+  assert_no_script_run "no bundled script ran from a ../-entry archive"
+  assert_tmp_clean "temp dir cleaned after ../ rejection"
+
+  fresh_logs unsafe-absolute
+  python3 - "$MATRIX/evil-abs.tar.gz" "$SRC_BUNDLE" "/evil-abs-canary-$$" <<'PY'
+import io
+import os
+import sys
+import tarfile
+
+tarball, bundle, evil = sys.argv[1], sys.argv[2], sys.argv[3]
+base = os.path.dirname(bundle)
+with tarfile.open(tarball, "w:gz") as tar:
+    for root, dirs, files in os.walk(bundle):
+        for name in files:
+            path = os.path.join(root, name)
+            tar.add(path, arcname="./" + os.path.relpath(path, base))
+    info = tarfile.TarInfo(evil)
+    data = b"evil absolute payload\n"
+    info.size = len(data)
+    info.mode = 0o644
+    tar.addfile(info, io.BytesIO(data))
+PY
+  publish_tarball "$MATRIX/evil-abs.tar.gz"
+  expect_abort "unsafe extraction (absolute entry) aborts" \
+    "unsafe release archive entry (must start with ./): /evil-abs-canary-$$" "$out" "$err"
+  [[ ! -e "/evil-abs-canary-$$" ]] && record_pass "no absolute-entry payload written to the host root" \
+    || record_fail "an absolute-entry payload was written to the host root"
+  assert_no_script_run "no bundled script ran from an absolute-entry archive"
+  assert_tmp_clean "temp dir cleaned after absolute-entry rejection"
+
+  # 9. unsafe extraction: a symlink entry inside ./ (name checks pass, the
+  #    ` -> ` verbose-listing marker must reject it) -> abort before
+  #    extraction and nothing is written.
+  fresh_logs unsafe-symlink
+  python3 - "$MATRIX/evil-symlink.tar.gz" "$SRC_BUNDLE" <<'PY'
+import os
+import sys
+import tarfile
+
+tarball, bundle = sys.argv[1], sys.argv[2]
+base = os.path.dirname(bundle)
+with tarfile.open(tarball, "w:gz") as tar:
+    for root, dirs, files in os.walk(bundle):
+        for name in files:
+            path = os.path.join(root, name)
+            tar.add(path, arcname="./" + os.path.relpath(path, base))
+    info = tarfile.TarInfo("./evil-link")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "/etc/passwd"
+    info.mode = 0o777
+    tar.addfile(info)
+PY
+  publish_tarball "$MATRIX/evil-symlink.tar.gz"
+  expect_abort "unsafe extraction (symlink entry) aborts" \
+    "unsafe release archive entry (symlink)" "$out" "$err"
+  [[ ! -e "$MATRIX/src-bundle/evil-link" && ! -L "$MATRIX/src-bundle/evil-link" ]] \
+    && record_pass "no symlink payload written" \
+    || record_fail "a symlink payload was written"
+  assert_no_script_run "no bundled script ran from a symlink-entry archive"
+  assert_tmp_clean "temp dir cleaned after symlink-entry rejection"
+
+  # 10. unsafe extraction: a character-device entry inside ./ (leading type
+  #     char `c` in the verbose listing) -> abort before extraction and
+  #     nothing is written.
+  fresh_logs unsafe-device
+  python3 - "$MATRIX/evil-device.tar.gz" "$SRC_BUNDLE" <<'PY'
+import os
+import sys
+import tarfile
+
+tarball, bundle = sys.argv[1], sys.argv[2]
+base = os.path.dirname(bundle)
+with tarfile.open(tarball, "w:gz") as tar:
+    for root, dirs, files in os.walk(bundle):
+        for name in files:
+            path = os.path.join(root, name)
+            tar.add(path, arcname="./" + os.path.relpath(path, base))
+    info = tarfile.TarInfo("./evil-dev")
+    info.type = tarfile.CHRTYPE
+    info.mode = 0o644
+    info.devmajor = 1
+    info.devminor = 3
+    tar.addfile(info)
+PY
+  publish_tarball "$MATRIX/evil-device.tar.gz"
+  expect_abort "unsafe extraction (device entry) aborts" \
+    "unsafe release archive entry (device, fifo, or link)" "$out" "$err"
+  [[ ! -e "$MATRIX/src-bundle/evil-dev" ]] \
+    && record_pass "no device payload written" \
+    || record_fail "a device payload was written"
+  assert_no_script_run "no bundled script ran from a device-entry archive"
+  assert_tmp_clean "temp dir cleaned after device-entry rejection"
+
+  # 11. preflight failure -> abort. The real /dev/kvm/libvirt/disk checks are
+  #    proven by tests/packaging-safety.sh and the real-VM campaigns; this
+  #    proves the wrapper treats any preflight failure as fatal.
+  fresh_logs preflight-fail
+  publish_tarball "$MATRIX/good.tar.gz"
+  O3K_TEST_PREFLIGHT_EXIT=1 \
+    expect_abort "preflight failure aborts the wrapper" \
+    "preflight failed (--profile libvirt --data-dir /var/lib/o3k)" "$out" "$err"
+  assert_no_install_run "install never ran after preflight failure"
+
+  # 12. foreign populated install path -> install.sh's failure exit passes
+  #     through. The real fence is proven by tests/packaging-safety.sh.
+  fresh_logs foreign-install-path
+  publish_tarball "$MATRIX/good.tar.gz"
+  O3K_TEST_INSTALL_MODE=foreign \
+    expect_abort "foreign install path failure passes through the wrapper" \
+    "installation failed; the host holds recoverable O3K-owned state and re-running the installer converges" \
+    "$out" "$err"
+  grep -Fq -- "--profile libvirt --noninteractive" "$O3K_TEST_SCRIPT_LOG" \
+    && record_pass "install shim received the verified-bundle invocation" \
+    || record_fail "install shim did not receive the expected arguments"
+
+  # 13. interrupted installer -> wrapper aborts and the EXIT trap removes the
+  #     private temp dir (no partial state claim). Install fails before the
+  #     health probes, so this case needs no health endpoints.
+  fresh_logs interrupted-installer
+  publish_tarball "$MATRIX/good.tar.gz"
+  O3K_TEST_INSTALL_MODE=interrupted \
+    expect_abort "interrupted installer aborts" \
+    "installation failed; the host holds recoverable O3K-owned state and re-running the installer converges" \
+    "$out" "$err"
+  if [[ -s "$MATRIX/install-tmp.log" ]]; then
+    recorded_tmp="$(head -n1 "$MATRIX/install-tmp.log")"
+    if [[ ! -e "$recorded_tmp" && ! -e "$recorded_tmp/interrupted-installer-canary" ]]; then
+      record_pass "interrupted installer temp dir removed by the trap"
+    else
+      record_fail "interrupted installer left its temp dir or canary behind"
+    fi
+  else
+    record_fail "interrupted installer shim did not record its temp dir"
+  fi
+
+  # 14. interrupted bootstrap -> wrapper aborts with a clear message.
+  if [[ "$HEALTH_UP" -eq 0 ]]; then
+    record_skip "interrupted bootstrap (needs health ports)"
+  else
+    fresh_logs interrupted-bootstrap
+    publish_tarball "$MATRIX/good.tar.gz"
+    O3K_TEST_BOOTSTRAP_MODE=fail \
+      expect_abort "interrupted bootstrap aborts with a clear message" \
+      "TestLab bootstrap failed" "$out" "$err"
+    grep -Fq 'install ' "$O3K_TEST_SCRIPT_LOG" \
+      && record_pass "install completed before bootstrap failure" \
+      || record_fail "install did not run before bootstrap failure"
+  fi
+
+  # 15. fresh first-run success control (TLS absent -> bootstrap-certs shim).
+  if [[ "$HEALTH_UP" -eq 0 ]]; then
+    record_skip "first-run success control (needs health ports)"
+  else
+    fresh_logs success
+    publish_tarball "$MATRIX/good.tar.gz"
+    if run_wrapper "$out" "$err"; then
+      record_pass "fresh first run exits 0 through the shim pipeline"
+    else
+      record_fail "fresh first run failed (stderr: $(head -c 300 "$err"))"
+    fi
+    grep -Fq 'release archive SHA-256 verified' "$out" \
+      && record_pass "release archive verified" || record_fail "missing verification line"
+    grep -Fq 'mTLS identities ready' "$out" \
+      && record_pass "TLS bootstrap invoked when identities were absent" \
+      || record_fail "missing mTLS-ready line"
+    grep -Fq 'O3K is ready.' "$out" \
+      && record_pass "ready banner printed" || record_fail "missing ready banner"
+    [[ -s "$O3K_TEST_CERT_LOG" ]] \
+      && record_pass "bootstrap-certs shim ran" || record_fail "bootstrap-certs shim did not run"
+    grep -Fq 'update' "$O3K_TEST_APT_LOG" && grep -Fq 'install' "$O3K_TEST_APT_LOG" \
+      && record_pass "apt dependency stage ran" || record_fail "apt dependency stage did not run"
+    grep -Fq 'enable --now libvirtd' "$O3K_TEST_SYSTEMCTL_LOG" \
+      && record_pass "libvirtd enablement ran" || record_fail "libvirtd enablement did not run"
+    [[ -s "$MATRIX/health-18080.log" && -s "$MATRIX/health-9100.log" ]] \
+      && record_pass "control-plane and compute health probes passed" \
+      || record_fail "health probes were not exercised"
+  fi
+
+  # 16. TLS partial set -> fail closed, nothing regenerated.
+  mkdir -p /etc/o3k/tls
+  ETC_O3K_CREATED=1
+  printf 'test fixture\n' >/etc/o3k/tls/ca.pem
+  chmod 0600 /etc/o3k/tls/ca.pem
+  fresh_logs tls-partial
+  publish_tarball "$MATRIX/good.tar.gz"
+  expect_abort "partial TLS set fails closed" \
+    "partial TLS identity set under /etc/o3k/tls (1 of 7 files)" "$out" "$err"
+  assert_no_install_run "install never ran with a partial TLS set"
+  [[ ! -e "$O3K_TEST_CERT_LOG" ]] \
+    && record_pass "no TLS regeneration was attempted" \
+    || record_fail "bootstrap-certs ran despite the partial TLS set"
+
+  # 17. converged second run: complete TLS set is preserved, shims report the
+  #     already-installed state, and the wrapper still exits 0.
+  if [[ "$HEALTH_UP" -eq 0 ]]; then
+    record_skip "converged second run (needs health ports)"
+  else
+    for file in ca.pem server.pem server-key.pem agent.pem agent-key.pem agent-id agent-fingerprint; do
+      printf 'test fixture\n' >"/etc/o3k/tls/$file"
+      chmod 0600 "/etc/o3k/tls/$file"
+    done
+    fresh_logs converge
+    publish_tarball "$MATRIX/good.tar.gz"
+    if O3K_TEST_INSTALL_MODE=converge O3K_TEST_BOOTSTRAP_MODE=converge \
+        run_wrapper "$out" "$err"; then
+      record_pass "converged second run exits 0"
+    else
+      record_fail "converged second run failed (stderr: $(head -c 300 "$err"))"
+    fi
+    grep -Fq 'TLS identities preserved' "$out" \
+      && record_pass "complete TLS set preserved" || record_fail "missing TLS-preserved line"
+    grep -Fq 'configuration preserved' "$out" && grep -Fq 'credentials preserved' "$out" \
+      && record_pass "configuration and credentials preserved" \
+      || record_fail "missing configuration/credentials preserved lines"
+    grep -Fq 'TestLab resources already present' "$out" \
+      && record_pass "TestLab resources already present" || record_fail "missing TestLab-converged line"
+    [[ ! -e "$O3K_TEST_CERT_LOG" ]] \
+      && record_pass "valid TLS identities were not regenerated" \
+      || record_fail "bootstrap-certs regenerated valid identities"
+    if [[ -f /usr/local/share/o3k/.o3k-installed ]]; then
+      grep -Fq 'already installed' "$out" \
+        && record_pass "installed-manifest notice printed" \
+        || record_fail "missing installed-manifest notice"
+    fi
+  fi
+}
+
+# ------------------------------------------------- platform / version fence --
+
+FUNCS="$WORK_DIR/get-o3k-functions.sh"
+# Least invasive mechanism: the wrapper hardcodes /etc/os-release and has no
+# self-test flag, so the shipped function definitions are extracted verbatim
+# and exercised in subshells with faked inputs. The extraction pattern matches
+# the top-level function braces exactly; a refactor that changes the shape
+# fails the sanity check below instead of silently testing nothing.
+sed -n '/^check_platform() {/,/^}/p; /^check_version_format() {/,/^}/p' \
+  "$WRAPPER" >"$FUNCS"
+if grep -q 'check_platform()' "$FUNCS" && grep -q 'check_version_format()' "$FUNCS"; then
+  record_pass "platform/version guard functions extracted from packaging/get-o3k.sh"
+else
+  record_fail "could not extract check_platform/check_version_format from packaging/get-o3k.sh"
+fi
+
+expect_platform_fail() { # expect_platform_fail DESC KERNEL MACHINE ID CODENAME MESSAGE
+  local desc="$1" kernel="$2" machine="$3" distro="$4" codename="$5" message="$6" output=""
+  if output="$(bash -c 'source "$1"; check_platform "$2" "$3" "$4" "$5"' \
+      bash "$FUNCS" "$kernel" "$machine" "$distro" "$codename" 2>&1)"; then
+    record_fail "$desc (expected non-zero exit)"
+    return
+  fi
+  if printf '%s\n' "$output" | grep -Fq -- "$message"; then
+    record_pass "$desc"
+  else
+    record_fail "$desc (missing message: $message; output: $output)"
+  fi
+}
+
+expect_platform_fail "unsupported kernel fails closed" FreeBSD x86_64 ubuntu noble \
+  "unsupported kernel: FreeBSD"
+expect_platform_fail "unsupported architecture fails closed" Linux aarch64 ubuntu noble \
+  "unsupported architecture: aarch64"
+expect_platform_fail "unsupported distribution fails closed" Linux x86_64 fedora 40 \
+  "unsupported distribution: fedora 40"
+expect_platform_fail "unsupported distro codename fails closed" Linux x86_64 ubuntu jammy \
+  "unsupported distribution: ubuntu jammy"
+if bash -c 'source "$1"; check_platform Linux x86_64 ubuntu noble; check_platform Linux x86_64 debian bookworm' \
+  bash "$FUNCS" >/dev/null 2>&1; then
+  record_pass "supported platforms (Ubuntu 24.04, Debian 12) pass the guard"
+else
+  record_fail "supported platforms rejected by check_platform"
+fi
+
+expect_version_fail() { # expect_version_fail DESC VERSION
+  if bash -c 'source "$1"; check_version_format "$2"' bash "$FUNCS" "$2" >/dev/null 2>&1; then
+    record_fail "$1 (accepted $2)"
+  else
+    record_pass "$1"
+  fi
+}
+
+expect_version_fail "version fence rejects 'main'" main
+expect_version_fail "version fence rejects 'latest'" latest
+expect_version_fail "version fence rejects three-dot versions" v1.2.3.4
+expect_version_fail "version fence rejects control characters" 'v1.2.3;rm -rf /'
+expect_version_fail "version fence rejects slashes" v0.2.0/alpha
+if bash -c 'source "$1"; check_version_format v0.2.0-alpha.1; check_version_format 0.2.0-alpha.1; check_version_format 1.2' \
+  bash "$FUNCS" >/dev/null 2>&1; then
+  record_pass "version fence accepts published release shapes"
+else
+  record_fail "version fence rejected a valid release version"
+fi
+
+# ------------------------------------------------------ full-wrapper matrix --
+
+run_full_matrix
+
+printf 'installer negative tests: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP"
+[[ $FAIL -eq 0 ]]

@@ -24,3 +24,6 @@ artifacts/
 /tests/tempest-evidence/tempest-preflight-result.json
 /tests/tempest-evidence/pipeline-*.xml
 /tests/tempest-evidence/pipeline-*.json
+
+# python bytecode cache
+__pycache__/

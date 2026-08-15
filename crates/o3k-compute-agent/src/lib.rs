@@ -2830,10 +2830,93 @@ impl CommandJournal {
         entries
     }
 
+    /// Returns the last terminal lifecycle-mutation outcome per resource from
+    /// the durable journal: for `create`, `start`, `stop`, `reboot`, and
+    /// `delete` commands, the recorded provider resource state of the most
+    /// recently accepted terminal entry. Resources whose most recent
+    /// lifecycle mutation is not terminal are excluded — their convergence is
+    /// owned by the control plane's re-drive, never by startup restoration.
+    ///
+    /// This is the agent-side authority for host-reboot restoration: a host
+    /// reboot leaves every qemu domain defined but inactive while the
+    /// control plane still reports the durable server state, so the startup
+    /// restore starts exactly the domains whose last executed mutation
+    /// provably left them running.
+    pub fn last_lifecycle_resource_states(&self) -> HashMap<String, (u64, proto::ResourceState)> {
+        let mut latest: HashMap<String, (u64, Option<proto::ResourceState>)> = HashMap::new();
+        for entry in self.entries.values() {
+            if !matches!(
+                entry.command.action,
+                Some(proto::command::Action::Create(_))
+                    | Some(proto::command::Action::Start(_))
+                    | Some(proto::command::Action::Stop(_))
+                    | Some(proto::command::Action::Reboot(_))
+                    | Some(proto::command::Action::Delete(_))
+            ) {
+                continue;
+            }
+            let terminal_state = matches!(entry.state, JournalState::Terminal)
+                .then(|| entry.result.as_ref())
+                .flatten()
+                .and_then(|result| proto::ResourceState::try_from(result.resource_state).ok());
+            match latest.entry(entry.command.resource_id.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    if entry.accepted_sequence > slot.get().0 {
+                        slot.insert((entry.accepted_sequence, terminal_state));
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert((entry.accepted_sequence, terminal_state));
+                }
+            }
+        }
+        latest
+            .into_iter()
+            .filter_map(|(resource_id, (sequence, state))| {
+                state.map(|state| (resource_id, (sequence, state)))
+            })
+            .collect()
+    }
+
     fn persist(&self) -> Result<(), AgentError> {
         let bytes = encode_journal(&self.entries)?;
         atomic_write_command_journal(&self.path, &bytes)
     }
+}
+
+/// Opens the durable command journal read-only: the decoded snapshot is
+/// returned without the in-flight → unknown mutation that the live journal
+/// applies on open. Startup restoration only needs the recorded terminal
+/// outcomes, and the live journal is opened separately by the control
+/// connection.
+fn open_command_journal_read_only(
+    identity_path: &Path,
+    agent_id: &str,
+) -> Result<CommandJournal, AgentError> {
+    let path = command_journal_file(identity_path);
+    let (entries, next_sequence) = match fs::read(&path) {
+        Ok(bytes) => decode_journal(&bytes, agent_id)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (HashMap::new(), 1),
+        Err(error) => return Err(AgentError::IdentityStore(error)),
+    };
+    Ok(CommandJournal {
+        path,
+        agent_id: agent_id.to_owned(),
+        entries,
+        next_sequence,
+    })
+}
+
+/// Reads the durable command journal and returns the last terminal
+/// lifecycle-mutation resource state per resource for host startup
+/// restoration. Read-only: the live journal used by the control connection
+/// is opened separately by [`AgentClient::run_with_executor`].
+pub fn load_journal_lifecycle_resource_states(
+    identity_file: &Path,
+    agent_id: &str,
+) -> Result<HashMap<String, (u64, proto::ResourceState)>, AgentError> {
+    let journal = open_command_journal_read_only(identity_file, agent_id)?;
+    Ok(journal.last_lifecycle_resource_states())
 }
 
 fn command_journal_file(identity_path: &Path) -> PathBuf {
@@ -5542,6 +5625,143 @@ mod tests {
             reopened.entries.values().next().map(|entry| entry.state),
             Some(JournalState::Unknown)
         ));
+        fs::remove_file(path).map_err(AgentError::IdentityStore)?;
+        Ok(())
+    }
+
+    /// Host-reboot restoration authority (issue #613 blocker A): the journal
+    /// must expose the LAST terminal lifecycle mutation per resource — a
+    /// stop after a create wins over the create, an accepted-but-unfinished
+    /// mutation excludes the resource (the control plane owns that
+    /// convergence), and passive console/inspect entries never count.
+    #[test]
+    fn journal_last_lifecycle_states_prefer_latest_terminal_mutation() -> Result<(), AgentError> {
+        let identity = PathBuf::from(format!(
+            "/tmp/o3k-journal-last-states-{}",
+            std::process::id()
+        ));
+        let path = command_journal_file(&identity);
+        let _ = fs::remove_file(&path);
+        let mut journal = CommandJournal::open(&identity, "node")?;
+
+        let accept_and_complete =
+            |journal: &mut CommandJournal, command: &proto::Command, resource_state: i32| {
+                let decision = journal
+                    .accept(command)
+                    .map_err(|error| AgentError::Protocol(format!("accept failed: {error}")))?;
+                let key = match decision {
+                    JournalDecision::New { key, .. } => key,
+                    JournalDecision::Existing(_) => {
+                        return Err(AgentError::Protocol(
+                            "journal unexpectedly deduplicated".to_owned(),
+                        ));
+                    }
+                };
+                journal
+                    .complete(&key, fake_success("provider-a".to_owned(), resource_state))
+                    .map_err(|error| AgentError::Protocol(format!("complete failed: {error}")))?;
+                Ok(())
+            };
+
+        // Resource "server-a": create (running) followed by a stop (stopped).
+        let create_a = build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            project_id: "project-a".to_owned(),
+            operation_id: Uuid::now_v7().to_string(),
+            resource_id: "server-a".to_owned(),
+            idempotency_key: "create-a".to_owned(),
+            deadline_unix_ms: unix_ms() + 60_000,
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-1".to_owned(),
+                mac: "02:00:00:00:00:01".to_owned(),
+                fixed_ipv4: "192.0.2.10".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
+            }],
+        })?;
+        accept_and_complete(
+            &mut journal,
+            &create_a,
+            proto::ResourceState::Running as i32,
+        )?;
+        let stop_a = build_lifecycle_command(
+            LifecycleCommand::Stop,
+            "node",
+            "epoch-1",
+            &Uuid::now_v7().to_string(),
+            "server-a",
+        )?;
+        accept_and_complete(&mut journal, &stop_a, proto::ResourceState::Stopped as i32)?;
+
+        // Resource "server-b": start (running) only.
+        let start_b = build_lifecycle_command(
+            LifecycleCommand::Start,
+            "node",
+            "epoch-1",
+            &Uuid::now_v7().to_string(),
+            "server-b",
+        )?;
+        accept_and_complete(&mut journal, &start_b, proto::ResourceState::Running as i32)?;
+
+        // Resource "server-c": an accepted create that never completed; the
+        // resource must be excluded (no proof of any executed outcome).
+        let create_c = build_create_command(CreateCommandSpec {
+            agent_id: "node".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            project_id: "project-a".to_owned(),
+            operation_id: Uuid::now_v7().to_string(),
+            resource_id: "server-c".to_owned(),
+            idempotency_key: "create-c".to_owned(),
+            deadline_unix_ms: unix_ms() + 60_000,
+            image_id: "image-1".to_owned(),
+            flavor_id: "flavor-1".to_owned(),
+            image_artifact_id: "image-artifact-1".to_owned(),
+            image_sha256: "a".repeat(64),
+            image_format: "qcow2".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            disk_gib: 10,
+            config_drive_artifact_id: "config-drive-1".to_owned(),
+            config_drive_sha256: "b".repeat(64),
+            network_attachments: vec![NetworkAttachmentSpec {
+                port_id: "port-2".to_owned(),
+                mac: "02:00:00:00:00:02".to_owned(),
+                fixed_ipv4: "192.0.2.11".to_owned(),
+                subnet_cidr: "192.0.2.0/24".to_owned(),
+                gateway_ipv4: "192.0.2.1".to_owned(),
+            }],
+        })?;
+        assert!(matches!(
+            journal.accept(&create_c)?,
+            JournalDecision::New { .. }
+        ));
+
+        let states = journal.last_lifecycle_resource_states();
+        assert_eq!(
+            states.get("server-a").map(|(_, state)| *state),
+            Some(proto::ResourceState::Stopped),
+            "the stop after the create must be the last lifecycle state"
+        );
+        assert_eq!(
+            states.get("server-b").map(|(_, state)| *state),
+            Some(proto::ResourceState::Running),
+            "a terminal start must be the last lifecycle state"
+        );
+        assert!(
+            !states.contains_key("server-c"),
+            "an unfinished mutation has no provable outcome and must be excluded"
+        );
         fs::remove_file(path).map_err(AgentError::IdentityStore)?;
         Ok(())
     }
