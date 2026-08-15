@@ -5,10 +5,13 @@
 # serves the local get.o3k.io endpoint shim (scripts/serve-installer-endpoint.py)
 # and drives the two in-VM phases:
 #   phase 1: canaries -> exact one-liner install -> assertions -> sudo reboot
+#   doctor: o3k doctor acceptance (HEALTHY, compute/o3kd stop-restart
+#           detection, disposable negative fixtures) — issue #617
 #   phase 2: reboot recovery -> one-liner rerun idempotency -> teardown ->
 #            uninstall -> one-liner reinstall -> lifecycle again -> purge ->
 #            zero-residue + canaries -> evidence JSON
-# The only things copied into the VM are in-vm-phase1.sh and in-vm-phase2.sh.
+# The only things copied into the VM are in-vm-phase1.sh, in-vm-phase2.sh,
+# and in-vm-doctor.sh.
 #
 # Usage: bash host-run.sh <ubuntu|debian> <evidence-dir>
 # Env overrides: O3K_CAMPAIGN_BUNDLE_DIST (default /tmp/campaign-tree/dist/...),
@@ -143,10 +146,10 @@ curl -sf "http://127.0.0.1:$PORT/version" >/dev/null \
   || { echo "endpoint shim did not come up" >&2; exit 1; }
 log "endpoint shim serving on 0.0.0.0:$PORT (pid $ENDPOINT_PID)"
 
-# ---- copy ONLY the two in-VM scripts (no repo, no bundle, no image) ------------
+# ---- copy ONLY the three in-VM scripts (no repo, no bundle, no image) ---------
 ssh_vm "mkdir -p $VM_SCRIPTS $VM_EVID"
 scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/in-vm-phase1.sh" "$SCRIPT_DIR/in-vm-phase2.sh" \
-  tester@localhost:"$VM_SCRIPTS/"
+  "$SCRIPT_DIR/in-vm-doctor.sh" tester@localhost:"$VM_SCRIPTS/"
 
 # ---- phase 1: install through the one-liner, assert, reboot --------------------
 log "phase 1: one-liner install"
@@ -194,6 +197,33 @@ log "SSH up after reboot (boot_id changed, kernel uptime ${BOOT_UPTIME}s)"
 # Ubuntu 24.04 mounts /tmp as tmpfs, so the campaign dirs live under the
 # tester home (persistent across reboot, readable by the scp pull user).
 ssh_vm "mkdir -p $VM_SCRIPTS $VM_EVID"
+
+# ---- doctor phase: diagnostics acceptance (issue #617) ------------------------
+# Detached + polled like phase 2: a dropped slirp session must not kill the
+# evidence run. Runs while o3kd/o3k-compute are healthy after the reboot,
+# stops and restarts both services, exercises disposable negative fixtures,
+# and must end with the services running and doctor HEALTHY again.
+DOCTOR_DIAG_CMD='sudo free -m; sudo journalctl -u o3kd --no-pager -n 40; sudo journalctl -u o3k-compute --no-pager -n 40; sudo /usr/local/bin/o3k doctor --json 2>/dev/null | head -60'
+log "doctor phase: diagnostics acceptance (issue #617)"
+ssh_vm "sudo rm -f $VM_EVID/doctor-done"
+ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-doctor.sh $DISTRO $VM_EVID $SOURCE_SHA \
+  >$VM_EVID/doctor-console.log 2>&1 </dev/null &"
+DOCTOR_MARKER=""
+for i in $(seq 1 150); do
+  sleep 10
+  DOCTOR_MARKER="$(ssh_vm "sudo cat $VM_EVID/doctor-done 2>/dev/null" 2>/dev/null || true)"
+  [ -n "$DOCTOR_MARKER" ] && break
+done
+log "doctor phase poll result: ${DOCTOR_MARKER:-<no marker yet>}"
+scp "${SCP_OPTS[@]}" -r tester@localhost:"$VM_EVID/." "$EVID/" 2>/dev/null || true
+[ -f "$EVID/doctor-console.log" ] && tail -40 "$EVID/doctor-console.log" \
+  | tee -a "$EVID/vm-${DISTRO}-doctor.log"
+if ! grep -Fq 'DOCTOR-COMPLETE status=passed' <<<"$DOCTOR_MARKER"; then
+  echo "doctor phase failed or timed out: ${DOCTOR_MARKER:-no marker}" >&2
+  ssh_vm "$DOCTOR_DIAG_CMD" >>"$EVID/vm-${DISTRO}-doctor-diagnostics.log" 2>&1 || true
+  exit 1
+fi
+log "doctor phase complete"
 
 # ---- phase 2: recovery, idempotency, removal, purge, evidence ------------------
 # Run detached inside the VM and poll a marker file over fresh SSH sessions:
