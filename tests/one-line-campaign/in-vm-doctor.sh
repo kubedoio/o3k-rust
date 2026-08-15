@@ -147,9 +147,10 @@ INITIAL=passed
 
 log "stopping o3k-compute"
 systemctl stop o3k-compute
-# The control plane marks the agent unavailable after its 15s lease.
+# The control plane marks the agent unavailable after its 15s lease plus a
+# 5s monitor tick; wait 30s so the readiness flip is deterministic.
 wait_http_ok "http://$LISTEN_ADDR/healthz" 20 3 || true
-sleep 20
+sleep 30
 doctor_json "$EVID/doctor-compute-stopped.json"
 assert_exit compute-stopped "$EVID/doctor-compute-stopped.json" 1
 assert_overall compute-stopped "$EVID/doctor-compute-stopped.json" unhealthy
