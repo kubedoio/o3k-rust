@@ -67,10 +67,12 @@ pub async fn check_agent_registered(ctx: &Context) -> Check {
 }
 
 /// `compute.agent_epoch`: the agent's self-reported epoch must not be older
-/// than any epoch the control plane has durably persisted. A newer
-/// self-reported epoch is a healthy registration that has not been durably
-/// recorded yet (WARN); an older one is a stale epoch (FAIL). UUIDv7 epoch
-/// strings compare lexicographically in time order.
+/// than any epoch the control plane has durably persisted. A persisted
+/// epoch NEWER than the report means the agent is behind (FAIL); persisted
+/// records OLDER than the report are superseded connection history and are
+/// healthy (they appear after every agent restart until the first durable
+/// write under the new epoch). UUIDv7 epoch strings compare
+/// lexicographically in time order.
 pub async fn check_agent_epoch(ctx: &Context) -> Check {
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("compute.agent_epoch", Category::Compute);
@@ -119,7 +121,7 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
         );
     }
     let mut stale: Vec<String> = Vec::new();
-    let mut not_recorded: Vec<String> = Vec::new();
+    let mut superseded: Vec<String> = Vec::new();
     for epoch in &epochs {
         let record = format!(
             "{} agent {} persisted {}",
@@ -127,44 +129,36 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
         );
         // UUIDv7 strings order lexicographically by creation time: a
         // persisted epoch NEWER than the agent's self-report means the agent
-        // is behind (stale); an older persisted epoch is just a registration
-        // that has no durable trace yet.
+        // is behind (stale). Older records are superseded connection
+        // history — healthy, reported as details only.
         if epoch.agent_epoch > self_reported {
             stale.push(record);
         } else if epoch.agent_epoch < self_reported {
-            not_recorded.push(record);
+            superseded.push(record);
         }
     }
-    if stale.is_empty() && not_recorded.is_empty() {
-        return Check::new(
+    if stale.is_empty() {
+        let mut check = Check::new(
             "compute.agent_epoch",
             Category::Compute,
             CheckStatus::Pass,
-            "agent epoch matches every persisted control-plane epoch",
+            "agent epoch is current against every persisted control-plane epoch",
         );
-    }
-    if !stale.is_empty() {
-        return Check::new(
-            "compute.agent_epoch",
-            Category::Compute,
-            CheckStatus::Fail,
-            format!(
-                "stale epoch: agent reports {self_reported}, control plane persisted newer epochs ({})",
-                stale.join(", ")
-            ),
-        )
-        .with_actions(vec![
-            "journalctl -u o3kd -n 100".to_owned(),
-            "journalctl -u o3k-compute -n 100".to_owned(),
-        ]);
+        if !superseded.is_empty() {
+            check = check.with_details(format!(
+                "superseded registration history ({}), none newer than the agent report",
+                superseded.join(", ")
+            ));
+        }
+        return check;
     }
     Check::new(
         "compute.agent_epoch",
         Category::Compute,
-        CheckStatus::Warn,
+        CheckStatus::Fail,
         format!(
-            "agent epoch {self_reported} is newer than the persisted control-plane epochs ({})",
-            not_recorded.join(", ")
+            "stale epoch: agent reports {self_reported}, control plane persisted newer epochs ({})",
+            stale.join(", ")
         ),
     )
     .with_actions(vec![
@@ -406,9 +400,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_epoch_warns_when_registration_not_recorded() {
-        // The agent reports a NEWER epoch than anything persisted: a healthy
-        // re-registration without a durable trace yet — never a failure.
+    async fn agent_epoch_passes_on_superseded_history() {
+        // The agent reports a NEWER epoch than anything persisted: healthy
+        // post-restart state (the old records are superseded connection
+        // history, never a failure).
         let mut db = FakeDb::healthy();
         db.epochs = vec![crate::db::EpochRow {
             source: "agent_commands".to_owned(),
@@ -416,9 +411,12 @@ mod tests {
             agent_epoch: "41".to_owned(),
         }];
         let check = check_agent_epoch(&context(FakeExec::healthy(), FakeHttp::healthy(), db)).await;
-        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.status, CheckStatus::Pass);
         assert!(
-            check.summary.contains("not been durably recorded") || check.summary.contains("newer")
+            check
+                .details
+                .as_deref()
+                .is_some_and(|d| d.contains("superseded"))
         );
     }
 
