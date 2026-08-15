@@ -1,0 +1,27 @@
+[package]
+name = "o3k"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "O3K operator CLI: o3k doctor read-only diagnostics"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx = { workspace = true, default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio.workspace = true
+
+[lib]
+name = "o3k"
+path = "src/lib.rs"
+
+[[bin]]
+name = "o3k"
+path = "src/main.rs"

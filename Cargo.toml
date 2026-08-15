@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "bins/o3kd",
+    "bins/o3k",
     "bins/o3k-compute",
     "crates/o3k-api",
     "crates/o3k-config",
