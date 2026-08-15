@@ -57,14 +57,16 @@ LISTEN_ADDR="$(sed -n 's/^O3K_LISTEN_ADDR=//p' /etc/o3k/o3kd.env | head -1)"
 
 # Runs the real doctor binary with a clean environment plus optional
 # sandbox overrides. Output lands in $1, the exit code in $1.exit.
+# An expected-nonzero doctor exit (negative fixtures) must not trip the
+# ERR trap: under `set -E` the trap still fires on a failing command even
+# with `set +e`, so capture the code in an `|| rc=$?` OR-list instead.
 doctor_json() { # out-file [OVERRIDE...]
   local out="$1"
   shift
-  set +e
+  local rc=0
   sudo env -i "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    "$@" /usr/local/bin/o3k doctor --json >"$out" 2>"$out.err"
-  printf '%d' $? >"$out.exit"
-  set -e
+    "$@" /usr/local/bin/o3k doctor --json >"$out" 2>"$out.err" || rc=$?
+  printf '%d' "$rc" >"$out.exit"
 }
 
 check_status() { # json-file check-id -> status string
