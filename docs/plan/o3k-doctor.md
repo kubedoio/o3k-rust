@@ -64,7 +64,7 @@ No secrets ever appear in output (enforced by a sentinel redaction test).
   Direction semantics: a persisted epoch NEWER than the agent report is a
   stale epoch (FAIL); older records are superseded connection history and
   stay healthy, so a freshly restarted agent never trips the check.
-- The compute-identity libvirt probe runs `sudo -u o3k-compute` with the
+- The compute-identity libvirt probe runs `runuser` with the
   unit's `SupplementaryGroups=libvirt kvm` so it reproduces the real
   agent's socket access; the control-identity probe keeps no extra groups.
 - `packaging/install.sh` additionally installs `bin/o3k`,
