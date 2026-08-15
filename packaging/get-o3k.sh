@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # get-o3k.sh — thin one-line installer wrapper (issue #613).
 #
-# Served by the get.o3k.io endpoint as GET /install.sh and executed as
+# Published as the GitHub Release asset install.sh of every O3K release: the
+# release generator exports this file byte-for-byte as dist/install.sh
+# (packaging/make-release.sh, 0755, drift-gated by cmp), so the canonical
+# alpha invocation is
+#   curl -sfL https://github.com/kubedoio/o3k-rust/releases/download/v0.2.0-alpha.2/install.sh | sudo sh -
+# get.o3k.io is only a convenience 302 redirect to that exact asset:
 #   curl -sfL https://get.o3k.io | sudo sh -
-# or pinned through the version path:
-#   curl -sfL https://get.o3k.io/v0.2.0-alpha.1 | sudo sh -
 #
 # This file is POSIX-sh compatible on purpose: on Ubuntu 24.04 and Debian 12
 # `sudo sh -` is dash, so the piped invocation must not depend on bashisms.
@@ -13,38 +16,40 @@
 # conditionally (empirically verified on a clean noble VM).
 #
 # SECURITY CONTRACT — no curl|sh of unverified content:
-#   The ONLY network-fetched executable input is the pinned channel version
-#   string, validated against the ADR-0130 version fence before use. Every
-#   file that is executed (packaging/*.sh, bin/o3kd, bin/o3k-compute) comes
-#   from the release tarball AFTER its published SHA-256 is verified; the
-#   tarball is never extracted before that verification, and extraction
-#   rejects any entry that is absolute, contains a ".." component, does not
-#   start with "./", or is not a regular file (symlink, hardlink, device,
-#   fifo, socket entries are refused from the `tar -tvzf` listing before
-#   anything is written). Any download or verification failure aborts.
+#   The version to install is BAKED into this file (O3K_INSTALLER_VERSION);
+#   the installer never consults a channel service or any other network
+#   endpoint to decide which version to install. Every file that is executed
+#   (packaging/*.sh, bin/o3kd, bin/o3k-compute) comes from the release
+#   tarball AFTER its published SHA-256 is verified; the tarball is never
+#   extracted before that verification, and extraction rejects any entry that
+#   is absolute, contains a ".." component, does not start with "./", or is
+#   not a regular file (symlink, hardlink, device, fifo, socket entries are
+#   refused from the `tar -tvzf` listing before anything is written). Any
+#   download or verification failure aborts.
 #
-# The endpoint may serve this same file with an optional FIRST line
-#   O3K_PINNED_VERSION="v0.2.0-alpha.1"
+# An optional endpoint may serve this same file with an added FIRST line
+#   O3K_PINNED_VERSION="v0.2.0-alpha.2"
 # which is a plain shell assignment when the stream is piped to sh. It is
-# handled by the resolution order below and its absence is not an error.
+# kept for optional future /v<version> endpoint paths (packaging/get-o3k-worker)
+# and handled by the resolution order below; its absence is not an error.
 # There is no fallback to main/latest: resolution failure aborts.
 #
 # Version resolution precedence:
-#   1. O3K_VERSION environment variable;
+#   1. O3K_VERSION environment variable (explicit dev/test override);
 #   2. O3K_PINNED_VERSION (the endpoint-injected first line, if present);
-#   3. the alpha channel: GET <O3K_INSTALL_BASE>/channel/alpha (plain text).
+#   3. the baked O3K_INSTALLER_VERSION release pin (this file's own release).
+# The installer NEVER consults a channel service.
 #
 # Supported platforms (strict): Linux x86_64, Ubuntu 24.04 (noble) or
 # Debian 12 (bookworm). Anything else fails with a clear message. Root is
 # required.
 #
 # Overrides for testing/campaigns (the only knobs):
-#   O3K_INSTALL_BASE  channel/version endpoint base (default https://get.o3k.io)
 #   O3K_RELEASE_BASE  release asset base (default
 #                     https://github.com/kubedoio/o3k-rust/releases/download)
-# Local campaigns serve both from one http server: /channel/alpha plus
-# /releases/v<version>/<assets>; HTTP is permitted only for these explicit
-# overrides, production URLs are pinned to HTTPS.
+# Local campaigns serve the release assets from one http server:
+# /releases/v<version>/<assets>; HTTP is permitted only for this explicit
+# override, production URLs are pinned to HTTPS.
 #
 # Release asset naming contract (packaging/make-release-archive.sh):
 #   o3k-<version>-linux-x86_64.tar.gz + o3k-<version>-linux-x86_64.tar.gz.sha256
@@ -63,7 +68,11 @@ if (set -o pipefail) 2>/dev/null; then
   set -o pipefail
 fi
 
-O3K_INSTALL_BASE="${O3K_INSTALL_BASE:-https://get.o3k.io}"
+# Baked release pin — updated in EVERY release's version-bump commit; the
+# published install.sh GitHub Release asset is byte-identical to this file,
+# so an installer downloaded from .../releases/download/v<version>/install.sh
+# installs exactly <version> by default.
+O3K_INSTALLER_VERSION="v0.2.0-alpha.2"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
@@ -102,7 +111,7 @@ check_version_format() {
   printf '%s\n' "$version" \
     | grep -Eq '^[0-9]+(\.[0-9]+){1,2}(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$' \
     || {
-      printf 'unsupported version: %s — expected a published release version like v0.2.0-alpha.1; refusing to fall back to main/latest\n' "$1" >&2
+      printf 'unsupported version: %s — expected a published release version like v0.2.0-alpha.2; refusing to fall back to main/latest\n' "$1" >&2
       exit 1
     }
 }
@@ -197,14 +206,11 @@ trap 'rm -rf -- "$TMP_DIR"; exit 130' INT
 trap 'rm -rf -- "$TMP_DIR"; exit 143' TERM HUP
 
 # ---- version resolution -------------------------------------------------------
-VERSION="${O3K_VERSION:-${O3K_PINNED_VERSION:-}}"
-if [ -z "$VERSION" ]; then
-  fetch "$O3K_INSTALL_BASE/channel/alpha" "$TMP_DIR/channel-alpha"
-  VERSION="$(cat "$TMP_DIR/channel-alpha")"
-  VERSION="$(trim "$VERSION")"
-  [ -n "$VERSION" ] || die "the alpha channel returned an empty version"
-fi
+# The version is baked into this file; the installer never consults a channel
+# service. Explicit dev/test overrides take precedence.
+VERSION="${O3K_VERSION:-${O3K_PINNED_VERSION:-$O3K_INSTALLER_VERSION}}"
 VERSION="$(trim "$VERSION")"
+[ -n "$VERSION" ] || die "no installer version resolved"
 check_version_format "$VERSION"
 VERSION_NO_V="${VERSION#v}"
 print_installed_notice

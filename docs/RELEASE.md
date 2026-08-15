@@ -19,7 +19,7 @@ glibc 2.39) requires `GLIBC_2.38`/`GLIBC_2.39` symbols (`__isoc23_sscanf`,
 ```bash
 bash scripts/build-release-binaries-debian12.sh        # builds in a disposable bookworm rootfs
 O3K_RELEASE_BINARIES_DIR=target/release-debian12 \
-  packaging/make-release.sh 0.2.0-alpha.1 libvirt
+  packaging/make-release.sh 0.2.0-alpha.2 libvirt
 ```
 
 The script installs the `rust-toolchain.toml` toolchain with rustup inside the
@@ -35,8 +35,8 @@ naming the offending version and the fix. The check is runnable standalone:
 Build and verify a candidate locally:
 
 ```bash
-SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) packaging/make-release.sh 0.2.0-alpha.1 fake
-cd dist/o3k-0.2.0-alpha.1
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) packaging/make-release.sh 0.2.0-alpha.2 fake
+cd dist/o3k-0.2.0-alpha.2
 sha256sum --check SHA256SUMS
 python3 -m json.tool sbom.spdx.json >/dev/null
 # Also checks that SHA256SUMS covers exactly every regular bundle file.
@@ -48,6 +48,27 @@ missing regular file, duplicate or escaping checksum paths, and symlinks in the
 bundle. `packaging/make-release.sh` runs this verification after creating the
 manifest and checksum file; it does not authenticate the bundle or replace
 artifact signing.
+
+## install.sh release asset
+
+The one-line installer is a first-class GitHub Release asset named exactly
+`install.sh`, exported byte-for-byte from the single installer source
+`packaging/get-o3k.sh` (mode 0755) by `packaging/make-release.sh`. Two drift
+gates make a second edited copy impossible to miss:
+
+- `make-release.sh` runs `cmp packaging/get-o3k.sh dist/install.sh` right
+  after the export and aborts on any mismatch, then records the SHA-256 in
+  the bundle manifest as `installer_sha256` (with
+  `installer_asset: "install.sh"`);
+- `packaging/make-release-archive.sh` re-checks that `dist/install.sh` is
+  byte-identical to `packaging/get-o3k.sh` before archiving (aborts on
+  drift) and prints its SHA-256.
+
+`install.sh` sits next to the bundle directory in `dist/` — it is a release
+asset, not a bundle file, so it is deliberately absent from the bundle
+`SHA256SUMS`. The release asset contract for a GitHub Release is:
+`install.sh`, `o3k-<version>-linux-x86_64.tar.gz`, its `.sha256`, `o3kd`,
+`o3k-compute`, `SHA256SUMS`, `sbom.spdx.json`, and `manifest.json`.
 
 The project does not claim SLSA compliance and does not automatically publish
 production releases. Before public alpha, the recommended keyless signing

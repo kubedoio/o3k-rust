@@ -9,15 +9,23 @@
 #     /etc/os-release and has no self-test flag, so extraction is the least
 #     invasive mechanism and tests the exact shipped text);
 #   - full-wrapper aborts driven through a local python3 http endpoint and a
-#     shim bundle: endpoint unreachable, release endpoint unreachable, missing
-#     release asset (404), corrupted archive, wrong SHA-256 (abort BEFORE
-#     extraction), malformed bundle, unsafe extraction ("../" and absolute
-#     entries, plus symlink and device/fifo entries rejected from the
-#     `tar -tvzf` listing), preflight failure, foreign install path
-#     pass-through, interrupted installer (trap cleanup), interrupted
-#     bootstrap, TLS partial-set fail-closed, TLS complete-set
+#     shim bundle: release endpoint unreachable, O3K_VERSION override wins over
+#     the baked pin, missing release asset (404), corrupted archive, wrong
+#     SHA-256 (abort BEFORE extraction), malformed bundle, unsafe extraction
+#     ("../" and absolute entries, plus symlink and device/fifo entries
+#     rejected from the `tar -tvzf` listing), preflight failure, foreign
+#     install path pass-through, interrupted installer (trap cleanup),
+#     interrupted bootstrap, TLS partial-set fail-closed, TLS complete-set
 #     skip-and-preserve, converged second run, and a first-run success
-#     control.
+#     control that proves the BAKED default version (no O3K_VERSION, no pin
+#     line) resolves to the pinned v0.2.0-alpha.2 release asset path.
+#
+# Version model under test: packaging/get-o3k.sh never consults a channel
+# service — it resolves O3K_VERSION env > O3K_PINNED_VERSION (optional
+# endpoint first line) > the baked O3K_INSTALLER_VERSION pin. This matrix
+# drives the wrapper directly through the O3K_RELEASE_BASE override; the
+# channel/version endpoint machinery belongs to the optional Worker
+# (packaging/get-o3k-worker/) and is tested by its own node test suite.
 #
 # Not duplicated here (owned by existing tests): the /dev/kvm, libvirt, and
 # disk-space checks live in packaging/preflight.sh and are exercised by
@@ -69,10 +77,10 @@ free_port() {
 start_http_server() { # start_http_server DIR PORT PID_VAR
   local dir="$1" port="$2" var="$3" pid="" attempt
   python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir" \
-    >"$MATRIX/channel-http.log" 2>&1 &
+    >"$MATRIX/endpoint-http.log" 2>&1 &
   pid=$!
   for attempt in $(seq 1 100); do
-    if curl -sf -o /dev/null "http://127.0.0.1:$port/channel/alpha"; then
+    if curl -sf -o /dev/null "http://127.0.0.1:$port/ready"; then
       eval "$var=$pid"
       return 0
     fi
@@ -80,22 +88,23 @@ start_http_server() { # start_http_server DIR PORT PID_VAR
   done
   kill "$pid" 2>/dev/null || true
   echo "http server on port $port did not come up; log:" >&2
-  cat "$MATRIX/channel-http.log" >&2
+  cat "$MATRIX/endpoint-http.log" >&2
   return 1
 }
 
 # ---- full-wrapper negative matrix (root, supported host, clean /etc/o3k) ----
 
 run_full_matrix() {
-  local MATRIX SHIM_BIN SRC_BUNDLE TMP_ROOT WWW CHANNEL_PORT DEAD_PORT
+  local MATRIX SHIM_BIN SRC_BUNDLE TMP_ROOT WWW RELEASE_PORT DEAD_PORT
   local HEALTH_UP=1
   MATRIX="$WORK_DIR/matrix"
   SHIM_BIN="$MATRIX/bin"
-  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.2.0-alpha.1"
+  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.2.0-alpha.2"
   TMP_ROOT="$MATRIX/tmp"
   WWW="$MATRIX/www"
   mkdir -p "$SHIM_BIN" "$SRC_BUNDLE/packaging" "$SRC_BUNDLE/bin" "$TMP_ROOT" \
-    "$WWW/channel" "$WWW/releases/v0.2.0-alpha.1"
+    "$WWW/releases/v0.2.0-alpha.2"
+  printf 'ok\n' >"$WWW/ready"
 
   if [[ $EUID -ne 0 ]]; then
     record_skip "full-wrapper negative matrix requires root (run: sudo bash tests/installer-negative.sh)"
@@ -205,27 +214,25 @@ EOF
   chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute"
 
   build_good_tarball() { # build_good_tarball TARBALL
-    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.2.0-alpha.1
+    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.2.0-alpha.2
   }
   publish_tarball() { # publish_tarball TARBALL — copies into WWW + writes .sha256
     local digest
-    cp "$1" "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz"
+    cp "$1" "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz"
     digest="$(sha256sum "$1" | awk '{print $1}')"
-    printf '%s  %s\n' "$digest" "o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$digest" "o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
   }
   publish_sha_digest() { # publish_sha_digest HEX64 — publishes a specific digest
-    printf '%s  %s\n' "$1" "o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$1" "o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
   }
 
-  printf 'v0.2.0-alpha.1\n' >"$WWW/channel/alpha"
-  CHANNEL_PORT="$(free_port)"
+  RELEASE_PORT="$(free_port)"
   DEAD_PORT="$(free_port)" # a port with nothing listening: connection refused
-  start_http_server "$WWW" "$CHANNEL_PORT" HTTP_PID
+  start_http_server "$WWW" "$RELEASE_PORT" HTTP_PID
 
-  export O3K_INSTALL_BASE="http://127.0.0.1:$CHANNEL_PORT"
-  export O3K_RELEASE_BASE="http://127.0.0.1:$CHANNEL_PORT/releases"
+  export O3K_RELEASE_BASE="http://127.0.0.1:$RELEASE_PORT/releases"
   export TMPDIR="$TMP_ROOT"
   export O3K_TEST_SCRIPT_LOG="$MATRIX/scripts.log"
   export O3K_TEST_APT_LOG="$MATRIX/apt.log"
@@ -338,6 +345,11 @@ PY
     : >"$O3K_TEST_APT_LOG"
     : >"$O3K_TEST_SYSTEMCTL_LOG"
     rm -f -- "$O3K_TEST_CERT_LOG" "$MATRIX/install-tmp.log"
+    # Deterministic version resolution per case: no explicit override and no
+    # endpoint-injected pin line (the wrapper is run as a file, never piped),
+    # so cases exercise the BAKED O3K_INSTALLER_VERSION unless a case sets
+    # O3K_VERSION itself.
+    unset O3K_VERSION O3K_PINNED_VERSION
     unset O3K_TEST_VERIFY_EXIT O3K_TEST_PREFLIGHT_EXIT O3K_TEST_INSTALL_MODE \
       O3K_TEST_BOOTSTRAP_MODE O3K_TEST_INSTALL_TMP_LOG
     O3K_TEST_INSTALL_TMP_LOG="$MATRIX/install-tmp.log"
@@ -346,27 +358,32 @@ PY
 
   local out="$MATRIX/out.log" err="$MATRIX/err.log"
 
-  # 1. channel endpoint unreachable -> abort before anything is downloaded.
-  fresh_logs endpoint-down
-  O3K_INSTALL_BASE="http://127.0.0.1:$DEAD_PORT" \
-    expect_abort "unreachable channel endpoint aborts" \
-    "download failed: http://127.0.0.1:$DEAD_PORT/channel/alpha" "$out" "$err"
-  assert_no_script_run "no bundled script ran after channel failure"
-
-  # 2. release endpoint unreachable -> abort after channel resolution.
-  fresh_logs release-down
+  # 1. default-version resolution with no O3K_VERSION and no pin line: the
+  #    BAKED O3K_INSTALLER_VERSION resolves to the pinned release asset path.
+  #    An unreachable release endpoint makes the resolved path visible in the
+  #    abort message, proving the wrapper never asked a channel service.
+  fresh_logs default-version-release-down
   O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
-    expect_abort "unreachable release endpoint aborts" \
-    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+    expect_abort "baked default version resolves to the pinned release asset" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
     "$out" "$err"
-  assert_no_script_run "no bundled script ran after release download failure"
+  assert_no_script_run "no bundled script ran after default-version download failure"
+
+  # 2. O3K_VERSION override wins over the baked default: the abort names the
+  #    OVERRIDE version's asset, not the baked v0.2.0-alpha.2 one.
+  fresh_logs override-version
+  O3K_VERSION="0.2.0-overridetest" O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
+    expect_abort "O3K_VERSION override wins over the baked default" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.2.0-overridetest/o3k-0.2.0-overridetest-linux-x86_64.tar.gz" \
+    "$out" "$err"
+  assert_no_script_run "no bundled script ran after override-version download failure"
 
   # 3. missing release asset (404) -> abort.
   fresh_logs missing-asset
-  rm -f -- "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
-    "$WWW/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz.sha256"
+  rm -f -- "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
+    "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
   expect_abort "missing release asset (404) aborts" \
-    "download failed: http://127.0.0.1:$CHANNEL_PORT/releases/v0.2.0-alpha.1/o3k-0.2.0-alpha.1-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after a 404 asset"
 
@@ -586,6 +603,18 @@ PY
     else
       record_fail "fresh first run failed (stderr: $(head -c 300 "$err"))"
     fi
+    # Default-version proof: with no O3K_VERSION and no pin line, the wrapper
+    # resolved the BAKED O3K_INSTALLER_VERSION — visible both in the banner
+    # and in the exact asset paths the release endpoint served.
+    grep -Fq '✓ O3K v0.2.0-alpha.2 verified' "$out" \
+      && record_pass "baked default resolved to v0.2.0-alpha.2 (verified banner)" \
+      || record_fail "missing v0.2.0-alpha.2 verified banner"
+    if grep -Fq 'GET /releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
+      && grep -Fq 'GET /releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
+      record_pass "default resolution downloaded the pinned v0.2.0-alpha.2 asset paths"
+    else
+      record_fail "release endpoint log does not show the pinned v0.2.0-alpha.2 asset requests"
+    fi
     grep -Fq 'release archive SHA-256 verified' "$out" \
       && record_pass "release archive verified" || record_fail "missing verification line"
     grep -Fq 'mTLS identities ready' "$out" \
@@ -711,7 +740,7 @@ expect_version_fail "version fence rejects 'latest'" latest
 expect_version_fail "version fence rejects three-dot versions" v1.2.3.4
 expect_version_fail "version fence rejects control characters" 'v1.2.3;rm -rf /'
 expect_version_fail "version fence rejects slashes" v0.2.0/alpha
-if bash -c 'source "$1"; check_version_format v0.2.0-alpha.1; check_version_format 0.2.0-alpha.1; check_version_format 1.2' \
+if bash -c 'source "$1"; check_version_format v0.2.0-alpha.2; check_version_format 0.2.0-alpha.2; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
   bash "$FUNCS" >/dev/null 2>&1; then
   record_pass "version fence accepts published release shapes"
 else

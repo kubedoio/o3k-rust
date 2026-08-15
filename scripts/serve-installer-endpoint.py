@@ -7,7 +7,9 @@ packaging/get-o3k-worker/ (see docs/plan/one-line-installer.md):
     GET /                          -> packaging/get-o3k.sh verbatim
     GET /install.sh                -> packaging/get-o3k.sh verbatim
     GET /version                   -> the advertised version (plain text)
-    GET /channel/alpha             -> v0.2.0-alpha.1 (plain text)
+    GET /channel/alpha             -> v0.2.0-alpha.2 (plain text; Worker-route
+                                      parity only — the installer itself is
+                                      pinned and never consults a channel)
     GET /v<version>                -> O3K_PINNED_VERSION="<version>" first line
                                       (the BARE version, no leading "v" —
                                       byte-identical to the production Worker,
@@ -20,14 +22,13 @@ packaging/get-o3k-worker/ (see docs/plan/one-line-installer.md):
 Anything else is 404. Stdlib only; no TLS — this shim is for the local
 acceptance campaign where the guest reaches the host over slirp
 (http://10.0.2.2:<port>). Production URLs in get-o3k.sh stay HTTPS; HTTP is
-only permitted through the documented O3K_INSTALL_BASE/O3K_RELEASE_BASE
-overrides.
+only permitted through the documented O3K_RELEASE_BASE override.
 
 Usage:
     python3 scripts/serve-installer-endpoint.py \
         --port 18000 \
-        --bundle-dist dist/o3k-0.2.0-alpha.1 \
-        --version v0.2.0-alpha.1
+        --bundle-dist dist/o3k-0.2.0-alpha.2 \
+        --version v0.2.0-alpha.2
 The release assets are read from the parent of --bundle-dist (the dist dir
 holding o3k-<version>-linux-x86_64.tar.gz + .sha256).
 """
@@ -47,7 +48,7 @@ def parse_args():
     parser.add_argument("--port", type=int, default=18000)
     parser.add_argument("--bundle-dist", required=True,
                         help="release bundle directory (dist/o3k-<version>/)")
-    parser.add_argument("--version", default="v0.2.0-alpha.1")
+    parser.add_argument("--version", default="v0.2.0-alpha.2")
     return parser.parse_args()
 
 

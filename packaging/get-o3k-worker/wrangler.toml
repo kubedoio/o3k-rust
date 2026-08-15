@@ -1,5 +1,9 @@
 # Cloudflare Workers configuration for the get.o3k.io installer endpoint.
 # Deployable artifact for issue #613 — see README.md in this directory.
+#
+# OPTIONAL: the production installation path is the Cloudflare Redirect Rule
+# in cloudflare-redirect.md; this worker is only for future channel/version
+# functionality and is not a trust dependency.
 
 name = "get-o3k"
 main = "src/index.js"

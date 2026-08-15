@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
+# make-release.sh — build the verified release bundle (dist/o3k-<version>/) and
+# export the one-line installer as the dist/install.sh GitHub Release asset.
+#
+# Usage: packaging/make-release.sh [VERSION] [PROFILE=fake]
+#
+# Release asset contract for the GitHub Release (see docs/RELEASE.md):
+#   dist/install.sh                            byte-identical export of
+#                                              packaging/get-o3k.sh (0755,
+#                                              drift-gated by cmp, SHA-256
+#                                              recorded in the bundle
+#                                              manifest.json installer_sha256)
+#   dist/o3k-<version>-linux-x86_64.tar.gz     produced by
+#   dist/o3k-<version>-linux-x86_64.tar.gz.sha256
+#                                              packaging/make-release-archive.sh
+#   plus o3kd, o3k-compute, SHA256SUMS, sbom.spdx.json, and manifest.json
+#   from the bundle and the baseline build.
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
@@ -53,20 +69,34 @@ else
   if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"; fi
 fi
 # get-o3k.sh and channels.yaml ship in the bundle so a pinned/self-hosted
-# release is self-describing (the wrapper and its channel table travel with
-# the artifacts they download).
+# release is self-describing (the wrapper and its advisory channel table
+# travel with the artifacts they download; the wrapper itself never consults
+# the channel table).
 cp "$ROOT_DIR/packaging/o3kd.service" "$ROOT_DIR/packaging/install.sh" "$ROOT_DIR/packaging/reset.sh" "$ROOT_DIR/packaging/uninstall.sh" "$ROOT_DIR/packaging/diagnose.sh" "$ROOT_DIR/packaging/preflight.sh" "$ROOT_DIR/packaging/bootstrap-certs.sh" "$ROOT_DIR/packaging/bootstrap-testlab.sh" "$ROOT_DIR/packaging/get-o3k.sh" "$ROOT_DIR/packaging/channels.yaml" "$ROOT_DIR/packaging/release-gate.sh" "$ROOT_DIR/packaging/validate-human-review.sh" "$ROOT_DIR/packaging/scan-release-evidence.sh" "$ROOT_DIR/packaging/generate-candidate-evidence-manifest.py" "$ROOT_DIR/packaging/verify-release-bundle.sh" "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/packaging/o3k-compute.service" "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$OUT_DIR/packaging/"
 cp "$ROOT_DIR/scripts/generate-passwords.sh" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/scripts/validate-release-e2e-evidence.py" "$OUT_DIR/scripts/"
 cp "$ROOT_DIR/contracts/release-e2e-evidence.schema.json" "$OUT_DIR/contracts/"
-cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.2.0-alpha.1.md" "$OUT_DIR/docs/"
+cp "$ROOT_DIR/docs/compatibility.md" "$ROOT_DIR/docs/cirros-walkthrough.md" "$ROOT_DIR/docs/release-evidence-schema.md" "$ROOT_DIR/docs/human-review-schema.md" "$ROOT_DIR/docs/security-review-checklist.md" "$ROOT_DIR/docs/releases/v0.2.0-alpha.2.md" "$OUT_DIR/docs/"
 cp "$ROOT_DIR/examples/clouds.yaml" "$ROOT_DIR/examples/o3kd.env.example" "$OUT_DIR/examples/"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" show -s --format=%ct HEAD)}" \
   "$ROOT_DIR/packaging/make-sbom.sh" "$OUT_DIR/sbom.spdx.json"
+# install.sh release asset: export the single installer source byte-for-byte
+# NEXT TO the bundle dir (it is a release asset, not a bundle file, so it is
+# deliberately absent from the bundle SHA256SUMS). The cmp gate makes drift
+# between the published asset and the reviewed source impossible to miss.
+INSTALL_SH="$DIST_ROOT/install.sh"
+cp "$ROOT_DIR/packaging/get-o3k.sh" "$INSTALL_SH"
+chmod 0755 "$INSTALL_SH"
+cmp -- "$ROOT_DIR/packaging/get-o3k.sh" "$INSTALL_SH" \
+  || { echo "install.sh release asset drifted from packaging/get-o3k.sh after copy" >&2; exit 1; }
+INSTALLER_SHA256="$(sha256sum "$INSTALL_SH" | awk '{print $1}')"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 WORKFLOW="${GITHUB_WORKFLOW:-local}"
-printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s"}\n' \
-  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" >"$OUT_DIR/manifest.json"
+# The manifest is written BEFORE SHA256SUMS so the final bundle verification
+# covers the installer record too.
+printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh"}\n' \
+  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" >"$OUT_DIR/manifest.json"
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"
 echo "release prepared at $OUT_DIR"
+echo "install.sh release asset: $INSTALL_SH (sha256 $INSTALLER_SHA256)"
