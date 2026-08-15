@@ -34,7 +34,7 @@ log() { echo "[$(date -u +%H:%M:%SZ)] $*"; }
 cleanup() {
   # Safety net: leave both services running whatever happened mid-phase.
   systemctl start o3kd o3k-compute 2>/dev/null || true
-  ip link del o3ktap-0123456789abcdef 2>/dev/null || true
+  ip link del o3ktap-99999999 2>/dev/null || true
   rm -rf -- "$FIXTURE_DIR"
 }
 trap cleanup EXIT
@@ -253,8 +253,10 @@ assert_status dead-dnsmasq "$EVID/doctor-dead-dnsmasq.json" network.dhcp_state F
 DEAD_DNSMASQ=passed
 
 # d6: a disposable dummy interface named like an O3K TAP but with no
-# ownership record. Created and removed here; never touches foreign state.
-ip link add o3ktap-0123456789abcdef type dummy
+# ownership record. The name must stay within the kernel's 15-character
+# IFNAMSIZ limit (the original fixture name was too long and 'ip link add'
+# rejected it). Created and removed here; never touches foreign state.
+ip link add o3ktap-99999999 type dummy
 doctor_json "$EVID/doctor-stale-tap.json"
 if [ "$(check_status "$EVID/doctor-stale-tap.json" network.tap_state)" = "NOT_APPLICABLE" ]; then
   log "stale-tap: no network ownership manifest on this install; fixture not applicable"
@@ -263,7 +265,7 @@ else
   assert_status stale-tap "$EVID/doctor-stale-tap.json" network.tap_state WARN
   STALE_TAP=passed
 fi
-ip link del o3ktap-0123456789abcdef
+ip link del o3ktap-99999999
 
 # ------------------------------------------------- (e) final healthy + JSON ---
 
