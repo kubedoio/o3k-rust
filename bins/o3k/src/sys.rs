@@ -122,19 +122,25 @@ impl SystemExec {
     }
 
     /// Bounded `virsh -c qemu:///system uri`, optionally under `sudo` when
-    /// running as root. For the compute identity the supplementary groups
-    /// mirror the compute unit's `SupplementaryGroups=libvirt kvm` so the
-    /// probe reproduces the real agent's socket access (plain `sudo -u`
-    /// drops them); the control-identity probe keeps no extra groups so a
-    /// granted connection still means a boundary breach.
+    /// running as root. For the compute identity `runuser` (util-linux) sets
+    /// the supplementary groups mirroring the compute unit's
+    /// `SupplementaryGroups=libvirt kvm` so the probe reproduces the real
+    /// agent's socket access (plain `sudo -u` drops them; Ubuntu's sudo
+    /// build lacks `-G`); the control-identity probe keeps no extra groups
+    /// so a granted connection still means a boundary breach.
     async fn virsh_uri_inner(&self, user: Option<&str>) -> Result<String, String> {
-        let mut command = Command::new("sudo");
-        if self.is_root {
+        let mut command = if self.is_root {
             let Some(user) = user else {
                 return self.virsh_uri_inner_unprivileged().await;
             };
             if user == "o3k-compute" {
-                command.args([
+                // runuser (util-linux) supports setting supplementary groups,
+                // which sudo on both target distros does not (`-G` is
+                // unavailable in Ubuntu's sudo build). The groups mirror the
+                // compute unit's SupplementaryGroups=libvirt kvm so the probe
+                // reproduces the real agent's socket access.
+                let mut run = Command::new("runuser");
+                run.args([
                     "-u",
                     user,
                     "-g",
@@ -147,12 +153,15 @@ impl SystemExec {
                     "qemu:///system",
                     "uri",
                 ]);
+                run
             } else {
-                command.args(["-u", user, "--", "virsh", "-c", "qemu:///system", "uri"]);
+                let mut run = Command::new("sudo");
+                run.args(["-u", user, "--", "virsh", "-c", "qemu:///system", "uri"]);
+                run
             }
         } else {
             return self.virsh_uri_inner_unprivileged().await;
-        }
+        };
         match run_bounded(&mut command) {
             Ok(outcome) if !outcome.completed => Err("virsh timed out".to_owned()),
             Ok(outcome) if outcome.output.status.success() => {
