@@ -6,6 +6,7 @@ CONFIG_DIR=/etc/o3k
 LOG_DIR=/var/log/o3k
 BINARY=
 COMPUTE_BINARY=
+O3K_BINARY=
 PROFILE=fake
 NONINTERACTIVE=0
 while (($#)); do
@@ -16,6 +17,7 @@ while (($#)); do
     --log-dir) LOG_DIR="$2"; shift 2;;
     --binary) BINARY="$2"; shift 2;;
     --compute-binary) COMPUTE_BINARY="$2"; shift 2;;
+    --o3k-binary) O3K_BINARY="$2"; shift 2;;
     --profile) PROFILE="$2"; shift 2;;
     --noninteractive) NONINTERACTIVE=1; shift;;
     *) echo "unknown option: $1" >&2; exit 2;;
@@ -79,6 +81,19 @@ if [[ "$PROFILE" == libvirt && -z "$COMPUTE_BINARY" ]]; then
   fi
 fi
 if [[ "$PROFILE" == libvirt ]]; then [[ -x "$COMPUTE_BINARY" ]] || { echo "compute binary is not executable: $COMPUTE_BINARY" >&2; exit 1; }; fi
+# o3k doctor is profile-independent: installed in every profile (issue #617).
+# The release bundle carries bin/o3k next to bin/o3kd; repo-tree/dev installs
+# build it from the workspace like the o3kd fallback above unless the caller
+# supplies --o3k-binary (used by tests to avoid in-script release builds).
+if [[ -z "$O3K_BINARY" ]]; then
+  if [[ -x "$ROOT_DIR/bin/o3k" ]]; then
+    O3K_BINARY="$ROOT_DIR/bin/o3k"
+  else
+    cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k
+    O3K_BINARY="$ROOT_DIR/target/release/o3k"
+  fi
+fi
+[[ -x "$O3K_BINARY" ]] || { echo "o3k binary is not executable: $O3K_BINARY" >&2; exit 1; }
 TLS_DIR="$CONFIG_DIR/tls"
 if [[ "$PROFILE" == libvirt ]]; then
   [[ -d "$TLS_DIR" && ! -L "$TLS_DIR" ]] || { echo "libvirt TLS directory is missing or unsafe: $TLS_DIR" >&2; exit 2; }
@@ -212,6 +227,7 @@ for path in "$DATA_DIR" "$CONFIG_DIR" "$LOG_DIR"; do mark_owned_dir "$path"; don
 if [[ "$PROFILE" == libvirt ]]; then mark_owned_dir "$COMPUTE_DATA_DIR"; fi
 INSTALLED_FILES=(
   bin/o3kd
+  bin/o3k
   share/o3k/o3kd.service
   share/o3k/reset.sh
   share/o3k/uninstall.sh
@@ -222,12 +238,28 @@ INSTALLED_FILES=(
   share/o3k/generate-passwords.sh
 )
 install_owned_file "$BINARY" "$PREFIX/bin/o3kd" bin/o3kd 0755
+install_owned_file "$O3K_BINARY" "$PREFIX/bin/o3k" bin/o3k 0755
 install_owned_file "$ROOT_DIR/packaging/o3kd.service" "$PREFIX/share/o3k/o3kd.service" share/o3k/o3kd.service 0644
 for file in reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh bootstrap-testlab.sh; do
   install_owned_file "$ROOT_DIR/packaging/$file" "$PREFIX/share/o3k/$file" "share/o3k/$file" 0755
 done
 install_owned_file "$ROOT_DIR/scripts/generate-passwords.sh" \
   "$PREFIX/share/o3k/generate-passwords.sh" share/o3k/generate-passwords.sh 0755
+# Release-bundle provenance files (issue #617): manifest.json and SHA256SUMS
+# sit at the release bundle root (packaging/make-release.sh writes them next
+# to bin/) and let `o3k doctor` verify the installed release. Repo-tree/dev
+# installs have no release bundle, so the two files are installed and tracked
+# in the ownership manifest only when the bundle sources exist.
+if [[ -f "$ROOT_DIR/manifest.json" ]]; then
+  install_owned_file "$ROOT_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json" \
+    share/o3k/release-manifest.json 0644
+  INSTALLED_FILES+=(share/o3k/release-manifest.json)
+fi
+if [[ -f "$ROOT_DIR/SHA256SUMS" ]]; then
+  install_owned_file "$ROOT_DIR/SHA256SUMS" "$PREFIX/share/o3k/SHA256SUMS" \
+    share/o3k/SHA256SUMS 0644
+  INSTALLED_FILES+=(share/o3k/SHA256SUMS)
+fi
 if [[ "$PROFILE" == libvirt ]]; then
   install_owned_file "$COMPUTE_BINARY" "$PREFIX/bin/o3k-compute" bin/o3k-compute 0755
   install_owned_file "$ROOT_DIR/packaging/o3k-compute.service" "$PREFIX/share/o3k/o3k-compute.service" share/o3k/o3k-compute.service 0644

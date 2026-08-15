@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/kubedoio/o3k-rust/blob/main/contracts/o3k-doctor-output.schema.json",
+  "title": "O3K Doctor machine output",
+  "description": "Stable machine-readable output of `o3k doctor --json`. Read-only by construction; MUST NOT contain secrets (passwords, tokens, private keys, user-data, or unredacted configuration). The schema version is the o3k doctor binary version (workspace version).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "overall_status", "timestamp", "checks"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Doctor schema version, equal to the o3k binary (workspace) version."
+    },
+    "overall_status": {
+      "type": "string",
+      "enum": ["healthy", "warning", "unhealthy"],
+      "description": "healthy = no WARN/FAIL; warning = at least one WARN and no FAIL; unhealthy = at least one FAIL. Exit code 0 only for healthy."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC RFC 3339 timestamp captured when the run started."
+    },
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/check" }
+    }
+  },
+  "definitions": {
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "category", "status", "summary"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9._-]{1,63}$",
+          "description": "Stable machine-readable check ID (e.g. compute.agent_registered)."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["host", "services", "control", "database", "identity", "compute", "libvirt", "network", "cloud", "security", "release"],
+          "description": "Human output section: Host / Services / Control plane / Database / Identity / Compute agent / Libvirt/KVM / Networking/DHCP / Cloud/API / Security boundaries / Installed release."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PASS", "WARN", "FAIL", "NOT_APPLICABLE"]
+        },
+        "summary": {
+          "type": "string",
+          "description": "Short human explanation of the finding. Never contains secrets."
+        },
+        "details": {
+          "type": "string",
+          "description": "Optional detail lines. Never contains secrets."
+        },
+        "recommended_actions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Safe read-only next diagnostic commands (e.g. `systemctl status o3k-compute`). Present on every FAIL and WARN; never repair/mutating commands."
+        }
+      }
+    }
+  }
+}

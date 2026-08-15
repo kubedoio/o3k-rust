@@ -340,6 +340,7 @@ log "purge: $PURGE_STATUS (teardown2=$TEARDOWN2_STATUS)"
 # ---- (g) zero-residue + foreign canaries ---------------------------------------
 ZERO_RESIDUE=yes
 [ ! -e /usr/local/bin/o3kd ] && [ ! -L /usr/local/bin/o3kd ] \
+  && [ ! -e /usr/local/bin/o3k ] && [ ! -L /usr/local/bin/o3k ] \
   && [ ! -e /usr/local/bin/o3k-compute ] && [ ! -L /usr/local/bin/o3k-compute ] \
   || { ZERO_RESIDUE=no; echo "ERROR: binaries remain" >&2; }
 [ ! -e /etc/systemd/system/o3kd.service ] && [ ! -e /etc/systemd/system/o3k-compute.service ] \

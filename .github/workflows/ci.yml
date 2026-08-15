@@ -120,6 +120,8 @@ jobs:
         run: bash tests/packaging-account-refusal.sh
       - name: Test release bundle integrity
         run: bash tests/release-bundle-integrity.sh
+      - name: Test o3k doctor process-level contract
+        run: bash tests/doctor-process.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Install pinned cargo-nextest

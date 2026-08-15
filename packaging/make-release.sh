@@ -47,6 +47,8 @@ BINARIES_DIR="${O3K_RELEASE_BINARIES_DIR:-}"
 if [[ -n "$BINARIES_DIR" ]]; then
   [[ -f "$BINARIES_DIR/o3kd" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3kd" >&2; exit 2; }
   bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3kd"
+  [[ -f "$BINARIES_DIR/o3k" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k" >&2; exit 2; }
+  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k"
   if [[ "$PROFILE" == libvirt ]]; then
     [[ -f "$BINARIES_DIR/o3k-compute" ]] || { echo "baseline binary is missing: $BINARIES_DIR/o3k-compute" >&2; exit 2; }
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$BINARIES_DIR/o3k-compute"
@@ -54,6 +56,8 @@ if [[ -n "$BINARIES_DIR" ]]; then
 else
   cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3kd
   bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3kd"
+  cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --bin o3k
+  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k"
   if [[ "$PROFILE" == libvirt ]]; then
     cargo build --release --manifest-path "$ROOT_DIR/Cargo.toml" --features libvirt --bin o3k-compute-bin
     bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$ROOT_DIR/target/release/o3k-compute-bin"
@@ -63,9 +67,11 @@ rm -rf -- "$OUT_DIR"
 mkdir -p "$OUT_DIR/bin" "$OUT_DIR/packaging" "$OUT_DIR/scripts" "$OUT_DIR/contracts" "$OUT_DIR/docs" "$OUT_DIR/examples"
 if [[ -n "$BINARIES_DIR" ]]; then
   install -m 0755 "$BINARIES_DIR/o3kd" "$OUT_DIR/bin/o3kd"
+  install -m 0755 "$BINARIES_DIR/o3k" "$OUT_DIR/bin/o3k"
   if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$BINARIES_DIR/o3k-compute" "$OUT_DIR/bin/o3k-compute"; fi
 else
   install -m 0755 "$ROOT_DIR/target/release/o3kd" "$OUT_DIR/bin/o3kd"
+  install -m 0755 "$ROOT_DIR/target/release/o3k" "$OUT_DIR/bin/o3k"
   if [[ "$PROFILE" == libvirt ]]; then install -m 0755 "$ROOT_DIR/target/release/o3k-compute-bin" "$OUT_DIR/bin/o3k-compute"; fi
 fi
 # get-o3k.sh and channels.yaml ship in the bundle so a pinned/self-hosted

@@ -957,6 +957,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k"
+version = "0.2.0-alpha.2"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "o3k-api"
 version = "0.2.0-alpha.2"
 dependencies = [
@@ -1085,6 +1097,7 @@ dependencies = [
  "o3k-provider",
  "o3k-provider-contract",
  "rustix 0.38.44",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",

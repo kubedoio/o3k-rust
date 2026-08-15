@@ -2,7 +2,8 @@
 # scripts/build-release-binaries-debian12.sh — build the release binaries on
 # the Debian 12 (bookworm) glibc 2.36 baseline
 #
-# The release binaries (o3kd, o3k-compute-bin --features libvirt) must execute
+# The release binaries (o3kd, o3k, o3k-compute-bin --features libvirt) must
+# execute
 # on every advertised target: Ubuntu 24.04 and Debian 12. Debian 12 ships
 # glibc 2.36, so a binary built on a newer baseline (Ubuntu 24.04's glibc
 # 2.39, for example) fails at exec on bookworm with `version 'GLIBC_2.38' not
@@ -23,7 +24,7 @@
 #
 # Usage: bash scripts/build-release-binaries-debian12.sh [OUTPUT_DIR]
 #   OUTPUT_DIR defaults to $ROOT_DIR/target/release-debian12 and receives
-#   o3kd, o3k-compute, SHA256SUMS, glibc-floor.txt, and build-info.txt.
+#   o3kd, o3k, o3k-compute, SHA256SUMS, glibc-floor.txt, and build-info.txt.
 #   Then assemble the release bundle from the baseline binaries:
 #     O3K_RELEASE_BINARIES_DIR="$OUTPUT_DIR" \
 #       packaging/make-release.sh VERSION libvirt
@@ -92,20 +93,21 @@ mkdir -p "$ROOTFS/build"
 (cd "$ROOT_DIR" && tar -cf - Cargo.toml Cargo.lock rust-toolchain.toml bins crates proto) \
   | tar -xf - -C "$ROOTFS/build"
 
-echo "==> cargo build --release (o3kd, o3k-compute-bin --features libvirt)"
+echo "==> cargo build --release (o3kd, o3k, o3k-compute-bin --features libvirt)"
 chroot "$ROOTFS" /bin/bash -c '
   set -Eeuo pipefail
   cd /build
   export RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH="/root/.cargo/bin:$PATH" HOME=/root
-  cargo build --release --locked --bin o3kd
+  cargo build --release --locked --bin o3kd --bin o3k
   cargo build --release --locked --features libvirt --bin o3k-compute-bin
   rustc --version > rustc-version.txt
 '
 
 mkdir -p "$OUTPUT_DIR"
 install -m 0755 "$ROOTFS/build/target/release/o3kd" "$OUTPUT_DIR/o3kd"
+install -m 0755 "$ROOTFS/build/target/release/o3k" "$OUTPUT_DIR/o3k"
 install -m 0755 "$ROOTFS/build/target/release/o3k-compute-bin" "$OUTPUT_DIR/o3k-compute"
-(cd "$OUTPUT_DIR" && sha256sum o3kd o3k-compute > SHA256SUMS)
+(cd "$OUTPUT_DIR" && sha256sum o3kd o3k o3k-compute > SHA256SUMS)
 
 echo "==> recording the glibc floor proof (checked with the host readelf)"
 {
@@ -113,7 +115,7 @@ echo "==> recording the glibc floor proof (checked with the host readelf)"
   echo "rootfs Debian version: $(cat "$ROOTFS/etc/debian_version")"
   echo "rust toolchain: $(cat "$ROOTFS/build/rustc-version.txt") (rust-toolchain.toml channel $CHANNEL)"
   echo "source commit: $(git -C "$ROOT_DIR" rev-parse HEAD)"
-  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k-compute"
+  bash "$ROOT_DIR/packaging/check-glibc-baseline.sh" "$OUTPUT_DIR/o3kd" "$OUTPUT_DIR/o3k" "$OUTPUT_DIR/o3k-compute"
 } | tee "$OUTPUT_DIR/glibc-floor.txt"
 {
   echo "rootfs: Debian $SUITE (bookworm)"

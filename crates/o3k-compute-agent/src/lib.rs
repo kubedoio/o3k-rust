@@ -2612,6 +2612,12 @@ impl ControlPlaneServer {
 pub struct AgentClient {
     config: AgentConfig,
     ready: Arc<std::sync::atomic::AtomicBool>,
+    /// The agent epoch of the currently live control-plane connection. `None`
+    /// before the first successful registration and while reconnecting; set
+    /// only after the control plane validated the registration, before
+    /// `ready` flips to true (issue #617: the loopback `/readyz` reports it
+    /// for stale-epoch diagnosis).
+    epoch: Arc<tokio::sync::RwLock<Option<String>>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4056,10 +4062,16 @@ impl AgentClient {
         Ok(Self {
             config,
             ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            epoch: Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
     pub fn is_ready(&self) -> bool {
         self.ready.load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// The agent epoch of the currently live control-plane connection, or
+    /// `None` when the agent has not registered yet or is reconnecting.
+    pub async fn current_epoch(&self) -> Option<String> {
+        self.epoch.read().await.clone()
     }
     pub fn identity_file(&self) -> &Path {
         &self.config.identity_file
@@ -4090,6 +4102,7 @@ impl AgentClient {
         loop {
             self.ready
                 .store(false, std::sync::atomic::Ordering::Release);
+            *self.epoch.write().await = None;
             let result = self
                 .connect_once(&agent_id, shutdown.as_mut(), executor.clone(), &mut journal)
                 .await;
@@ -4202,6 +4215,10 @@ impl AgentClient {
             }
         };
         validate_register_response(&register, agent_id, &epoch)?;
+        // Publish the validated epoch before `ready` flips to true so a
+        // concurrent loopback /readyz can never observe ready-without-epoch
+        // (issue #617).
+        *self.epoch.write().await = Some(epoch.clone());
         let artifact_store =
             ArtifactStore::open(artifact_store_root(&self.config.identity_file), agent_id)
                 .map_err(|_| artifact_store_error())?;
