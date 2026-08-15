@@ -132,6 +132,13 @@ bash "$ROOT_DIR/packaging/install.sh" \
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
 grep -Fqx "o3k-installed-v1 prefix=$WORK_DIR/prefix" "$WORK_DIR/prefix/share/o3k/.o3k-installed"
 grep -Fqx 'bin/o3kd' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+grep -Fqx 'bin/o3k' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+[[ -x "$WORK_DIR/prefix/bin/o3k" ]]
+# Repo-tree installs have no release bundle: the bundle-root provenance files
+# (manifest.json, SHA256SUMS) are bundle-only and must not be invented here.
+! grep -Fqx 'share/o3k/release-manifest.json' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+! grep -Fqx 'share/o3k/SHA256SUMS' "$WORK_DIR/prefix/share/o3k/.o3k-installed"
+[[ ! -e "$WORK_DIR/prefix/share/o3k/release-manifest.json" && ! -e "$WORK_DIR/prefix/share/o3k/SHA256SUMS" ]]
 # The fake profile keeps the configuration default: the generated daemon env
 # must not override O3K_PROVIDER (config default `fake`,
 # crates/o3k-config/src/lib.rs).
@@ -149,7 +156,8 @@ if bash "$ROOT_DIR/packaging/uninstall.sh" \
   echo "uninstall accepted a lexical dot component in its prefix" >&2
   exit 1
 fi
-[[ -x "$WORK_DIR/prefix/bin/o3kd" && -f "$WORK_DIR/prefix/share/o3k/uninstall.sh" ]]
+[[ -x "$WORK_DIR/prefix/bin/o3kd" && -x "$WORK_DIR/prefix/bin/o3k" \
+  && -f "$WORK_DIR/prefix/share/o3k/uninstall.sh" ]]
 
 # Purge targets must reject the same lexical path tricks as install targets;
 # otherwise ownership checks could be applied to a resolved directory outside
@@ -229,7 +237,8 @@ PATH="$WORK_DIR/fake-bin:$PATH" SYSTEMCTL_LOG="$WORK_DIR/systemctl.log" \
 for file in o3kd.service o3k-compute.service reset.sh uninstall.sh diagnose.sh preflight.sh bootstrap-certs.sh; do
   [[ ! -e "$WORK_DIR/prefix/share/o3k/$file" ]] || { echo "uninstall left helper file: $file" >&2; exit 1; }
 done
-[[ ! -e "$WORK_DIR/prefix/bin/o3kd" && ! -e "$WORK_DIR/prefix/bin/o3k-compute" ]]
+[[ ! -e "$WORK_DIR/prefix/bin/o3kd" && ! -e "$WORK_DIR/prefix/bin/o3k" \
+  && ! -e "$WORK_DIR/prefix/bin/o3k-compute" ]]
 [[ -f "$WORK_DIR/prefix/share/o3k/foreign-helper.sh" ]]
 [[ -f "$WORK_DIR/data/.o3k-owned" && -f "$WORK_DIR/config/o3kd.env" && -f "$WORK_DIR/log/.o3k-owned" ]]
 [[ ! -s "$WORK_DIR/systemctl.log" ]]

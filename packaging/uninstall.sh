@@ -56,7 +56,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/release-manifest.json|share/o3k/SHA256SUMS|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)

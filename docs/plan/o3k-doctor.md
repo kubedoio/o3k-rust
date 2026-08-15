@@ -25,6 +25,10 @@ out of scope (separate reviewed feature later).
   `PASS | WARN | FAIL | NOT_APPLICABLE`, a `summary`, optional `details`, and
   `recommended_actions` (safe read-only next commands) on WARN/FAIL.
 - Checks run serially in a fixed order; output order is deterministic.
+- Testing/sandbox overrides (process environment, not user-facing flags)
+  redirect doctor at a disposable sandbox for rootless process tests and
+  acceptance fixtures: `O3K_DOCTOR_CONFIG_DIR`, `O3K_DOCTOR_DATA_DIR`,
+  `O3K_DOCTOR_PREFIX`. Production runs use the installed defaults.
 
 ### Check IDs
 

@@ -19,8 +19,15 @@ cp "$ROOT_DIR/scripts/generate-passwords.sh" "$BUNDLE_DIR/scripts/generate-passw
 
 printf '#!/usr/bin/env bash\nprintf bundled-o3kd\n' >"$BUNDLE_DIR/bin/o3kd"
 chmod 0755 "$BUNDLE_DIR/bin/o3kd"
+printf '#!/usr/bin/env bash\nprintf bundled-o3k\n' >"$BUNDLE_DIR/bin/o3k"
+chmod 0755 "$BUNDLE_DIR/bin/o3k"
 printf '#!/usr/bin/env bash\nprintf bundled-o3k-compute\n' >"$BUNDLE_DIR/bin/o3k-compute"
 chmod 0755 "$BUNDLE_DIR/bin/o3k-compute"
+# Bundle-root provenance fixtures (issue #617): install.sh installs them as
+# share/o3k/release-manifest.json and share/o3k/SHA256SUMS exactly like the
+# real bundle produced by make-release.sh.
+printf '{"version":"0.0-bundle-test","profile":"fake"}\n' >"$BUNDLE_DIR/manifest.json"
+(cd "$BUNDLE_DIR" && sha256sum manifest.json >SHA256SUMS)
 
 CARGO_DIR="$WORK_DIR/no-cargo"
 mkdir -p "$CARGO_DIR"
@@ -72,7 +79,13 @@ CARGO_MARKER="$WORK_DIR/cargo-invoked" PATH="$CARGO_DIR:$PATH" bash "$BUNDLE_DIR
   --config-dir "$WORK_DIR/config" --log-dir "$WORK_DIR/log"
 
 cmp -s "$BUNDLE_DIR/bin/o3kd" "$PREFIX/bin/o3kd"
+cmp -s "$BUNDLE_DIR/bin/o3k" "$PREFIX/bin/o3k"
 [[ -f "$PREFIX/share/o3k/o3kd.service" ]]
+cmp -s "$BUNDLE_DIR/manifest.json" "$PREFIX/share/o3k/release-manifest.json"
+cmp -s "$BUNDLE_DIR/SHA256SUMS" "$PREFIX/share/o3k/SHA256SUMS"
+grep -Fqx 'bin/o3k' "$PREFIX/share/o3k/.o3k-installed"
+grep -Fqx 'share/o3k/release-manifest.json' "$PREFIX/share/o3k/.o3k-installed"
+grep -Fqx 'share/o3k/SHA256SUMS' "$PREFIX/share/o3k/.o3k-installed"
 [[ ! -e "$WORK_DIR/cargo-invoked" ]]
 
 # Keep this deterministic and host-independent: the real preflight contract is
@@ -121,6 +134,7 @@ else
     --prefix "$LIBVIRT_PREFIX" --data-dir "$WORK_DIR/libvirt-data" \
     --config-dir "$WORK_DIR/libvirt-config" --log-dir "$WORK_DIR/libvirt-log"
   cmp -s "$BUNDLE_DIR/bin/o3kd" "$LIBVIRT_PREFIX/bin/o3kd"
+  cmp -s "$BUNDLE_DIR/bin/o3k" "$LIBVIRT_PREFIX/bin/o3k"
   cmp -s "$BUNDLE_DIR/bin/o3k-compute" "$LIBVIRT_PREFIX/bin/o3k-compute"
   [[ -f "$LIBVIRT_PREFIX/share/o3k/o3k-compute.service" ]]
 fi

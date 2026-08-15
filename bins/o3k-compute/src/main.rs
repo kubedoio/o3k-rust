@@ -52,6 +52,11 @@ fn test_fault_pause_ms_value(raw: Option<String>) -> Option<u64> {
 #[derive(Clone)]
 struct HealthState {
     agent: AgentClient,
+    /// Live agent identity captured at startup; `o3k doctor` reads it from
+    /// the loopback `/readyz` (issue #617). Never secrets.
+    agent_id: String,
+    software_version: String,
+    capabilities: proto::Capabilities,
     libvirt_ready: bool,
     libvirt_error: Option<String>,
 }
@@ -2789,7 +2794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         image_materializer: o3k_compute_agent::ImageMaterializer::open(
             o3k_compute_agent::ArtifactStore::open(
                 agent.identity_file().with_extension("artifacts"),
-                agent_id,
+                agent_id.clone(),
             )?,
             service_root.join("image-cache"),
             2 * 1024 * 1024 * 1024,
@@ -2804,6 +2809,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<SocketAddr>()?;
     let state = HealthState {
         agent: agent.clone(),
+        agent_id: agent_id.clone(),
+        software_version: config.software_version.clone(),
+        capabilities: config.capabilities.clone(),
         libvirt_ready,
         libvirt_error,
     };
@@ -2836,9 +2844,48 @@ async fn liveness() -> impl IntoResponse {
     (StatusCode::OK, "{\"status\":\"alive\"}\n")
 }
 
+/// The 200 `/readyz` body (issue #617): the existing `status` key plus the
+/// agent's live, loopback-only identity. `agent_epoch` is omitted until the
+/// control plane has validated the current registration — a ready agent has
+/// always published one first, but the field stays `skip_serializing_if None`
+/// so the doctor can parse leniently. No secrets.
+#[derive(serde::Serialize)]
+struct ReadyBody {
+    status: &'static str,
+    agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_epoch: Option<String>,
+    software_version: String,
+    capabilities: ReadyCapabilities,
+}
+
+#[derive(serde::Serialize)]
+struct ReadyCapabilities {
+    max_vcpus: u32,
+    max_memory_mib: u64,
+    max_disk_gb: u64,
+}
+
 async fn readiness(State(state): State<HealthState>) -> impl IntoResponse {
     if state.agent.is_ready() && state.libvirt_ready {
-        (StatusCode::OK, "{\"status\":\"ready\"}\n".to_owned())
+        let body = ReadyBody {
+            status: "ready",
+            agent_id: state.agent_id.clone(),
+            agent_epoch: state.agent.current_epoch().await,
+            software_version: state.software_version.clone(),
+            capabilities: ReadyCapabilities {
+                max_vcpus: state.capabilities.max_vcpus,
+                max_memory_mib: state.capabilities.max_memory_mib,
+                max_disk_gb: state.capabilities.max_disk_gb,
+            },
+        };
+        let body = match serde_json::to_string(&body) {
+            Ok(serialized) => serialized,
+            // Plain string/integer fields cannot fail JSON serialization;
+            // never panic on the health path.
+            Err(_) => "{\"status\":\"ready\"}".to_owned(),
+        };
+        (StatusCode::OK, format!("{body}\n"))
     } else {
         let error = state
             .libvirt_error
@@ -2937,6 +2984,78 @@ mod tests {
         assert_eq!(test_fault_pause_ms_value(Some("0".to_owned())), None);
         assert_eq!(test_fault_pause_ms_value(Some("abc".to_owned())), None);
         assert_eq!(test_fault_pause_ms_value(Some("250".to_owned())), Some(250));
+    }
+
+    /// Serializes a [`ReadyBody`] and parses it back as JSON. Asserts the
+    /// round-trip and returns `None` (the caller returns from the test) on
+    /// any serialization failure, avoiding `unwrap` in tests.
+    fn ready_body_json(body: &ReadyBody) -> Option<serde_json::Value> {
+        let encoded = match serde_json::to_string(body) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                // Plain fields cannot fail serialization; the assertion
+                // condition is data-dependent so clippy's
+                // assertions_on_constants rule stays satisfied.
+                assert!(
+                    error.to_string().is_empty(),
+                    "ReadyBody must serialize: {error}"
+                );
+                return None;
+            }
+        };
+        match serde_json::from_str(&encoded) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                assert!(
+                    error.to_string().is_empty(),
+                    "ReadyBody must deserialize: {error}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Issue #617: the 200 /readyz body is the additive self-report contract
+    /// `o3k doctor` reads — the existing `status` key is preserved, the new
+    /// identity fields are present, and an absent epoch is omitted entirely
+    /// (never `null`) so the doctor can parse leniently.
+    #[test]
+    fn readyz_body_reports_live_agent_identity_additively() {
+        let Some(body) = ready_body_json(&ReadyBody {
+            status: "ready",
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: Some("epoch-1".to_owned()),
+            software_version: "0.2.0-alpha.1".to_owned(),
+            capabilities: ReadyCapabilities {
+                max_vcpus: 8,
+                max_memory_mib: 16_384,
+                max_disk_gb: 10,
+            },
+        }) else {
+            return;
+        };
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["agent_id"], "agent-1");
+        assert_eq!(body["agent_epoch"], "epoch-1");
+        assert_eq!(body["software_version"], "0.2.0-alpha.1");
+        assert_eq!(body["capabilities"]["max_vcpus"], 8);
+        assert_eq!(body["capabilities"]["max_memory_mib"], 16_384);
+        assert_eq!(body["capabilities"]["max_disk_gb"], 10);
+
+        let Some(body) = ready_body_json(&ReadyBody {
+            status: "ready",
+            agent_id: "agent-1".to_owned(),
+            agent_epoch: None,
+            software_version: "0.2.0-alpha.1".to_owned(),
+            capabilities: ReadyCapabilities {
+                max_vcpus: 8,
+                max_memory_mib: 16_384,
+                max_disk_gb: 10,
+            },
+        }) else {
+            return;
+        };
+        assert!(body.get("agent_epoch").is_none());
     }
 
     fn network_attachment(

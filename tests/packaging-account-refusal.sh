@@ -69,17 +69,22 @@ make_user() { # name primary-group home shell [supplementary-group...]
 # and is exercised separately in tests/packaging-safety.sh.
 build_bundle() { # tag destination
   local tag="$1" dest="$2" helper
-  mkdir -p "$dest/packaging" "$dest/scripts"
+  mkdir -p "$dest/packaging" "$dest/scripts" "$dest/bin"
   sed "s/o3k/${tag}/g" "$ROOT_DIR/packaging/install.sh" >"$dest/packaging/install.sh"
   cp "$ROOT_DIR/packaging/o3kd.service" "$dest/packaging/${tag}d.service"
   cp "$ROOT_DIR/packaging/o3k-compute.service" "$dest/packaging/${tag}-compute.service"
   cp "$ROOT_DIR/packaging/50-o3k-libvirt.rules" "$dest/packaging/50-${tag}-libvirt.rules"
-  for helper in reset.sh uninstall.sh diagnose.sh bootstrap-certs.sh; do
+  for helper in reset.sh uninstall.sh diagnose.sh bootstrap-certs.sh bootstrap-testlab.sh; do
     cp "$ROOT_DIR/packaging/$helper" "$dest/packaging/$helper"
   done
   printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n' >"$dest/packaging/preflight.sh"
   chmod 0755 "$dest/packaging/preflight.sh"
   cp "$ROOT_DIR/scripts/generate-passwords.sh" "$dest/scripts/generate-passwords.sh"
+  # The rewritten installer resolves the o3k doctor binary at bundle
+  # bin/<tag> (the rewrite maps bin/o3k); provide the shim so the completed
+  # CASE G install never falls back to a cargo build outside the repo.
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$dest/bin/$tag"
+  chmod 0755 "$dest/bin/$tag"
 }
 
 FAKE_BIN_DIR="$WORK_DIR/fake-binaries"

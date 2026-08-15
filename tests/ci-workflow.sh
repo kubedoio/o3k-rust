@@ -25,6 +25,7 @@ assert "run: bash tests/toolchain-evidence.sh" in text
 assert "run: cargo test --workspace --all-features" in text
 assert "run: bash tests/packaging-safety.sh" in text
 assert "run: bash tests/packaging-bundle.sh" in text
+assert "run: bash tests/doctor-process.sh" in text
 assert "run: sudo bash tests/installer-negative.sh" in text
 # The installer-negative matrix skip is vacuous on any non-24.04 runner:
 # the dedicated job must stay pinned to ubuntu-24.04.
