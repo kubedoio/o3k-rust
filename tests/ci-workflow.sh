@@ -23,6 +23,14 @@ assert "run: bash tests/real-libvirt-harness.sh" in text
 assert "run: bash tests/openapi-governance.sh" in text
 assert "run: bash tests/toolchain-evidence.sh" in text
 assert "run: cargo test --workspace --all-features" in text
+assert "run: bash tests/packaging-safety.sh" in text
+assert "run: bash tests/packaging-bundle.sh" in text
+assert "run: sudo bash tests/installer-negative.sh" in text
+# The installer-negative matrix skip is vacuous on any non-24.04 runner:
+# the dedicated job must stay pinned to ubuntu-24.04.
+assert re.search(r"^  installer-negative:\s*\n\s+runs-on: ubuntu-24\.04", text, re.MULTILINE) is not None
+assert "run: node --test packaging/get-o3k-worker/test.mjs" in text
+assert "run: bash packaging/get-o3k-worker/sync.sh --check" in text
 assert "run: cargo test --workspace\n" not in text
 assert "protobuf-compiler libvirt-dev pkg-config" in text
 assert "cargo clean -p virt-sys" in text

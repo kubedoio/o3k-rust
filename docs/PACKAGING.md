@@ -43,3 +43,22 @@ Upgrade and rollback boundaries are package-level: stop the service, retain
 the SQLite/data layout, replace the versioned binary, run readiness and the
 TestLab workflow, and restore the previous binary if validation fails. Schema
 migrations must remain forward-compatible before an upgrade is published.
+
+## One-line installer
+
+For a clean Ubuntu 24.04 / Debian 12 host, the supported entry point is the
+one-line installer (`curl -sfL https://get.o3k.io | sudo sh -`) documented in
+[docs/INSTALLER.md](INSTALLER.md). Its packaging artifacts:
+
+- `packaging/get-o3k.sh` — the thin wrapper served by the endpoint; resolves
+  the version, installs host dependencies, downloads and verifies the
+  release archive, then drives the bundle scripts below;
+- `packaging/channels.yaml` — the channel table (`alpha -> v0.2.0-alpha.1`)
+  served by the endpoint and embedded in the worker
+  (`packaging/get-o3k-worker/`, generated snapshot `src/assets.js`, kept in
+  sync by `sync.sh --check`);
+- `packaging/make-release-archive.sh` — produces the GitHub Release assets
+  (`o3k-<version>-linux-x86_64.tar.gz` + published `.sha256`) the wrapper
+  downloads, and verifies the archive shape before publishing;
+- `packaging/bootstrap-testlab.sh` — idempotent public-API TestLab bootstrap
+  (CirrOS, network, subnet, port, flavor, keypair, `test-vm`, console).

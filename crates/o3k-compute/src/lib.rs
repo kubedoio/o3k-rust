@@ -1098,6 +1098,15 @@ impl ComputeService {
             config_drive: config_drive.clone(),
             idempotency_key: idempotency_key.clone(),
         };
+        // A durable row in terminal `Deleted` state is a completed lifecycle
+        // over the same deterministic identity, not an in-flight create: the
+        // name is free (`list_servers` excludes Deleted rows) and the caller
+        // is starting a NEW lifecycle. The tombstone is remembered and the
+        // normal schedule+persist flow revives the row under a fresh
+        // lifecycle operation identity below. Every other durable state keeps
+        // the retry semantics of ADR-0014 (byte-equivalent intent converges,
+        // a differing intent conflicts).
+        let mut revived_from: Option<o3k_store::ResourceRecord> = None;
         match self.store.get_resource(server_id).await {
             Ok(existing) => {
                 let existing_request: CreateInstanceRequest =
@@ -1108,14 +1117,35 @@ impl ComputeService {
                     placement_allocation_id: None,
                     ..existing_request
                 };
-                let legacy_keypair_intent =
-                    requests_match_with_keypair_migration(&existing_request, &request);
-                if existing_request == request || legacy_keypair_intent {
-                    if matches!(
-                        server_state_from_storage(&existing.observed_state),
-                        Ok(ServerState::Deleted)
-                    ) {
-                        return Err(ComputeError::NotFound);
+                // Deliberate vs HEAD: corrupt observed state now fails
+                // closed as `ComputeError::Store` instead of being silently
+                // treated as a live row.
+                let observed = server_state_from_storage(&existing.observed_state)
+                    .map_err(ComputeError::Store)?;
+                if observed == ServerState::Deleted {
+                    revived_from = Some(existing);
+                } else {
+                    let legacy_keypair_intent =
+                        requests_match_with_keypair_migration(&existing_request, &request);
+                    // A recreation revive (issue #613 blocker B) persisted a
+                    // fresh lifecycle operation identity for the same caller
+                    // intent; a retry of that recreation rebuilds the
+                    // pre-revive request and differs from the persisted
+                    // intent only in operation_id and idempotency_key. The
+                    // durable intent wins for that exact shape (the retry
+                    // converges on the persisted row and its operation);
+                    // every other difference keeps the ADR-0014 conflict
+                    // semantics.
+                    let revive_equivalent = existing_request != request
+                        && !legacy_keypair_intent
+                        && CreateInstanceRequest {
+                            operation_id: existing_request.operation_id,
+                            idempotency_key: existing_request.idempotency_key.clone(),
+                            ..request.clone()
+                        } == existing_request;
+                    if !(existing_request == request || legacy_keypair_intent || revive_equivalent)
+                    {
+                        return Err(ComputeError::Conflict);
                     }
                     if legacy_keypair_intent {
                         let desired_state =
@@ -1180,7 +1210,6 @@ impl ComputeService {
                         .show_server(&project_id, ServerId::from_uuid(server_id))
                         .await;
                 }
-                return Err(ComputeError::Conflict);
             }
             Err(StoreError::ResourceNotFound) => {}
             Err(error) => return Err(ComputeError::Store(error)),
@@ -1301,101 +1330,192 @@ impl ComputeService {
             "after-placement-commit",
             "O3K_TEST_FAULT_PAUSE_AFTER_PLACEMENT_COMMIT_MS",
         );
-        match self.journal.begin_create(&project_id, &request).await {
-            Ok(_) => {}
-            Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
-                let existing = self.store.get_resource(id).await?;
-                let existing_request: CreateInstanceRequest =
-                    serde_json::from_str(&existing.desired_state)
-                        .map_err(|_| ComputeError::Conflict)?;
-                let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
-                    existing_request.placement_provider_id.as_deref()
-                        == Some(decision.provider_id.as_str())
-                        && existing_request.placement_allocation_id.as_deref()
-                            == Some(decision.allocation_id.as_str())
-                });
-                if let Some(decision) = placement.as_ref()
-                    && !owns_persisted_placement
+        let request = match revived_from.as_ref() {
+            Some(tombstone) => {
+                // Revive the tombstoned row into a fresh lifecycle. The
+                // operation identity and the provider idempotency key derive
+                // deterministically from the tombstone's durable
+                // observed_generation, so a retry before this persist
+                // recomputes the same identities and a retry after a crash
+                // between placement commit and persist converges through the
+                // revive again (the tombstone is untouched until the atomic
+                // persist below). The fresh idempotency key also keeps the
+                // agent command journal from deduplicating the new create
+                // against the completed lifecycle's terminal command.
+                let revive_operation_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "o3k:operation:revive:{project_id}:{idempotency_key}:{}",
+                        tombstone.observed_generation
+                    )
+                    .as_bytes(),
+                );
+                let revive_idempotency_key =
+                    format!("{idempotency_key}:revive:{}", tombstone.observed_generation);
+                let revive_request = CreateInstanceRequest {
+                    operation_id: revive_operation_id,
+                    idempotency_key: revive_idempotency_key,
+                    ..request
+                };
+                let desired_state =
+                    serde_json::to_string(&revive_request).map_err(|_| ComputeError::Conflict)?;
+                match self
+                    .store
+                    .revive_resource_and_operation(
+                        id,
+                        tombstone.generation,
+                        &desired_state,
+                        server_state_to_storage(ServerState::Requested),
+                        tombstone.observed_generation,
+                        None,
+                        &o3k_store::OperationRecord {
+                            id: revive_operation_id,
+                            resource_id: id,
+                            kind: "create".to_owned(),
+                            state: o3k_store::OperationState::Pending,
+                            provider_operation_id: None,
+                            error_category: None,
+                            error_message: None,
+                        },
+                        placement
+                            .as_ref()
+                            .map(|decision| decision.allocation_id.as_str()),
+                    )
+                    .await
                 {
-                    self.release_placement_decision(decision).await?;
-                }
-                let legacy_keypair_intent =
-                    requests_match_with_keypair_migration(&existing_request, &request);
-                if existing_request != request && !legacy_keypair_intent {
-                    return Err(ComputeError::Conflict);
-                }
-                if matches!(
-                    server_state_from_storage(&existing.observed_state),
-                    Ok(ServerState::Deleted)
-                ) {
-                    return Err(ComputeError::NotFound);
-                }
-                if legacy_keypair_intent {
-                    let desired_state =
-                        serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
-                    self.store
-                        .update_resource(
-                            existing.id,
-                            existing.generation,
-                            &desired_state,
-                            &existing.observed_state,
-                            existing.observed_generation,
-                            existing.provider_id.as_deref(),
-                        )
-                        .await?;
-                }
-                let attached = self.store.get_server_keypair_name(id).await?;
-                let mut repaired_association = false;
-                if attached != request.key_name {
-                    if attached.is_none() {
-                        if let Some(keypair) = keypair.as_ref() {
-                            self.store.attach_server_keypair(id, keypair.id).await?;
-                            repaired_association = true;
-                        } else {
-                            return Err(ComputeError::Conflict);
+                    Ok(_) => revive_request,
+                    Err(StoreError::StaleGeneration) | Err(StoreError::ResourceAlreadyExists) => {
+                        // A concurrent writer already advanced the row.
+                        // Observe the durable row before deciding what to
+                        // release: a decision owned by the live row backs
+                        // that row and must not be released.
+                        let existing = self.store.get_resource(id).await?;
+                        let existing_request: CreateInstanceRequest =
+                            serde_json::from_str(&existing.desired_state)
+                                .map_err(|_| ComputeError::Conflict)?;
+                        let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
+                            existing_request.placement_provider_id.as_deref()
+                                == Some(decision.provider_id.as_str())
+                                && existing_request.placement_allocation_id.as_deref()
+                                    == Some(decision.allocation_id.as_str())
+                        });
+                        if let Some(decision) = placement.as_ref()
+                            && !owns_persisted_placement
+                        {
+                            self.release_placement_decision(decision).await?;
                         }
-                    } else {
                         return Err(ComputeError::Conflict);
                     }
+                    // The placement allocation referenced by this revive was
+                    // reconciled away before the intent became durable
+                    // (startup orphan reconciliation racing an in-flight
+                    // create). Fail closed exactly like the fresh-create
+                    // path: the caller retries with a fresh allocation.
+                    Err(StoreError::PlacementAllocationNotFound) => {
+                        return Err(ComputeError::Conflict);
+                    }
+                    Err(error) => return Err(ComputeError::Store(error)),
                 }
-                if repaired_association {
-                    match self.journal.reconcile_once(request.operation_id).await {
-                        Ok(o3k_store::OperationState::Failed) => {
-                            self.store.detach_server_keypair(id).await?;
-                            self.project_terminal_binding_outcome(
-                                request.operation_id.to_string().as_str(),
-                                o3k_store::OperationState::Failed,
-                            )
-                            .await;
+            }
+            None => {
+                match self.journal.begin_create(&project_id, &request).await {
+                    Ok(_) => {}
+                    Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
+                        let existing = self.store.get_resource(id).await?;
+                        let existing_request: CreateInstanceRequest =
+                            serde_json::from_str(&existing.desired_state)
+                                .map_err(|_| ComputeError::Conflict)?;
+                        let owns_persisted_placement = placement.as_ref().is_some_and(|decision| {
+                            existing_request.placement_provider_id.as_deref()
+                                == Some(decision.provider_id.as_str())
+                                && existing_request.placement_allocation_id.as_deref()
+                                    == Some(decision.allocation_id.as_str())
+                        });
+                        if let Some(decision) = placement.as_ref()
+                            && !owns_persisted_placement
+                        {
+                            self.release_placement_decision(decision).await?;
+                        }
+                        let legacy_keypair_intent =
+                            requests_match_with_keypair_migration(&existing_request, &request);
+                        if existing_request != request && !legacy_keypair_intent {
                             return Err(ComputeError::Conflict);
                         }
-                        Ok(o3k_store::OperationState::Succeeded) => {
-                            self.project_terminal_binding_outcome(
-                                request.operation_id.to_string().as_str(),
-                                o3k_store::OperationState::Succeeded,
-                            )
-                            .await;
+                        if matches!(
+                            server_state_from_storage(&existing.observed_state),
+                            Ok(ServerState::Deleted)
+                        ) {
+                            return Err(ComputeError::NotFound);
                         }
-                        Ok(_) => {}
-                        Err(error) => {
-                            self.store.detach_server_keypair(id).await?;
-                            return Err(ComputeError::Reconcile(error));
+                        if legacy_keypair_intent {
+                            let desired_state = serde_json::to_string(&request)
+                                .map_err(|_| ComputeError::Conflict)?;
+                            self.store
+                                .update_resource(
+                                    existing.id,
+                                    existing.generation,
+                                    &desired_state,
+                                    &existing.observed_state,
+                                    existing.observed_generation,
+                                    existing.provider_id.as_deref(),
+                                )
+                                .await?;
                         }
+                        let attached = self.store.get_server_keypair_name(id).await?;
+                        let mut repaired_association = false;
+                        if attached != request.key_name {
+                            if attached.is_none() {
+                                if let Some(keypair) = keypair.as_ref() {
+                                    self.store.attach_server_keypair(id, keypair.id).await?;
+                                    repaired_association = true;
+                                } else {
+                                    return Err(ComputeError::Conflict);
+                                }
+                            } else {
+                                return Err(ComputeError::Conflict);
+                            }
+                        }
+                        if repaired_association {
+                            match self.journal.reconcile_once(request.operation_id).await {
+                                Ok(o3k_store::OperationState::Failed) => {
+                                    self.store.detach_server_keypair(id).await?;
+                                    self.project_terminal_binding_outcome(
+                                        request.operation_id.to_string().as_str(),
+                                        o3k_store::OperationState::Failed,
+                                    )
+                                    .await;
+                                    return Err(ComputeError::Conflict);
+                                }
+                                Ok(o3k_store::OperationState::Succeeded) => {
+                                    self.project_terminal_binding_outcome(
+                                        request.operation_id.to_string().as_str(),
+                                        o3k_store::OperationState::Succeeded,
+                                    )
+                                    .await;
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    self.store.detach_server_keypair(id).await?;
+                                    return Err(ComputeError::Reconcile(error));
+                                }
+                            }
+                        }
+                        return self.show_server(&project_id, ServerId::from_uuid(id)).await;
                     }
+                    // The placement allocation referenced by this create was
+                    // reconciled away before the consumer intent became durable
+                    // (startup orphan reconciliation racing an in-flight
+                    // create). Fail closed: no resource may outlive its
+                    // allocation. The caller retries; the deterministic
+                    // allocation identity keeps the retry idempotent.
+                    Err(ReconcileError::Store(StoreError::PlacementAllocationNotFound)) => {
+                        return Err(ComputeError::Conflict);
+                    }
+                    Err(error) => return Err(ComputeError::Reconcile(error)),
                 }
-                return self.show_server(&project_id, ServerId::from_uuid(id)).await;
+                request
             }
-            // The placement allocation referenced by this create was
-            // reconciled away before the consumer intent became durable
-            // (startup orphan reconciliation racing an in-flight create).
-            // Fail closed: no resource may outlive its allocation. The
-            // caller retries; the deterministic allocation identity keeps
-            // the retry idempotent.
-            Err(ReconcileError::Store(StoreError::PlacementAllocationNotFound)) => {
-                return Err(ComputeError::Conflict);
-            }
-            Err(error) => return Err(ComputeError::Reconcile(error)),
-        }
+        };
         if let Some(keypair) = keypair {
             self.store.attach_server_keypair(id, keypair.id).await?;
         }
@@ -6314,6 +6434,115 @@ mod tests {
                 o3k_placement::PlacementError::Storage(error),
             ))
         })?;
+        Ok(())
+    }
+
+    /// One-line TestLab recreate contract (issue #613 blocker B): a create
+    /// with the same name and idempotency key after a COMPLETED delete must
+    /// converge — the prior lifecycle is terminal and the name is free —
+    /// instead of conflicting. The deterministic server identity is reused
+    /// and a fresh lifecycle operation is started; a differing network intent
+    /// is part of the new lifecycle, not a conflicting retry of the old one.
+    #[tokio::test]
+    async fn create_after_completed_delete_reuses_identity_and_converges()
+    -> Result<(), ComputeError> {
+        let service = service("recreate-after-delete").await?;
+        let flavor = service.flavors()[0].id;
+        let first = service
+            .create_server(
+                "project-a",
+                "recreate-vm".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "recreate-vm".to_owned(),
+            )
+            .await?;
+        service.delete_server("project-a", first.id).await?;
+        assert!(
+            service.list_servers("project-a").await?.is_empty(),
+            "the completed delete must leave no visible server"
+        );
+        // The recreation carries a new network intent; the completed delete
+        // must make the deterministic identity free for a new lifecycle.
+        let second = service
+            .create_server(
+                "project-a",
+                "recreate-vm".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-2".to_owned()],
+                "recreate-vm".to_owned(),
+            )
+            .await?;
+        assert_eq!(
+            second.id, first.id,
+            "the deterministic server identity is reused across lifecycles"
+        );
+        assert_eq!(second.state, ServerState::Active);
+        Ok(())
+    }
+
+    /// A retry of the recreation (a crash between the revive persist and the
+    /// provider dispatch, or a plain caller retry) must recompute the same
+    /// fresh lifecycle identity from the tombstone fence and converge on the
+    /// persisted row instead of conflicting or dispatching a second create.
+    #[tokio::test]
+    async fn recreated_server_retry_converges_on_the_persisted_revive() -> Result<(), ComputeError>
+    {
+        let fake = Arc::new(FakeComputeProvider::new());
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-compute-recreate-retry-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let store: Arc<dyn ComputeRepository> =
+            Arc::new(o3k_store::testkit::open_file(&path).await?);
+        let service = ComputeService::new(store, fake.clone());
+        let flavor = service.flavors()[0].id;
+        let first = service
+            .create_server(
+                "project-a",
+                "recreate-vm".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-1".to_owned()],
+                "recreate-vm".to_owned(),
+            )
+            .await?;
+        service.delete_server("project-a", first.id).await?;
+        let second = service
+            .create_server(
+                "project-a",
+                "recreate-vm".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-2".to_owned()],
+                "recreate-vm".to_owned(),
+            )
+            .await?;
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.state, ServerState::Active);
+        let retry = service
+            .create_server(
+                "project-a",
+                "recreate-vm".to_owned(),
+                "image-1".to_owned(),
+                flavor,
+                vec!["network-2".to_owned()],
+                "recreate-vm".to_owned(),
+            )
+            .await?;
+        assert_eq!(
+            retry.id, first.id,
+            "the retry must converge on the revived identity"
+        );
+        assert_eq!(retry.state, ServerState::Active);
+        assert_eq!(
+            fake.instance_count(),
+            1,
+            "the retry must not dispatch a second provider create"
+        );
         Ok(())
     }
 

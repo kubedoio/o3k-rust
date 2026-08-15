@@ -38,6 +38,27 @@ Core principles:
 > Kubernetes HA, native persistent volumes, and full OpenStack parity are not
 > current support claims.
 
+## One-line TestLab install (alpha)
+
+On a clean Ubuntu 24.04 or Debian 12 x86_64 VM:
+
+```bash
+curl -sfL https://get.o3k.io | sudo sh -
+```
+
+This installs the verified `v0.2.0-alpha.1` release bundle, bootstraps the
+libvirt TestLab (`test-vm` ACTIVE, console verified), and writes client
+credentials to `/etc/o3k/admin-openrc` and `/etc/o3k/clouds.yaml` — the admin
+password is never printed.
+
+**Supported:** Ubuntu 24.04 x86_64, Debian 12 x86_64, libvirt TestLab alpha.
+Version pinning (`/v0.2.0-alpha.1`, `O3K_VERSION`), the alpha channel model,
+credentials, idempotent re-run, uninstall/purge, and troubleshooting:
+[docs/INSTALLER.md](docs/INSTALLER.md).
+
+**Not claimed:** production, HA, Kubernetes HA, PostgreSQL, full OpenStack,
+native Cinder, advanced networking, ARM/RHEL/etc.
+
 ## What runs today
 
 ![O3K current runtime topology](docs/architecture/o3k-runtime-topology.svg)

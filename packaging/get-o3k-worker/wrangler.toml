@@ -1,0 +1,27 @@
+# Cloudflare Workers configuration for the get.o3k.io installer endpoint.
+# Deployable artifact for issue #613 — see README.md in this directory.
+
+name = "get-o3k"
+main = "src/index.js"
+compatibility_date = "2026-08-01"
+
+# Deploy a preview to your own *.workers.dev subdomain first:
+#   npx wrangler login
+#   npx wrangler deploy
+# wrangler resolves the account interactively when account_id is absent; if
+# you deploy non-interactively, uncomment and fill in the account that owns
+# get.o3k.io:
+# account_id = "REPLACE_WITH_YOUR_CLOUDFLARE_ACCOUNT_ID"
+
+workers_dev = true
+
+# Production custom domain for get.o3k.io — uncomment after the account that
+# owns the domain is configured (wrangler also wires the DNS record):
+# routes = [
+#   { pattern = "get.o3k.io", custom_domain = true }
+# ]
+
+# This worker intentionally has NO KV, NO D1, and NO bindings: the channel
+# table is tiny, versioned with the code, and embedded via sync.sh
+# (src/assets.js). Release archives are served by GitHub Releases, never
+# proxied through this worker.

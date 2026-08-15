@@ -702,6 +702,29 @@ pub trait DurableStore: Send + Sync {
         operation: &OperationRecord,
         expected_placement_allocation_id: Option<&str>,
     ) -> Result<(), StoreError>;
+    /// Revives a resource row left in a terminal `DELETED` observed state by a
+    /// completed lifecycle into a fresh create intent, recording the fresh
+    /// lifecycle operation in the same transaction. This is the recreate path
+    /// for a create whose deterministic identity collides with a COMPLETED
+    /// prior lifecycle (the one-line TestLab recreate contract): the row
+    /// update and the operation insert persist atomically, so a crash can
+    /// never strand a pending operation without its resource intent or vice
+    /// versa, and the placement allocation referenced by the revived intent
+    /// must still exist (the ASR-018 ordering invariant, identical to
+    /// `insert_resource_and_operation`). The generation fence rejects a
+    /// concurrent writer that already advanced the row.
+    #[allow(clippy::too_many_arguments)]
+    async fn revive_resource_and_operation(
+        &self,
+        id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<ResourceRecord, StoreError>;
     async fn readiness_check(&self) -> Result<(), StoreError>;
 }
 
@@ -4543,6 +4566,78 @@ impl DurableStore for SqliteStore {
         transaction.commit().await.map_err(StoreError::Database)
     }
 
+    async fn revive_resource_and_operation(
+        &self,
+        id: Uuid,
+        expected_generation: i64,
+        desired_state: &str,
+        observed_state: &str,
+        observed_generation: i64,
+        provider_id: Option<&str>,
+        operation: &OperationRecord,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<ResourceRecord, StoreError> {
+        let mut transaction = self.pool.begin().await.map_err(StoreError::Database)?;
+        let update = sqlx::query("UPDATE resources SET generation = generation + 1, desired_state = ?, observed_state = ?, observed_generation = ?, provider_id = ? WHERE id = ? AND generation = ?")
+            .bind(desired_state)
+            .bind(observed_state)
+            .bind(observed_generation)
+            .bind(provider_id)
+            .bind(id.to_string())
+            .bind(expected_generation)
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+        if update.rows_affected() == 0 {
+            // The generation fence must be evaluated on the SAME transaction
+            // connection: the write lock is still held here, and a deferred
+            // read on a second connection would hit SQLITE_BUSY instead of
+            // classifying the fence miss.
+            let exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM resources WHERE id = ?")
+                    .bind(id.to_string())
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(StoreError::Database)?;
+            return if exists.is_some() {
+                Err(StoreError::StaleGeneration)
+            } else {
+                Err(StoreError::ResourceNotFound)
+            };
+        }
+        // ASR-018: the revived consumer intent must not outlive its placement
+        // allocation (identical to the `insert_resource_and_operation` fence).
+        if let Some(allocation_id) = expected_placement_allocation_id {
+            let allocation_exists: Option<String> =
+                sqlx::query_scalar("SELECT id FROM placement_allocations WHERE id = ?")
+                    .bind(allocation_id)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(StoreError::Database)?;
+            if allocation_exists.is_none() {
+                return Err(StoreError::PlacementAllocationNotFound);
+            }
+        }
+        let insert = sqlx::query("INSERT INTO operations (id, resource_id, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(operation.id.to_string())
+            .bind(operation.resource_id.to_string())
+            .bind(operation.state.as_str())
+            .bind(&operation.provider_operation_id)
+            .bind(&operation.error_category)
+            .bind(&operation.error_message)
+            .execute(&mut *transaction)
+            .await;
+        match insert {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                return Err(StoreError::ResourceAlreadyExists);
+            }
+            Err(error) => return Err(StoreError::Database(error)),
+        }
+        transaction.commit().await.map_err(StoreError::Database)?;
+        self.get_resource(id).await
+    }
+
     async fn readiness_check(&self) -> Result<(), StoreError> {
         sqlx::query("SELECT 1")
             .execute(&self.pool)
@@ -7336,6 +7431,152 @@ mod tests {
             store.get_operation(operation.id).await?.state,
             OperationState::Pending
         );
+        Ok(())
+    }
+
+    /// One-line TestLab recreate contract (issue #613 blocker B): reviving a
+    /// tombstoned row must persist the fresh intent and the fresh lifecycle
+    /// operation atomically, bump the generation, and reject a concurrent
+    /// writer through the generation fence without side effects.
+    #[tokio::test]
+    async fn revive_resource_and_operation_persists_atomically_and_fences_generation()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let id = Uuid::now_v7();
+        let tombstone = ResourceRecord {
+            id,
+            kind: "compute_instance".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 7,
+            observed_generation: 5,
+            desired_state: r#"{"name":"old"}"#.to_owned(),
+            observed_state: "DELETED".to_owned(),
+            provider_id: None,
+        };
+        store.insert_resource(&tombstone).await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let revived = store
+            .revive_resource_and_operation(
+                id,
+                7,
+                r#"{"name":"fresh"}"#,
+                "REQUESTED",
+                5,
+                None,
+                &operation,
+                None,
+            )
+            .await?;
+        assert_eq!(revived.generation, 8, "the revive bumps the generation");
+        assert_eq!(revived.observed_state, "REQUESTED");
+        assert_eq!(
+            revived.observed_generation, 5,
+            "the tombstone fence is preserved"
+        );
+        assert_eq!(
+            store.get_operation(operation.id).await?.state,
+            OperationState::Pending,
+            "the fresh lifecycle operation must be durable"
+        );
+        // A concurrent writer that already advanced the row fails the fence
+        // and must not persist the competing operation row.
+        let competing = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        assert!(matches!(
+            store
+                .revive_resource_and_operation(
+                    id,
+                    7,
+                    r#"{"name":"competing"}"#,
+                    "REQUESTED",
+                    5,
+                    None,
+                    &competing,
+                    None,
+                )
+                .await,
+            Err(StoreError::StaleGeneration)
+        ));
+        assert!(matches!(
+            store.get_operation(competing.id).await,
+            Err(StoreError::OperationNotFound)
+        ));
+        assert_eq!(
+            store.get_resource(id).await?.desired_state,
+            r#"{"name":"fresh"}"#,
+            "the first writer's intent must be preserved"
+        );
+        Ok(())
+    }
+
+    /// The revive carries the same ASR-018 placement fence as the fresh
+    /// create: a revived intent whose allocation was reconciled away must
+    /// fail closed and roll back the row update and the operation insert.
+    #[tokio::test]
+    async fn revive_resource_and_operation_enforces_the_placement_fence()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let id = Uuid::now_v7();
+        store
+            .insert_resource(&ResourceRecord {
+                id,
+                kind: "compute_instance".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 3,
+                observed_generation: 3,
+                desired_state: r#"{"name":"old"}"#.to_owned(),
+                observed_state: "DELETED".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        let operation = OperationRecord {
+            id: Uuid::now_v7(),
+            resource_id: id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        assert!(matches!(
+            store
+                .revive_resource_and_operation(
+                    id,
+                    3,
+                    r#"{"name":"fresh"}"#,
+                    "REQUESTED",
+                    3,
+                    None,
+                    &operation,
+                    Some("allocation-missing"),
+                )
+                .await,
+            Err(StoreError::PlacementAllocationNotFound)
+        ));
+        assert_eq!(
+            store.get_resource(id).await?.observed_state,
+            "DELETED",
+            "the tombstone must be preserved when the fence fails"
+        );
+        assert!(matches!(
+            store.get_operation(operation.id).await,
+            Err(StoreError::OperationNotFound)
+        ));
         Ok(())
     }
 

@@ -56,7 +56,7 @@ while IFS= read -r line; do
   [[ -n "$line" ]] || { echo "refusing malformed installation ownership manifest: $INSTALL_MANIFEST" >&2; exit 2; }
   [[ "$line" == "$MANIFEST_HEADER" ]] && continue
   case "$line" in
-    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/generate-passwords.sh)
+    bin/o3kd|bin/o3k-compute|share/o3k/o3kd.service|share/o3k/o3k-compute.service|share/o3k/50-o3k-libvirt.rules|share/o3k/reset.sh|share/o3k/uninstall.sh|share/o3k/diagnose.sh|share/o3k/preflight.sh|share/o3k/bootstrap-certs.sh|share/o3k/bootstrap-testlab.sh|share/o3k/generate-passwords.sh)
       MANIFEST_FILES+=("$line")
       ;;
     *)
@@ -242,7 +242,11 @@ if [[ $PURGE -eq 1 ]]; then
       actual="$(sha256sum "$target" | awk '{print $1}')"
       [[ "$actual" == "$expected" ]]
     }
-    for file in o3kd.env o3kd.env.lock o3k-compute.env; do
+    # Admin/testlab client credential files, the disposable testlab key, and
+    # the testlab flavor ownership record are ledger-owned too (install.sh
+    # and bootstrap-testlab.sh record them), so purge removes them under the
+    # same digest-verification fence.
+    for file in o3kd.env o3kd.env.lock o3k-compute.env admin-openrc clouds.yaml testlab-key.pem testlab-flavor-id; do
       if config_file_owned "$file"; then
         rm -f -- "$CONFIG_DIR/$file"
       elif [[ -e "$CONFIG_DIR/$file" ]]; then

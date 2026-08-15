@@ -29,3 +29,15 @@ survives a control-plane process restart without an in-memory idempotency map.
   should use a fresh request key when migrating an old in-flight request.
 - Provider operation observation and full dependent-resource compensation still
   need the host-backed #47 workflow and release evidence.
+
+## Completed-lifecycle recreation (issue #613)
+
+A durable row in terminal `DELETED` state is a completed lifecycle, not an
+in-flight create: a later create with the same idempotency key starts a NEW
+lifecycle over the same deterministic server identity. The row is revived
+with a fresh lifecycle operation identity (deterministic from the tombstone's
+`observed_generation`, with a lifecycle-scoped provider idempotency key) and
+the name-conflict checks keep treating Deleted rows as free. A retry of that
+recreation converges on the persisted revive intent; a differing intent
+against a live (non-deleted) row still conflicts, unchanged from the retry
+semantics above.
