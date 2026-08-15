@@ -365,7 +365,9 @@ impl FakeHttp {
             Ok(HttpResponse {
                 status: 200,
                 headers: Vec::new(),
-                body: "{\"status\":\"ready\",\"agent_epoch\":\"42\"}".to_owned(),
+                body:
+                    "{\"status\":\"ready\",\"agent_id\":\"compute-agent\",\"agent_epoch\":\"42\"}"
+                        .to_owned(),
             }),
         );
         responses.insert(

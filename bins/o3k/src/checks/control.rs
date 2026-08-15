@@ -40,11 +40,15 @@ pub async fn check_healthz(ctx: &Context) -> Check {
     ])
 }
 
-/// `control.readyz`: 200 with "ready" is healthy; 503 means the compute
-/// agent is not ready (a FAIL for the libvirt profile).
+/// `control.readyz`: 200 with "ready" is healthy; 503 means o3kd's
+/// readiness gate is down. In the libvirt profile that gate is the
+/// compute-agent control plane (the authenticated registration listener),
+/// not the agent's own presence — a stopped agent is reported by the
+/// compute/service checks, while readyz stays healthy as long as the
+/// control plane itself is serving.
 pub async fn check_readyz(ctx: &Context) -> Check {
     let url = format!("http://{}/readyz", ctx.listen_addr);
-    let response = match ctx.http.get(&url).await {
+    let response = match readyz_response(ctx).await {
         Ok(response) => response,
         Err(error) => {
             return Check::new(
@@ -66,7 +70,7 @@ pub async fn check_readyz(ctx: &Context) -> Check {
     }
     if response.status == 503 {
         let summary = if ctx.libvirt_profile {
-            "control plane not ready: compute agent not ready"
+            "control plane not ready: compute-agent control plane down"
         } else {
             "control plane not ready: provider capability probe failed"
         };

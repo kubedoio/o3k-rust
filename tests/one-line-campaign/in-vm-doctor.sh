@@ -149,15 +149,19 @@ INITIAL=passed
 
 log "stopping o3k-compute"
 systemctl stop o3k-compute
-# The control plane marks the agent unavailable after its 15s lease plus a
-# 5s monitor tick; wait 30s so the readiness flip is deterministic.
+# The agent registry marks the agent unavailable after its 15s lease plus a
+# 5s monitor tick; wait 30s so that state is deterministic. The control
+# plane's own readyz gate stays healthy: it reflects the compute-agent
+# control plane (the registration listener), not the agent's presence, so
+# the compute failure must surface via services.compute_unit and
+# compute.agent_registered, not control.readyz.
 wait_http_ok "http://$LISTEN_ADDR/healthz" 20 3 || true
 sleep 30
 doctor_json "$EVID/doctor-compute-stopped.json"
 assert_exit compute-stopped "$EVID/doctor-compute-stopped.json" 1
 assert_overall compute-stopped "$EVID/doctor-compute-stopped.json" unhealthy
 assert_status compute-stopped "$EVID/doctor-compute-stopped.json" services.compute_unit FAIL
-assert_status compute-stopped "$EVID/doctor-compute-stopped.json" control.readyz FAIL
+assert_status compute-stopped "$EVID/doctor-compute-stopped.json" control.readyz PASS
 assert_status compute-stopped "$EVID/doctor-compute-stopped.json" compute.agent_registered FAIL
 COMPUTE_STOPPED=passed
 

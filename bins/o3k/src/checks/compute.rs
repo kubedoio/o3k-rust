@@ -1,7 +1,6 @@
 //! Compute-agent checks against placement state, the control-plane
 //! readiness probe, and the agent's self-reported epoch.
 
-use crate::checks::control::readyz_response;
 use crate::checks::{
     compute_actions, internal_failure, not_libvirt_profile, profile_not_applicable,
 };
@@ -13,55 +12,81 @@ use std::collections::BTreeMap;
 /// total (mirrors `crates/o3k-placement`).
 const REQUIRED_RESOURCE_CLASSES: [&str; 3] = ["VCPU", "MEMORY_MB", "DISK_GB"];
 
-/// `compute.agent_registered`: at least one placement provider must exist
-/// and the control plane must report ready. A registered provider with a
-/// not-ready control plane means the agent is disconnected.
+/// `compute.agent_registered`: the compute agent's loopback readiness
+/// endpoint must answer 200 "ready" with a non-empty agent identity. The
+/// agent serves that body only while its control-plane connection is
+/// validated and libvirt is ready, so this is the live registration
+/// signal — durable placement rows and o3kd's own readyz both stay
+/// healthy after the agent dies and cannot detect a stopped agent.
 pub async fn check_agent_registered(ctx: &Context) -> Check {
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("compute.agent_registered", Category::Compute);
     }
-    let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
-        Ok(providers) => providers,
+    let url = format!("http://{}/readyz", ctx.compute_health_addr);
+    let response = match ctx.http.get(&url).await {
+        Ok(response) => response,
         Err(error) => {
-            return internal_failure(
+            return Check::new(
                 "compute.agent_registered",
                 Category::Compute,
-                "compute agent registration",
-                &error,
-                compute_actions(),
-            );
+                CheckStatus::Fail,
+                format!("compute agent unreachable (stopped or crashed): {error}"),
+            )
+            .with_actions(compute_actions());
         }
     };
-    if providers.is_empty() {
+    if response.status == 200 && response.body.contains("ready") {
+        let agent_id = serde_json::from_str::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+            });
+        return match agent_id {
+            Some(agent_id) => Check::new(
+                "compute.agent_registered",
+                Category::Compute,
+                CheckStatus::Pass,
+                format!("compute agent registered and ready ({agent_id})"),
+            ),
+            None => Check::new(
+                "compute.agent_registered",
+                Category::Compute,
+                CheckStatus::Fail,
+                "compute agent readiness body has no agent identity",
+            )
+            .with_actions(compute_actions()),
+        };
+    }
+    if response.status == 503 {
+        let reason = serde_json::from_str::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "libvirt or control-plane connection not ready".to_owned());
         return Check::new(
             "compute.agent_registered",
             Category::Compute,
             CheckStatus::Fail,
-            "compute agent has never registered",
+            format!("compute agent not ready: {reason}"),
         )
         .with_actions(compute_actions());
-    }
-    let readyz = readyz_response(ctx).await;
-    let ready = matches!(
-        readyz,
-        Ok(ref response) if response.status == 200 && response.body.contains("ready")
-    );
-    if ready {
-        return Check::new(
-            "compute.agent_registered",
-            Category::Compute,
-            CheckStatus::Pass,
-            format!(
-                "{} compute provider(s) registered and the control plane is ready",
-                providers.len()
-            ),
-        );
     }
     Check::new(
         "compute.agent_registered",
         Category::Compute,
         CheckStatus::Fail,
-        "agent disconnected: provider registered but control plane reports not ready",
+        format!(
+            "unexpected compute readiness response: HTTP {}",
+            response.status
+        ),
     )
     .with_actions(compute_actions())
 }
@@ -345,30 +370,68 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_registered_fails_when_readyz_not_ready() {
+    async fn agent_registered_passes_when_agent_ready() {
         let mut http = FakeHttp::healthy();
         http.with(
-            "GET http://127.0.0.1:8080/readyz",
+            "GET http://127.0.0.1:9100/readyz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "{\"status\":\"ready\",\"agent_id\":\"compute-agent\"}".to_owned(),
+            }),
+        );
+        let check =
+            check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert!(check.summary.contains("compute-agent"));
+    }
+
+    #[tokio::test]
+    async fn agent_registered_fails_when_agent_unreachable() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:9100/readyz",
+            Err("connection refused".to_owned()),
+        );
+        let check =
+            check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(check.summary.contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn agent_registered_fails_when_agent_not_ready() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:9100/readyz",
             Ok(HttpResponse {
                 status: 503,
                 headers: Vec::new(),
-                body: "{\"status\":\"not_ready\"}".to_owned(),
+                body: "{\"status\":\"not_ready\",\"reason\":\"control plane is not connected\"}"
+                    .to_owned(),
             }),
         );
         let check =
             check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
         assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.summary.contains("disconnected"));
+        assert!(check.summary.contains("not ready"));
     }
 
     #[tokio::test]
-    async fn agent_registered_fails_when_never_registered() {
-        let mut db = FakeDb::healthy();
-        db.providers.clear();
+    async fn agent_registered_fails_without_agent_identity() {
+        let mut http = FakeHttp::healthy();
+        http.with(
+            "GET http://127.0.0.1:9100/readyz",
+            Ok(HttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: "{\"status\":\"ready\"}".to_owned(),
+            }),
+        );
         let check =
-            check_agent_registered(&context(FakeExec::healthy(), FakeHttp::healthy(), db)).await;
+            check_agent_registered(&context(FakeExec::healthy(), http, FakeDb::healthy())).await;
         assert_eq!(check.status, CheckStatus::Fail);
-        assert!(check.summary.contains("never registered"));
+        assert!(check.summary.contains("no agent identity"));
     }
 
     #[tokio::test]
