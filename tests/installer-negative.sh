@@ -18,7 +18,7 @@
 #     interrupted bootstrap, TLS partial-set fail-closed, TLS complete-set
 #     skip-and-preserve, converged second run, and a first-run success
 #     control that proves the BAKED default version (no O3K_VERSION, no pin
-#     line) resolves to the pinned v0.2.0-alpha.2 release asset path.
+#     line) resolves to the pinned v0.3.0-alpha.1 release asset path.
 #
 # Version model under test: packaging/get-o3k.sh never consults a channel
 # service — it resolves O3K_VERSION env > O3K_PINNED_VERSION (optional
@@ -99,11 +99,11 @@ run_full_matrix() {
   local HEALTH_UP=1
   MATRIX="$WORK_DIR/matrix"
   SHIM_BIN="$MATRIX/bin"
-  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.2.0-alpha.2"
+  SRC_BUNDLE="$MATRIX/src-bundle/o3k-0.3.0-alpha.1"
   TMP_ROOT="$MATRIX/tmp"
   WWW="$MATRIX/www"
   mkdir -p "$SHIM_BIN" "$SRC_BUNDLE/packaging" "$SRC_BUNDLE/bin" "$TMP_ROOT" \
-    "$WWW/releases/v0.2.0-alpha.2"
+    "$WWW/releases/v0.3.0-alpha.1"
   printf 'ok\n' >"$WWW/ready"
 
   if [[ $EUID -ne 0 ]]; then
@@ -214,18 +214,18 @@ EOF
   chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute"
 
   build_good_tarball() { # build_good_tarball TARBALL
-    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.2.0-alpha.2
+    tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.3.0-alpha.1
   }
   publish_tarball() { # publish_tarball TARBALL — copies into WWW + writes .sha256
     local digest
-    cp "$1" "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz"
+    cp "$1" "$WWW/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz"
     digest="$(sha256sum "$1" | awk '{print $1}')"
-    printf '%s  %s\n' "$digest" "o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$digest" "o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256"
   }
   publish_sha_digest() { # publish_sha_digest HEX64 — publishes a specific digest
-    printf '%s  %s\n' "$1" "o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
-      >"$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
+    printf '%s  %s\n' "$1" "o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
+      >"$WWW/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256"
   }
 
   RELEASE_PORT="$(free_port)"
@@ -365,12 +365,12 @@ PY
   fresh_logs default-version-release-down
   O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "baked default version resolves to the pinned release asset" \
-    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$DEAD_PORT/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after default-version download failure"
 
   # 2. O3K_VERSION override wins over the baked default: the abort names the
-  #    OVERRIDE version's asset, not the baked v0.2.0-alpha.2 one.
+  #    OVERRIDE version's asset, not the baked v0.3.0-alpha.1 one.
   fresh_logs override-version
   O3K_VERSION="0.2.0-overridetest" O3K_RELEASE_BASE="http://127.0.0.1:$DEAD_PORT/releases" \
     expect_abort "O3K_VERSION override wins over the baked default" \
@@ -380,10 +380,10 @@ PY
 
   # 3. missing release asset (404) -> abort.
   fresh_logs missing-asset
-  rm -f -- "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
-    "$WWW/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256"
+  rm -f -- "$WWW/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
+    "$WWW/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256"
   expect_abort "missing release asset (404) aborts" \
-    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz" \
+    "download failed: http://127.0.0.1:$RELEASE_PORT/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
     "$out" "$err"
   assert_no_script_run "no bundled script ran after a 404 asset"
 
@@ -606,14 +606,14 @@ PY
     # Default-version proof: with no O3K_VERSION and no pin line, the wrapper
     # resolved the BAKED O3K_INSTALLER_VERSION — visible both in the banner
     # and in the exact asset paths the release endpoint served.
-    grep -Fq '✓ O3K v0.2.0-alpha.2 verified' "$out" \
-      && record_pass "baked default resolved to v0.2.0-alpha.2 (verified banner)" \
-      || record_fail "missing v0.2.0-alpha.2 verified banner"
-    if grep -Fq 'GET /releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
-      && grep -Fq 'GET /releases/v0.2.0-alpha.2/o3k-0.2.0-alpha.2-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
-      record_pass "default resolution downloaded the pinned v0.2.0-alpha.2 asset paths"
+    grep -Fq '✓ O3K v0.3.0-alpha.1 verified' "$out" \
+      && record_pass "baked default resolved to v0.3.0-alpha.1 (verified banner)" \
+      || record_fail "missing v0.3.0-alpha.1 verified banner"
+    if grep -Fq 'GET /releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz ' "$MATRIX/endpoint-http.log" \
+      && grep -Fq 'GET /releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256 ' "$MATRIX/endpoint-http.log"; then
+      record_pass "default resolution downloaded the pinned v0.3.0-alpha.1 asset paths"
     else
-      record_fail "release endpoint log does not show the pinned v0.2.0-alpha.2 asset requests"
+      record_fail "release endpoint log does not show the pinned v0.3.0-alpha.1 asset requests"
     fi
     grep -Fq 'release archive SHA-256 verified' "$out" \
       && record_pass "release archive verified" || record_fail "missing verification line"
@@ -740,7 +740,7 @@ expect_version_fail "version fence rejects 'latest'" latest
 expect_version_fail "version fence rejects three-dot versions" v1.2.3.4
 expect_version_fail "version fence rejects control characters" 'v1.2.3;rm -rf /'
 expect_version_fail "version fence rejects slashes" v0.2.0/alpha
-if bash -c 'source "$1"; check_version_format v0.2.0-alpha.2; check_version_format 0.2.0-alpha.2; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
+if bash -c 'source "$1"; check_version_format v0.3.0-alpha.1; check_version_format 0.3.0-alpha.1; check_version_format v0.2.0-alpha.1; check_version_format 1.2' \
   bash "$FUNCS" >/dev/null 2>&1; then
   record_pass "version fence accepts published release shapes"
 else
