@@ -16,15 +16,41 @@ pub struct LimitKey {
 }
 
 impl LimitKey {
-    /// Creates a new validated limit key.
+    /// Canonical inventory of supported Cloud Kernel quota dimensions.
+    pub const KNOWN_DIMENSIONS: &'static [(&'static str, &'static str)] = &[
+        ("compute", "servers"),
+        ("compute", "vcpus"),
+        ("compute", "memory_mb"),
+        ("compute", "disk_gb"),
+        ("image", "images"),
+        ("image", "bytes"),
+        ("network", "networks"),
+        ("network", "subnets"),
+        ("network", "ports"),
+    ];
+
+    #[must_use]
+    pub fn is_known_dimension(namespace: &str, resource: &str) -> bool {
+        Self::KNOWN_DIMENSIONS
+            .iter()
+            .any(|(ns, res)| *ns == namespace && *res == resource)
+    }
+
+    #[must_use]
+    pub fn is_known(&self) -> bool {
+        Self::is_known_dimension(self.namespace.as_str(), &self.resource)
+    }
+
+    /// Creates a new validated limit key checked against the canonical registry inventory.
     pub fn new(namespace: &str, resource: &str) -> Result<Self, KernelError> {
         let ns = ServiceNamespace::new(namespace)?;
-        if resource.is_empty() || resource.len() > 64 {
+        let resource_clean = resource.to_ascii_lowercase();
+        if resource_clean.is_empty() || resource_clean.len() > 64 {
             return Err(KernelError::InvalidIdentifier(format!(
                 "invalid limit resource name: '{resource}'"
             )));
         }
-        if !resource
+        if !resource_clean
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
@@ -32,9 +58,14 @@ impl LimitKey {
                 "limit resource name '{resource}' contains forbidden characters"
             )));
         }
+        if !Self::is_known_dimension(ns.as_str(), &resource_clean) {
+            return Err(KernelError::InvalidIdentifier(format!(
+                "unknown or unregistered quota dimension '{namespace}:{resource}'"
+            )));
+        }
         Ok(Self {
             namespace: ns,
-            resource: resource.to_ascii_lowercase(),
+            resource: resource_clean,
         })
     }
 
@@ -132,8 +163,20 @@ pub enum LimitValue {
     /// No maximum ceiling is enforced.
     #[default]
     Unlimited,
-    /// A finite maximum ceiling.
+    /// A finite maximum ceiling (must not exceed i64::MAX for safe durable storage).
     Maximum(u64),
+}
+
+impl LimitValue {
+    /// Creates a verified finite maximum limit value.
+    pub fn new_maximum_checked(max: u64) -> Result<Self, KernelError> {
+        if max > i64::MAX as u64 {
+            return Err(KernelError::InvalidIdentifier(format!(
+                "limit maximum {max} exceeds maximum supported signed 64-bit integer"
+            )));
+        }
+        Ok(Self::Maximum(max))
+    }
 }
 
 impl fmt::Display for LimitValue {
@@ -155,6 +198,21 @@ pub struct ResourceAmount {
 impl ResourceAmount {
     #[must_use]
     pub fn new(key: LimitKey, amount: u64) -> Self {
+        Self { key, amount }
+    }
+
+    /// Creates a verified resource amount ensuring bounds fit in signed 64-bit integers.
+    pub fn new_checked(key: LimitKey, amount: u64) -> Result<Self, KernelError> {
+        if amount > i64::MAX as u64 {
+            return Err(KernelError::InvalidIdentifier(format!(
+                "resource amount {amount} exceeds maximum supported signed 64-bit integer"
+            )));
+        }
+        Ok(Self { key, amount })
+    }
+
+    #[must_use]
+    pub fn new_unchecked(key: LimitKey, amount: u64) -> Self {
         Self { key, amount }
     }
 }
@@ -331,7 +389,39 @@ mod tests {
         assert!(LimitKey::new("", "servers").is_err());
         assert!(LimitKey::new("compute", "").is_err());
         assert!(LimitKey::new("compute", "bad/char").is_err());
+        // Unknown or unregistered keys fail closed
+        assert!(LimitKey::new("compute", "servres").is_err());
+        assert!(LimitKey::new("network", "foo").is_err());
+        assert!(LimitKey::new("unknown", "anything").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn numeric_bounds_enforcement() -> Result<(), crate::KernelError> {
+        let key = LimitKey::compute_servers();
+
+        // Safe bounds within i64::MAX
+        assert!(LimitValue::new_maximum_checked(i64::MAX as u64).is_ok());
+        assert!(ResourceAmount::new_checked(key.clone(), i64::MAX as u64).is_ok());
+
+        // Overflowing i64::MAX is rejected fail-closed
+        assert!(LimitValue::new_maximum_checked((i64::MAX as u64) + 1).is_err());
+        assert!(LimitValue::new_maximum_checked(u64::MAX).is_err());
+        assert!(ResourceAmount::new_checked(key.clone(), (i64::MAX as u64) + 1).is_err());
+        assert!(ResourceAmount::new_checked(key, u64::MAX).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn all_known_dimensions_parse_and_validate() {
+        for (ns, res) in LimitKey::KNOWN_DIMENSIONS {
+            let key = LimitKey::new(ns, res);
+            assert!(key.is_ok(), "failed to construct valid key {ns}:{res}");
+            let key = key.unwrap_or_else(|_| LimitKey::compute_servers());
+            assert_eq!(key.namespace().as_str(), *ns);
+            assert_eq!(key.resource(), *res);
+        }
     }
 
     #[test]
@@ -371,7 +461,10 @@ mod tests {
         let mut res = Reservation::new(
             scope.clone(),
             "op-123".to_owned(),
-            vec![ResourceAmount::new(LimitKey::compute_servers(), 1)],
+            vec![ResourceAmount::new_unchecked(
+                LimitKey::compute_servers(),
+                1,
+            )],
         );
         assert_eq!(res.state, ReservationState::Pending);
         assert_eq!(res.operation_id, "op-123");

@@ -65,6 +65,11 @@ impl QuotaRepository for SqliteStore {
         scope: &OwnershipScope,
         key: &LimitKey,
     ) -> Result<LimitValue, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
         let row = sqlx::query(
             "SELECT limit_value FROM quota_limits WHERE scope_id = ? AND scope_kind = ? AND namespace = ? AND resource = ?",
         )
@@ -80,8 +85,11 @@ impl QuotaRepository for SqliteStore {
             Some(row) => {
                 let val: Option<i64> = row.get(0);
                 match val {
+                    None => Ok(LimitValue::Unlimited),
                     Some(max) if max >= 0 => Ok(LimitValue::Maximum(max as u64)),
-                    _ => Ok(LimitValue::Unlimited),
+                    Some(neg) => Err(StoreError::Corrupt(format!(
+                        "malformed negative limit value {neg} for '{key}' in durable storage"
+                    ))),
                 }
             }
             None => Ok(LimitValue::Unlimited),
@@ -94,9 +102,21 @@ impl QuotaRepository for SqliteStore {
         key: &LimitKey,
         limit: LimitValue,
     ) -> Result<(), StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
         let limit_val: Option<i64> = match limit {
             LimitValue::Unlimited => None,
-            LimitValue::Maximum(max) => Some(max as i64),
+            LimitValue::Maximum(max) => {
+                let val = i64::try_from(max).map_err(|_| {
+                    StoreError::Corrupt(format!(
+                        "limit maximum {max} for '{key}' exceeds maximum supported signed 64-bit integer"
+                    ))
+                })?;
+                Some(val)
+            }
         };
 
         sqlx::query(
@@ -117,6 +137,11 @@ impl QuotaRepository for SqliteStore {
     }
 
     async fn get_usage(&self, scope: &OwnershipScope, key: &LimitKey) -> Result<Usage, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
         let mut conn = self.pool.acquire().await.map_err(StoreError::Database)?;
         let in_use = query_in_use_usage(&mut conn, scope, key).await?;
         let reserved = query_reserved_usage(&mut conn, scope, key, None).await?;
@@ -213,15 +238,13 @@ fn amounts_match(a: &[ResourceAmount], b: &[ResourceAmount]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    for item in a {
-        if !b
-            .iter()
-            .any(|other| other.key == item.key && other.amount == item.amount)
-        {
-            return false;
-        }
-    }
-    true
+    let mut a_sorted: Vec<(&LimitKey, u64)> =
+        a.iter().map(|item| (&item.key, item.amount)).collect();
+    let mut b_sorted: Vec<(&LimitKey, u64)> =
+        b.iter().map(|item| (&item.key, item.amount)).collect();
+    a_sorted.sort();
+    b_sorted.sort();
+    a_sorted == b_sorted
 }
 
 async fn reserve_quota_inner(
@@ -230,20 +253,36 @@ async fn reserve_quota_inner(
     operation_id: &str,
     amounts: &[ResourceAmount],
 ) -> Result<Reservation, StoreError> {
+    // 0. Validate dimensions and safe bounds; reject duplicate limit keys
+    let mut seen_keys = std::collections::BTreeSet::new();
+    for req in amounts {
+        if !req.key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{}' in reservation request",
+                req.key
+            )));
+        }
+        i64::try_from(req.amount).map_err(|_| {
+            StoreError::Corrupt(format!(
+                "reservation amount {} for '{}' exceeds maximum supported signed 64-bit integer",
+                req.amount, req.key
+            ))
+        })?;
+        if !seen_keys.insert(&req.key) {
+            return Err(StoreError::Corrupt(format!(
+                "duplicate limit key '{}' in reservation request",
+                req.key
+            )));
+        }
+    }
+
     // 1. Check for existing reservation by operation_id (idempotency check)
     let existing = query_reservation_by_op(&mut *conn, operation_id).await?;
     if let Some(res) = existing {
         if res.state == ReservationState::Released {
-            sqlx::query("DELETE FROM quota_reservation_amounts WHERE reservation_id = ?")
-                .bind(res.id.as_str())
-                .execute(&mut *conn)
-                .await
-                .map_err(StoreError::Database)?;
-            sqlx::query("DELETE FROM quota_reservations WHERE id = ?")
-                .bind(res.id.as_str())
-                .execute(&mut *conn)
-                .await
-                .map_err(StoreError::Database)?;
+            return Err(StoreError::ReservationConflict(format!(
+                "operation '{operation_id}' has already been released and cannot be re-reserved"
+            )));
         } else if res.scope.id() == scope.id()
             && res.scope.kind() == scope.kind()
             && amounts_match(&res.amounts, amounts)
@@ -290,6 +329,12 @@ async fn reserve_quota_inner(
     .map_err(StoreError::Database)?;
 
     for amt in amounts {
+        let amount_i64 = i64::try_from(amt.amount).map_err(|_| {
+            StoreError::Corrupt(format!(
+                "reservation amount {} for '{}' exceeds maximum supported signed 64-bit integer",
+                amt.amount, amt.key
+            ))
+        })?;
         sqlx::query(
             "INSERT INTO quota_reservation_amounts (reservation_id, namespace, resource, amount)
              VALUES (?, ?, ?, ?)",
@@ -297,7 +342,7 @@ async fn reserve_quota_inner(
         .bind(res.id.as_str())
         .bind(amt.key.namespace().as_str())
         .bind(amt.key.resource())
-        .bind(amt.amount as i64)
+        .bind(amount_i64)
         .execute(&mut *conn)
         .await
         .map_err(StoreError::Database)?;
@@ -311,6 +356,11 @@ async fn query_limit_in_tx(
     scope: &OwnershipScope,
     key: &LimitKey,
 ) -> Result<LimitValue, StoreError> {
+    if !key.is_known() {
+        return Err(StoreError::Corrupt(format!(
+            "unknown or unregistered limit key '{key}'"
+        )));
+    }
     let row = sqlx::query(
         "SELECT limit_value FROM quota_limits WHERE scope_id = ? AND scope_kind = ? AND namespace = ? AND resource = ?",
     )
@@ -326,8 +376,11 @@ async fn query_limit_in_tx(
         Some(row) => {
             let val: Option<i64> = row.get(0);
             match val {
+                None => Ok(LimitValue::Unlimited),
                 Some(max) if max >= 0 => Ok(LimitValue::Maximum(max as u64)),
-                _ => Ok(LimitValue::Unlimited),
+                Some(neg) => Err(StoreError::Corrupt(format!(
+                    "malformed negative limit value {neg} for '{key}' in durable storage"
+                ))),
             }
         }
         None => Ok(LimitValue::Unlimited),
@@ -449,7 +502,9 @@ async fn query_in_use_usage(
             let count: i64 = row.get(0);
             Ok(count.max(0) as u64)
         }
-        _ => Ok(0),
+        _ => Err(StoreError::Corrupt(format!(
+            "unknown or unregistered limit key '{key}'"
+        ))),
     }
 }
 
@@ -540,9 +595,13 @@ async fn query_reservation_by_op(
         let ns: String = a.get(0);
         let res: String = a.get(1);
         let amt: i64 = a.get(2);
-        if let Ok(key) = LimitKey::new(&ns, &res) {
-            amounts.push(ResourceAmount::new(key, amt.max(0) as u64));
+        if amt < 0 {
+            return Err(StoreError::Corrupt(format!(
+                "malformed negative reservation amount {amt} for '{ns}:{res}' in durable storage"
+            )));
         }
+        let key = LimitKey::new(&ns, &res).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        amounts.push(ResourceAmount::new_unchecked(key, amt as u64));
     }
 
     let id = ReservationId::parse(res_id_str).map_err(|e| StoreError::Corrupt(e.to_string()))?;
@@ -626,6 +685,284 @@ mod tests {
             .ok_or_else(|| StoreError::ReservationNotFound)?;
         assert_eq!(stored.state, ReservationState::Committed);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signed_sqlite_numeric_bounds_fail_closed() -> Result<(), StoreError> {
+        let store = crate::testkit::open_memory().await?;
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("tenant-bounds"), None, None);
+        let key = LimitKey::compute_servers();
+
+        // 1. Valid i64::MAX is accepted
+        store
+            .set_limit(&scope, &key, LimitValue::Maximum(i64::MAX as u64))
+            .await?;
+        assert_eq!(
+            store.get_limit(&scope, &key).await?,
+            LimitValue::Maximum(i64::MAX as u64)
+        );
+
+        // 2. Setting limit exceeding i64::MAX fails closed
+        assert!(matches!(
+            store
+                .set_limit(&scope, &key, LimitValue::Maximum((i64::MAX as u64) + 1))
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            store
+                .set_limit(&scope, &key, LimitValue::Maximum(u64::MAX))
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        // 3. Reserving amount exceeding i64::MAX fails closed
+        let overflow_amounts = vec![ResourceAmount::new_unchecked(
+            key.clone(),
+            (i64::MAX as u64) + 1,
+        )];
+        assert!(matches!(
+            store
+                .reserve_quota(&scope, "op-overflow", &overflow_amounts)
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        // 4. Corrupt negative persisted limit fails closed with StoreError::Corrupt
+        sqlx::query(
+            "INSERT INTO quota_limits (scope_id, scope_kind, namespace, resource, limit_value)
+             VALUES (?, ?, ?, ?, -42)
+             ON CONFLICT(scope_id, scope_kind, namespace, resource) DO UPDATE SET limit_value = -42",
+        )
+        .bind(scope.id().as_str())
+        .bind(scope.kind().as_str())
+        .bind(key.namespace().as_str())
+        .bind(key.resource())
+        .execute(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        assert!(matches!(
+            store.get_limit(&scope, &key).await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        // 5. Corrupt negative persisted reservation amount fails closed
+        let res_id = ReservationId::new();
+        sqlx::query(
+            "INSERT INTO quota_reservations (id, scope_id, scope_kind, operation_id, state, created_at)
+             VALUES (?, ?, ?, 'op-corrupt-amt', 'pending', '2026-08-17T00:00:00Z')",
+        )
+        .bind(res_id.as_str())
+        .bind(scope.id().as_str())
+        .bind(scope.kind().as_str())
+        .execute(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        sqlx::query(
+            "INSERT INTO quota_reservation_amounts (reservation_id, namespace, resource, amount)
+             VALUES (?, ?, ?, -100)",
+        )
+        .bind(res_id.as_str())
+        .bind(key.namespace().as_str())
+        .bind(key.resource())
+        .execute(&store.pool)
+        .await
+        .map_err(StoreError::Database)?;
+
+        assert!(matches!(
+            store.get_reservation_for_operation("op-corrupt-amt").await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unknown_keys_and_duplicate_amounts_fail_closed() -> Result<(), StoreError> {
+        let store = crate::testkit::open_memory().await?;
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("tenant-bad"), None, None);
+        let valid_key = LimitKey::compute_servers();
+        let unknown_key = LimitKey::new_unchecked(
+            o3k_kernel::ServiceNamespace::new_unchecked("compute".to_owned()),
+            "servres".to_owned(),
+        );
+
+        // 1. Unknown key fails closed on set_limit, get_limit, get_usage
+        assert!(matches!(
+            store
+                .set_limit(&scope, &unknown_key, LimitValue::Maximum(5))
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            store.get_limit(&scope, &unknown_key).await,
+            Err(StoreError::Corrupt(_))
+        ));
+        assert!(matches!(
+            store.get_usage(&scope, &unknown_key).await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        // 2. Duplicate keys in reservation request fail closed
+        let dup_amounts = vec![
+            ResourceAmount::new_unchecked(valid_key.clone(), 1),
+            ResourceAmount::new_unchecked(valid_key.clone(), 2),
+        ];
+        assert!(matches!(
+            store.reserve_quota(&scope, "op-dup", &dup_amounts).await,
+            Err(StoreError::Corrupt(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn released_reservation_cannot_be_reused_for_same_op() -> Result<(), StoreError> {
+        let store = crate::testkit::open_memory().await?;
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("tenant-rel"), None, None);
+        let key = LimitKey::compute_servers();
+        let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 1)];
+
+        // Reserve and release
+        let res = store.reserve_quota(&scope, "op-terminal", &amounts).await?;
+        store.release_reservation(&res.id).await?;
+
+        // Re-reserving the same operation ID fails closed with conflict
+        assert!(matches!(
+            store.reserve_quota(&scope, "op-terminal", &amounts).await,
+            Err(StoreError::ReservationConflict(_))
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn two_tenant_finite_quota_isolation() -> Result<(), StoreError> {
+        let store = crate::testkit::open_memory().await?;
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
+        let scope_b = OwnershipScope::project(ScopeId::new_unchecked("proj-b"), None, None);
+        let key = LimitKey::compute_servers();
+        let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 1)];
+
+        // Tenant A: limit = 1, Tenant B: limit = 2
+        store
+            .set_limit(&scope_a, &key, LimitValue::Maximum(1))
+            .await?;
+        store
+            .set_limit(&scope_b, &key, LimitValue::Maximum(2))
+            .await?;
+
+        // Tenant A: 1st succeeds, 2nd fails
+        let res_a1 = store.reserve_quota(&scope_a, "op-a1", &amounts).await?;
+        assert_eq!(res_a1.state, ReservationState::Pending);
+        assert!(matches!(
+            store.reserve_quota(&scope_a, "op-a2", &amounts).await,
+            Err(StoreError::QuotaExceeded { .. })
+        ));
+
+        // Tenant B: 1st and 2nd succeed, 3rd fails
+        let res_b1 = store.reserve_quota(&scope_b, "op-b1", &amounts).await?;
+        let res_b2 = store.reserve_quota(&scope_b, "op-b2", &amounts).await?;
+        assert_eq!(res_b1.state, ReservationState::Pending);
+        assert_eq!(res_b2.state, ReservationState::Pending);
+        assert!(matches!(
+            store.reserve_quota(&scope_b, "op-b3", &amounts).await,
+            Err(StoreError::QuotaExceeded { .. })
+        ));
+
+        // Tenant A usage is 1, Tenant B usage is 2
+        let usage_a = store.get_usage(&scope_a, &key).await?;
+        let usage_b = store.get_usage(&scope_b, &key).await?;
+        assert_eq!(usage_a.total_consumed(), 1);
+        assert_eq!(usage_b.total_consumed(), 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_reservations_cannot_over_allocate() -> Result<(), Box<dyn std::error::Error>>
+    {
+        for iteration in 0..25 {
+            let path = std::path::PathBuf::from(format!(
+                "/tmp/o3k-quota-race-{}-{}.sqlite",
+                std::process::id(),
+                iteration
+            ));
+            let _ = std::fs::remove_file(&path);
+            let store = crate::testkit::open_file(&path).await?;
+            let scope = OwnershipScope::project(
+                ScopeId::new_unchecked(format!("proj-race-{iteration}")),
+                None,
+                None,
+            );
+            let key = LimitKey::compute_servers();
+            store
+                .set_limit(&scope, &key, LimitValue::Maximum(1))
+                .await?;
+
+            let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 1)];
+
+            let store1 = store.clone();
+            let store2 = store.clone();
+            let scope1 = scope.clone();
+            let scope2 = scope.clone();
+            let amounts1 = amounts.clone();
+            let amounts2 = amounts.clone();
+
+            let task1 =
+                tokio::spawn(
+                    async move { store1.reserve_quota(&scope1, "op-race-1", &amounts1).await },
+                );
+            let task2 =
+                tokio::spawn(
+                    async move { store2.reserve_quota(&scope2, "op-race-2", &amounts2).await },
+                );
+
+            let (res1, res2) = tokio::join!(task1, task2);
+            let r1 = res1?;
+            let r2 = res2?;
+
+            let successes = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
+            assert_eq!(
+                successes, 1,
+                "iteration {iteration}: exactly one concurrent reservation must succeed for limit=1"
+            );
+
+            let usage = store.get_usage(&scope, &key).await?;
+            assert_eq!(usage.total_consumed(), 1);
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn existing_db_migration_defaults_to_unlimited() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/o3k-db-migration-test-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // Open store (which runs all migrations including 0018)
+        let store = crate::testkit::open_file(&path).await?;
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("legacy-tenant"), None, None);
+        let key = LimitKey::compute_servers();
+
+        // Defaults to Unlimited without manual configuration
+        assert_eq!(store.get_limit(&scope, &key).await?, LimitValue::Unlimited);
+
+        // Usage and reservations work out-of-the-box
+        let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 1)];
+        let res = store.reserve_quota(&scope, "op-migrated", &amounts).await?;
+        assert_eq!(res.state, ReservationState::Pending);
+
+        let _ = std::fs::remove_file(&path);
         Ok(())
     }
 }
