@@ -505,6 +505,9 @@ expected = {
     "security.tls_identity": "FAIL",
     "release.version": "PASS",
     "release.binary_hashes": "FAIL",
+    "release.binary_set_consistent": "FAIL",
+    "release.backup_available": "WARN",
+    "release.upgrade_state": "PASS",
     "cloud.api_discovery": "WARN",
     "cloud.testvm_status": "NOT_APPLICABLE",
 }

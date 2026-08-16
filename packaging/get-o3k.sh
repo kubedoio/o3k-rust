@@ -40,6 +40,22 @@
 #   3. the baked O3K_INSTALLER_VERSION release pin (this file's own release).
 # The installer NEVER consults a channel service.
 #
+# Upgrade fence (issue #626, docs/plan/o3k-upgrade.md §12): when an O3K
+# release is already installed (parsed from
+# /usr/local/share/o3k/release-manifest.json), the resolved TARGET version is
+# compared against it BEFORE any mutation:
+#   - fresh host (no manifest): the normal install flow, unchanged;
+#   - installed == target: the existing idempotent convergence flow;
+#   - installed > target: refuse the implicit downgrade (exit 1, no mutation);
+#   - installed < target: download + verify the new release bundle (tarball +
+#     published .sha256 + install.sh) into /var/lib/o3k/upgrade-download/
+#     (mode 0700; the only override knob is O3K_UPGRADE_DOWNLOAD_DIR for
+#     test/campaign sandboxes), print the exact next command
+#     `sudo /var/lib/o3k/upgrade-download/o3k-<target>/bin/o3k upgrade`, and
+#     exit 0. Nothing is extracted or executed here — extraction is the o3k
+#     upgrade engine's job — so a noninteractive curl|sh NEVER auto-upgrades
+#     an existing installation (safety over convenience).
+#
 # Supported platforms (strict): Linux x86_64, Ubuntu 24.04 (noble) or
 # Debian 12 (bookworm). Anything else fails with a clear message. Root is
 # required.
@@ -186,6 +202,180 @@ print_installed_notice() {
   fi
 }
 
+# ---- upgrade fence helpers (issue #626) ---------------------------------------
+# compare_versions LEFT RIGHT — embedded python3 semver-with-prerelease
+# comparison (the ADR-0130 release-version format: one or two numeric dots
+# plus an optional dot-separated alphanumeric prerelease; a leading "v" is
+# accepted and stripped). Exit codes: 0 = LEFT is older, 1 = equal,
+# 2 = LEFT is newer, 3 = unparseable input (caller must fail closed).
+# Deterministic and unit-tested by tests/installer-negative.sh (extracted via
+# sed and driven with faked inputs, same mechanism as check_platform).
+compare_versions() {
+python3 - "$1" "$2" <<'PY'
+import re
+import sys
+
+
+def parse(text):
+    text = text.strip()
+    if text.startswith("v"):
+        text = text[1:]
+    match = re.fullmatch(
+        r"[0-9]+(?:\.[0-9]+){1,2}(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?", text
+    )
+    if match is None:
+        return None
+    body, _, prerelease = text.partition("-")
+    numeric = [int(part) for part in body.split(".")]
+    while len(numeric) < 3:
+        numeric.append(0)
+    identifiers = tuple(prerelease.split(".")) if prerelease else ()
+    return numeric, identifiers
+
+
+def identifier_key(identifier):
+    return (0, int(identifier)) if identifier.isdigit() else (1, identifier)
+
+
+def precedence(parsed):
+    numeric, identifiers = parsed
+    return tuple(numeric) + (0 if identifiers else 1,), tuple(
+        identifier_key(item) for item in identifiers
+    )
+
+
+left = parse(sys.argv[1])
+right = parse(sys.argv[2])
+if left is None or right is None:
+    sys.exit(3)
+if precedence(left) < precedence(right):
+    sys.exit(0)
+if precedence(left) == precedence(right):
+    sys.exit(1)
+sys.exit(2)
+PY
+}
+
+# read_installed_version MANIFEST — prints the installed release version, or
+# nothing when the manifest is absent (fresh host). Unreadable/malformed
+# manifests fail closed (exit 3). Self-contained for the test matrix.
+read_installed_version() {
+  local manifest="$1"
+  [ -f "$manifest" ] || return 0
+  [ ! -L "$manifest" ] || die "installed release manifest must not be a symlink: $manifest"
+python3 - "$manifest" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        document = json.load(stream)
+except (OSError, ValueError):
+    print("O3K installer: installed release manifest is unreadable: %s" % sys.argv[1], file=sys.stderr)
+    sys.exit(3)
+version = document.get("version") if isinstance(document, dict) else None
+if not isinstance(version, str) or not version.strip():
+    print("O3K installer: installed release manifest declares no version: %s" % sys.argv[1], file=sys.stderr)
+    sys.exit(3)
+print(version.strip())
+PY
+}
+
+# verify_delegation_sha256 DIR ASSET — the same strict published-digest gate
+# the install path uses: exactly one `<64-hex>  <asset>` line naming the
+# expected asset, then sha256sum --check --strict in DIR.
+verify_delegation_sha256() {
+  local dir="$1" asset="$2" lines fields digest name
+  lines="$(awk 'END{print NR}' "$dir/$asset.sha256")"
+  fields="$(awk 'NR==1{print NF}' "$dir/$asset.sha256")"
+  digest="$(awk 'NR==1{print $1}' "$dir/$asset.sha256")"
+  name="$(awk 'NR==1{print $2}' "$dir/$asset.sha256")"
+  [ "$lines" = 1 ] && [ "$fields" = 2 ] \
+    || die "published SHA-256 file is malformed: $asset.sha256"
+  printf '%s' "$digest" | grep -Eq '^[0-9a-f]{64}$' \
+    || die "published SHA-256 file is malformed: $asset.sha256"
+  [ "$name" = "$asset" ] \
+    || die "published SHA-256 file names an unexpected asset: $name"
+  (cd "$dir" && sha256sum -c --strict -- "$asset.sha256") \
+    || die "published SHA-256 verification failed for $asset — refusing to extract or execute anything from the bundle"
+}
+
+# delegate_upgrade_download — verified delegation download for the
+# installed < target case. Downloads tarball + published .sha256 + install.sh
+# into O3K_UPGRADE_DOWNLOAD_DIR (0700), extracts the VERIFIED tarball next to
+# them (so the printed `o3k upgrade` entry point exists), and prints the
+# exact next command. Extracting a verified archive is not executing a
+# downloaded script: the o3k upgrade engine re-downloads and re-verifies
+# every asset itself before any mutation, so this copy is only an operator
+# entry point, never trusted directly.
+# Interrupted-delegation reuse: when the directory already holds the tarball
+# and its .sha256, they are re-verified against the published digest and
+# reused; a failed re-verification fails closed (remove the directory
+# deliberately to force a fresh download).
+delegate_upgrade_download() {
+  local asset base dest reused=0 bundle_dir
+  asset="o3k-${VERSION_NO_V}-linux-x86_64.tar.gz"
+  base="$O3K_RELEASE_BASE/v$VERSION_NO_V"
+  dest="$O3K_UPGRADE_DOWNLOAD_DIR"
+  mkdir -p "$dest"
+  chmod 700 "$dest"
+  if [ -s "$dest/$asset" ] && [ -s "$dest/$asset.sha256" ]; then
+    reused=1
+    verify_delegation_sha256 "$dest" "$asset"
+  else
+    fetch "$base/$asset" "$dest/$asset"
+    fetch "$base/$asset.sha256" "$dest/$asset.sha256"
+    verify_delegation_sha256 "$dest" "$asset"
+  fi
+  # install.sh asset copy: a fresh atomic fetch every time (byte-identical to
+  # the published GitHub Release asset; never executed by this installer).
+  fetch "$base/install.sh" "$dest/install.sh.tmp"
+  mv -- "$dest/install.sh.tmp" "$dest/install.sh"
+  # Extract the verified tarball so `.../o3k-<target>/bin/o3k upgrade` exists
+  # (entry point only; the engine re-verifies everything before mutating).
+  bundle_dir="$dest/o3k-${VERSION_NO_V}"
+  if [ ! -x "$bundle_dir/bin/o3k" ]; then
+    rm -rf -- "$bundle_dir"
+    mkdir -p "$bundle_dir"
+    safe_extract "$dest/$asset" "$bundle_dir" "$dest/delegation-entries.txt"
+  fi
+  chmod 0600 "$dest/$asset" "$dest/$asset.sha256" "$dest/install.sh"
+  if [ "$reused" -eq 1 ]; then
+    step "upgrade download for O3K v$VERSION_NO_V re-verified ($dest)"
+  else
+    step "upgrade download for O3K v$VERSION_NO_V verified ($dest)"
+  fi
+  printf 'O3K v%s is installed; the installer never upgrades an existing installation automatically.\n' "${INSTALLED_VERSION#v}"
+  printf 'Run: sudo %s/o3k-%s/bin/o3k upgrade\n' "$dest" "$VERSION_NO_V"
+}
+
+# check_upgrade_fence — compares the resolved TARGET version against the
+# installed release (parsed from /usr/local/share/o3k/release-manifest.json;
+# absent = fresh host). Runs after the platform guard and BEFORE any mutation.
+check_upgrade_fence() {
+  INSTALLED_VERSION="$(read_installed_version "$INSTALLED_MANIFEST")" \
+    || die "installed release manifest is unreadable or declares no version: $INSTALLED_MANIFEST"
+  [ -n "$INSTALLED_VERSION" ] || return 0 # fresh host: normal install flow
+  set +e
+  compare_versions "$INSTALLED_VERSION" "$VERSION"
+  fence_status=$?
+  set -e
+  case "$fence_status" in
+    0) # installed < target: verified delegation, then explicit operator action
+       delegate_upgrade_download
+       exit 0
+       ;;
+    1) # same version: the existing idempotent convergence flow below
+       ;;
+    2)
+       die "installed v${INSTALLED_VERSION#v} is newer than requested v${VERSION#v}; refusing implicit downgrade"
+       ;;
+    *)
+       die "cannot compare installed v${INSTALLED_VERSION#v} against requested v${VERSION#v}"
+       ;;
+  esac
+}
+
 # ---- platform and privilege guards -------------------------------------------
 if [ "$(id -u)" -ne 0 ]; then
   printf 'O3K installer: root is required; run: curl -sfL https://get.o3k.io | sudo sh -\n' >&2
@@ -198,13 +388,6 @@ check_platform "$(uname -s)" "$(uname -m)" "${ID:-}" "${VERSION_CODENAME:-}"
 printf 'O3K Cloud OS — TestLab\n'
 printf '✓ %s %s\n' "${PRETTY_NAME:-${ID:-unknown} ${VERSION_ID:-unknown}}" "$(uname -m)"
 
-# ---- private temp dir + cleanup ----------------------------------------------
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer.XXXXXX")"
-chmod 700 "$TMP_DIR"
-trap 'rm -rf -- "$TMP_DIR"' EXIT
-trap 'rm -rf -- "$TMP_DIR"; exit 130' INT
-trap 'rm -rf -- "$TMP_DIR"; exit 143' TERM HUP
-
 # ---- version resolution -------------------------------------------------------
 # The version is baked into this file; the installer never consults a channel
 # service. Explicit dev/test overrides take precedence.
@@ -213,7 +396,24 @@ VERSION="$(trim "$VERSION")"
 [ -n "$VERSION" ] || die "no installer version resolved"
 check_version_format "$VERSION"
 VERSION_NO_V="${VERSION#v}"
+
+# ---- upgrade fence (issue #626) — before ANY mutation -------------------------
+# Fresh host -> normal install; same version -> idempotent convergence;
+# newer installed version -> refuse implicit downgrade (exit 1); older
+# installed version -> verified delegation download + printed
+# `sudo .../bin/o3k upgrade` command, exit 0. curl|sh never auto-upgrades an
+# existing install.
+INSTALLED_MANIFEST=/usr/local/share/o3k/release-manifest.json
+O3K_UPGRADE_DOWNLOAD_DIR="${O3K_UPGRADE_DOWNLOAD_DIR:-/var/lib/o3k/upgrade-download}"
+check_upgrade_fence
 print_installed_notice
+
+# ---- private temp dir + cleanup ----------------------------------------------
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-installer.XXXXXX")"
+chmod 700 "$TMP_DIR"
+trap 'rm -rf -- "$TMP_DIR"' EXIT
+trap 'rm -rf -- "$TMP_DIR"; exit 130' INT
+trap 'rm -rf -- "$TMP_DIR"; exit 143' TERM HUP
 
 # ---- host dependencies (the one place apt is allowed) -------------------------
 # Mirror the proven clean-VM set (asr-021-cd15263/vm-run.sh cloud-init):

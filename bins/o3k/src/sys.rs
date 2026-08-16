@@ -24,10 +24,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_HTTP_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Outcome of a bounded synchronous host command.
-struct CommandOutcome {
-    output: std::process::Output,
+pub(crate) struct CommandOutcome {
+    pub(crate) output: std::process::Output,
     /// False when the command was killed after exceeding the bound.
-    completed: bool,
+    pub(crate) completed: bool,
 }
 
 /// Reads a byte stream to its end, ignoring read errors (the exit status and
@@ -41,13 +41,22 @@ fn read_all(mut reader: impl Read) -> Vec<u8> {
 /// Runs a host command with a bounded wait. On timeout the child is killed
 /// and the outcome is marked incomplete. A missing binary reports an
 /// [`std::io::ErrorKind::NotFound`] spawn error to the caller.
-fn run_bounded(command: &mut Command) -> std::io::Result<CommandOutcome> {
+pub(crate) fn run_bounded(command: &mut Command) -> std::io::Result<CommandOutcome> {
+    run_bounded_with_timeout(command, COMMAND_TIMEOUT)
+}
+
+/// [`run_bounded`] with an explicit bound (the upgrade runner needs longer
+/// bounds for downloads and service stop/start).
+pub(crate) fn run_bounded_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::io::Result<CommandOutcome> {
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait()? {
             Some(status) => {
@@ -80,7 +89,7 @@ fn run_bounded(command: &mut Command) -> std::io::Result<CommandOutcome> {
 }
 
 /// Reduces a completed command outcome to a trimmed stderr message.
-fn stderr_message(output: &std::process::Output) -> String {
+pub(crate) fn stderr_message(output: &std::process::Output) -> String {
     let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if message.is_empty() {
         "command failed without a message".to_owned()

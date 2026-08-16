@@ -183,6 +183,80 @@ identical.
 No new admin password, TLS identities, users, services, networks, images, or
 `test-vm` are created on re-run.
 
+## Upgrade and rollback
+
+The `o3k` operator CLI owns upgrades; the one-line installer never upgrades an
+existing installation (see the fence below). After the first install, every
+journey runs from the installed binary:
+
+```sh
+sudo o3k version                       # binary version + installed release version
+sudo o3k upgrade --check               # read-only preflight verdict, no download
+sudo o3k upgrade [--to vX.Y.Z] [--yes] [--json]
+sudo o3k rollback [--yes] [--json]
+```
+
+`upgrade` resolves the target release (explicit `--to`, or the newest published
+release in the same channel family) through the official GitHub Release
+assets, verifies the published SHA-256 and the bundle's own `SHA256SUMS`
+before anything is extracted, then runs the phase machine: preflight → backup
+→ stop `o3k-compute` then `o3kd` → atomic binary replacement → start `o3kd`
+then `o3k-compute` (the embedded migrator applies any pending migrations) →
+doctor → commit. `upgrade --check` mutates nothing and downloads nothing.
+
+Backups live under `/var/lib/o3k/backups/<backup-id>/` (directory 0700,
+files 0600): the pre-upgrade SQLite snapshot (crash-consistent `VACUUM INTO`,
+never a raw copy of a live WAL database), a copy of `/etc/o3k` configuration
+(credentials and TLS are copied verbatim, never regenerated, never printed),
+the installed release manifest/SHA256SUMS/ownership ledger, and `backup.json`
+recording versions, binary hashes, the schema version, and the
+migration-compatibility decision. Retention keeps the **last 2 backups** plus
+the rollback-chain record `/var/lib/o3k/backups/backup-chain.json`; `rollback`
+always selects the immediately previous successful upgrade snapshot from the
+chain and only ever trusts O3K-created, hash-verified records.
+
+Downgrade policy: `upgrade --to <older>` is refused explicitly, never silent.
+Upgrades from a release older than the target's declared
+`upgrade_from.min_version` fail closed with "unsupported upgrade path;
+reinstall required". Migration compatibility is declared by the release
+itself (`schema_version` in the bundle manifest, computed from
+`crates/o3k-store/migrations/`): when the schema version is unchanged, rollback
+is binaries-only (the backup stays as a safety net); when migrations ran,
+rollback restores the pre-upgrade database snapshot together with the old
+binary set. No migration is reversible, so a schema-changing rollback is
+always a restore, never a down-migration.
+
+Failure recovery: a failure in any phase aborts with no mutation before the
+backup exists, restores the old binaries on a partial switch, or restores the
+pre-upgrade database plus binaries after a migration failure. One automatic
+rollback attempt runs per invocation; if the rollback itself fails, an
+explicit `FAILED_UPGRADE` state records the backup id and prints the exact
+next command (`sudo o3k upgrade` to resume or `sudo o3k rollback` to
+recover). `sudo o3k doctor` remains the read-only post-upgrade validation
+gate; the release checks (`release.binary_set_consistent`,
+`release.backup_available`, `release.upgrade_state`) report mixed-version
+installs, a missing backup on an otherwise healthy install, and interrupted
+upgrade state.
+
+Installer fence: `curl -sfL https://get.o3k.io | sudo sh -` never
+auto-upgrades an existing install. On a host with an installed release, the
+installer compares the resolved target version against
+`/usr/local/share/o3k/release-manifest.json` **before any mutation**:
+
+- same version → the normal idempotent convergence run;
+- installed version newer → exit 1 with
+  `installed vX is newer than requested vY; refusing implicit downgrade`
+  (nothing downloaded, nothing mutated);
+- installed version older → the verified release bundle (tarball + published
+  `.sha256` + `install.sh`) is downloaded into `/var/lib/o3k/upgrade-download/`
+  (mode 0700; a previous interrupted delegation is re-verified and reused,
+  a tampered one fails closed) and the installer prints the exact next
+  command — `sudo /var/lib/o3k/upgrade-download/o3k-<target>/bin/o3k upgrade`
+  — then exits 0. Nothing is extracted or executed by the installer itself;
+  extraction is the upgrade engine's job. After the first upgrade, the
+  installed `o3k` binary provides `sudo o3k upgrade` for all future
+  journeys.
+
 ## Uninstall, reset, purge
 
 Uninstall preserves state by default:

@@ -122,6 +122,8 @@ jobs:
         run: bash tests/release-bundle-integrity.sh
       - name: Test o3k doctor process-level contract
         run: bash tests/doctor-process.sh
+      - name: Test o3k upgrade/rollback process-level contract
+        run: bash tests/upgrade-process.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Install pinned cargo-nextest
