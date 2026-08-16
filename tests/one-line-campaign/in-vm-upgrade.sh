@@ -16,7 +16,7 @@
 #       line printed, and NO mutation yet (manifest + binary hashes
 #       unchanged, o3kd still active);
 #   (3) upgrade via the staged verified entry point
-#       (.../bin/o3k upgrade --yes --json): exit 0, status committed, phase
+#       (.../bin/o3k upgrade --to <target> --yes --json): exit 0, status committed, phase
 #       COMMITTED, backup_id present, doctor_status healthy|warning (the
 #       engine's own gate accepts both — see the JSON assert below);
 #   (4) identity AFTER upgrade: manifest == target, same server UUID / fixed
@@ -435,7 +435,7 @@ phase_upgrade() {
   log "phase 3/8: upgrade through the staged verified entry point"
   [ -x "$STAGED" ] || fail 31 "staged entry point missing: $STAGED"
   local rc=0
-  sudo timeout 1800 "$STAGED" upgrade --yes --json \
+  sudo timeout 1800 "$STAGED" upgrade --to "$TARGET_VERSION" --yes --json \
     >"$EVID/upgrade-command.json" 2>"$EVID/upgrade-command.stderr" || rc=$?
   [ "$rc" = 0 ] || fail 31 "upgrade exited $rc: $(tail -n 5 "$EVID/upgrade-command.stderr" 2>/dev/null | tr '\n' ' ')"
   UPGRADE_BACKUP_ID="$(assert_engine_json upgrade "$EVID/upgrade-command.json" upgrade "$SOURCE_VERSION" "$TARGET")"
@@ -592,7 +592,7 @@ phase_re_upgrade() {
   log "phase 7/8: re-upgrade through the same staged entry point"
   [ -x "$STAGED" ] || fail 71 "staged entry point missing: $STAGED"
   local rc=0
-  sudo timeout 1800 "$STAGED" upgrade --yes --json \
+  sudo timeout 1800 "$STAGED" upgrade --to "$TARGET_VERSION" --yes --json \
     >"$EVID/reupgrade-command.json" 2>"$EVID/reupgrade-command.stderr" || rc=$?
   [ "$rc" = 0 ] || fail 71 "re-upgrade exited $rc: $(tail -n 5 "$EVID/reupgrade-command.stderr" 2>/dev/null | tr '\n' ' ')"
   REUPGRADE_BACKUP_ID="$(assert_engine_json re-upgrade "$EVID/reupgrade-command.json" upgrade "$SOURCE_VERSION" "$TARGET")"
@@ -651,7 +651,7 @@ document = {
     "target_version": target,
     "install_method": "public-installer-delegation",
     "installer_command": f"curl -sfL {release_base}/v{target}/install.sh | sudo sh -",
-    "upgrade_command": f"sudo /var/lib/o3k/upgrade-download/o3k-{target}/bin/o3k upgrade --yes --json",
+    "upgrade_command": f"sudo /var/lib/o3k/upgrade-download/o3k-{target}/bin/o3k upgrade --to {target} --yes --json",
     "rollback_command": "sudo o3k rollback --yes --json",
     "upgrade_backup_id": backup_id,
     "identity_preserved": {
