@@ -554,18 +554,22 @@ impl SystemUpgradeIo {
             }
             Ok(outcome) if !outcome.completed => Err("o3k doctor timed out".to_owned()),
             Ok(outcome) => {
-                // Doctor prints its JSON report to stdout and exits 1 on an
-                // unhealthy installation; stderr is often empty. Parse the
-                // stdout anyway so the failure names the failing checks
-                // instead of reporting an empty stderr.
+                // Doctor prints its JSON report to stdout and exits 1 for
+                // BOTH warning and unhealthy installations (stderr is often
+                // empty). The upgrade gate accepts healthy AND warning, so
+                // parse the stdout and only fail on `unhealthy` — or when
+                // no report can be parsed at all.
                 let stdout = String::from_utf8_lossy(&outcome.output.stdout);
-                let summary = serde_json::from_str::<serde_json::Value>(&stdout)
-                    .ok()
-                    .map(|report| {
+                let report = serde_json::from_str::<serde_json::Value>(&stdout);
+                match report {
+                    Ok(report) => {
                         let overall = report
                             .get("overall_status")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("unknown");
+                        if overall == "healthy" || overall == "warning" {
+                            return Ok(report);
+                        }
                         let failing = report
                             .get("checks")
                             .and_then(serde_json::Value::as_array)
@@ -583,23 +587,24 @@ impl SystemUpgradeIo {
                                     .join(", ")
                             })
                             .unwrap_or_default();
-                        if failing.is_empty() {
+                        let summary = if failing.is_empty() {
                             format!("overall {overall}")
                         } else {
                             format!("overall {overall}; FAIL: {failing}")
-                        }
-                    })
-                    .unwrap_or_else(|| {
+                        };
+                        Err(format!(
+                            "o3k doctor reported an unhealthy installation: {summary}"
+                        ))
+                    }
+                    Err(_) => {
                         let stderr = stderr_message(&outcome.output);
                         if stderr == "command failed without a message" {
-                            "o3k doctor exited non-zero without a report".to_owned()
+                            Err("o3k doctor exited non-zero without a report".to_owned())
                         } else {
-                            stderr
+                            Err(stderr)
                         }
-                    });
-                Err(format!(
-                    "o3k doctor reported an unhealthy installation: {summary}"
-                ))
+                    }
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Err("o3k is not installed (PATH lookup failed)".to_owned())
