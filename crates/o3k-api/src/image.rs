@@ -92,7 +92,11 @@ pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
             let message = format!(
                 "Quota exceeded for {key}: limit {limit}, used {used}, requested {requested}"
             );
-            keystone_error(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large", message)
+            if key.resource() == "bytes" {
+                keystone_error(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large", message)
+            } else {
+                keystone_error(StatusCode::FORBIDDEN, "Forbidden", message)
+            }
         }
         ImageError::UnsupportedFormat | ImageError::ChecksumMismatch | ImageError::InvalidPath => {
             keystone_error(

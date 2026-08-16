@@ -3282,4 +3282,81 @@ esac
         let _ = fs::remove_dir_all(&path);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn image_byte_quota_enforcement_and_failure_release()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::QuotaRepository;
+
+        let path = root("image-byte-quota");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, 100_000, store.clone()).await?;
+
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-byte"), None, None);
+        let auth_a = auth("proj-byte");
+
+        // Set byte limit to 1000 bytes
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::image_bytes(),
+                LimitValue::Maximum(1000),
+            )
+            .await?;
+
+        // 1. Create metadata for two images
+        let img1 = service
+            .create(
+                &auth_a,
+                "raw-1".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        let img2 = service
+            .create(
+                &auth_a,
+                "raw-2".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+
+        // 2. Upload 600 bytes to img1 -> succeeds
+        let payload_600 = vec![0x42u8; 600];
+        let rec1 = service.upload(&auth_a, img1.id, &payload_600).await?;
+        assert_eq!(rec1.size, Some(600));
+
+        // 3. Upload 600 bytes to img2 -> exceeds 1000 limit -> fails with QuotaExceeded
+        let res2 = service.upload(&auth_a, img2.id, &payload_600).await;
+        assert!(matches!(res2, Err(ImageError::QuotaExceeded { .. })));
+
+        // 4. Upload 400 bytes to img2 -> exactly hits 1000 limit -> succeeds
+        let payload_400 = vec![0x43u8; 400];
+        let rec2 = service.upload(&auth_a, img2.id, &payload_400).await?;
+        assert_eq!(rec2.size, Some(400));
+
+        // 5. Delete img1 -> frees 600 bytes
+        service.delete(&auth_a, img1.id).await?;
+
+        // 6. Create and upload 500 bytes -> succeeds (400 + 500 = 900 <= 1000)
+        let img3 = service
+            .create(
+                &auth_a,
+                "raw-3".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        let payload_500 = vec![0x44u8; 500];
+        let rec3 = service.upload(&auth_a, img3.id, &payload_500).await?;
+        assert_eq!(rec3.size, Some(500));
+
+        let _ = fs::remove_dir_all(&path);
+        Ok(())
+    }
 }

@@ -5070,4 +5070,97 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn network_subnet_and_port_quota_enforcement() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::QuotaRepository;
+
+        let path = root("network-subnets-ports-quota");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-sub-port"), None, None);
+        let auth_a = auth("proj-sub-port");
+
+        // 1. Set subnet limit = 1 and port limit = 1
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::network_subnets(),
+                LimitValue::Maximum(1),
+            )
+            .await?;
+        store
+            .set_limit(&scope_a, &LimitKey::network_ports(), LimitValue::Maximum(1))
+            .await?;
+
+        let net = service
+            .create_network(&auth_a, "net-main".to_owned())
+            .await?;
+
+        // 2. Subnet creation: 1st succeeds, 2nd fails
+        let sub1 = service
+            .create_subnet(
+                &auth_a,
+                net.id,
+                "sub-1".to_owned(),
+                "10.0.0.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(sub1.network_id, net.id);
+
+        let sub2_res = service
+            .create_subnet(
+                &auth_a,
+                net.id,
+                "sub-2".to_owned(),
+                "10.0.1.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(matches!(sub2_res, Err(NetworkError::QuotaExceeded { .. })));
+
+        // 3. Port creation: 1st succeeds, 2nd fails
+        let port1 = service
+            .create_port(&auth_a, net.id, "port-1".to_owned())
+            .await?;
+        assert_eq!(port1.network_id, net.id);
+
+        let port2_res = service
+            .create_port(&auth_a, net.id, "port-2".to_owned())
+            .await;
+        assert!(matches!(port2_res, Err(NetworkError::QuotaExceeded { .. })));
+
+        // 4. Delete port1 and subnet1 -> frees quota
+        service.delete_port(&auth_a, port1.id).await?;
+        service.delete_subnet(&auth_a, sub1.id).await?;
+
+        // 5. Subsequent creates succeed
+        let sub2 = service
+            .create_subnet(
+                &auth_a,
+                net.id,
+                "sub-2".to_owned(),
+                "10.0.1.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        assert_eq!(sub2.network_id, net.id);
+
+        let port2 = service
+            .create_port(&auth_a, net.id, "port-2".to_owned())
+            .await?;
+        assert_eq!(port2.network_id, net.id);
+
+        let _ = fs::remove_dir_all(&path);
+        Ok(())
+    }
 }
