@@ -88,7 +88,7 @@ fi
 # published install.sh GitHub Release asset is byte-identical to this file,
 # so an installer downloaded from .../releases/download/v<version>/install.sh
 # installs exactly <version> by default.
-O3K_INSTALLER_VERSION="v0.3.0-alpha.1"
+O3K_INSTALLER_VERSION="v0.4.0-alpha.1"
 O3K_RELEASE_BASE="${O3K_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download}"
 INSTALL_MANIFEST=/usr/local/share/o3k/.o3k-installed
 
