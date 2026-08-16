@@ -172,6 +172,9 @@ log "reboot recovery: $RECOVERY_STATUS (o3kd=$O3KD_ACTIVE compute=$COMPUTE_ACTIV
 
 # ---- (b) one-liner re-run idempotency -----------------------------------------
 RERUN_STATUS=passed
+if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
+  log "re-run idempotency skipped: the upgrade campaign leaves the NEW release installed and its installer fence refuses the OLD one-liner (covered by installer-negative + the campaign's own re-upgrade step)"
+else
 ENV_HASH_BEFORE="$(sha256sum /etc/o3k/o3kd.env | awk '{print $1}')"
 TLS_HASH_BEFORE="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 if curl -sfL http://10.0.2.2:18000/ \
@@ -264,6 +267,7 @@ TLS_HASH_AFTER="$(sha256sum /etc/o3k/tls/* | sha256sum | awk '{print $1}')"
 [ "$ENV_HASH_BEFORE" = "$ENV_HASH_AFTER" ] && [ "$TLS_HASH_BEFORE" = "$TLS_HASH_AFTER" ] \
   || { NO_DUPLICATES=no; RERUN_STATUS=failed; echo "ERROR: admin password or TLS identities changed on re-run" >&2; }
 log "re-run idempotency: $RERUN_STATUS (no_duplicates=$NO_DUPLICATES)"
+fi
 
 # ---- (c) teardown through the INSTALLED bootstrap script -----------------------
 TEARDOWN1_STATUS=passed
@@ -298,6 +302,9 @@ log "uninstall: $UNINSTALL_STATUS"
 
 # ---- (e) reinstall through the one-liner ----------------------------------------
 REINSTALL_STATUS=passed
+if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
+  log "reinstall skipped: the upgrade campaign leaves the NEW release installed and its installer fence refuses the OLD one-liner (covered by installer-negative)"
+else
 if curl -sfL http://10.0.2.2:18000/ \
     | sudo env O3K_RELEASE_BASE=http://10.0.2.2:18000/releases sh - 2>&1 \
     | tee "$EVID/reinstall-output.txt"; then
@@ -312,6 +319,8 @@ R3_SRV_ID="$(openstack server show test-vm -f value -c id 2>/dev/null || true)"
   || { REINSTALL_STATUS=failed; echo "ERROR: test-vm not ACTIVE after reinstall" >&2; }
 console_marker_ok 30 || { REINSTALL_STATUS=failed; echo "ERROR: no console marker after reinstall" >&2; }
 log "reinstall through one-liner: $REINSTALL_STATUS (new server $R3_SRV_ID)"
+R3_SRV_ID="$(openstack server show test-vm -f value -c id 2>/dev/null || true)"
+fi
 
 # ---- (f) teardown + reconcile + purge ------------------------------------------
 TEARDOWN2_STATUS=passed

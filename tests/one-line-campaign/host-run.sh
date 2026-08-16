@@ -231,8 +231,18 @@ log "doctor phase complete"
 DIAG_CMD='sudo free -m; sudo dmesg | tail -60; sudo journalctl -u o3kd --no-pager; sudo journalctl -u o3k-compute --no-pager; sudo journalctl -u ssh --no-pager -n 40; sudo ls -laR /var/lib/o3k 2>/dev/null | head -60; sudo ls -la /var/log/o3k 2>/dev/null; sudo tail -80 /var/log/o3k/*.log 2>/dev/null'
 log "phase 2: recovery / rerun / removal / purge (detached + polled)"
 ssh_vm "sudo rm -f $VM_EVID/phase2-done"
-ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
-  >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
+# With the upgrade gate on, the VM ends phase-upgrade on the NEW release;
+# the one-liner rerun/reinstall blocks would trip the new installer's
+# downgrade fence (already covered by installer-negative), so phase 2
+# skips only those idempotency blocks while uninstall/purge/zero-residue
+# and foreign-state checks still run.
+if [ -n "${O3K_UPGRADE_TARGET_VERSION:-}" ]; then
+  ssh_vm "sudo nohup env O3K_PHASE2_SKIP_IDEMPOTENCY=1 bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+    >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
+else
+  ssh_vm "sudo nohup bash $VM_SCRIPTS/in-vm-phase2.sh $DISTRO $VM_EVID $SOURCE_SHA \
+    >$VM_EVID/phase2-console.log 2>&1 </dev/null &"
+fi
 PHASE2_MARKER=""
 for i in $(seq 1 150); do
   sleep 10
