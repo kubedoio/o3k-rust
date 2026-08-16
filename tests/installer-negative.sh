@@ -223,7 +223,13 @@ EOF
 printf 'shim binary must not be executed\n' >&2
 exit 97
 EOF
-  chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute"
+  cat >"$SRC_BUNDLE/bin/o3k" <<'EOF'
+#!/usr/bin/env bash
+# TEST FIXTURE — the staged upgrade entry point; never executed by the wrapper.
+printf 'shim binary must not be executed\n' >&2
+exit 97
+EOF
+  chmod +x "$SRC_BUNDLE/bin/o3kd" "$SRC_BUNDLE/bin/o3k-compute" "$SRC_BUNDLE/bin/o3k"
 
   build_good_tarball() { # build_good_tarball TARBALL
     tar -C "$MATRIX/src-bundle" -czf "$1" ./o3k-0.4.0-alpha.1
@@ -753,6 +759,12 @@ PY
       && -f "$MATRIX/upgrade-download/install.sh" ]] \
       && record_pass "delegation download holds tarball + .sha256 + install.sh" \
       || record_fail "delegation download files incomplete"
+    # The staged entry point must exist so the printed command is runnable:
+    # extraction targets the download dir itself (the tarball root is
+    # already o3k-<version>/; the first implementation double-nested it).
+    [[ -f "$MATRIX/upgrade-download/o3k-0.4.0-alpha.1/bin/o3k" ]] \
+      && record_pass "delegation staged the o3k entry point (no double nesting)" \
+      || record_fail "staged entry point missing: $MATRIX/upgrade-download/o3k-0.4.0-alpha.1/bin/o3k"
     [[ "$(stat -c %a "$MATRIX/upgrade-download")" = "700" ]] \
       && record_pass "delegation directory is private (0700)" \
       || record_fail "delegation directory mode is not 0700"
