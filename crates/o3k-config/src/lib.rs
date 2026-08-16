@@ -12,6 +12,13 @@ const DEFAULT_DATA_DIR: &str = "./data";
 const DEFAULT_LOG_FILTER: &str = "info";
 const DEFAULT_COMPUTE_CONTROL_ADDR: &str = "127.0.0.1:50051";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DatabaseBackend {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     Json,
@@ -53,6 +60,7 @@ pub struct Config {
     pub config_path: Option<PathBuf>,
     pub listen_addr: SocketAddr,
     pub data_dir: PathBuf,
+    pub database_backend: DatabaseBackend,
     pub log_format: LogFormat,
     pub log_filter: String,
     pub provider: Provider,
@@ -66,6 +74,7 @@ pub struct Config {
     pub compute_server_private_key: Option<PathBuf>,
     pub compute_client_ca: Option<PathBuf>,
     pub compute_authorized_agents: Option<String>,
+    database_url: Option<Secret>,
     bootstrap_secret: Option<Secret>,
     bootstrap_password: Option<Secret>,
     cinder_password: Option<Secret>,
@@ -79,6 +88,8 @@ impl fmt::Debug for Config {
             .field("config_path", &self.config_path)
             .field("listen_addr", &self.listen_addr)
             .field("data_dir", &self.data_dir)
+            .field("database_backend", &self.database_backend)
+            .field("database_url", &self.database_url)
             .field("log_format", &self.log_format)
             .field("log_filter", &self.log_filter)
             .field("provider", &self.provider)
@@ -158,6 +169,11 @@ impl Config {
     pub fn token_signing_key(&self) -> Option<&Secret> {
         self.token_signing_key.as_ref()
     }
+
+    #[must_use]
+    pub fn database_url(&self) -> Option<&Secret> {
+        self.database_url.as_ref()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -203,6 +219,10 @@ pub enum ConfigError {
     InvalidBootstrapPassword,
     #[error("token signing key must be at least 32 bytes")]
     WeakTokenSigningKey,
+    #[error("database backend must be `sqlite` or `postgres`")]
+    InvalidDatabaseBackend,
+    #[error("PostgreSQL database backend requires O3K_DATABASE_URL / database_url")]
+    MissingDatabaseUrl,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -210,6 +230,8 @@ struct PartialConfig {
     config_path: Option<PathBuf>,
     listen_addr: Option<String>,
     data_dir: Option<String>,
+    database_backend: Option<String>,
+    database_url: Option<String>,
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
@@ -234,6 +256,8 @@ struct PartialConfig {
 struct FileConfig {
     listen_addr: Option<String>,
     data_dir: Option<String>,
+    database_backend: Option<String>,
+    database_url: Option<String>,
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
@@ -258,6 +282,8 @@ impl From<FileConfig> for PartialConfig {
         Self {
             listen_addr: file.listen_addr,
             data_dir: file.data_dir,
+            database_backend: file.database_backend,
+            database_url: file.database_url,
             log_format: file.log_format,
             log_filter: file.log_filter,
             provider: file.provider,
@@ -290,6 +316,12 @@ impl PartialConfig {
         }
         if other.data_dir.is_some() {
             self.data_dir = other.data_dir;
+        }
+        if other.database_backend.is_some() {
+            self.database_backend = other.database_backend;
+        }
+        if other.database_url.is_some() {
+            self.database_url = other.database_url;
         }
         if other.log_format.is_some() {
             self.log_format = other.log_format;
@@ -348,6 +380,8 @@ impl PartialConfig {
         Self {
             listen_addr: value_from_env(environment, "O3K_LISTEN_ADDR"),
             data_dir: value_from_env(environment, "O3K_DATA_DIR"),
+            database_backend: value_from_env(environment, "O3K_DATABASE_BACKEND"),
+            database_url: value_from_env(environment, "O3K_DATABASE_URL"),
             log_format: value_from_env(environment, "O3K_LOG_FORMAT"),
             log_filter: value_from_env(environment, "O3K_LOG_FILTER"),
             provider: value_from_env(environment, "O3K_PROVIDER"),
@@ -394,6 +428,10 @@ impl PartialConfig {
                 "--config" => result.config_path = Some(PathBuf::from(value("--config")?)),
                 "--listen-addr" => result.listen_addr = Some(value("--listen-addr")?),
                 "--data-dir" => result.data_dir = Some(value("--data-dir")?),
+                "--database-backend" => {
+                    result.database_backend = Some(value("--database-backend")?)
+                }
+                "--database-url" => result.database_url = Some(value("--database-url")?),
                 "--log-format" => result.log_format = Some(value("--log-format")?),
                 "--log-filter" => result.log_filter = Some(value("--log-filter")?),
                 "--provider" => result.provider = Some(value("--provider")?),
@@ -574,10 +612,32 @@ impl PartialConfig {
             return Err(ConfigError::IncompleteComputeTls);
         }
 
+        let database_backend = match self
+            .database_backend
+            .as_deref()
+            .unwrap_or("sqlite")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "sqlite" => DatabaseBackend::Sqlite,
+            "postgres" | "postgresql" => DatabaseBackend::Postgres,
+            _ => return Err(ConfigError::InvalidDatabaseBackend),
+        };
+        if database_backend == DatabaseBackend::Postgres
+            && self
+                .database_url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+        {
+            return Err(ConfigError::MissingDatabaseUrl);
+        }
+
         Ok(Config {
             config_path,
             listen_addr,
             data_dir,
+            database_backend,
+            database_url: self.database_url.map(Secret),
             log_format,
             log_filter,
             provider,
@@ -607,7 +667,7 @@ fn value_from_env(environment: &[(String, String)], name: &str) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError, LogFormat, Provider};
+    use super::{Config, ConfigError, DatabaseBackend, LogFormat, Provider};
     use std::{fs, path::PathBuf};
 
     fn env(values: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -749,5 +809,44 @@ mod tests {
             result,
             Err(ConfigError::MissingAgentConfiguration)
         ));
+    }
+
+    #[test]
+    fn default_database_backend_is_sqlite() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(["o3kd".to_owned()], Vec::new())?;
+        assert_eq!(config.database_backend, DatabaseBackend::Sqlite);
+        assert!(config.database_url().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn postgres_database_backend_requires_url() {
+        let result = Config::from_sources(
+            ["o3kd".to_owned(), "--database-backend=postgres".to_owned()],
+            Vec::new(),
+        );
+        assert!(matches!(result, Err(ConfigError::MissingDatabaseUrl)));
+    }
+
+    #[test]
+    fn postgres_database_backend_configured_from_env() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(
+            ["o3kd".to_owned()],
+            env(&[
+                ("O3K_DATABASE_BACKEND", "postgres"),
+                (
+                    "O3K_DATABASE_URL",
+                    "postgres://o3k:secret-password@127.0.0.1/o3k",
+                ),
+            ]),
+        )?;
+        assert_eq!(config.database_backend, DatabaseBackend::Postgres);
+        let url = config
+            .database_url()
+            .ok_or_else(|| std::io::Error::other("url missing"))?;
+        assert_eq!(url.expose(), "postgres://o3k:secret-password@127.0.0.1/o3k");
+        assert_eq!(url.to_string(), "<redacted>");
+        assert!(!format!("{config:?}").contains("secret-password"));
+        Ok(())
     }
 }

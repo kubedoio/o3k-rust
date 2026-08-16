@@ -47,7 +47,16 @@ fi
 if [[ "${PROFILE}" != "fake" ]]; then echo "unsupported TestLab profile" >&2; exit 2; fi
 
 cargo build --quiet --manifest-path "${ROOT_DIR}/Cargo.toml" --bin o3kd
-O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" --log-filter warn >"${LOG_FILE}" 2>&1 &
+
+DB_ARGS=()
+if [[ -n "${O3K_DATABASE_BACKEND:-}" ]]; then
+    DB_ARGS+=(--database-backend "${O3K_DATABASE_BACKEND}")
+fi
+if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
+    DB_ARGS+=(--database-url "${O3K_DATABASE_URL}")
+fi
+
+O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" "${DB_ARGS[@]}" --log-filter warn >"${LOG_FILE}" 2>&1 &
 O3KD_PID=$!
 
 for _ in $(seq 1 100); do
@@ -88,7 +97,7 @@ FLAVOR_ID="$(json "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/flavors
 SERVER_ID="$(json -X POST "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers" -H 'content-type: application/json' -H 'x-openstack-request-id: testlab-server-create' --data "{\"server\":{\"name\":\"testlab-server\",\"image\":{\"id\":\"${IMAGE_ID}\"},\"flavor\":{\"id\":\"${FLAVOR_ID}\"},\"networks\":[{\"uuid\":\"${PORT_ID}\"}]}}" | field server.id)"
 
 kill -TERM "${O3KD_PID}"; wait "${O3KD_PID}"; unset O3KD_PID
-O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" --log-filter warn >>"${LOG_FILE}" 2>&1 &
+O3K_BOOTSTRAP_PASSWORD="${O3K_BOOTSTRAP_PASSWORD:-password}" O3K_TOKEN_SIGNING_KEY="${O3K_TOKEN_SIGNING_KEY:-testlab-signing-key-with-at-least-32-bytes}" "${ROOT_DIR}/target/debug/o3kd" --listen-addr "127.0.0.1:${PORT}" --data-dir "${DATA_DIR}" "${DB_ARGS[@]}" --log-filter warn >>"${LOG_FILE}" 2>&1 &
 O3KD_PID=$!
 for _ in $(seq 1 100); do curl -fsS "${BASE_URL}/readyz" >/dev/null 2>&1 && break; sleep 0.1; done
 json "${BASE_URL}/v2.1/eba29e2d-53de-461d-ae91-ede7402713cb/servers/${SERVER_ID}" >/dev/null

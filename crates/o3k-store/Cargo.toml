@@ -13,6 +13,7 @@ workspace = true
 async-trait.workspace = true
 base64.workspace = true
 md-5.workspace = true
+chrono = { workspace = true }
 o3k-domain = { path = "../o3k-domain" }
 o3k-kernel = { path = "../o3k-kernel" }
 serde = { workspace = true }

@@ -46,7 +46,7 @@ profiles:
     database:
       default: sqlite
       production_target: postgres
-      postgres_support: planned
+      postgres_support: supported-production-backend
     execution_boundaries:
       - o3k-compute
       - embedded-network-provider
@@ -74,7 +74,7 @@ profiles:
     database:
       default_for_single_controller: sqlite-with-documented-limits
       production_target: postgres
-      postgres_support: planned
+      postgres_support: supported-production-backend
     execution_boundaries:
       - o3k-compute
       - future-o3k-network
@@ -94,8 +94,9 @@ claim_rules:
     requires_profile_specific_measurement: true
     may_be_claimed_as_guarantee: false
   postgres_for_production:
-    type: production-profile-target
-    support_status: planned
+    type: production-profile-backend
+    support_status: supported
+    tested_version: "PostgreSQL 16"
     may_be_claimed_supported_only_after_adapter_and_conformance: true
   kubernetes_control_plane:
     type: deployment-target

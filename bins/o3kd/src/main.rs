@@ -5,6 +5,7 @@ use o3k_provider::{
     CreateInstanceRequest, OperationState, ProviderError, ResolvedCreateArtifact,
     ResolvedCreateInputs, ResolvedCreateResolver,
 };
+use o3k_store::ComputeRepository;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -347,8 +348,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         o3k_config::LogFormat::Pretty => subscriber.pretty().init(),
     }
 
-    let database_path = config.data_dir.join("o3k.sqlite");
-    let store = Arc::new(o3k_store::SqliteStore::connect_file(&database_path).await?);
+    let store = match config.database_backend {
+        o3k_config::DatabaseBackend::Sqlite => {
+            let database_path = config.data_dir.join("o3k.sqlite");
+            Arc::new(o3k_store::O3kStore::connect_sqlite_file(&database_path).await?)
+        }
+        o3k_config::DatabaseBackend::Postgres => {
+            let url = config
+                .database_url()
+                .map(|s| s.expose())
+                .ok_or("missing O3K_DATABASE_URL for PostgreSQL backend")?;
+            Arc::new(o3k_store::O3kStore::connect_postgres(url).await?)
+        }
+    };
     let identity_store = store.clone();
     let image_repository: Arc<dyn o3k_store::ImageRepository> = store.clone();
     let image_service = o3k_image::ImageService::open(

@@ -100,7 +100,10 @@ sudo chown -R o3k:o3k "$state"
 sudo chmod 0700 "$state"
 sudo -n -u o3k -- "$state/bin/o3kd" 60 & supervisor_pid=$!
 sleep 0.2
-service_pid="$(sudo -n pgrep -P "$supervisor_pid" -u o3k)"
+service_pid="$(sudo -n pgrep -P "$supervisor_pid" -u o3k 2>/dev/null || true)"
+if [[ -z "$service_pid" ]]; then
+  service_pid="$(sudo -n pgrep -u o3k -f "$state/bin/o3kd" | head -n1)"
+fi
 start_ticks="$(sudo -n awk '{print $22}' "/proc/$service_pid/stat")"
 printf '%s|%s|o3k|o3kd\n' "$service_pid" "$start_ticks" >"$pid_root/o3kd.pid"
 touch "$image"

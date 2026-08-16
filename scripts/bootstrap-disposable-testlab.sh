@@ -417,6 +417,12 @@ O3K_COMPUTE_SERVER_PRIVATE_KEY=$(printf '%q' "$STATE_ROOT/tls/server-key.pem")
 O3K_COMPUTE_CLIENT_CA=$(printf '%q' "$STATE_ROOT/tls/ca.pem")
 O3K_COMPUTE_AUTHORIZED_AGENTS=compute-agent=$(printf '%q' "$AUTHORIZED_FINGERPRINT")
 EOF
+if [[ -n "${O3K_DATABASE_BACKEND:-}" ]]; then
+  printf 'O3K_DATABASE_BACKEND=%s\n' "$(printf '%q' "$O3K_DATABASE_BACKEND")" >>"$o3kd_env_tmp"
+fi
+if [[ -n "${O3K_DATABASE_URL:-}" ]]; then
+  printf 'O3K_DATABASE_URL=%s\n' "$(printf '%q' "$O3K_DATABASE_URL")" >>"$o3kd_env_tmp"
+fi
 cat >"$compute_env_tmp" <<EOF
 O3K_COMPUTE_DATA_DIR=$(printf '%q' "$STATE_ROOT/compute-data")
 O3K_COMPUTE_CONTROL_ENDPOINT=$(printf '%q' "https://127.0.0.1:${CONTROL_PORT}")

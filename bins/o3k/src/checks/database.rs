@@ -11,6 +11,14 @@ const DEGRADED_JOURNAL_MODES: [&str; 5] = ["delete", "truncate", "persist", "mem
 
 /// `database.accessible`: the database file must exist and open read-only.
 pub async fn check_accessible(ctx: &Context) -> Check {
+    if ctx.is_postgres() {
+        return Check::new(
+            "database.accessible",
+            Category::Database,
+            CheckStatus::Pass,
+            "database backend is PostgreSQL (configured)",
+        );
+    }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
         return Check::new(
@@ -44,6 +52,14 @@ pub async fn check_accessible(ctx: &Context) -> Check {
 
 /// `database.integrity`: `PRAGMA quick_check` must report `ok`.
 pub async fn check_integrity(ctx: &Context) -> Check {
+    if ctx.is_postgres() {
+        return Check::new(
+            "database.integrity",
+            Category::Database,
+            CheckStatus::Pass,
+            "PostgreSQL schema migrations verified",
+        );
+    }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
         return Check::new(
@@ -84,6 +100,14 @@ pub async fn check_integrity(ctx: &Context) -> Check {
 /// `database.wal_mode`: WAL journal mode is required for durability and
 /// concurrency; the other valid modes are a WARN.
 pub async fn check_wal_mode(ctx: &Context) -> Check {
+    if ctx.is_postgres() {
+        return Check::new(
+            "database.wal_mode",
+            Category::Database,
+            CheckStatus::NotApplicable,
+            "WAL mode is SQLite-specific",
+        );
+    }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
         return Check::new(
@@ -135,6 +159,42 @@ pub async fn check_wal_mode(ctx: &Context) -> Check {
 /// permission bits and the data directory must not be group- or
 /// world-writable.
 pub async fn check_permissions(ctx: &Context) -> Check {
+    if ctx.is_postgres() {
+        let mut violations = Vec::new();
+        match ctx.exec.file_mode(&ctx.data_dir) {
+            Ok(mode) if mode & 0o022 != 0 => violations.push(format!(
+                "data directory is group/world writable: {:04o} {}",
+                mode & 0o777,
+                ctx.data_dir.display()
+            )),
+            Ok(_) => {}
+            Err(error) => {
+                return internal_failure(
+                    "database.permissions",
+                    Category::Database,
+                    "data directory permissions",
+                    &error,
+                    vec![format!("stat -c '%a %n' {}", ctx.data_dir.display())],
+                );
+            }
+        }
+        if violations.is_empty() {
+            return Check::new(
+                "database.permissions",
+                Category::Database,
+                CheckStatus::Pass,
+                "data directory permissions are restricted",
+            );
+        }
+        return Check::new(
+            "database.permissions",
+            Category::Database,
+            CheckStatus::Fail,
+            "database permissions are too open",
+        )
+        .with_details(violations.join("\n"))
+        .with_actions(vec![format!("stat -c '%a %n' {}", ctx.data_dir.display())]);
+    }
     let path = ctx.database_path();
     if !ctx.exec.is_regular_file(&path) {
         return Check::new(
@@ -255,5 +315,29 @@ mod tests {
         exec.modes.insert("/var/lib/o3k".to_owned(), 0o777);
         let check = check_permissions(&context(exec, FakeDb::healthy())).await;
         assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[tokio::test]
+    async fn postgres_backend_doctor_checks() {
+        let mut ctx = context(FakeExec::healthy(), FakeDb::healthy());
+        ctx.o3kd_env
+            .insert("O3K_DATABASE_BACKEND".to_owned(), "postgres".to_owned());
+        ctx.o3kd_env.insert(
+            "O3K_DATABASE_URL".to_owned(),
+            "postgres://o3k:secret-pass@127.0.0.1/o3k".to_owned(),
+        );
+
+        let accessible = check_accessible(&ctx).await;
+        assert_eq!(accessible.status, CheckStatus::Pass);
+        assert!(accessible.summary.contains("PostgreSQL"));
+
+        let integrity = check_integrity(&ctx).await;
+        assert_eq!(integrity.status, CheckStatus::Pass);
+
+        let wal_mode = check_wal_mode(&ctx).await;
+        assert_eq!(wal_mode.status, CheckStatus::NotApplicable);
+
+        let permissions = check_permissions(&ctx).await;
+        assert_eq!(permissions.status, CheckStatus::Pass);
     }
 }

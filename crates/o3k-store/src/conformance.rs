@@ -1,0 +1,1595 @@
+//! Unified Conformance Test Suite for O3K Repositories.
+//!
+//! Every test in this suite is fully backend-agnostic and executes identical
+//! assertions against both `SqliteStore` and `PostgresStore`.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::net::Ipv4Addr;
+use std::str::FromStr;
+use std::sync::Arc;
+use uuid::Uuid;
+
+use crate::{
+    AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
+    ArtifactTransferUpdate, ComputeRepository, DurableStore, IdentityRepository,
+    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
+    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
+    KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
+    StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
+    quota::QuotaRepository,
+};
+use o3k_kernel::{
+    LimitKey, LimitValue, OwnershipScope, ReservationState, ResourceAmount, ScopeId, ScopeKind,
+};
+
+pub trait StoreUnderTest:
+    DurableStore
+    + IdentityRepository
+    + KeypairRepository
+    + VolumeAttachmentRepository
+    + ImageRepository
+    + NetworkRepository
+    + PlacementRepository
+    + QuotaRepository
+    + ComputeRepository
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T> StoreUnderTest for T where
+    T: DurableStore
+        + IdentityRepository
+        + KeypairRepository
+        + VolumeAttachmentRepository
+        + ImageRepository
+        + NetworkRepository
+        + PlacementRepository
+        + QuotaRepository
+        + ComputeRepository
+        + Send
+        + Sync
+        + 'static
+{
+}
+
+pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
+    test_durable_store_resources(store.clone()).await;
+    test_durable_store_operations(store.clone()).await;
+    test_durable_store_provider_references(store.clone()).await;
+    test_durable_store_agent_commands(store.clone()).await;
+    test_durable_store_artifact_transfers(store.clone()).await;
+    test_durable_store_image_overlays(store.clone()).await;
+    test_identity_repository(store.clone()).await;
+    test_keypair_repository(store.clone()).await;
+    test_volume_attachment_repository(store.clone()).await;
+    test_image_repository(store.clone()).await;
+    test_network_repository(store.clone()).await;
+    test_placement_repository(store.clone()).await;
+    test_quota_repository(store.clone()).await;
+    test_concurrent_finite_quota_limit_1(store.clone()).await;
+    test_concurrent_placement_allocation_fencing(store.clone()).await;
+    test_duplicate_port_ip_mac_conflict(store.clone()).await;
+    test_operation_state_monotonicity(store.clone()).await;
+}
+
+pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let record = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj.clone(),
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+
+    store
+        .insert_resource(&record)
+        .await
+        .expect("insert_resource");
+
+    // Duplicate insert should fail with ResourceAlreadyExists
+    let duplicate_err = store.insert_resource(&record).await.unwrap_err();
+    assert!(matches!(duplicate_err, StoreError::ResourceAlreadyExists));
+
+    // Get resource
+    let fetched = store.get_resource(res_id).await.expect("get_resource");
+    assert_eq!(fetched.id, res_id);
+    assert_eq!(fetched.generation, 1);
+    assert_eq!(fetched.desired_state, "active");
+    assert_eq!(fetched.observed_state, "building");
+
+    // List resources
+    let list = store
+        .list_resources(&proj, "compute_instance")
+        .await
+        .expect("list_resources");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, res_id);
+
+    // Stale generation update
+    let stale_err = store
+        .update_resource(res_id, 999, "active", "active", 1, Some("prov-1"))
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_err, StoreError::StaleGeneration));
+
+    // Valid update
+    let updated = store
+        .update_resource(res_id, 1, "active", "active", 1, Some("prov-1"))
+        .await
+        .expect("update_resource");
+    assert_eq!(updated.generation, 2);
+    assert_eq!(updated.observed_state, "active");
+    assert_eq!(updated.provider_id.as_deref(), Some("prov-1"));
+
+    // Observation update
+    let obs = ObservationUpdate {
+        expected_generation: 2,
+        desired_state: "active",
+        observed_state: "active",
+        observed_generation: 2,
+        provider_id: Some("prov-1"),
+        agent_epoch: "epoch-1",
+        observation_sequence: 10,
+    };
+    let obs_updated = store
+        .update_resource_from_observation(res_id, &obs)
+        .await
+        .expect("update_resource_from_observation");
+    assert_eq!(obs_updated.generation, 3);
+
+    // Replaying older observation sequence is a no-op (doesn't fail, returns current)
+    let obs_replay = ObservationUpdate {
+        expected_generation: 3,
+        desired_state: "active",
+        observed_state: "active",
+        observed_generation: 2,
+        provider_id: Some("prov-1"),
+        agent_epoch: "epoch-1",
+        observation_sequence: 9,
+    };
+    let replay_res = store
+        .update_resource_from_observation(res_id, &obs_replay)
+        .await
+        .expect("replay observation update");
+    assert_eq!(replay_res.generation, 3);
+}
+
+pub async fn test_durable_store_operations<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    let fetched = store.get_operation(op_id).await.expect("get_operation");
+    assert_eq!(fetched.id, op_id);
+    assert_eq!(fetched.state, OperationState::Pending);
+
+    // Non-terminal list
+    let non_terminal = store
+        .list_non_terminal_lifecycle_operations()
+        .await
+        .expect("list_non_terminal_lifecycle_operations");
+    assert!(non_terminal.iter().any(|o| o.id == op_id));
+
+    // Update to running
+    store
+        .update_operation(
+            op_id,
+            OperationState::Running,
+            Some("prov-op-1"),
+            None,
+            None,
+        )
+        .await
+        .expect("update_operation running");
+
+    // Retry count increment
+    let retry = store
+        .increment_operation_retry(op_id)
+        .await
+        .expect("increment_operation_retry");
+    assert_eq!(retry, 1);
+
+    // Update to terminal succeeded
+    store
+        .update_operation(
+            op_id,
+            OperationState::Succeeded,
+            Some("prov-op-1"),
+            None,
+            None,
+        )
+        .await
+        .expect("update_operation succeeded");
+
+    // Terminal operation should no longer be in non-terminal list
+    let non_terminal_after = store
+        .list_non_terminal_lifecycle_operations()
+        .await
+        .expect("list_non_terminal_lifecycle_operations");
+    assert!(!non_terminal_after.iter().any(|o| o.id == op_id));
+}
+
+pub async fn test_durable_store_provider_references<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let pref = ProviderReference {
+        resource_id: res_id,
+        provider_name: "libvirt".to_owned(),
+        provider_resource_id: "domain-uuid-12345".to_owned(),
+    };
+
+    store
+        .attach_provider_reference(&pref)
+        .await
+        .expect("attach_provider_reference");
+
+    // Duplicate provider reference fails with ProviderReferenceAlreadyExists
+    let dup_err = store.attach_provider_reference(&pref).await.unwrap_err();
+    assert!(matches!(
+        dup_err,
+        StoreError::ProviderReferenceAlreadyExists
+    ));
+
+    let fetched = store
+        .get_provider_reference(res_id, "libvirt")
+        .await
+        .expect("get_provider_reference");
+    assert_eq!(fetched.provider_resource_id, "domain-uuid-12345");
+}
+
+pub async fn test_durable_store_agent_commands<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    let cmd_id = format!("cmd-{}", Uuid::now_v7());
+    let idemp_key = format!("idemp-{}", Uuid::now_v7());
+
+    let cmd = AgentCommandRecord {
+        command_id: cmd_id.clone(),
+        idempotency_key: idemp_key.clone(),
+        operation_id: op_id,
+        resource_id: res_id,
+        agent_id: "agent-1".to_owned(),
+        agent_epoch: "epoch-1".to_owned(),
+        payload_fingerprint_sha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        payload: vec![1, 2, 3, 4],
+        state: AgentCommandState::Pending,
+        accepted_sequence: 0,
+        last_sequence: 0,
+        provider_operation_id: None,
+        provider_resource_id: None,
+    };
+
+    store
+        .insert_agent_command(&cmd)
+        .await
+        .expect("insert_agent_command");
+
+    let by_id = store
+        .get_agent_command(&cmd_id)
+        .await
+        .expect("get_agent_command");
+    assert_eq!(by_id.idempotency_key, idemp_key);
+
+    let by_idemp = store
+        .get_agent_command_by_idempotency_key(&idemp_key)
+        .await
+        .expect("get_agent_command_by_idempotency_key");
+    assert_eq!(by_idemp.command_id, cmd_id);
+
+    let by_op = store
+        .get_agent_command_by_operation(op_id)
+        .await
+        .expect("get_agent_command_by_operation");
+    assert_eq!(by_op.command_id, cmd_id);
+
+    store
+        .update_agent_command(
+            &cmd_id,
+            AgentCommandState::Running,
+            1,
+            1,
+            Some("p-op-1"),
+            Some("p-res-1"),
+        )
+        .await
+        .expect("update_agent_command");
+
+    let rec = store
+        .list_recoverable_agent_commands()
+        .await
+        .expect("list_recoverable_agent_commands");
+    assert!(rec.iter().any(|c| c.command_id == cmd_id));
+}
+
+pub async fn test_durable_store_artifact_transfers<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    let cmd_id = format!("cmd-{}", Uuid::now_v7());
+    let idemp_key = format!("idemp-{}", Uuid::now_v7());
+    let cmd = AgentCommandRecord {
+        command_id: cmd_id.clone(),
+        idempotency_key: idemp_key,
+        operation_id: op_id,
+        resource_id: res_id,
+        agent_id: "agent-1".to_owned(),
+        agent_epoch: "epoch-1".to_owned(),
+        payload_fingerprint_sha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        payload: vec![1, 2, 3, 4],
+        state: AgentCommandState::Pending,
+        accepted_sequence: 0,
+        last_sequence: 0,
+        provider_operation_id: None,
+        provider_resource_id: None,
+    };
+    store
+        .insert_agent_command(&cmd)
+        .await
+        .expect("insert_agent_command");
+
+    let transfer_id = format!("tx-{}", Uuid::now_v7());
+    let transfer = ArtifactTransferRecord {
+        transfer_id: transfer_id.clone(),
+        command_id: cmd_id,
+        operation_id: op_id,
+        resource_id: res_id,
+        agent_id: "agent-1".to_owned(),
+        agent_epoch: "epoch-1".to_owned(),
+        artifact_id: "art-1".to_owned(),
+        artifact_kind: "image".to_owned(),
+        sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        size_bytes: 1024,
+        expires_at_unix_ms: 1893456000000,
+        format: "qcow2".to_owned(),
+        chunk_size_bytes: 512,
+        chunk_count: 2,
+        state: ArtifactTransferState::Offered,
+        contiguous_bytes: 0,
+        next_chunk_index: 0,
+        retry_count: 0,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    store
+        .insert_artifact_transfer(&transfer)
+        .await
+        .expect("insert_artifact_transfer");
+
+    let fetched = store
+        .get_artifact_transfer(&transfer_id)
+        .await
+        .expect("get_artifact_transfer");
+    assert_eq!(fetched.state, ArtifactTransferState::Offered);
+
+    // Update transfer
+    let update = ArtifactTransferUpdate {
+        state: ArtifactTransferState::Receiving,
+        contiguous_bytes: 512,
+        next_chunk_index: 1,
+        retry_count: 0,
+    };
+    let updated = store
+        .update_artifact_transfer(&transfer_id, "epoch-1", update)
+        .await
+        .expect("update_artifact_transfer");
+    assert_eq!(updated.state, ArtifactTransferState::Receiving);
+    assert_eq!(updated.contiguous_bytes, 512);
+
+    // List recoverable
+    let recoverable = store
+        .list_recoverable_artifact_transfers()
+        .await
+        .expect("list_recoverable_artifact_transfers");
+    assert!(recoverable.iter().any(|t| t.transfer_id == transfer_id));
+
+    // Terminalize the operation and expire transfers
+    store
+        .update_operation(op_id, OperationState::Succeeded, None, None, None)
+        .await
+        .expect("update_operation to succeeded");
+
+    let expired_count = store
+        .expire_transfers_of_terminal_operations()
+        .await
+        .expect("expire_transfers_of_terminal_operations");
+    assert!(expired_count >= 1);
+
+    let expired_tx = store
+        .get_artifact_transfer(&transfer_id)
+        .await
+        .expect("get_artifact_transfer expired");
+    assert_eq!(expired_tx.state, ArtifactTransferState::Expired);
+}
+
+pub async fn test_durable_store_image_overlays<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    let overlay_id = format!("ovl-{}", Uuid::now_v7());
+    let identity = ImageOverlayIdentity {
+        resource_id: res_id,
+        operation_id: op_id,
+        command_id: format!("cmd-{}", Uuid::now_v7()),
+        agent_id: "agent-1".to_owned(),
+        agent_epoch: "epoch-1".to_owned(),
+        base_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+        base_format: "qcow2".to_owned(),
+        overlay_format: "qcow2".to_owned(),
+    };
+
+    let overlay = ImageOverlayOwnershipRecord {
+        overlay_id: overlay_id.clone(),
+        identity: identity.clone(),
+        state: ImageOverlayState::Materializing,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    store
+        .insert_image_overlay(&overlay)
+        .await
+        .expect("insert_image_overlay");
+
+    let fetched = store
+        .get_image_overlay(&overlay_id)
+        .await
+        .expect("get_image_overlay");
+    assert_eq!(fetched.state, ImageOverlayState::Materializing);
+
+    let count = store
+        .count_image_overlay_references(&identity.base_sha256, &identity.base_format)
+        .await
+        .expect("count_image_overlay_references");
+    assert_eq!(count, 1);
+
+    let list = store
+        .list_image_overlays(res_id)
+        .await
+        .expect("list_image_overlays");
+    assert_eq!(list.len(), 1);
+
+    store
+        .update_image_overlay(
+            &overlay_id,
+            &identity,
+            ImageOverlayUpdate {
+                state: ImageOverlayState::Ready,
+            },
+        )
+        .await
+        .expect("update_image_overlay to ready");
+
+    let ready_fetched = store
+        .get_image_overlay(&overlay_id)
+        .await
+        .expect("get ready");
+    assert_eq!(ready_fetched.state, ImageOverlayState::Ready);
+
+    let deleted = store
+        .delete_image_overlay(&overlay_id, &identity)
+        .await
+        .expect("delete_image_overlay");
+    assert_eq!(deleted.state, ImageOverlayState::Deleted);
+
+    let get_deleted = store
+        .get_image_overlay(&overlay_id)
+        .await
+        .expect("get deleted");
+    assert_eq!(get_deleted.state, ImageOverlayState::Deleted);
+}
+
+pub async fn test_identity_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let domain_id = format!("dom-{}", Uuid::now_v7());
+    let domain = KeystoneDomainRecord {
+        id: domain_id.clone(),
+        name: format!("domain-{}", Uuid::now_v7()),
+        description: Some("Test Domain".to_owned()),
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_domain(&domain)
+        .await
+        .expect("insert_keystone_domain");
+    let domains = store
+        .list_keystone_domains()
+        .await
+        .expect("list_keystone_domains");
+    assert!(domains.iter().any(|d| d.id == domain_id));
+
+    let proj_id = format!("proj-{}", Uuid::now_v7());
+    let project = KeystoneProjectRecord {
+        id: proj_id.clone(),
+        domain_id: domain_id.clone(),
+        name: format!("proj-{}", Uuid::now_v7()),
+        description: Some("Test Project".to_owned()),
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_project(&project)
+        .await
+        .expect("insert_keystone_project");
+    let projects = store
+        .list_keystone_projects()
+        .await
+        .expect("list_keystone_projects");
+    assert!(projects.iter().any(|p| p.id == proj_id));
+
+    let user_id = format!("usr-{}", Uuid::now_v7());
+    let user = KeystoneUserRecord {
+        id: user_id.clone(),
+        domain_id,
+        name: format!("user-{}", Uuid::now_v7()),
+        password_hash: "hash".to_owned(),
+        email: Some("user@test.local".to_owned()),
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_user(&user)
+        .await
+        .expect("insert_keystone_user");
+    let users = store
+        .list_keystone_users()
+        .await
+        .expect("list_keystone_users");
+    assert!(users.iter().any(|u| u.id == user_id));
+
+    let role_id = format!("role-{}", Uuid::now_v7());
+    let role = KeystoneRoleRecord {
+        id: role_id.clone(),
+        name: format!("role-{}", Uuid::now_v7()),
+        description: Some("Admin Role".to_owned()),
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_role(&role)
+        .await
+        .expect("insert_keystone_role");
+    let roles = store
+        .list_keystone_roles()
+        .await
+        .expect("list_keystone_roles");
+    assert!(roles.iter().any(|r| r.id == role_id));
+
+    let assignment = KeystoneRoleAssignmentRecord {
+        id: format!("ra-{}", Uuid::now_v7()),
+        user_id,
+        project_id: proj_id,
+        role_id,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_role_assignment(&assignment)
+        .await
+        .expect("insert_keystone_role_assignment");
+    let assignments = store
+        .list_keystone_role_assignments()
+        .await
+        .expect("list_keystone_role_assignments");
+    assert!(assignments.iter().any(|a| a.id == assignment.id));
+
+    let service_id = format!("srv-{}", Uuid::now_v7());
+    let service = KeystoneServiceRecord {
+        id: service_id.clone(),
+        name: "compute".to_owned(),
+        r#type: "compute".to_owned(),
+        description: Some("Nova Compute Service".to_owned()),
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_service(&service)
+        .await
+        .expect("insert_keystone_service");
+    let services = store
+        .list_keystone_services()
+        .await
+        .expect("list_keystone_services");
+    assert!(services.iter().any(|s| s.id == service_id));
+
+    let ep_id = format!("ep-{}", Uuid::now_v7());
+    let endpoint = KeystoneEndpointRecord {
+        id: ep_id.clone(),
+        service_id,
+        interface: "public".to_owned(),
+        url: "http://127.0.0.1:8774/v2.1".to_owned(),
+        region: "RegionOne".to_owned(),
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_endpoint(&endpoint)
+        .await
+        .expect("insert_keystone_endpoint");
+    let endpoints = store
+        .list_keystone_endpoints()
+        .await
+        .expect("list_keystone_endpoints");
+    assert!(endpoints.iter().any(|e| e.id == ep_id));
+
+    let reg_id = format!("reg-{}", Uuid::now_v7());
+    let region = KeystoneRegionRecord {
+        id: reg_id.clone(),
+        description: Some("Primary Region".to_owned()),
+        parent_region_id: None,
+        enabled: true,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+    store
+        .insert_keystone_region(&region)
+        .await
+        .expect("insert_keystone_region");
+    let regions = store
+        .list_keystone_regions()
+        .await
+        .expect("list_keystone_regions");
+    assert!(regions.iter().any(|r| r.id == reg_id));
+}
+
+pub async fn test_keypair_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let keypair_id = Uuid::now_v7();
+    let user_id = format!("usr-{}", Uuid::now_v7());
+    let proj_id = format!("proj-{}", Uuid::now_v7());
+    let name = "my-key";
+
+    let blob = [
+        0, 0, 0, 11, b's', b's', b'h', b'-', b'e', b'd', b'2', b'5', b'5', b'1', b'9', 0, 0, 0, 32,
+    ]
+    .into_iter()
+    .chain([9_u8; 32])
+    .collect::<Vec<_>>();
+    let (key_type, fingerprint, canonical) = crate::validate_public_key(&format!(
+        "ssh-ed25519 {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &blob)
+    ))
+    .expect("validate test key");
+
+    let kp = KeypairRecord {
+        id: keypair_id,
+        user_id: user_id.clone(),
+        project_id: proj_id.clone(),
+        name: name.to_owned(),
+        key_type,
+        public_key: canonical,
+        fingerprint,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+    };
+
+    store.insert_keypair(&kp).await.expect("insert_keypair");
+
+    let list = store
+        .list_keypairs(&user_id, &proj_id)
+        .await
+        .expect("list_keypairs");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, keypair_id);
+
+    let fetched = store
+        .get_keypair(&user_id, &proj_id, name)
+        .await
+        .expect("get_keypair");
+    assert_eq!(fetched.id, keypair_id);
+
+    // Server keypair attachment
+    let server_id = Uuid::now_v7();
+    let srv_res = ResourceRecord {
+        id: server_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj_id.clone(),
+        generation: 1,
+        observed_generation: 0,
+        desired_state: r#"{"status":"active"}"#.to_owned(),
+        observed_state: "active".to_owned(),
+        provider_id: None,
+    };
+    store
+        .insert_resource(&srv_res)
+        .await
+        .expect("insert srv for keypair");
+
+    store
+        .attach_server_keypair(server_id, keypair_id)
+        .await
+        .expect("attach_server_keypair");
+    let attached_name = store
+        .get_server_keypair_name(server_id)
+        .await
+        .expect("get_server_keypair_name");
+    assert_eq!(attached_name.as_deref(), Some(name));
+
+    store
+        .detach_server_keypair(server_id)
+        .await
+        .expect("detach_server_keypair");
+    let detached_name = store
+        .get_server_keypair_name(server_id)
+        .await
+        .expect("get detached");
+    assert!(detached_name.is_none());
+
+    store
+        .delete_keypair(&user_id, &proj_id, name)
+        .await
+        .expect("delete_keypair");
+    let del_err = store
+        .get_keypair(&user_id, &proj_id, name)
+        .await
+        .unwrap_err();
+    assert!(matches!(del_err, StoreError::KeypairNotFound));
+}
+
+pub async fn test_volume_attachment_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let server_id = Uuid::now_v7();
+    let proj_id = format!("proj-{}", Uuid::now_v7());
+
+    let srv_res = ResourceRecord {
+        id: server_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj_id,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "active".to_owned(),
+        provider_id: None,
+    };
+    store
+        .insert_resource(&srv_res)
+        .await
+        .expect("insert srv for vol attachment");
+
+    let att_id = Uuid::now_v7();
+    let vol_id = Uuid::now_v7();
+
+    let record = VolumeAttachmentRecord {
+        id: att_id,
+        server_id,
+        volume_id: vol_id,
+        device: "/dev/vdb".to_owned(),
+        tag: Some("vol-tag-1".to_owned()),
+        delete_on_termination: false,
+        created_at: "2026-08-17T00:00:00Z".to_owned(),
+        status: "validated".to_owned(),
+        operation_id: None,
+        idempotency_key: Some(format!("idemp-{}", Uuid::now_v7())),
+        cinder_attachment_id: None,
+        connector_host: None,
+        connector_ip: None,
+        connector_initiator: None,
+        driver_volume_type: None,
+        target_iqn: None,
+        target_portal: None,
+        target_lun: None,
+        connection_info_digest: None,
+        error: None,
+    };
+
+    store
+        .insert_volume_attachment(&record)
+        .await
+        .expect("insert_volume_attachment");
+
+    let by_id = store
+        .get_volume_attachment_by_id(att_id)
+        .await
+        .expect("get by id")
+        .expect("some");
+    assert_eq!(by_id.volume_id, vol_id);
+
+    let by_vol = store
+        .get_volume_attachment_by_volume(vol_id)
+        .await
+        .expect("get by vol")
+        .expect("some");
+    assert_eq!(by_vol.id, att_id);
+
+    let by_srv_vol = store
+        .get_volume_attachment_by_volume_for_server(vol_id, server_id)
+        .await
+        .expect("get by srv vol")
+        .expect("some");
+    assert_eq!(by_srv_vol.id, att_id);
+
+    let list = store
+        .list_volume_attachments(server_id)
+        .await
+        .expect("list_volume_attachments");
+    assert_eq!(list.len(), 1);
+
+    // Update phase
+    let phase_updated = store
+        .update_volume_attachment_phase(att_id, "attaching", None)
+        .await
+        .expect("update_volume_attachment_phase");
+    assert_eq!(phase_updated.status, "attaching");
+
+    // Update outcome
+    let outcome_updated = store
+        .update_volume_attachment_outcome(
+            att_id,
+            "attached",
+            Some("cinder-att-1"),
+            Some("node-1"),
+            Some("10.0.0.1"),
+            Some("iqn.initiator"),
+            Some("iscsi"),
+            Some("iqn.target"),
+            Some("10.0.0.2:3260"),
+            Some(1),
+            Some("digest-123"),
+            Some("/dev/vdb"),
+        )
+        .await
+        .expect("update_volume_attachment_outcome");
+    assert_eq!(outcome_updated.status, "attached");
+    assert_eq!(
+        outcome_updated.cinder_attachment_id.as_deref(),
+        Some("cinder-att-1")
+    );
+
+    store
+        .delete_volume_attachment(server_id, att_id)
+        .await
+        .expect("delete_volume_attachment");
+    let after_del = store
+        .get_volume_attachment_by_id(att_id)
+        .await
+        .expect("get after del");
+    assert!(after_del.is_none());
+}
+
+pub async fn test_image_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let img_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+
+    let img = ImageMetadataRecord {
+        id: img_id,
+        name: "ubuntu-24.04".to_owned(),
+        project_id: proj.clone(),
+        status: "queued".to_owned(),
+        visibility: "private".to_owned(),
+        container_format: "bare".to_owned(),
+        disk_format: "qcow2".to_owned(),
+        size: None,
+        checksum: None,
+    };
+
+    store.insert_image(&img).await.expect("insert_image");
+
+    let list = store.list_images(&proj).await.expect("list_images");
+    assert!(list.iter().any(|i| i.id == img_id));
+
+    let fetched = store
+        .get_image(&proj, &img_id)
+        .await
+        .expect("get_image")
+        .expect("some");
+    assert_eq!(fetched.status, "queued");
+
+    let activated = store
+        .activate_image(&proj, &img_id, 2_000_000_000, "checksum-abc")
+        .await
+        .expect("activate_image");
+    assert_eq!(activated.status, "active");
+    assert_eq!(activated.size, Some(2_000_000_000));
+
+    store
+        .delete_image(&proj, &img_id)
+        .await
+        .expect("delete_image");
+    let after_del = store
+        .get_image(&proj, &img_id)
+        .await
+        .expect("get after delete");
+    assert!(after_del.is_none());
+}
+
+pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let proj = format!("proj-{}", Uuid::now_v7());
+    let net_id = Uuid::now_v7();
+
+    let net = NetworkRecord {
+        id: net_id,
+        name: "private-net".to_owned(),
+        project_id: proj.clone(),
+        status: "active".to_owned(),
+    };
+    store.insert_network(&net).await.expect("insert_network");
+
+    let sub_id = Uuid::now_v7();
+    let sub = SubnetRecord {
+        id: sub_id,
+        network_id: net_id,
+        name: "private-subnet".to_owned(),
+        project_id: proj.clone(),
+        cidr: "192.168.1.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::from_str("192.168.1.1").unwrap(),
+        allocation_start: Ipv4Addr::from_str("192.168.1.10").unwrap(),
+        allocation_end: Ipv4Addr::from_str("192.168.1.200").unwrap(),
+    };
+    store.insert_subnet(&sub).await.expect("insert_subnet");
+
+    let port_id = Uuid::now_v7();
+    let port = PortRecord {
+        id: port_id,
+        network_id: net_id,
+        subnet_id: Some(sub_id),
+        project_id: proj.clone(),
+        name: "port-1".to_owned(),
+        mac_address: format!(
+            "fa:16:3e:{:02x}:{:02x}:{:02x}",
+            (sub_id.as_bytes()[0]),
+            (sub_id.as_bytes()[1]),
+            (sub_id.as_bytes()[2])
+        ),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.50").unwrap(),
+        status: "DOWN".to_owned(),
+        binding_host: None,
+        binding_state: None,
+    };
+    store.insert_port(&port).await.expect("insert_port");
+
+    let fetched_port = store
+        .get_port(&proj, &port_id)
+        .await
+        .expect("get_port")
+        .expect("some");
+    assert_eq!(fetched_port.fixed_ip.to_string(), "192.168.1.50");
+
+    let updated_port = store
+        .update_port_binding(&proj, &port_id, Some("compute-node-1"), Some("bound"))
+        .await
+        .expect("update_port_binding");
+    assert_eq!(updated_port.binding_host.as_deref(), Some("compute-node-1"));
+    assert_eq!(updated_port.binding_state.as_deref(), Some("bound"));
+
+    // Subnet deletion fails when in-use
+    let in_use_sub = store.delete_subnet(&proj, &sub_id).await.unwrap_err();
+    assert!(matches!(in_use_sub, StoreError::NetworkInUse));
+
+    store
+        .delete_port(&proj, &port_id)
+        .await
+        .expect("delete_port");
+    store
+        .delete_subnet(&proj, &sub_id)
+        .await
+        .expect("delete_subnet");
+    store
+        .delete_network(&proj, &net_id)
+        .await
+        .expect("delete_network");
+}
+
+pub async fn test_placement_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let node_id = format!("node-{}", Uuid::now_v7());
+
+    let inventories = vec![
+        PlacementInventoryRecord {
+            resource_class: "VCPU".to_owned(),
+            total: 32,
+            reserved: 0,
+            allocation_ratio: 1.0,
+            used: 0,
+        },
+        PlacementInventoryRecord {
+            resource_class: "MEMORY_MB".to_owned(),
+            total: 65536,
+            reserved: 1024,
+            allocation_ratio: 1.0,
+            used: 0,
+        },
+    ];
+
+    let provider = store
+        .register_provider(&node_id, &inventories)
+        .await
+        .expect("register_provider");
+    assert_eq!(provider.generation, 1);
+    assert_eq!(provider.inventories.len(), 2);
+
+    let prov_id = provider.id.clone();
+
+    // Commit allocation
+    let alloc_id = format!("alloc-{}", Uuid::now_v7());
+    let consumer_id = format!("consumer-{}", Uuid::now_v7());
+
+    let alloc = PlacementAllocationRecord {
+        id: alloc_id.clone(),
+        provider_id: prov_id.clone(),
+        consumer_id: consumer_id.clone(),
+        resources: vec![
+            PlacementResourceRecord {
+                resource_class: "MEMORY_MB".to_owned(),
+                amount: 8192,
+            },
+            PlacementResourceRecord {
+                resource_class: "VCPU".to_owned(),
+                amount: 4,
+            },
+        ],
+    };
+
+    let committed = store
+        .commit_allocation(&prov_id, 1, &alloc)
+        .await
+        .expect("commit_allocation");
+    assert_eq!(committed.id, alloc_id);
+
+    // Idempotent commit of the same allocation succeeds
+    let re_committed = store
+        .commit_allocation(&prov_id, 1, &alloc)
+        .await
+        .expect("idempotent commit_allocation");
+    assert_eq!(re_committed.id, alloc_id);
+
+    // Commit of a new allocation with stale generation 1 fails (provider generation is now 2)
+    let alloc2 = PlacementAllocationRecord {
+        id: format!("alloc-{}", Uuid::now_v7()),
+        provider_id: prov_id.clone(),
+        consumer_id: format!("consumer-{}", Uuid::now_v7()),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    let stale_alloc = store
+        .commit_allocation(&prov_id, 1, &alloc2)
+        .await
+        .unwrap_err();
+    assert!(matches!(stale_alloc, StoreError::PlacementStaleGeneration));
+
+    // Release allocation
+    store
+        .release_allocation(&prov_id, &alloc_id)
+        .await
+        .expect("release_allocation");
+
+    // Upsert and get intent
+    let intent_id = format!("intent-{}", Uuid::now_v7());
+    let intent = PlacementIntentRecord {
+        id: intent_id.clone(),
+        provider_id: prov_id.clone(),
+        consumer_id: consumer_id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 2,
+        }],
+    };
+
+    store.upsert_intent(&intent).await.expect("upsert_intent");
+    let fetched_intent = store
+        .get_intent(&intent_id)
+        .await
+        .expect("get_intent")
+        .expect("some");
+    assert_eq!(fetched_intent.id, intent_id);
+
+    // Reconcile consumers
+    let reconcile = store
+        .reconcile_consumers(&[])
+        .await
+        .expect("reconcile_consumers");
+    assert!(
+        reconcile
+            .abandoned_intents
+            .iter()
+            .any(|i| i.id == intent_id)
+    );
+}
+
+pub async fn test_quota_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let proj_id = format!("proj-{}", Uuid::now_v7());
+    let scope = OwnershipScope::new(
+        ScopeId::new_unchecked(proj_id.clone()),
+        ScopeKind::Project,
+        None,
+        None,
+    );
+
+    let key_servers = LimitKey::new("compute", "servers").unwrap();
+    let key_vcpus = LimitKey::new("compute", "vcpus").unwrap();
+
+    // Default is unlimited
+    let initial_limit = store
+        .get_limit(&scope, &key_servers)
+        .await
+        .expect("get_limit default");
+    assert_eq!(initial_limit, LimitValue::Unlimited);
+
+    // Set finite limit
+    store
+        .set_limit(&scope, &key_servers, LimitValue::Maximum(2))
+        .await
+        .expect("set_limit 2");
+    store
+        .set_limit(&scope, &key_vcpus, LimitValue::Maximum(8))
+        .await
+        .expect("set_limit 8");
+
+    let limit_servers = store
+        .get_limit(&scope, &key_servers)
+        .await
+        .expect("get_limit servers");
+    assert_eq!(limit_servers, LimitValue::Maximum(2));
+
+    // Reservation 1: request 1 server, 4 vcpus (succeeds)
+    let op1 = format!("op-{}", Uuid::now_v7());
+    let req1 = vec![
+        ResourceAmount::new(key_servers.clone(), 1),
+        ResourceAmount::new(key_vcpus.clone(), 4),
+    ];
+    let res1 = store
+        .reserve_quota(&scope, &op1, &req1)
+        .await
+        .expect("reserve_quota 1");
+    assert_eq!(res1.state, ReservationState::Pending);
+
+    // Idempotent retry of reservation 1 succeeds
+    let res1_retry = store
+        .reserve_quota(&scope, &op1, &req1)
+        .await
+        .expect("reserve_quota 1 retry");
+    assert_eq!(res1_retry.id, res1.id);
+
+    // Check usage
+    let usage_servers = store
+        .get_usage(&scope, &key_servers)
+        .await
+        .expect("get_usage servers");
+    assert_eq!(usage_servers.in_use, 0);
+    assert_eq!(usage_servers.reserved, 1);
+
+    // Reservation 2: request 2 servers (exceeds limit 2 because 1 + 2 > 2) -> QuotaExceeded
+    let op2 = format!("op-{}", Uuid::now_v7());
+    let req2 = vec![ResourceAmount::new(key_servers.clone(), 2)];
+    let quota_err = store.reserve_quota(&scope, &op2, &req2).await.unwrap_err();
+    assert!(matches!(quota_err, StoreError::QuotaExceeded { .. }));
+
+    // Commit reservation 1
+    store
+        .commit_reservation(&res1.id)
+        .await
+        .expect("commit_reservation");
+    let committed_res = store
+        .get_reservation_for_operation(&op1)
+        .await
+        .expect("get op1")
+        .expect("some");
+    assert_eq!(committed_res.state, ReservationState::Committed);
+
+    // Release reservation 1
+    store
+        .release_reservation(&res1.id)
+        .await
+        .expect("release_reservation");
+    let released_res = store
+        .get_reservation_for_operation(&op1)
+        .await
+        .expect("get op1")
+        .expect("some");
+    assert_eq!(released_res.state, ReservationState::Released);
+
+    // Re-reserving an already released operation fails with conflict
+    let released_err = store.reserve_quota(&scope, &op1, &req1).await.unwrap_err();
+    assert!(matches!(released_err, StoreError::ReservationConflict(_)));
+}
+
+pub async fn test_concurrent_finite_quota_limit_1<S: StoreUnderTest>(store: Arc<S>) {
+    let proj = format!("proj-race-{}", Uuid::now_v7());
+    let scope = OwnershipScope::new(ScopeId::new_unchecked(proj), ScopeKind::Project, None, None);
+    let key = LimitKey::compute_servers();
+
+    store
+        .set_limit(&scope, &key, LimitValue::Maximum(1))
+        .await
+        .expect("set_limit 1");
+
+    let num_tasks = 10;
+    let mut handles = Vec::new();
+    for _ in 0..num_tasks {
+        let store = store.clone();
+        let scope = scope.clone();
+        let key = key.clone();
+        let op_id = format!("op-race-{}", Uuid::now_v7());
+        handles.push(tokio::spawn(async move {
+            let req = vec![ResourceAmount::new(key, 1)];
+            store.reserve_quota(&scope, &op_id, &req).await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut quota_exceeded = 0;
+    for handle in handles {
+        match handle.await.expect("join handle") {
+            Ok(_) => successes += 1,
+            Err(StoreError::QuotaExceeded { .. }) => quota_exceeded += 1,
+            Err(other) => panic!("unexpected error during quota race: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Exactly 1 reservation must succeed with limit=1 under race"
+    );
+    assert_eq!(
+        quota_exceeded,
+        num_tasks - 1,
+        "All other concurrent requests must fail with QuotaExceeded"
+    );
+}
+
+pub async fn test_concurrent_placement_allocation_fencing<S: StoreUnderTest>(store: Arc<S>) {
+    let node_id = format!("node-race-{}", Uuid::now_v7());
+    let inventories = vec![PlacementInventoryRecord {
+        resource_class: "VCPU".to_owned(),
+        total: 4,
+        reserved: 0,
+        allocation_ratio: 1.0,
+        used: 0,
+    }];
+    let provider = store
+        .register_provider(&node_id, &inventories)
+        .await
+        .expect("register_provider");
+
+    let initial_gen = provider.generation;
+
+    // Concurrently try to commit 2 allocations using the exact same generation
+    let alloc1 = PlacementAllocationRecord {
+        id: format!("alloc1-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer1-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    let alloc2 = PlacementAllocationRecord {
+        id: format!("alloc2-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer2-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+
+    let store1 = store.clone();
+    let prov_id1 = provider.id.clone();
+    let alloc1_clone = alloc1.clone();
+    let h1 = tokio::spawn(async move {
+        store1
+            .commit_allocation(&prov_id1, initial_gen, &alloc1_clone)
+            .await
+    });
+
+    let store2 = store.clone();
+    let prov_id2 = provider.id.clone();
+    let alloc2_clone = alloc2.clone();
+    let h2 = tokio::spawn(async move {
+        store2
+            .commit_allocation(&prov_id2, initial_gen, &alloc2_clone)
+            .await
+    });
+
+    let res1 = h1.await.expect("join h1");
+    let res2 = h2.await.expect("join h2");
+
+    let outcomes = [res1, res2];
+    let successes = outcomes.iter().filter(|r| r.is_ok()).count();
+    let conflicts = outcomes
+        .iter()
+        .filter(|r| matches!(r, Err(StoreError::PlacementStaleGeneration)))
+        .count();
+
+    assert_eq!(
+        successes, 1,
+        "Exactly 1 allocation must succeed for a given provider generation"
+    );
+    assert_eq!(
+        conflicts, 1,
+        "The concurrent competing allocation must fail with PlacementStaleGeneration"
+    );
+
+    // Stale generation attempt must fail with PlacementStaleGeneration
+    let stale_alloc = PlacementAllocationRecord {
+        id: format!("alloc-stale-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer-stale-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    let stale_res = store.commit_allocation(&provider.id, 0, &stale_alloc).await;
+    assert!(
+        matches!(stale_res, Err(StoreError::PlacementStaleGeneration)),
+        "Stale provider generation must be rejected"
+    );
+}
+
+pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S>) {
+    let proj = format!("proj-net-{}", Uuid::now_v7());
+    let net_id = Uuid::now_v7();
+    let net = NetworkRecord {
+        id: net_id,
+        project_id: proj.clone(),
+        name: "test-net".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    store.insert_network(&net).await.expect("insert_network");
+
+    let subnet_id = Uuid::now_v7();
+    let subnet = SubnetRecord {
+        id: subnet_id,
+        network_id: net_id,
+        project_id: proj.clone(),
+        name: "test-subnet".to_owned(),
+        cidr: "192.168.1.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::from_str("192.168.1.1").unwrap(),
+        allocation_start: Ipv4Addr::from_str("192.168.1.10").unwrap(),
+        allocation_end: Ipv4Addr::from_str("192.168.1.200").unwrap(),
+    };
+    store.insert_subnet(&subnet).await.expect("insert_subnet");
+
+    let port1_id = Uuid::now_v7();
+    let port1 = PortRecord {
+        id: port1_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-1".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.50").unwrap(),
+        mac_address: "fa:16:3e:00:11:22".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    store.insert_port(&port1).await.expect("insert port 1");
+
+    // Insert port with duplicate IP
+    let port2_id = Uuid::now_v7();
+    let port2_dup_ip = PortRecord {
+        id: port2_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-2".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.50").unwrap(),
+        mac_address: "fa:16:3e:00:11:33".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    let dup_ip_err = store.insert_port(&port2_dup_ip).await;
+    assert!(
+        dup_ip_err.is_err(),
+        "Duplicate fixed IP on subnet must be rejected"
+    );
+
+    // Insert port with duplicate MAC
+    let port3_id = Uuid::now_v7();
+    let port3_dup_mac = PortRecord {
+        id: port3_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-3".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.51").unwrap(),
+        mac_address: "fa:16:3e:00:11:22".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    let dup_mac_err = store.insert_port(&port3_dup_mac).await;
+    assert!(
+        dup_mac_err.is_err(),
+        "Duplicate MAC address must be rejected"
+    );
+}
+
+pub async fn test_operation_state_monotonicity<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Succeeded,
+        provider_operation_id: Some("prov-op-1".to_owned()),
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    // Attempting to regress terminal Succeeded state fails
+    let regress_res = store
+        .update_operation(
+            op_id,
+            OperationState::Running,
+            Some("prov-op-2"),
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        regress_res.is_err(),
+        "Updating terminal Succeeded operation to Running must fail"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PostgresStore, SqliteStore};
+
+    #[tokio::test]
+    async fn test_sqlite_conformance() {
+        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        run_all_conformance_tests(store).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_conformance() {
+        if let Ok(db_url) = std::env::var("O3K_DATABASE_URL") {
+            let store = PostgresStore::connect(&db_url)
+                .await
+                .expect("connect to Postgres");
+            store
+                .clean_tables_for_testing()
+                .await
+                .expect("clean tables");
+            run_all_conformance_tests(Arc::new(store)).await;
+        } else if let Ok(store) =
+            PostgresStore::connect("postgres://o3k:password@127.0.0.1/o3k_test").await
+        {
+            store
+                .clean_tables_for_testing()
+                .await
+                .expect("clean tables");
+            run_all_conformance_tests(Arc::new(store)).await;
+        } else {
+            eprintln!("Skipping test_postgres_conformance: no Postgres instance available");
+        }
+    }
+}
