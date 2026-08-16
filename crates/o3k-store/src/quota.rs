@@ -387,6 +387,19 @@ async fn query_limit_in_tx(
     }
 }
 
+fn parse_non_negative_u64(val: i64, context: &str) -> Result<u64, StoreError> {
+    if val < 0 {
+        return Err(StoreError::Corrupt(format!(
+            "malformed negative count/amount {val} for {context} in durable storage"
+        )));
+    }
+    u64::try_from(val).map_err(|_| {
+        StoreError::Corrupt(format!(
+            "count/amount {val} for {context} exceeds maximum supported 64-bit integer"
+        ))
+    })
+}
+
 async fn query_in_use_usage(
     conn: &mut SqliteConnection,
     scope: &OwnershipScope,
@@ -406,7 +419,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let count: i64 = row.get(0);
-            Ok(count.max(0) as u64)
+            parse_non_negative_u64(count, "compute:servers count")
         }
         ("compute", "vcpus") => {
             // Look up from placement allocation resources for server instances
@@ -421,7 +434,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let sum: i64 = row.get(0);
-            Ok(sum.max(0) as u64)
+            parse_non_negative_u64(sum, "compute:vcpus sum")
         }
         ("compute", "memory_mb") => {
             let row = sqlx::query(
@@ -435,7 +448,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let sum: i64 = row.get(0);
-            Ok(sum.max(0) as u64)
+            parse_non_negative_u64(sum, "compute:memory_mb sum")
         }
         ("compute", "disk_gb") => {
             let row = sqlx::query(
@@ -449,7 +462,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let sum: i64 = row.get(0);
-            Ok(sum.max(0) as u64)
+            parse_non_negative_u64(sum, "compute:disk_gb sum")
         }
         ("image", "images") => {
             let row = sqlx::query(
@@ -460,7 +473,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let count: i64 = row.get(0);
-            Ok(count.max(0) as u64)
+            parse_non_negative_u64(count, "image:images count")
         }
         ("image", "bytes") => {
             let row = sqlx::query(
@@ -471,7 +484,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let sum: i64 = row.get(0);
-            Ok(sum.max(0) as u64)
+            parse_non_negative_u64(sum, "image:bytes sum")
         }
         ("network", "networks") => {
             let row = sqlx::query(
@@ -482,7 +495,7 @@ async fn query_in_use_usage(
             .await
             .map_err(StoreError::Database)?;
             let count: i64 = row.get(0);
-            Ok(count.max(0) as u64)
+            parse_non_negative_u64(count, "network:networks count")
         }
         ("network", "subnets") => {
             let row = sqlx::query("SELECT COUNT(*) FROM network_subnets WHERE project_id = ?")
@@ -491,7 +504,7 @@ async fn query_in_use_usage(
                 .await
                 .map_err(StoreError::Database)?;
             let count: i64 = row.get(0);
-            Ok(count.max(0) as u64)
+            parse_non_negative_u64(count, "network:subnets count")
         }
         ("network", "ports") => {
             let row = sqlx::query("SELECT COUNT(*) FROM network_ports WHERE project_id = ?")
@@ -500,7 +513,7 @@ async fn query_in_use_usage(
                 .await
                 .map_err(StoreError::Database)?;
             let count: i64 = row.get(0);
-            Ok(count.max(0) as u64)
+            parse_non_negative_u64(count, "network:ports count")
         }
         _ => Err(StoreError::Corrupt(format!(
             "unknown or unregistered limit key '{key}'"
@@ -542,7 +555,7 @@ async fn query_reserved_usage(
         .await
         .map_err(StoreError::Database)?;
     let sum: i64 = row.get(0);
-    Ok(sum.max(0) as u64)
+    parse_non_negative_u64(sum, "reserved amounts sum")
 }
 
 async fn query_reservation_by_op(
