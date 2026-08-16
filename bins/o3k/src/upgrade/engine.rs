@@ -115,13 +115,31 @@ pub trait UpgradeIo: Send + Sync {
 }
 
 /// Arguments of one `o3k upgrade` invocation.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UpgradeArgs {
     pub requested: Option<ReleaseVersion>,
     pub check_only: bool,
     /// Accepted for CLI compatibility; the engine never prompts, so the
     /// flag does not change behavior.
     pub assume_yes: bool,
+    /// Post-start doctor convergence: the agent re-publishes inventory
+    /// asynchronously after registering, so the doctor gate retries a
+    /// bounded number of times before failing (defaults 5 x 15s; the
+    /// portable test suite shrinks them via env knobs).
+    pub doctor_retry_attempts: u32,
+    pub doctor_retry_delay_ms: u64,
+}
+
+impl Default for UpgradeArgs {
+    fn default() -> Self {
+        Self {
+            requested: None,
+            check_only: false,
+            assume_yes: false,
+            doctor_retry_attempts: 5,
+            doctor_retry_delay_ms: 15_000,
+        }
+    }
 }
 
 /// File-system locations the engine owns (state file, rollback chain).
@@ -528,56 +546,81 @@ async fn run_upgrade_locked(
             }
         }
 
-        let action: Result<(), String> = match phase {
-            UpgradePhase::ReleaseDownloaded => {
-                io.download_and_verify(&target).await.map(|downloaded| {
-                    bundle = Some(downloaded);
-                })
-            }
-            UpgradePhase::ReleaseVerified => Ok(()),
-            UpgradePhase::PreflightPassed => match &bundle {
-                Some(verified) => io.preflight(&state, verified).await,
-                None => Err("the verified bundle is unavailable".to_owned()),
-            },
-            UpgradePhase::BackupCreated => match &backup_id {
-                Some(_) => Ok(()),
-                None => io.create_backup(&state).await.map(|id| {
-                    backup_id = Some(id.clone());
-                    state.backup_id = Some(id);
-                }),
-            },
-            UpgradePhase::ServicesStopped => io.stop_services().await,
-            UpgradePhase::BinariesInstalled => match &bundle {
-                Some(verified) => io.switch_binaries(verified).await,
-                None => Err("the verified bundle is unavailable".to_owned()),
-            },
-            UpgradePhase::MigrationsApplied => io
-                .apply_migrations_and_start_control(backup_id.as_deref().unwrap_or(""))
-                .await
-                .map(|_schema| ()),
-            UpgradePhase::ServicesStarted => io.start_compute().await,
-            UpgradePhase::HealthVerified => io.verify_public_api().await,
-            UpgradePhase::DoctorPassed => match io.run_doctor().await {
-                Ok(outcome) => {
-                    doctor_status = Some(outcome.overall.clone());
-                    if outcome.healthy {
-                        Ok(())
-                    } else {
-                        Err(format!(
-                            "doctor reports an unhealthy installation: {}",
-                            outcome.overall
+        let action: Result<(), String> =
+            match phase {
+                UpgradePhase::ReleaseDownloaded => {
+                    io.download_and_verify(&target).await.map(|downloaded| {
+                        bundle = Some(downloaded);
+                    })
+                }
+                UpgradePhase::ReleaseVerified => Ok(()),
+                UpgradePhase::PreflightPassed => match &bundle {
+                    Some(verified) => io.preflight(&state, verified).await,
+                    None => Err("the verified bundle is unavailable".to_owned()),
+                },
+                UpgradePhase::BackupCreated => match &backup_id {
+                    Some(_) => Ok(()),
+                    None => io.create_backup(&state).await.map(|id| {
+                        backup_id = Some(id.clone());
+                        state.backup_id = Some(id);
+                    }),
+                },
+                UpgradePhase::ServicesStopped => io.stop_services().await,
+                UpgradePhase::BinariesInstalled => match &bundle {
+                    Some(verified) => io.switch_binaries(verified).await,
+                    None => Err("the verified bundle is unavailable".to_owned()),
+                },
+                UpgradePhase::MigrationsApplied => io
+                    .apply_migrations_and_start_control(backup_id.as_deref().unwrap_or(""))
+                    .await
+                    .map(|_schema| ()),
+                UpgradePhase::ServicesStarted => io.start_compute().await,
+                UpgradePhase::HealthVerified => io.verify_public_api().await,
+                UpgradePhase::DoctorPassed => {
+                    // Bounded convergence wait: after o3k-compute registers it
+                    // re-publishes placement inventory asynchronously, so a
+                    // point-in-time doctor run can transiently FAIL. Retry up
+                    // to the configured budget before failing the upgrade.
+                    let mut last: Option<DoctorOutcome> = None;
+                    let mut last_error: Option<String> = None;
+                    for _attempt in 0..args.doctor_retry_attempts {
+                        match io.run_doctor().await {
+                            Ok(outcome) => {
+                                last = Some(outcome);
+                                if last.as_ref().is_some_and(|report| report.healthy) {
+                                    break;
+                                }
+                            }
+                            Err(error) => last_error = Some(error),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            args.doctor_retry_delay_ms,
                         ))
+                        .await;
+                    }
+                    match last {
+                        Some(outcome) => {
+                            doctor_status = Some(outcome.overall.clone());
+                            if outcome.healthy {
+                                Ok(())
+                            } else {
+                                Err(format!(
+                                    "doctor reports an unhealthy installation: {}",
+                                    outcome.overall
+                                ))
+                            }
+                        }
+                        None => Err(last_error
+                            .unwrap_or_else(|| "doctor never produced a report".to_owned())),
                     }
                 }
-                Err(error) => Err(error),
-            },
-            UpgradePhase::Committed
-            | UpgradePhase::Discovered
-            | UpgradePhase::FailedUpgrade
-            | UpgradePhase::RolledBack => {
-                Err("internal error: unexpected upgrade phase".to_owned())
-            }
-        };
+                UpgradePhase::Committed
+                | UpgradePhase::Discovered
+                | UpgradePhase::FailedUpgrade
+                | UpgradePhase::RolledBack => {
+                    Err("internal error: unexpected upgrade phase".to_owned())
+                }
+            };
 
         match action {
             Ok(()) => {
@@ -1251,6 +1294,9 @@ mod tests {
             requested: None,
             check_only: false,
             assume_yes: true,
+            // Tests must never sleep for the production retry budget.
+            doctor_retry_attempts: 2,
+            doctor_retry_delay_ms: 1,
         }
     }
 
