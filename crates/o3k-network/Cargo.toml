@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+o3k-kernel = { path = "../o3k-kernel" }
 o3k-store = { path = "../o3k-store" }
 serde.workspace = true
 serde_json.workspace = true

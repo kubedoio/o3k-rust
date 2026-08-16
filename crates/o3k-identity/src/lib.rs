@@ -14,6 +14,9 @@ use sha2::Sha256;
 use thiserror::Error;
 use uuid::Uuid;
 
+use o3k_kernel::{
+    AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, ServicePrincipal, UserPrincipal,
+};
 use o3k_store::{IdentityRepository, StoreError};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -411,24 +414,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         diff |= l ^ r;
     }
     diff == 0
-}
-
-/// Internal authorization context produced from a validated token. Roles and
-/// service-user classification come from the durable snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthContext {
-    pub token_id: String,
-    pub user_id: String,
-    pub user_name: String,
-    pub project_id: String,
-    pub project_name: String,
-    pub domain_id: String,
-    pub domain_name: String,
-    pub roles: Vec<String>,
-    pub service_user: bool,
-    pub issued_at: u64,
-    pub expires_at: u64,
-    pub audit_id: String,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -1005,20 +990,44 @@ impl TokenService {
             .into_iter()
             .map(|(_id, name)| name)
             .collect();
-        Ok(AuthContext {
-            token_id: verified.token_id,
-            user_id: user.id.clone(),
-            user_name: user.name.clone(),
-            project_id: project.id.clone(),
-            project_name: project.name.clone(),
-            domain_id: domain.id.clone(),
-            domain_name: domain.name.clone(),
-            roles: role_names.clone(),
-            service_user: role_names.iter().any(|role| role == "service"),
-            issued_at: verified.issued,
-            expires_at: verified.expires,
-            audit_id: Uuid::now_v7().to_string(),
-        })
+        let principal_id = PrincipalId::new(&user.id).map_err(|_| AuthError::InvalidToken)?;
+        let is_service = role_names.iter().any(|role| role == "service");
+        let principal = if is_service {
+            Principal::Service(ServicePrincipal::new(principal_id, &user.name, "service"))
+        } else {
+            Principal::User(UserPrincipal::new(
+                principal_id,
+                &user.name,
+                Some(domain.id.clone()),
+            ))
+        };
+        let scope_id = ScopeId::new(&project.id).map_err(|_| AuthError::InvalidToken)?;
+        let scope = OwnershipScope::project(
+            scope_id,
+            Some(project.name.clone()),
+            Some(domain.id.clone()),
+        );
+        let request_id = Uuid::now_v7().to_string();
+        let audit_id = Uuid::now_v7().to_string();
+        let service_principal = if is_service {
+            Some(ServicePrincipal::new(
+                PrincipalId::new(&user.id).map_err(|_| AuthError::InvalidToken)?,
+                &user.name,
+                "service",
+            ))
+        } else {
+            None
+        };
+        Ok(AuthContext::new(
+            principal,
+            scope,
+            role_names,
+            verified.issued,
+            verified.expires,
+            audit_id,
+            request_id,
+            service_principal,
+        ))
     }
 
     fn resolve_domain(
@@ -1496,6 +1505,7 @@ pub mod testkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_kernel::{PrincipalKind, ScopeKind};
 
     fn service_with_snapshot() -> Result<TokenService, AuthError> {
         let mut snapshot = IdentitySnapshot {
@@ -1904,9 +1914,17 @@ mod tests {
             "eba29e2d-53de-461d-ae91-ede7402713cb"
         );
         let context = service.auth_context(&token, now)?;
-        assert!(context.service_user);
-        assert!(context.roles.contains(&"service".to_owned()));
-        assert!(!context.roles.contains(&"admin".to_owned()));
+        assert_eq!(context.principal().kind(), PrincipalKind::Service);
+        assert_eq!(context.principal().id().as_str(), "cinder");
+        assert_eq!(
+            context.effective_scope().id().as_str(),
+            "eba29e2d-53de-461d-ae91-ede7402713cb"
+        );
+        assert!(context.has_role("service"));
+        assert!(!context.has_role("admin"));
+        assert_eq!(context.issued_at(), 1000);
+        assert!(!context.audit_id().is_empty());
+        assert!(!context.request_id().is_empty());
         Ok(())
     }
 
@@ -1916,7 +1934,52 @@ mod tests {
         let now = UNIX_EPOCH + Duration::from_secs(1_000);
         let (token, _) = service.issue(&admin_request(), now)?;
         let context = service.auth_context(&token, now)?;
-        assert!(!context.service_user);
+        assert_eq!(context.principal().kind(), PrincipalKind::User);
+        assert_eq!(context.principal().id().as_str(), "bootstrap-user");
+        assert_eq!(
+            context.effective_scope().id().as_str(),
+            "eba29e2d-53de-461d-ae91-ede7402713cb"
+        );
+        assert!(context.has_role("admin"));
+        assert_eq!(context.issued_at(), 1000);
+        assert!(!context.audit_id().is_empty());
+        assert!(!context.request_id().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn keystone_token_mapping_to_kernel_auth_context() -> Result<(), AuthError> {
+        let service = service_with_snapshot()?;
+        let now = UNIX_EPOCH + Duration::from_secs(2_000);
+        let (token_str, response) = service.issue(&admin_request(), now)?;
+
+        let auth_ctx = service.auth_context(&token_str, now)?;
+
+        // 1. User Principal
+        assert_eq!(auth_ctx.principal().kind(), PrincipalKind::User);
+        assert_eq!(auth_ctx.principal().id().as_str(), &response.token.user.id);
+        assert_eq!(auth_ctx.principal().name(), &response.token.user.name);
+
+        // 2. Ownership Scope
+        assert_eq!(
+            auth_ctx.effective_scope().id().as_str(),
+            &response.token.project.id
+        );
+        assert_eq!(auth_ctx.effective_scope().kind(), ScopeKind::Project);
+
+        // 3. Roles
+        assert!(auth_ctx.has_role("admin"));
+
+        // 4. Timestamps & Audit
+        assert_eq!(auth_ctx.issued_at(), 2000);
+        assert_eq!(auth_ctx.expires_at(), 2000 + 3600);
+        assert!(!auth_ctx.audit_id().is_empty());
+        assert!(!auth_ctx.request_id().is_empty());
+
+        // 5. No raw token stored
+        let serialized = serde_json::to_string(&auth_ctx).map_err(|_| AuthError::InvalidRequest)?;
+        assert!(!serialized.contains(&token_str));
+
         Ok(())
     }
 

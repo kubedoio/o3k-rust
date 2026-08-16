@@ -830,10 +830,10 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
     )
     .await?;
     let network = network_service
-        .create_network("eba29e2d-53de-461d-ae91-ede7402713cb", "flat".to_owned())
+        .create_network_for_project("eba29e2d-53de-461d-ae91-ede7402713cb", "flat".to_owned())
         .await?;
     let _subnet = network_service
-        .create_subnet(
+        .create_subnet_for_project(
             "eba29e2d-53de-461d-ae91-ede7402713cb",
             network.id,
             "subnet".to_owned(),
@@ -844,7 +844,7 @@ async fn nova_server_lifecycle_uses_project_scoped_envelopes()
         )
         .await?;
     let port = network_service
-        .create_port(
+        .create_port_for_project(
             "eba29e2d-53de-461d-ae91-ede7402713cb",
             network.id,
             "server-port".to_owned(),

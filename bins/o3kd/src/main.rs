@@ -106,7 +106,7 @@ impl DaemonCreateResolver {
             .parse::<Uuid>()
             .map_err(|_| ProviderError::InvalidRequest)?;
         self.image
-            .resolve_artifact(&request.project_id, image_id)
+            .resolve_artifact_for_project(&request.project_id, image_id)
             .await
             .map_err(|_| ProviderError::InvalidRequest)
     }
@@ -130,12 +130,12 @@ impl DaemonCreateResolver {
                 .map_err(|_| ProviderError::InvalidRequest)?;
             let port = self
                 .network
-                .get_port(&request.project_id, port_id)
+                .get_port_for_project(&request.project_id, port_id)
                 .await
                 .map_err(|_| ProviderError::InvalidRequest)?;
             let subnet = self
                 .network
-                .get_subnet(
+                .get_subnet_for_project(
                     &request.project_id,
                     port.subnet_id.ok_or(ProviderError::InvalidRequest)?,
                 )
@@ -1111,10 +1111,10 @@ mod tests {
             config_drive,
         };
         let net = network
-            .create_network("project-a", "flat".to_owned())
+            .create_network_for_project("project-a", "flat".to_owned())
             .await?;
         let _subnet = network
-            .create_subnet(
+            .create_subnet_for_project(
                 "project-a",
                 net.id,
                 "lab".to_owned(),
@@ -1125,7 +1125,7 @@ mod tests {
             )
             .await?;
         let port = network
-            .create_port("project-a", net.id, "one".to_owned())
+            .create_port_for_project("project-a", net.id, "one".to_owned())
             .await?;
         let request = o3k_provider::CreateInstanceRequest {
             operation_id: Uuid::now_v7(),
@@ -1148,7 +1148,7 @@ mod tests {
         let (attachments, _) = resolver.resolve_network(&request, "compute-1").await?;
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].port_id, port.id.to_string());
-        let bound = network.get_port("project-a", port.id).await?;
+        let bound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(bound.binding_state.as_deref(), Some("binding"));
 
@@ -1185,7 +1185,9 @@ mod tests {
         };
         let failed = resolver.resolve_network(&unresolved, "compute-1").await;
         assert!(failed.is_err());
-        let after = network.get_port("project-a", unresolved_port.id).await?;
+        let after = network
+            .get_port_for_project("project-a", unresolved_port.id)
+            .await?;
         assert_eq!(after.binding_host, None);
         assert_eq!(after.binding_state, None);
         drop(resolver);
@@ -1211,10 +1213,10 @@ mod tests {
             network: network.clone(),
         };
         let net = network
-            .create_network("project-a", "flat".to_owned())
+            .create_network_for_project("project-a", "flat".to_owned())
             .await?;
         network
-            .create_subnet(
+            .create_subnet_for_project(
                 "project-a",
                 net.id,
                 "lab".to_owned(),
@@ -1225,7 +1227,7 @@ mod tests {
             )
             .await?;
         let port = network
-            .create_port("project-a", net.id, "one".to_owned())
+            .create_port_for_project("project-a", net.id, "one".to_owned())
             .await?;
         // Projection without a recorded intent is rejected (logged upstream).
         assert!(
@@ -1240,13 +1242,13 @@ mod tests {
         projector
             .project_create_outcome("project-a", &port.id.to_string(), true)
             .await?;
-        let bound = network.get_port("project-a", port.id).await?;
+        let bound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(bound.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(bound.binding_state.as_deref(), Some("bound"));
         projector
             .unbind_port("project-a", &port.id.to_string())
             .await?;
-        let unbound = network.get_port("project-a", port.id).await?;
+        let unbound = network.get_port_for_project("project-a", port.id).await?;
         assert_eq!(unbound.binding_host, None);
         assert_eq!(unbound.binding_state, None);
         drop(projector);

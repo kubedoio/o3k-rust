@@ -17,7 +17,7 @@ use o3k_provider::{ConfigDriveRequest, InstanceAction};
 use serde::Serialize;
 
 use crate::{
-    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT, auth::require_token, error::keystone_error,
+    AppState, CONSOLE_AGENT_DISPATCH_TIMEOUT, auth::require_auth_context, error::keystone_error,
     image::image_error, network::network_error,
 };
 
@@ -161,7 +161,10 @@ pub(crate) async fn server_response(
             let Ok(port_id) = port_id.parse::<uuid::Uuid>() else {
                 continue;
             };
-            let Ok(port) = network_service.get_port(&server.project_id, port_id).await else {
+            let Ok(port) = network_service
+                .get_port_for_project(&server.project_id, port_id)
+                .await
+            else {
                 continue;
             };
             let address_list = addresses
@@ -245,6 +248,11 @@ pub(crate) fn keypair_response(keypair: o3k_compute::Keypair) -> KeypairResponse
 
 pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
     match error {
+        ComputeError::Unauthorized => keystone_error(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized",
+            "The request has not been authenticated.",
+        ),
         ComputeError::NotFound => keystone_error(
             StatusCode::NOT_FOUND,
             "Not Found",
@@ -323,20 +331,20 @@ pub(crate) fn should_query_live_console(offset: u64) -> bool {
 }
 
 #[allow(clippy::result_large_err)]
-pub(crate) fn project_token(
+pub(crate) fn project_auth_context(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     project_id: &str,
-) -> Result<o3k_identity::VerifiedToken, axum::response::Response> {
-    let token = require_token(state, headers)?;
-    if token.project_id != project_id {
+) -> Result<o3k_kernel::AuthContext, axum::response::Response> {
+    let auth = require_auth_context(state, headers)?;
+    if auth.effective_scope().id().as_str() != project_id {
         return Err(keystone_error(
             StatusCode::NOT_FOUND,
             "Not Found",
             "compute resource was not found",
         ));
     }
-    Ok(token)
+    Ok(auth)
 }
 
 #[allow(clippy::result_large_err)]
@@ -357,14 +365,15 @@ pub(crate) async fn list_flavors(
     headers: axum::http::HeaderMap,
     Path(project_id): Path<String>,
 ) -> axum::response::Response {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let service = match compute_service(&state) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.flavors_for_project(&project_id).await {
+    match service.flavors_for_auth(&auth).await {
         Ok(flavors) => Json(FlavorListResponse {
             flavors: flavors.into_iter().map(flavor_response).collect(),
         })
@@ -392,7 +401,7 @@ pub(crate) async fn create_flavor(
     Path(project_id): Path<String>,
     request: Result<Json<CreateFlavorEnvelope>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -408,8 +417,8 @@ pub(crate) async fn create_flavor(
         );
     };
     match service
-        .create_flavor(
-            &token.project_id,
+        .create_flavor_for_auth(
+            &auth,
             body.flavor.name,
             body.flavor.vcpus,
             body.flavor.ram,
@@ -433,14 +442,15 @@ pub(crate) async fn show_flavor(
     headers: axum::http::HeaderMap,
     Path((project_id, id)): Path<(String, uuid::Uuid)>,
 ) -> axum::response::Response {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let service = match compute_service(&state) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.flavor_for_project(&project_id, id).await {
+    match service.flavor_for_auth(&auth, id).await {
         Ok(flavor) => Json(FlavorEnvelope {
             flavor: flavor_response(flavor),
         })
@@ -454,14 +464,15 @@ pub(crate) async fn delete_flavor(
     headers: axum::http::HeaderMap,
     Path((project_id, id)): Path<(String, uuid::Uuid)>,
 ) -> axum::response::Response {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let service = match compute_service(&state) {
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_flavor(&project_id, id).await {
+    match service.delete_flavor_for_auth(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => compute_error(error),
     }
@@ -472,7 +483,7 @@ pub(crate) async fn list_keypairs(
     headers: axum::http::HeaderMap,
     Path(project_id): Path<String>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -480,10 +491,7 @@ pub(crate) async fn list_keypairs(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service
-        .list_keypairs(&token.user_id, &token.project_id)
-        .await
-    {
+    match service.list_keypairs_for_auth(&auth).await {
         Ok(keypairs) => Json(KeypairListResponse {
             keypairs: keypairs
                 .into_iter()
@@ -503,7 +511,7 @@ pub(crate) async fn create_keypair(
     Path(project_id): Path<String>,
     request: Result<Json<CreateKeypairEnvelope>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -538,12 +546,7 @@ pub(crate) async fn create_keypair(
         );
     };
     match service
-        .create_keypair(
-            &token.user_id,
-            &token.project_id,
-            body.keypair.name,
-            public_key,
-        )
+        .create_keypair_for_auth(&auth, body.keypair.name, public_key)
         .await
     {
         Ok(keypair) => (
@@ -562,7 +565,7 @@ pub(crate) async fn show_keypair(
     headers: axum::http::HeaderMap,
     Path((project_id, name)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -570,10 +573,7 @@ pub(crate) async fn show_keypair(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service
-        .show_keypair(&token.user_id, &token.project_id, &name)
-        .await
-    {
+    match service.show_keypair_for_auth(&auth, &name).await {
         Ok(keypair) => Json(KeypairEnvelope {
             keypair: keypair_response(keypair),
         })
@@ -587,7 +587,7 @@ pub(crate) async fn delete_keypair(
     headers: axum::http::HeaderMap,
     Path((project_id, name)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -595,10 +595,7 @@ pub(crate) async fn delete_keypair(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service
-        .delete_keypair(&token.user_id, &token.project_id, &name)
-        .await
-    {
+    match service.delete_keypair_for_auth(&auth, &name).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => compute_error(error),
     }
@@ -610,7 +607,7 @@ pub(crate) async fn create_server(
     Path(project_id): Path<String>,
     request: Result<Json<CreateServerEnvelope>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -628,10 +625,7 @@ pub(crate) async fn create_server(
     let config_drive = if body.server.config_drive == Some(true) {
         let keypair_public_key = if body.server.ssh_public_key.is_none() {
             if let Some(key_name) = body.server.key_name.as_deref() {
-                match service
-                    .show_keypair(&token.user_id, &token.project_id, key_name)
-                    .await
-                {
+                match service.show_keypair_for_auth(&auth, key_name).await {
                     Ok(keypair) => Some(keypair.public_key),
                     Err(error) => return compute_error(error),
                 }
@@ -724,7 +718,7 @@ pub(crate) async fn create_server(
                 );
             }
         };
-        match image_service.get(&token.project_id, image_id).await {
+        match image_service.get(&auth, image_id).await {
             Ok(record) if record.status == o3k_image::ImageStatus::Active => {}
             Ok(_) => {
                 return keystone_error(StatusCode::CONFLICT, "Conflict", "image is not active");
@@ -749,7 +743,7 @@ pub(crate) async fn create_server(
                     );
                 }
             };
-            if let Err(error) = network_service.get_port(&token.project_id, port_id).await {
+            if let Err(error) = network_service.get_port(&auth, port_id).await {
                 return network_error(error);
             }
         }
@@ -760,17 +754,20 @@ pub(crate) async fn create_server(
         .unwrap_or(&body.server.name)
         .to_owned();
     match service
-        .create_server_for_user(o3k_compute::ServerCreateInput {
-            user_id: token.user_id,
-            project_id: token.project_id,
-            name: body.server.name,
-            image_id: image,
-            flavor_id: flavor,
-            network_ids,
-            key_name: body.server.key_name,
-            config_drive,
-            idempotency_key: idempotency,
-        })
+        .create_server_for_auth(
+            &auth,
+            o3k_compute::ServerCreateInput {
+                user_id: auth.principal().id().as_str().to_owned(),
+                project_id: auth.effective_scope().id().as_str().to_owned(),
+                name: body.server.name,
+                image_id: image,
+                flavor_id: flavor,
+                network_ids,
+                key_name: body.server.key_name,
+                config_drive,
+                idempotency_key: idempotency,
+            },
+        )
         .await
     {
         Ok(server) => (
@@ -789,7 +786,7 @@ pub(crate) async fn list_servers(
     headers: axum::http::HeaderMap,
     Path(project_id): Path<String>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -797,7 +794,7 @@ pub(crate) async fn list_servers(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_servers(&token.project_id).await {
+    match service.list_servers_for_auth(&auth).await {
         Ok(servers) => {
             let mut server_responses = Vec::with_capacity(servers.len());
             for server in servers {
@@ -817,7 +814,7 @@ pub(crate) async fn show_server(
     headers: axum::http::HeaderMap,
     Path((project_id, id)): Path<(String, uuid::Uuid)>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -826,7 +823,7 @@ pub(crate) async fn show_server(
         Err(response) => return response,
     };
     match service
-        .show_server(&token.project_id, ServerId::from_uuid(id))
+        .show_server_for_auth(&auth, ServerId::from_uuid(id))
         .await
     {
         Ok(server) => Json(ServerEnvelope {
@@ -842,7 +839,7 @@ pub(crate) async fn delete_server(
     headers: axum::http::HeaderMap,
     Path((project_id, id)): Path<(String, uuid::Uuid)>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -851,7 +848,7 @@ pub(crate) async fn delete_server(
         Err(response) => return response,
     };
     match service
-        .delete_server(&token.project_id, ServerId::from_uuid(id))
+        .delete_server_for_auth(&auth, ServerId::from_uuid(id))
         .await
     {
         Ok(()) => {
@@ -877,7 +874,7 @@ pub(crate) async fn server_action(
     Path((project_id, id)): Path<(String, uuid::Uuid)>,
     request: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match project_token(&state, &headers, &project_id) {
+    let auth = match project_auth_context(&state, &headers, &project_id) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -906,7 +903,7 @@ pub(crate) async fn server_action(
                 );
             };
             if let Err(error) = service
-                .show_server(&token.project_id, ServerId::from_uuid(id))
+                .show_server_for_auth(&auth, ServerId::from_uuid(id))
                 .await
             {
                 return compute_error(error);
@@ -950,7 +947,10 @@ pub(crate) async fn server_action(
                 && let Some(registry) = state.agent_registry.as_ref()
             {
                 match service
-                    .placement_provider_id(&token.project_id, ServerId::from_uuid(id))
+                    .placement_provider_id(
+                        auth.effective_scope().id().as_str(),
+                        ServerId::from_uuid(id),
+                    )
                     .await
                 {
                     Ok(Some(agent_id)) => {
@@ -1092,7 +1092,7 @@ pub(crate) async fn server_action(
         }
     };
     match service
-        .action(&token.project_id, ServerId::from_uuid(id), action)
+        .action_for_auth(&auth, ServerId::from_uuid(id), action)
         .await
     {
         Ok(server) => (

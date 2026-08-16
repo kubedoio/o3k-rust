@@ -9,6 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use o3k_kernel::{
+    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
+    ResourceType, StaticAuthorizer,
+};
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -100,6 +104,8 @@ pub struct CachedImageArtifact {
 
 #[derive(Debug, Error)]
 pub enum ImageError {
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("image not found")]
     NotFound,
     #[error("image operation is not allowed")]
@@ -1131,6 +1137,7 @@ pub struct ImageService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
+    authorizer: Arc<dyn Authorizer>,
 }
 
 struct Inner {
@@ -1153,10 +1160,47 @@ impl ImageService {
             inner: Arc::new(Inner { root, repository }),
             lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
+            authorizer: Arc::new(StaticAuthorizer::standard()),
         })
     }
 
+    #[must_use]
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
+        self.authorizer = authorizer;
+        self
+    }
+
     pub async fn create(
+        &self,
+        auth: &AuthContext,
+        name: String,
+        visibility: String,
+        container_format: String,
+        disk_format: String,
+    ) -> Result<ImageRecord, ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "CreateImage")
+                .map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::Unauthorized);
+        }
+        self.create_for_project(
+            auth.effective_scope().id().as_str(),
+            name,
+            visibility,
+            container_format,
+            disk_format,
+        )
+        .await
+    }
+
+    pub async fn create_for_project(
         &self,
         project_id: &str,
         name: String,
@@ -1192,7 +1236,24 @@ impl ImageService {
         image_from_store(record)
     }
 
-    pub async fn list(&self, project_id: &str) -> Result<Vec<ImageRecord>, ImageError> {
+    pub async fn list(&self, auth: &AuthContext) -> Result<Vec<ImageRecord>, ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "ListImages")
+                .map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::Unauthorized);
+        }
+        self.list_for_project(auth.effective_scope().id().as_str())
+            .await
+    }
+
+    pub async fn list_for_project(&self, project_id: &str) -> Result<Vec<ImageRecord>, ImageError> {
         self.inner
             .repository
             .list_images(project_id)
@@ -1203,7 +1264,28 @@ impl ImageService {
             .collect()
     }
 
-    pub async fn get(&self, project_id: &str, id: Uuid) -> Result<ImageRecord, ImageError> {
+    pub async fn get(&self, auth: &AuthContext, id: Uuid) -> Result<ImageRecord, ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "ReadImage").map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::NotFound);
+        }
+        self.get_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn get_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<ImageRecord, ImageError> {
         let record = self
             .inner
             .repository
@@ -1215,6 +1297,28 @@ impl ImageService {
     }
 
     pub async fn resolve_artifact(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<ImageArtifact, ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "DownloadImage")
+                .map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::NotFound);
+        }
+        self.resolve_artifact_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn resolve_artifact_for_project(
         &self,
         project_id: &str,
         id: Uuid,
@@ -1267,6 +1371,29 @@ impl ImageService {
 
     pub async fn upload(
         &self,
+        auth: &AuthContext,
+        id: Uuid,
+        content: &[u8],
+    ) -> Result<ImageRecord, ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "UploadImage")
+                .map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::NotFound);
+        }
+        self.upload_for_project(auth.effective_scope().id().as_str(), id, content)
+            .await
+    }
+
+    pub async fn upload_for_project(
+        &self,
         project_id: &str,
         id: Uuid,
         content: &[u8],
@@ -1274,13 +1401,6 @@ impl ImageService {
         if content.len() > self.max_upload_bytes {
             return Err(ImageError::TooLarge);
         }
-        // Upload and delete are serialized by this lock, preserving the
-        // check-then-act atomicity of the previous in-memory implementation:
-        // a concurrent upload of the same image must not write bytes after
-        // another upload already activated the record, because the losing
-        // writer would then have to remove the winner's published content
-        // file. The store's conditional activate remains the authoritative
-        // guard; this lock only reproduces the single-process serialization.
         let _guard = self.lock.lock().await;
         let record = self
             .inner
@@ -1293,11 +1413,6 @@ impl ImageService {
         if record.status == ImageStatus::Active {
             return Err(ImageError::Conflict);
         }
-        // Import-time structural gate: a truncated or corrupt qcow2 must
-        // never become an active image record, otherwise the create path
-        // would materialize and boot it. The check runs before the content
-        // file is written, so a rejection publishes nothing and the record
-        // stays queued (unusable).
         if record.disk_format == "qcow2" {
             let mut reader = std::io::Cursor::new(content);
             validate_qcow2_structure(&mut reader, content.len() as u64)?;
@@ -1321,17 +1436,31 @@ impl ImageService {
         {
             Ok(record) => image_from_store(record),
             Err(error) => {
-                // Roll back the published content file when the activation
-                // fails; the record stays queued and remains re-uploadable.
                 let _ = fs::remove_file(&content_path);
                 Err(Self::map_store_error(error))
             }
         }
     }
 
-    pub async fn delete(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {
-        // Same serialization as upload so a delete cannot interleave with an
-        // upload of the same image.
+    pub async fn delete(&self, auth: &AuthContext, id: Uuid) -> Result<(), ImageError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("image", "DeleteImage")
+                .map_err(|_| ImageError::InvalidMetadata)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
+                ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ImageError::NotFound);
+        }
+        self.delete_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn delete_for_project(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {
         let _guard = self.lock.lock().await;
         self.inner
             .repository
@@ -1396,6 +1525,27 @@ fn image_from_store(record: ImageMetadataRecord) -> Result<ImageRecord, ImageErr
 mod tests {
     use super::*;
 
+    fn auth(project_id: &str) -> AuthContext {
+        AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("test-user"),
+                "test-user",
+                Some("default".to_string()),
+            )),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked(project_id),
+                Some(project_id.to_string()),
+                Some("default".to_string()),
+            ),
+            vec!["admin".to_string()],
+            1000,
+            5000,
+            uuid::Uuid::now_v7().to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            None,
+        )
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
@@ -1412,7 +1562,7 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1420,7 +1570,7 @@ mod tests {
             )
             .await?;
         let uploaded = service
-            .upload("project-a", image.id, b"image-bytes")
+            .upload(&auth("project-a"), image.id, b"image-bytes")
             .await?;
         assert_eq!(uploaded.status, ImageStatus::Active);
         assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
@@ -1432,8 +1582,10 @@ mod tests {
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
         let reopened = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
-        assert_eq!(reopened.get("project-a", image.id).await?, uploaded);
-        let artifact = reopened.resolve_artifact("project-a", image.id).await?;
+        assert_eq!(reopened.get(&auth("project-a"), image.id).await?, uploaded);
+        let artifact = reopened
+            .resolve_artifact(&auth("project-a"), image.id)
+            .await?;
         assert_eq!(artifact.id, image.id);
         assert_eq!(artifact.format, "raw");
         assert_eq!(artifact.size, 11);
@@ -1453,7 +1605,7 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1461,19 +1613,19 @@ mod tests {
             )
             .await?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::NotFound)
         ));
         service
-            .upload("project-a", image.id, b"image-bytes")
+            .upload(&auth("project-a"), image.id, b"image-bytes")
             .await?;
         assert!(matches!(
-            service.resolve_artifact("project-b", image.id).await,
+            service.resolve_artifact(&auth("project-b"), image.id).await,
             Err(ImageError::NotFound)
         ));
         fs::write(path.join("content").join(image.id.to_string()), b"tampered")?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::ChecksumMismatch)
         ));
         fs::remove_dir_all(path)?;
@@ -1488,20 +1640,20 @@ mod tests {
         let service = ImageService::open(&path, 3, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
                 "raw".to_owned(),
             )
             .await?;
-        service.upload("project-a", image.id, b"abc").await?;
+        service.upload(&auth("project-a"), image.id, b"abc").await?;
         fs::write(
             path.join("content").join(image.id.to_string()),
             b"too-large",
         )?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::TooLarge)
         ));
         fs::remove_dir_all(path)?;
@@ -1517,7 +1669,7 @@ mod tests {
         let service = ImageService::open(&service_path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1525,9 +1677,11 @@ mod tests {
             )
             .await?;
         service
-            .upload("project-a", image.id, b"image-bytes")
+            .upload(&auth("project-a"), image.id, b"image-bytes")
             .await?;
-        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        let artifact = service
+            .resolve_artifact(&auth("project-a"), image.id)
+            .await?;
         let cache = ImageCache::open(&cache_path, DEFAULT_MAX_CACHE_BYTES)?;
 
         let first = cache.cache_artifact(&artifact)?;
@@ -1643,7 +1797,7 @@ mod tests {
         let service = ImageService::open(&path, 3, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "../outside".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1651,14 +1805,14 @@ mod tests {
             )
             .await?;
         assert!(matches!(
-            service.upload("project-a", image.id, b"four").await,
+            service.upload(&auth("project-a"), image.id, b"four").await,
             Err(ImageError::TooLarge)
         ));
         assert!(matches!(
-            service.get("project-b", image.id).await,
+            service.get(&auth("project-b"), image.id).await,
             Err(ImageError::NotFound)
         ));
-        service.delete("project-a", image.id).await?;
+        service.delete(&auth("project-a"), image.id).await?;
         assert!(!path.join("outside").exists());
         fs::remove_dir_all(path)?;
         Ok(())
@@ -1697,22 +1851,29 @@ mod tests {
             let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
             let image = service
                 .create(
-                    "project-a",
+                    &auth("project-a"),
                     "test".to_owned(),
                     "private".to_owned(),
                     "bare".to_owned(),
                     "raw".to_owned(),
                 )
                 .await?;
-            let uploaded = service.upload("project-a", image.id, content).await?;
+            let uploaded = service
+                .upload(&auth("project-a"), image.id, content)
+                .await?;
             (image.id, uploaded)
         };
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
-        assert_eq!(service.list("project-a").await?, vec![uploaded.clone()]);
-        assert_eq!(service.get("project-a", image_id).await?, uploaded);
-        let artifact = service.resolve_artifact("project-a", image_id).await?;
+        assert_eq!(
+            service.list(&auth("project-a")).await?,
+            vec![uploaded.clone()]
+        );
+        assert_eq!(service.get(&auth("project-a"), image_id).await?, uploaded);
+        let artifact = service
+            .resolve_artifact(&auth("project-a"), image_id)
+            .await?;
         assert_eq!(artifact.content, content);
         assert!(!path.join("metadata.json").exists());
         fs::remove_dir_all(path)?;
@@ -1734,14 +1895,16 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
                 "raw".to_owned(),
             )
             .await?;
-        service.upload("project-a", image.id, &payload).await?;
+        service
+            .upload(&auth("project-a"), image.id, &payload)
+            .await?;
         drop(service);
         drop(store);
         // The content file is the only place the payload may live; neither
@@ -1761,7 +1924,9 @@ mod tests {
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(std::path::Path::new(&sqlite_path)).await?);
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, reopened_store).await?;
-        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        let artifact = service
+            .resolve_artifact(&auth("project-a"), image.id)
+            .await?;
         assert_eq!(artifact.size, payload.len() as u64);
         assert_eq!(artifact.content, payload);
         fs::remove_dir_all(path)?;
@@ -1779,7 +1944,7 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1788,9 +1953,11 @@ mod tests {
             .await?;
         let bytes_a = vec![0x41u8; 4096];
         let bytes_b = vec![0x42u8; 4096];
+        let auth_a = auth("project-a");
+        let auth_b = auth("project-a");
         let (first, second) = tokio::join!(
-            service.upload("project-a", image.id, &bytes_a),
-            service.upload("project-a", image.id, &bytes_b),
+            service.upload(&auth_a, image.id, &bytes_a),
+            service.upload(&auth_b, image.id, &bytes_b),
         );
         // The mutation lock serializes the two uploads: exactly one activates
         // the record and the loser sees the already-active conflict without
@@ -1806,7 +1973,9 @@ mod tests {
         let winner = first
             .or(second)
             .map_err(|_| "expected exactly one upload to succeed")?;
-        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        let artifact = service
+            .resolve_artifact(&auth("project-a"), image.id)
+            .await?;
         assert_eq!(artifact.size, 4096);
         let sealed = format!("{:x}", Sha256::digest(&artifact.content));
         assert_eq!(winner.checksum.as_deref(), Some(sealed.as_str()));
@@ -1823,7 +1992,7 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1831,14 +2000,14 @@ mod tests {
             )
             .await?;
         let uploaded = service
-            .upload("project-a", image.id, b"image-bytes")
+            .upload(&auth("project-a"), image.id, b"image-bytes")
             .await?;
         fs::remove_file(path.join("content").join(image.id.to_string()))?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::NotFound)
         ));
-        let record = service.get("project-a", image.id).await?;
+        let record = service.get(&auth("project-a"), image.id).await?;
         assert_eq!(record.status, ImageStatus::Active);
         assert_eq!(record.size, uploaded.size);
         assert_eq!(record.checksum, uploaded.checksum);
@@ -1854,7 +2023,7 @@ mod tests {
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "test".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -1862,14 +2031,14 @@ mod tests {
             )
             .await?;
         service
-            .upload("project-a", image.id, b"image-bytes")
+            .upload(&auth("project-a"), image.id, b"image-bytes")
             .await?;
         fs::write(
             path.join("content").join(image.id.to_string()),
             b"tampered!",
         )?;
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::ChecksumMismatch)
         ));
         fs::remove_dir_all(path)?;
@@ -2558,7 +2727,7 @@ esac
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "truncated".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -2568,19 +2737,21 @@ esac
         let fixture = valid_qcow2_fixture();
         for truncated in [&fixture[..fixture.len() / 20], &fixture[..5 * 4096 + 2048]] {
             assert!(matches!(
-                service.upload("project-a", image.id, truncated).await,
+                service
+                    .upload(&auth("project-a"), image.id, truncated)
+                    .await,
                 Err(ImageError::FormatVerificationFailed)
             ));
         }
         // The record stays queued and unusable: no size, no checksum, no
         // published content file, no resolvable artifact.
-        let record = service.get("project-a", image.id).await?;
+        let record = service.get(&auth("project-a"), image.id).await?;
         assert_eq!(record.status, ImageStatus::Queued);
         assert_eq!(record.size, None);
         assert_eq!(record.checksum, None);
         assert!(!path.join("content").join(image.id.to_string()).exists());
         assert!(matches!(
-            service.resolve_artifact("project-a", image.id).await,
+            service.resolve_artifact(&auth("project-a"), image.id).await,
             Err(ImageError::NotFound)
         ));
         fs::remove_dir_all(path)?;
@@ -2595,7 +2766,7 @@ esac
         let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store).await?;
         let image = service
             .create(
-                "project-a",
+                &auth("project-a"),
                 "valid".to_owned(),
                 "private".to_owned(),
                 "bare".to_owned(),
@@ -2603,10 +2774,14 @@ esac
             )
             .await?;
         let fixture = valid_qcow2_fixture();
-        let uploaded = service.upload("project-a", image.id, &fixture).await?;
+        let uploaded = service
+            .upload(&auth("project-a"), image.id, &fixture)
+            .await?;
         assert_eq!(uploaded.status, ImageStatus::Active);
         assert_eq!(uploaded.size, Some(fixture.len() as u64));
-        let artifact = service.resolve_artifact("project-a", image.id).await?;
+        let artifact = service
+            .resolve_artifact(&auth("project-a"), image.id)
+            .await?;
         assert_eq!(artifact.content, fixture);
         // Random bytes and a plausible-looking non-qcow2 file follow the same
         // format policy: rejected with a terminal error, record stays queued.
@@ -2615,7 +2790,7 @@ esac
         for bad in [&garbage[..], &non_qcow2[..]] {
             let image = service
                 .create(
-                    "project-a",
+                    &auth("project-a"),
                     "bad".to_owned(),
                     "private".to_owned(),
                     "bare".to_owned(),
@@ -2623,11 +2798,11 @@ esac
                 )
                 .await?;
             assert!(matches!(
-                service.upload("project-a", image.id, bad).await,
+                service.upload(&auth("project-a"), image.id, bad).await,
                 Err(ImageError::FormatVerificationFailed)
             ));
             assert_eq!(
-                service.get("project-a", image.id).await?.status,
+                service.get(&auth("project-a"), image.id).await?.status,
                 ImageStatus::Queued
             );
         }

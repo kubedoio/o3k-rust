@@ -6,6 +6,7 @@ cd "${repo_root}"
 
 echo "Checking repository architecture boundaries..."
 python3 scripts/check-architecture-boundaries.py
+python3 scripts/validate-kernel-actions.py
 
 temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/o3k-architecture-test.XXXXXX")"
 trap 'rm -rf "${temp_dir}"' EXIT

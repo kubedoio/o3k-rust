@@ -23,6 +23,7 @@ members = [
     "crates/o3k-dhcp",
     "crates/o3k-console",
     "crates/o3k-store",
+    "crates/o3k-kernel",
 ]
 resolver = "2"
 

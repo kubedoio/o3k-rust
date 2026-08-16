@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 pub use o3k_domain::{Server, ServerId, ServerState};
+use o3k_kernel::{
+    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
+    ResourceType, StaticAuthorizer,
+};
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
 use o3k_provider::{
@@ -90,6 +94,8 @@ pub struct ServerCreateInput {
 
 #[derive(Debug, Error)]
 pub enum ComputeError {
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("compute resource was not found")]
     NotFound,
     #[error("compute request conflicts with existing state")]
@@ -119,6 +125,7 @@ pub struct ComputeService {
     attachments: AttachmentOrchestrator,
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
+    authorizer: Arc<dyn Authorizer>,
 }
 
 #[derive(Clone)]
@@ -384,7 +391,14 @@ impl ComputeService {
             attachments,
             binding_projector: None,
             config_drive_cleaner: None,
+            authorizer: Arc::new(StaticAuthorizer::standard()),
         }
+    }
+
+    #[must_use]
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
+        self.authorizer = authorizer;
+        self
     }
 
     /// Configures the control-plane config-drive store whose per-instance
@@ -879,6 +893,23 @@ impl ComputeService {
         ]
     }
 
+    pub async fn flavors_for_auth(&self, auth: &AuthContext) -> Result<Vec<Flavor>, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ListFlavors")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.flavors_for_project(auth.effective_scope().id().as_str())
+            .await
+    }
+
     pub async fn flavors_for_project(&self, project_id: &str) -> Result<Vec<Flavor>, ComputeError> {
         let mut flavors = self.flavors();
         for resource in self
@@ -894,6 +925,36 @@ impl ComputeService {
             flavors.push(flavor);
         }
         Ok(flavors)
+    }
+
+    pub async fn create_flavor_for_auth(
+        &self,
+        auth: &AuthContext,
+        name: String,
+        vcpus: u32,
+        ram_mib: u64,
+        disk_gib: u64,
+    ) -> Result<Flavor, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "CreateFlavor")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.create_flavor(
+            auth.effective_scope().id().as_str(),
+            name,
+            vcpus,
+            ram_mib,
+            disk_gib,
+        )
+        .await
     }
 
     pub async fn create_flavor(
@@ -936,6 +997,28 @@ impl ComputeService {
         Ok(flavor)
     }
 
+    pub async fn flavor_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<Flavor, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ReadFlavor")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.flavor_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
     pub async fn flavor_for_project(
         &self,
         project_id: &str,
@@ -949,6 +1032,28 @@ impl ComputeService {
             .into_iter()
             .find(|flavor| flavor.id == id)
             .ok_or(ComputeError::NotFound)
+    }
+
+    pub async fn delete_flavor_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "DeleteFlavor")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.delete_flavor(auth.effective_scope().id().as_str(), id)
+            .await
     }
 
     pub async fn delete_flavor(&self, project_id: &str, id: Uuid) -> Result<(), ComputeError> {
@@ -1011,6 +1116,26 @@ impl ComputeService {
             .into_iter()
             .find(|flavor| flavor.id == id)
             .ok_or(ComputeError::NotFound)
+    }
+
+    pub async fn create_server_for_auth(
+        &self,
+        auth: &AuthContext,
+        input: ServerCreateInput,
+    ) -> Result<Server, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "CreateServer")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.create_server_for_user(input).await
     }
 
     pub async fn create_server(
@@ -1575,6 +1700,26 @@ impl ComputeService {
         self.show_server(&project_id, ServerId::from_uuid(id)).await
     }
 
+    pub async fn list_servers_for_auth(
+        &self,
+        auth: &AuthContext,
+    ) -> Result<Vec<Server>, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ListServers")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.list_servers(auth.effective_scope().id().as_str())
+            .await
+    }
+
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
         let flavors = self.flavors_for_project(project_id).await?;
         let resources = self
@@ -1604,6 +1749,29 @@ impl ComputeService {
             }
         }
         Ok(servers)
+    }
+
+    pub async fn show_server_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<Server, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ReadServer")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.show_server(auth.effective_scope().id().as_str(), id)
+            .await
     }
 
     pub async fn show_server(
@@ -1776,9 +1944,65 @@ impl ComputeService {
                     state,
                 )
                 .await;
+                if let Ok(resource) = self.store.get_resource(resource.id).await
+                    && resource.observed_state != "ACTIVE"
+                    && let Err(error) = self
+                        .store
+                        .update_resource(
+                            resource.id,
+                            resource.generation,
+                            &resource.desired_state,
+                            "ACTIVE",
+                            resource.generation,
+                            resource.provider_id.as_deref(),
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        operation_id = %request.operation_id,
+                        resource_id = %resource.id,
+                        error = %error,
+                        "server create success projection to ACTIVE failed"
+                    );
+                }
             }
             _ => {}
         }
+    }
+
+    pub async fn attach_volume_for_auth(
+        &self,
+        auth: &AuthContext,
+        server_id: ServerId,
+        volume_id: Uuid,
+        device: Option<String>,
+        tag: Option<String>,
+        delete_on_termination: bool,
+    ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("volume", "AttachVolume")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("volume", "volume_attachment")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(server_id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.attach_volume(
+            auth.effective_scope().id().as_str(),
+            server_id,
+            volume_id,
+            device,
+            tag,
+            delete_on_termination,
+        )
+        .await
     }
 
     pub async fn attach_volume(
@@ -1803,6 +2027,30 @@ impl ComputeService {
             .await
     }
 
+    pub async fn list_volume_attachments_for_auth(
+        &self,
+        auth: &AuthContext,
+        server_id: ServerId,
+    ) -> Result<Vec<VolumeAttachmentRecord>, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("volume", "ListVolumeAttachments")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("volume", "volume_attachment")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(server_id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.list_volume_attachments(auth.effective_scope().id().as_str(), server_id)
+            .await
+    }
+
     pub async fn list_volume_attachments(
         &self,
         project_id: &str,
@@ -1819,6 +2067,35 @@ impl ComputeService {
             .collect())
     }
 
+    pub async fn get_volume_attachment_for_auth(
+        &self,
+        auth: &AuthContext,
+        server_id: ServerId,
+        attachment_id: Uuid,
+    ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("volume", "ReadVolumeAttachment")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("volume", "volume_attachment")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(server_id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.get_volume_attachment(
+            auth.effective_scope().id().as_str(),
+            server_id,
+            attachment_id,
+        )
+        .await
+    }
+
     pub async fn get_volume_attachment(
         &self,
         project_id: &str,
@@ -1830,6 +2107,35 @@ impl ComputeService {
             .get_volume_attachment(server_id.as_uuid(), attachment_id)
             .await?
             .ok_or(ComputeError::NotFound)
+    }
+
+    pub async fn detach_volume_for_auth(
+        &self,
+        auth: &AuthContext,
+        server_id: ServerId,
+        attachment_id: Uuid,
+    ) -> Result<(), ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("volume", "DetachVolume")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("volume", "volume_attachment")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(server_id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.detach_volume(
+            auth.effective_scope().id().as_str(),
+            server_id,
+            attachment_id,
+        )
+        .await
     }
 
     pub async fn detach_volume(
@@ -2029,6 +2335,58 @@ impl ComputeService {
         Ok(keypair_from_record(record))
     }
 
+    pub async fn create_keypair_for_auth(
+        &self,
+        auth: &AuthContext,
+        name: String,
+        public_key: String,
+    ) -> Result<Keypair, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ImportKeypair")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "keypair")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.create_keypair(
+            auth.principal().id().as_str(),
+            auth.effective_scope().id().as_str(),
+            name,
+            public_key,
+        )
+        .await
+    }
+
+    pub async fn list_keypairs_for_auth(
+        &self,
+        auth: &AuthContext,
+    ) -> Result<Vec<Keypair>, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ListKeypairs")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("compute", "keypair")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::Unauthorized);
+        }
+        self.list_keypairs(
+            auth.principal().id().as_str(),
+            auth.effective_scope().id().as_str(),
+        )
+        .await
+    }
+
     pub async fn list_keypairs(
         &self,
         user_id: &str,
@@ -2041,6 +2399,33 @@ impl ComputeService {
             .into_iter()
             .map(keypair_from_record)
             .collect())
+    }
+
+    pub async fn show_keypair_for_auth(
+        &self,
+        auth: &AuthContext,
+        name: &str,
+    ) -> Result<Keypair, ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "ReadKeypair")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "keypair")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(name.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.show_keypair(
+            auth.principal().id().as_str(),
+            auth.effective_scope().id().as_str(),
+            name,
+        )
+        .await
     }
 
     pub async fn show_keypair(
@@ -2057,6 +2442,33 @@ impl ComputeService {
                 StoreError::KeypairNotFound => ComputeError::NotFound,
                 other => ComputeError::Store(other),
             })
+    }
+
+    pub async fn delete_keypair_for_auth(
+        &self,
+        auth: &AuthContext,
+        name: &str,
+    ) -> Result<(), ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "DeleteKeypair")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "keypair")
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(name.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.delete_keypair(
+            auth.principal().id().as_str(),
+            auth.effective_scope().id().as_str(),
+            name,
+        )
+        .await
     }
 
     pub async fn delete_keypair(
@@ -2087,6 +2499,29 @@ impl ComputeService {
         let request: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         Ok(request.placement_provider_id)
+    }
+
+    pub async fn delete_server_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<(), ComputeError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", "DeleteServer")
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.delete_server(auth.effective_scope().id().as_str(), id)
+            .await
     }
 
     pub async fn delete_server(&self, project_id: &str, id: ServerId) -> Result<(), ComputeError> {
@@ -2342,6 +2777,35 @@ impl ComputeService {
             )) => Err(ComputeError::Conflict),
             result => result.map_err(ComputeError::from),
         }
+    }
+
+    pub async fn action_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+        action: InstanceAction,
+    ) -> Result<Server, ComputeError> {
+        let action_name = match action {
+            InstanceAction::Start => "StartServer",
+            InstanceAction::Stop => "StopServer",
+            InstanceAction::Reboot => "RebootServer",
+        };
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("compute", action_name)
+                .map_err(|_| ComputeError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
+                ResourceId::new(id.as_uuid().to_string())
+                    .map_err(|_| ComputeError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(ComputeError::NotFound);
+        }
+        self.action(auth.effective_scope().id().as_str(), id, action)
+            .await
     }
 
     pub async fn action(
@@ -7164,6 +7628,80 @@ mod tests {
         // attachment.rs restart tests.
         task.abort();
         let _ = task.await;
+        Ok(())
+    }
+
+    fn test_compute_auth(project_id: &str, user_id: &str, role: &str) -> AuthContext {
+        AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked(user_id),
+                user_id,
+                Some("default".to_string()),
+            )),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked(project_id),
+                Some(project_id.to_string()),
+                Some("default".to_string()),
+            ),
+            vec![role.to_string()],
+            1000,
+            5000,
+            uuid::Uuid::now_v7().to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn compute_service_authorization_enforcement() -> Result<(), Box<dyn std::error::Error>> {
+        let service = service("compute-auth-test").await?;
+        let member_auth = test_compute_auth("proj-a", "user-1", "member");
+        let reader_auth = test_compute_auth("proj-a", "user-2", "reader");
+        let other_auth = test_compute_auth("proj-b", "user-3", "member");
+
+        // With standard authorizer, unauthorized action when empty authorizer is used
+        let empty_service = service
+            .clone()
+            .with_authorizer(Arc::new(StaticAuthorizer::empty()));
+        let empty_create = empty_service
+            .create_flavor_for_auth(&reader_auth, "custom-flavor".to_owned(), 2, 2048, 10)
+            .await;
+        assert!(matches!(empty_create, Err(ComputeError::Unauthorized)));
+
+        // Member can list flavors with standard authorizer
+        let flavors = service.flavors_for_auth(&member_auth).await?;
+        assert!(!flavors.is_empty());
+
+        // Member can import a keypair
+        let kp = service
+            .create_keypair_for_auth(
+                &member_auth,
+                "my-key".to_owned(),
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJuQvak7YBzsbN71EyvJnDK8pODWM1Ox/3wO3tT8Adj o3k-test".to_owned(),
+            )
+            .await?;
+        assert_eq!(kp.name, "my-key");
+
+        // Member can list keypairs
+        let kps = service.list_keypairs_for_auth(&member_auth).await?;
+        assert_eq!(kps.len(), 1);
+
+        // Foreign project cannot read or delete the keypair
+        let foreign_get = service.show_keypair_for_auth(&other_auth, "my-key").await;
+        assert!(matches!(foreign_get, Err(ComputeError::NotFound)));
+
+        let foreign_del = service.delete_keypair_for_auth(&other_auth, "my-key").await;
+        assert!(matches!(foreign_del, Err(ComputeError::NotFound)));
+
+        // Owner can read and delete keypair
+        let owner_kp = service
+            .show_keypair_for_auth(&member_auth, "my-key")
+            .await?;
+        assert_eq!(owner_kp.name, "my-key");
+        service
+            .delete_keypair_for_auth(&member_auth, "my-key")
+            .await?;
+
         Ok(())
     }
 }

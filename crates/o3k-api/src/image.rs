@@ -11,7 +11,7 @@ use axum::{
 use o3k_image::{ImageError, ImageRecord};
 use sha2::{Digest, Sha256};
 
-use crate::{AppState, auth::require_token, error::keystone_error};
+use crate::{AppState, auth::require_auth_context, error::keystone_error};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct CreateImageRequest {
@@ -60,6 +60,11 @@ pub(crate) fn image_response(image: ImageRecord) -> ImageResponse {
 
 pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
     match error {
+        ImageError::Unauthorized => keystone_error(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized",
+            "The request has not been authenticated.",
+        ),
         ImageError::NotFound => {
             keystone_error(StatusCode::NOT_FOUND, "Not Found", "image was not found")
         }
@@ -110,8 +115,8 @@ pub(crate) async fn download_image(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -121,7 +126,7 @@ pub(crate) async fn download_image(
             "image service is not configured",
         );
     };
-    match service.resolve_artifact(&token.project_id, id).await {
+    match service.resolve_artifact(&auth, id).await {
         Ok(artifact) => {
             let mut response = (StatusCode::OK, artifact.content).into_response();
             response.headers_mut().insert(
@@ -144,8 +149,8 @@ pub(crate) async fn create_image(
     headers: axum::http::HeaderMap,
     request: Result<Json<CreateImageRequest>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -164,7 +169,7 @@ pub(crate) async fn create_image(
     };
     match service
         .create(
-            &token.project_id,
+            &auth,
             request.name,
             request.visibility,
             request.container_format,
@@ -181,8 +186,8 @@ pub(crate) async fn list_images(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -192,7 +197,7 @@ pub(crate) async fn list_images(
             "image service is not configured",
         );
     };
-    match service.list(&token.project_id).await {
+    match service.list(&auth).await {
         Ok(images) => Json(ImageListResponse {
             images: images.into_iter().map(image_response).collect(),
         })
@@ -206,8 +211,8 @@ pub(crate) async fn show_image(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -217,7 +222,7 @@ pub(crate) async fn show_image(
             "image service is not configured",
         );
     };
-    match service.get(&token.project_id, id).await {
+    match service.get(&auth, id).await {
         Ok(image) => Json(image_response(image)).into_response(),
         Err(error) => image_error(error),
     }
@@ -229,8 +234,8 @@ pub(crate) async fn upload_image(
     Path(id): Path<uuid::Uuid>,
     body: Bytes,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -289,7 +294,7 @@ pub(crate) async fn upload_image(
             );
         }
     }
-    match service.upload(&token.project_id, id, &body).await {
+    match service.upload(&auth, id, &body).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => image_error(error),
     }
@@ -300,8 +305,8 @@ pub(crate) async fn delete_image(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
-        Ok(token) => token,
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(auth) => auth,
         Err(response) => return response,
     };
     let Some(service) = &state.image else {
@@ -311,7 +316,7 @@ pub(crate) async fn delete_image(
             "image service is not configured",
         );
     };
-    match service.delete(&token.project_id, id).await {
+    match service.delete(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => image_error(error),
     }

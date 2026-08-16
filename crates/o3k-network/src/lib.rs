@@ -8,6 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use o3k_kernel::{
+    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
+    ResourceType, StaticAuthorizer,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -2923,6 +2927,8 @@ impl PortBindingState {
 
 #[derive(Debug, Error)]
 pub enum NetworkError {
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("network resource not found")]
     NotFound,
     #[error("network resource already exists or is still in use")]
@@ -2950,6 +2956,7 @@ fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
 pub struct NetworkService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
+    authorizer: Arc<dyn Authorizer>,
 }
 
 struct Inner {
@@ -2976,10 +2983,39 @@ impl NetworkService {
         Ok(Self {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
+            authorizer: Arc::new(StaticAuthorizer::standard()),
         })
     }
 
+    #[must_use]
+    pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
+        self.authorizer = authorizer;
+        self
+    }
+
     pub async fn create_network(
+        &self,
+        auth: &AuthContext,
+        name: String,
+    ) -> Result<NetworkRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "CreateNetwork")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "network")
+                    .map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.create_network_for_project(auth.effective_scope().id().as_str(), name)
+            .await
+    }
+
+    pub async fn create_network_for_project(
         &self,
         project_id: &str,
         name: String,
@@ -3014,6 +3050,27 @@ impl NetworkService {
 
     pub async fn list_networks(
         &self,
+        auth: &AuthContext,
+    ) -> Result<Vec<NetworkRecord>, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ListNetworks")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "network")
+                    .map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.list_networks_for_project(auth.effective_scope().id().as_str())
+            .await
+    }
+
+    pub async fn list_networks_for_project(
+        &self,
         project_id: &str,
     ) -> Result<Vec<NetworkRecord>, NetworkError> {
         self.inner
@@ -3024,6 +3081,29 @@ impl NetworkService {
     }
 
     pub async fn get_network(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<NetworkRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ReadNetwork")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "network")
+                    .map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.get_network_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn get_network_for_project(
         &self,
         project_id: &str,
         id: Uuid,
@@ -3036,7 +3116,30 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
-    pub async fn delete_network(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+    pub async fn delete_network(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "DeleteNetwork")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "network")
+                    .map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.delete_network_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn delete_network_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
         self.inner
             .repository
@@ -3047,6 +3150,41 @@ impl NetworkService {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn create_subnet(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+        name: String,
+        cidr: String,
+        gateway_ip: Option<Ipv4Addr>,
+        allocation_start: Option<Ipv4Addr>,
+        allocation_end: Option<Ipv4Addr>,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "CreateSubnet")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.create_subnet_for_project(
+            auth.effective_scope().id().as_str(),
+            network_id,
+            name,
+            cidr,
+            gateway_ip,
+            allocation_start,
+            allocation_end,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_subnet_for_project(
         &self,
         project_id: &str,
         network_id: Uuid,
@@ -3113,7 +3251,30 @@ impl NetworkService {
         }
     }
 
-    pub async fn list_subnets(&self, project_id: &str) -> Result<Vec<SubnetRecord>, NetworkError> {
+    pub async fn list_subnets(
+        &self,
+        auth: &AuthContext,
+    ) -> Result<Vec<SubnetRecord>, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ListSubnets")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.list_subnets_for_project(auth.effective_scope().id().as_str())
+            .await
+    }
+
+    pub async fn list_subnets_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<SubnetRecord>, NetworkError> {
         self.inner
             .repository
             .list_subnets(project_id)
@@ -3122,6 +3283,28 @@ impl NetworkService {
     }
 
     pub async fn get_subnet(
+        &self,
+        auth: &AuthContext,
+        id: Uuid,
+    ) -> Result<SubnetRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ReadSubnet")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.get_subnet_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn get_subnet_for_project(
         &self,
         project_id: &str,
         id: Uuid,
@@ -3134,7 +3317,29 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
-    pub async fn delete_subnet(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+    pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "DeleteSubnet")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn delete_subnet_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
         self.inner
             .repository
@@ -3144,6 +3349,28 @@ impl NetworkService {
     }
 
     pub async fn create_port(
+        &self,
+        auth: &AuthContext,
+        network_id: Uuid,
+        name: String,
+    ) -> Result<PortRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "CreatePort")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.create_port_for_project(auth.effective_scope().id().as_str(), network_id, name)
+            .await
+    }
+
+    pub async fn create_port_for_project(
         &self,
         project_id: &str,
         network_id: Uuid,
@@ -3211,7 +3438,27 @@ impl NetworkService {
         Err(NetworkError::PoolExhausted)
     }
 
-    pub async fn list_ports(&self, project_id: &str) -> Result<Vec<PortRecord>, NetworkError> {
+    pub async fn list_ports(&self, auth: &AuthContext) -> Result<Vec<PortRecord>, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ListPorts")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::collection(
+                ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::Unauthorized);
+        }
+        self.list_ports_for_project(auth.effective_scope().id().as_str())
+            .await
+    }
+
+    pub async fn list_ports_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<PortRecord>, NetworkError> {
         self.inner
             .repository
             .list_ports(project_id)
@@ -3219,7 +3466,29 @@ impl NetworkService {
             .map_err(map_store_error)
     }
 
-    pub async fn get_port(&self, project_id: &str, id: Uuid) -> Result<PortRecord, NetworkError> {
+    pub async fn get_port(&self, auth: &AuthContext, id: Uuid) -> Result<PortRecord, NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "ReadPort")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.get_port_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn get_port_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<PortRecord, NetworkError> {
         self.inner
             .repository
             .get_port(project_id, &id)
@@ -3228,7 +3497,29 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
-    pub async fn delete_port(&self, project_id: &str, id: Uuid) -> Result<(), NetworkError> {
+    pub async fn delete_port(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let req = AuthorizationRequest {
+            auth_context: auth,
+            action: ActionId::new("network", "DeletePort")
+                .map_err(|_| NetworkError::InvalidRequest)?,
+            resource_target: ResourceTarget::instance(
+                ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
+                ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        };
+        if !self.authorizer.authorize(&req).is_allowed() {
+            return Err(NetworkError::NotFound);
+        }
+        self.delete_port_for_project(auth.effective_scope().id().as_str(), id)
+            .await
+    }
+
+    pub async fn delete_port_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
         let _guard = self.lock().await;
         self.inner
             .repository
@@ -3549,6 +3840,27 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 mod tests {
     use super::*;
 
+    fn auth(project_id: &str) -> AuthContext {
+        AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("test-user"),
+                "test-user",
+                Some("default".to_string()),
+            )),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked(project_id),
+                Some(project_id.to_string()),
+                Some("default".to_string()),
+            ),
+            vec!["admin".to_string()],
+            1000,
+            5000,
+            uuid::Uuid::now_v7().to_string(),
+            uuid::Uuid::now_v7().to_string(),
+            None,
+        )
+    }
+
     fn root(label: &str) -> PathBuf {
         PathBuf::from(format!("/tmp/o3k-network-{label}-{}", std::process::id()))
     }
@@ -3563,11 +3875,11 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
-            .create_network("project-a", "flat".to_owned())
+            .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
         let subnet = service
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "lab".to_owned(),
                 "192.0.2.0/29".to_owned(),
@@ -3577,10 +3889,10 @@ mod tests {
             )
             .await?;
         let first = service
-            .create_port("project-a", network.id, "one".to_owned())
+            .create_port(&auth("project-a"), network.id, "one".to_owned())
             .await?;
         let second = service
-            .create_port("project-a", network.id, "two".to_owned())
+            .create_port(&auth("project-a"), network.id, "two".to_owned())
             .await?;
         assert_ne!(first.fixed_ip, second.fixed_ip);
         assert_ne!(first.mac_address, second.mac_address);
@@ -3591,10 +3903,13 @@ mod tests {
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
-        assert_eq!(reopened.get_port("project-a", first.id).await?, first);
-        reopened.delete_port("project-a", first.id).await?;
+        assert_eq!(
+            reopened.get_port(&auth("project-a"), first.id).await?,
+            first
+        );
+        reopened.delete_port(&auth("project-a"), first.id).await?;
         let replacement = reopened
-            .create_port("project-a", network.id, "replacement".to_owned())
+            .create_port(&auth("project-a"), network.id, "replacement".to_owned())
             .await?;
         assert_eq!(replacement.fixed_ip, first.fixed_ip);
         assert!(!fs::read_dir(&path)?.flatten().any(|entry| {
@@ -3673,31 +3988,35 @@ mod tests {
         fs::write(path.join("metadata.json"), serde_json::to_vec(&legacy)?)?;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let service = NetworkService::open(&path, store.clone()).await?;
-        assert_eq!(service.list_networks("project-a").await?.len(), 1);
-        assert_eq!(service.list_subnets("project-a").await?.len(), 1);
-        assert_eq!(service.list_ports("project-a").await?.len(), 3);
-        let network = service.get_network("project-a", network_id).await?;
+        assert_eq!(service.list_networks(&auth("project-a")).await?.len(), 1);
+        assert_eq!(service.list_subnets(&auth("project-a")).await?.len(), 1);
+        assert_eq!(service.list_ports(&auth("project-a")).await?.len(), 3);
+        let network = service.get_network(&auth("project-a"), network_id).await?;
         assert_eq!(network.id, network_id);
-        let subnet = service.get_subnet("project-a", subnet_id).await?;
+        let subnet = service.get_subnet(&auth("project-a"), subnet_id).await?;
         assert_eq!(subnet.id, subnet_id);
-        let first = service.get_port("project-a", port_with_mac).await?;
+        let first = service.get_port(&auth("project-a"), port_with_mac).await?;
         assert_eq!(first.mac_address, "02:00:00:00:00:99");
         assert_eq!(first.subnet_id, Some(subnet_id));
-        let migrated_mac = service.get_port("project-a", port_without_mac).await?;
+        let migrated_mac = service
+            .get_port(&auth("project-a"), port_without_mac)
+            .await?;
         assert_eq!(
             migrated_mac.mac_address,
             deterministic_port_mac(port_without_mac)
         );
         assert_eq!(migrated_mac.subnet_id, Some(subnet_id));
-        let migrated_subnet = service.get_port("project-a", port_without_subnet).await?;
+        let migrated_subnet = service
+            .get_port(&auth("project-a"), port_without_subnet)
+            .await?;
         assert_eq!(migrated_subnet.subnet_id, Some(subnet_id));
         assert_eq!(migrated_subnet.mac_address, "02:00:00:00:00:98");
         assert!(!path.join("metadata.json").exists());
         assert!(path.join("metadata.json.imported").exists());
         let second = NetworkService::open(&path, store).await?;
-        assert_eq!(second.list_networks("project-a").await?.len(), 1);
-        assert_eq!(second.list_subnets("project-a").await?.len(), 1);
-        assert_eq!(second.list_ports("project-a").await?.len(), 3);
+        assert_eq!(second.list_networks(&auth("project-a")).await?.len(), 1);
+        assert_eq!(second.list_subnets(&auth("project-a")).await?.len(), 1);
+        assert_eq!(second.list_ports(&auth("project-a")).await?.len(), 3);
         drop(second);
         fs::remove_dir_all(path)?;
 
@@ -3762,10 +4081,12 @@ mod tests {
         fs::create_dir_all(&path)?;
         let setup_store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let setup = NetworkService::open(&path, setup_store.clone()).await?;
-        let network = setup.create_network("project-a", "flat".to_owned()).await?;
+        let network = setup
+            .create_network(&auth("project-a"), "flat".to_owned())
+            .await?;
         let subnet = setup
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "lab".to_owned(),
                 "192.0.2.0/28".to_owned(),
@@ -3792,7 +4113,7 @@ mod tests {
             let network_id = network.id;
             handles.push(tokio::spawn(async move {
                 service
-                    .create_port("project-a", network_id, format!("port-{index}"))
+                    .create_port(&auth("project-a"), network_id, format!("port-{index}"))
                     .await
             }));
         }
@@ -3831,10 +4152,12 @@ mod tests {
         let store_b = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
         let service_a = NetworkService::open(&path, store_a).await?;
         let service_b = NetworkService::open(&path, store_b).await?;
+        let auth_a = auth("project-a");
+        let auth_b = auth("project-a");
         // Two writers create a network with the same name: exactly one wins.
         let (first, second) = tokio::join!(
-            service_a.create_network("project-a", "flat".to_owned()),
-            service_b.create_network("project-a", "flat".to_owned()),
+            service_a.create_network(&auth_a, "flat".to_owned()),
+            service_b.create_network(&auth_b, "flat".to_owned()),
         );
         assert_eq!([&first, &second].iter().filter(|r| r.is_ok()).count(), 1);
         assert_eq!(
@@ -3851,7 +4174,7 @@ mod tests {
         // Same cidr on the same network: exactly one subnet survives.
         let (subnet_first, subnet_second) = tokio::join!(
             service_a.create_subnet(
-                "project-a",
+                &auth_a,
                 network_id,
                 "lab".to_owned(),
                 "192.0.2.0/27".to_owned(),
@@ -3860,7 +4183,7 @@ mod tests {
                 None,
             ),
             service_b.create_subnet(
-                "project-a",
+                &auth_b,
                 network_id,
                 "lab".to_owned(),
                 "192.0.2.0/27".to_owned(),
@@ -3895,7 +4218,7 @@ mod tests {
             };
             handles.push(tokio::spawn(async move {
                 service
-                    .create_port("project-a", network_id, format!("port-{index}"))
+                    .create_port(&auth("project-a"), network_id, format!("port-{index}"))
                     .await
             }));
         }
@@ -3919,8 +4242,8 @@ mod tests {
         assert_eq!(ports.len(), macs.len());
         // Concurrent deletion of one port: exactly one writer wins.
         let (delete_first, delete_second) = tokio::join!(
-            service_a.delete_port("project-a", ports[0].id),
-            service_b.delete_port("project-a", ports[0].id),
+            service_a.delete_port(&auth_a, ports[0].id),
+            service_b.delete_port(&auth_b, ports[0].id),
         );
         assert_eq!(
             [&delete_first, &delete_second]
@@ -3970,11 +4293,11 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
-            .create_network("project-a", "flat".to_owned())
+            .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
         let _subnet = service
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "lab".to_owned(),
                 "192.0.2.0/29".to_owned(),
@@ -3984,7 +4307,7 @@ mod tests {
             )
             .await?;
         let port = service
-            .create_port("project-a", network.id, "one".to_owned())
+            .create_port(&auth("project-a"), network.id, "one".to_owned())
             .await?;
         let intended = service
             .record_binding_intent("project-a", port.id, "compute-1")
@@ -4050,7 +4373,7 @@ mod tests {
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
-        let restored = reopened.get_port("project-a", port.id).await?;
+        let restored = reopened.get_port(&auth("project-a"), port.id).await?;
         assert_eq!(restored.binding_host.as_deref(), Some("compute-1"));
         assert_eq!(restored.binding_state.as_deref(), Some("bound"));
         drop(reopened);
@@ -4071,11 +4394,11 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
-            .create_network("project-a", "flat".to_owned())
+            .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
         let subnet = service
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "lab".to_owned(),
                 "192.0.2.0/29".to_owned(),
@@ -4085,11 +4408,11 @@ mod tests {
             )
             .await?;
         let port = service
-            .create_port("project-a", network.id, "one".to_owned())
+            .create_port(&auth("project-a"), network.id, "one".to_owned())
             .await?;
-        service.delete_port("project-a", port.id).await?;
+        service.delete_port(&auth("project-a"), port.id).await?;
         assert!(matches!(
-            service.get_port("project-a", port.id).await,
+            service.get_port(&auth("project-a"), port.id).await,
             Err(NetworkError::NotFound)
         ));
         drop(service);
@@ -4098,15 +4421,21 @@ mod tests {
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
         let replacement = reopened
-            .create_port("project-a", network.id, "replacement".to_owned())
+            .create_port(&auth("project-a"), network.id, "replacement".to_owned())
             .await?;
         assert_eq!(replacement.fixed_ip, port.fixed_ip);
         assert_ne!(replacement.mac_address, port.mac_address);
-        reopened.delete_port("project-a", replacement.id).await?;
-        reopened.delete_subnet("project-a", subnet.id).await?;
-        reopened.delete_network("project-a", network.id).await?;
+        reopened
+            .delete_port(&auth("project-a"), replacement.id)
+            .await?;
+        reopened
+            .delete_subnet(&auth("project-a"), subnet.id)
+            .await?;
+        reopened
+            .delete_network(&auth("project-a"), network.id)
+            .await?;
         assert!(matches!(
-            reopened.get_network("project-a", network.id).await,
+            reopened.get_network(&auth("project-a"), network.id).await,
             Err(NetworkError::NotFound)
         ));
         drop(reopened);
@@ -4128,11 +4457,11 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let service = NetworkService::open(&path, store.clone()).await?;
         let network = service
-            .create_network("project-a", "flat".to_owned())
+            .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
         let _subnet = service
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "lab".to_owned(),
                 "192.0.2.0/29".to_owned(),
@@ -4142,7 +4471,7 @@ mod tests {
             )
             .await?;
         let port = service
-            .create_port("project-a", network.id, "one".to_owned())
+            .create_port(&auth("project-a"), network.id, "one".to_owned())
             .await?;
         // Without a recorded intent the projection is rejected.
         assert!(matches!(
@@ -4199,7 +4528,7 @@ mod tests {
         let reopened_store =
             Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
         let reopened = NetworkService::open(&path, reopened_store.clone()).await?;
-        let restored = reopened.get_port("project-a", port.id).await?;
+        let restored = reopened.get_port(&auth("project-a"), port.id).await?;
         assert_eq!(restored.binding_host, None);
         assert_eq!(restored.binding_state, None);
         drop(reopened);
@@ -4219,12 +4548,12 @@ mod tests {
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let service = NetworkService::open(&path, store).await?;
         let network = service
-            .create_network("project-a", "flat".to_owned())
+            .create_network(&auth("project-a"), "flat".to_owned())
             .await?;
         assert!(matches!(
             service
                 .create_subnet(
-                    "project-a",
+                    &auth("project-a"),
                     network.id,
                     "bad".to_owned(),
                     "192.0.2.1/31".to_owned(),
@@ -4237,7 +4566,7 @@ mod tests {
         ));
         let _ = service
             .create_subnet(
-                "project-a",
+                &auth("project-a"),
                 network.id,
                 "tiny".to_owned(),
                 "192.0.2.0/30".to_owned(),
@@ -4247,18 +4576,18 @@ mod tests {
             )
             .await?;
         let _ = service
-            .create_port("project-a", network.id, "one".to_owned())
+            .create_port(&auth("project-a"), network.id, "one".to_owned())
             .await?;
         assert!(matches!(
             service
-                .create_port("project-a", network.id, "two".to_owned())
+                .create_port(&auth("project-a"), network.id, "two".to_owned())
                 .await,
             Err(NetworkError::PoolExhausted)
         ));
         assert!(matches!(
             service
                 .create_subnet(
-                    "project-a",
+                    &auth("project-a"),
                     network.id,
                     "gateway-overlap".to_owned(),
                     "198.51.100.0/29".to_owned(),
@@ -4270,7 +4599,7 @@ mod tests {
             Err(NetworkError::InvalidRequest)
         ));
         assert!(matches!(
-            service.get_network("project-b", network.id).await,
+            service.get_network(&auth("project-b"), network.id).await,
             Err(NetworkError::NotFound)
         ));
         fs::remove_dir_all(path)?;

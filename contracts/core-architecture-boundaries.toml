@@ -31,6 +31,7 @@ non_application_crates = [
   "o3k-console",
   "o3k-dhcp",
   "o3k-domain",
+  "o3k-kernel",
   "o3k-libvirt",
   "o3k-provider",
   "o3k-provider-contract",
@@ -50,6 +51,29 @@ forbidden_source_markers = [
   "o3k_store",
   "o3k_provider",
   "o3k_provider_contract",
+  "o3k_compute_agent",
+  "o3k_libvirt",
+  "o3k_cellhv",
+  "o3k_cinder",
+]
+
+[kernel]
+crate = "o3k-kernel"
+allowed_dependencies = ["serde", "thiserror", "uuid"]
+forbidden_source_markers = [
+  "axum::",
+  "sqlx::",
+  "tonic::",
+  "prost::",
+  "hyper::",
+  "o3k_api",
+  "o3k_identity",
+  "o3k_store",
+  "o3k_provider",
+  "o3k_provider_contract",
+  "o3k_compute",
+  "o3k_network",
+  "o3k_image",
   "o3k_compute_agent",
   "o3k_libvirt",
   "o3k_cellhv",

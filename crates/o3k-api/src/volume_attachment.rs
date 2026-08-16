@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    compute::{compute_error, project_token, requested_compute_289},
+    compute::{compute_error, project_auth_context, requested_compute_289},
     error::keystone_error,
 };
 
@@ -28,9 +28,15 @@ pub(crate) struct VolumeAttachmentRequest {
 pub(crate) struct VolumeAttachmentRequestPayload {
     #[serde(rename = "volumeId", alias = "volume_id")]
     volume_id: String,
+    #[serde(default)]
     device: Option<String>,
+    #[serde(default)]
     tag: Option<String>,
-    #[serde(default, alias = "delete_on_termination")]
+    #[serde(
+        rename = "delete_on_termination",
+        alias = "deleteOnTermination",
+        default
+    )]
     delete_on_termination: bool,
 }
 
@@ -100,9 +106,10 @@ pub(crate) async fn attach_volume(
     Path((project_id, server_id)): Path<(String, String)>,
     Json(request): Json<VolumeAttachmentRequest>,
 ) -> impl IntoResponse {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -119,8 +126,8 @@ pub(crate) async fn attach_volume(
     };
 
     match compute
-        .attach_volume(
-            &project_id,
+        .attach_volume_for_auth(
+            &auth,
             ServerId::from_uuid(server_uuid),
             volume_uuid,
             request.volume_attachment.device,
@@ -145,9 +152,10 @@ pub(crate) async fn list_volume_attachments(
     headers: axum::http::HeaderMap,
     Path((project_id, server_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -161,7 +169,7 @@ pub(crate) async fn list_volume_attachments(
     };
 
     match compute
-        .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
+        .list_volume_attachments_for_auth(&auth, ServerId::from_uuid(server_uuid))
         .await
     {
         Ok(records) => {
@@ -187,9 +195,10 @@ pub(crate) async fn show_volume_attachment(
     headers: axum::http::HeaderMap,
     Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -204,7 +213,7 @@ pub(crate) async fn show_volume_attachment(
     let at_289 = requested_compute_289(&headers);
 
     if let Ok(records) = compute
-        .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
+        .list_volume_attachments_for_auth(&auth, ServerId::from_uuid(server_uuid))
         .await
     {
         for record in records {
@@ -232,9 +241,10 @@ pub(crate) async fn delete_volume_attachment(
     headers: axum::http::HeaderMap,
     Path((project_id, server_id, attachment_id)): Path<(String, String, String)>,
 ) -> impl IntoResponse {
-    if let Err(response) = project_token(&state, &headers, &project_id) {
-        return response;
-    }
+    let auth = match project_auth_context(&state, &headers, &project_id) {
+        Ok(auth) => auth,
+        Err(response) => return response,
+    };
     let Ok(server_uuid) = Uuid::parse_str(&server_id) else {
         return compute_error(ComputeError::NotFound).into_response();
     };
@@ -249,7 +259,7 @@ pub(crate) async fn delete_volume_attachment(
 
     let target_uuid = if let Ok(uuid) = Uuid::parse_str(&attachment_id) {
         if compute
-            .get_volume_attachment(&project_id, ServerId::from_uuid(server_uuid), uuid)
+            .get_volume_attachment_for_auth(&auth, ServerId::from_uuid(server_uuid), uuid)
             .await
             .is_ok()
         {
@@ -265,7 +275,7 @@ pub(crate) async fn delete_volume_attachment(
         Some(uuid) => uuid,
         None => {
             if let Ok(records) = compute
-                .list_volume_attachments(&project_id, ServerId::from_uuid(server_uuid))
+                .list_volume_attachments_for_auth(&auth, ServerId::from_uuid(server_uuid))
                 .await
             {
                 let found = records.into_iter().find(|r| {
@@ -283,7 +293,7 @@ pub(crate) async fn delete_volume_attachment(
     };
 
     match compute
-        .detach_volume(&project_id, ServerId::from_uuid(server_uuid), target_uuid)
+        .detach_volume_for_auth(&auth, ServerId::from_uuid(server_uuid), target_uuid)
         .await
     {
         Ok(()) => StatusCode::OK.into_response(),

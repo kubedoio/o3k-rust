@@ -1,0 +1,346 @@
+# contracts/cloud-kernel-actions.yaml
+# Machine-readable O3K Cloud Kernel authorization inventory (P4 milestone, SPEC-0020, ADR-0166).
+schema_version: 1
+status: "accepted"
+
+actions:
+  # Identity
+  - action_id: "identity:IssueToken"
+    service_namespace: "identity"
+    resource_type: "token"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: true
+
+  - action_id: "identity:ValidateToken"
+    service_namespace: "identity"
+    resource_type: "token"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: true
+
+  - action_id: "identity:RevokeToken"
+    service_namespace: "identity"
+    resource_type: "token"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: true
+
+  # Image
+  - action_id: "image:ListImages"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "image:CreateImage"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "image:ReadImage"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "image:DeleteImage"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "image:UploadImage"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "image:DownloadImage"
+    service_namespace: "image"
+    resource_type: "image"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  # Network
+  - action_id: "network:ListNetworks"
+    service_namespace: "network"
+    resource_type: "network"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateNetwork"
+    service_namespace: "network"
+    resource_type: "network"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadNetwork"
+    service_namespace: "network"
+    resource_type: "network"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteNetwork"
+    service_namespace: "network"
+    resource_type: "network"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListSubnets"
+    service_namespace: "network"
+    resource_type: "subnet"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreateSubnet"
+    service_namespace: "network"
+    resource_type: "subnet"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadSubnet"
+    service_namespace: "network"
+    resource_type: "subnet"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeleteSubnet"
+    service_namespace: "network"
+    resource_type: "subnet"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListPorts"
+    service_namespace: "network"
+    resource_type: "port"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:CreatePort"
+    service_namespace: "network"
+    resource_type: "port"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ReadPort"
+    service_namespace: "network"
+    resource_type: "port"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:DeletePort"
+    service_namespace: "network"
+    resource_type: "port"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "network:ListExtensions"
+    service_namespace: "network"
+    resource_type: "extension"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: false
+    public_discovery: true
+
+  # Compute
+  - action_id: "compute:ListFlavors"
+    service_namespace: "compute"
+    resource_type: "flavor"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:CreateFlavor"
+    service_namespace: "compute"
+    resource_type: "flavor"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ReadFlavor"
+    service_namespace: "compute"
+    resource_type: "flavor"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:DeleteFlavor"
+    service_namespace: "compute"
+    resource_type: "flavor"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ListKeypairs"
+    service_namespace: "compute"
+    resource_type: "keypair"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ImportKeypair"
+    service_namespace: "compute"
+    resource_type: "keypair"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ReadKeypair"
+    service_namespace: "compute"
+    resource_type: "keypair"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:DeleteKeypair"
+    service_namespace: "compute"
+    resource_type: "keypair"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ListServers"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:CreateServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ReadServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:DeleteServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:StopServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:StartServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:RebootServer"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "compute:ReadConsole"
+    service_namespace: "compute"
+    resource_type: "server"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  # Volume
+  - action_id: "volume:ListVolumeAttachments"
+    service_namespace: "volume"
+    resource_type: "volume_attachment"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "volume:AttachVolume"
+    service_namespace: "volume"
+    resource_type: "volume_attachment"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "volume:ReadVolumeAttachment"
+    service_namespace: "volume"
+    resource_type: "volume_attachment"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false
+
+  - action_id: "volume:DetachVolume"
+    service_namespace: "volume"
+    resource_type: "volume_attachment"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: false

@@ -202,6 +202,33 @@ def check(root: Path) -> list[str]:
                             f"{path.relative_to(root)} contains forbidden domain marker {marker!r}",
                         )
 
+    kernel = contract.get("kernel", {})
+    kernel_crate = kernel.get("crate")
+    if kernel_crate:
+        allowed_kernel_dependencies = set(kernel.get("allowed_dependencies", []))
+        forbidden_kernel_markers = kernel.get("forbidden_source_markers", [])
+        try:
+            _, kernel_manifest = load_manifest(root, kernel_crate)
+        except FileNotFoundError as exc:
+            fail(errors, str(exc))
+        else:
+            actual_kernel_dependencies = dependency_names(kernel_manifest)
+            unexpected = sorted(actual_kernel_dependencies - allowed_kernel_dependencies)
+            if unexpected:
+                fail(
+                    errors,
+                    f"{kernel_crate} gained outward/unapproved dependencies: "
+                    + ", ".join(unexpected),
+                )
+            for path in rust_files(root, kernel_crate):
+                text = path.read_text(encoding="utf-8")
+                for marker in forbidden_kernel_markers:
+                    if marker in text:
+                        fail(
+                            errors,
+                            f"{path.relative_to(root)} contains forbidden kernel marker {marker!r}",
+                        )
+
     application = contract.get("application", {})
     hard_forbidden = set(application.get("hard_forbidden_dependencies", []))
     ratcheted_dependencies = set(application.get("ratcheted_adapter_dependencies", []))

@@ -1,18 +1,19 @@
-//! Shared token validation helpers used by the service protocol adapters.
+//! Shared token validation and kernel AuthContext conversion helpers.
 
 use std::time::SystemTime;
 
 use axum::http::StatusCode;
+use o3k_kernel::AuthContext;
 
 use crate::{AppState, error::keystone_error};
 
 // Axum handlers consume the concrete response directly; boxing this error would
 // add conversions across every OpenStack adapter without changing behavior.
 #[allow(clippy::result_large_err)]
-pub(crate) fn require_token(
+pub(crate) fn require_auth_context(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<o3k_identity::VerifiedToken, axum::response::Response> {
+) -> Result<AuthContext, axum::response::Response> {
     let Some(service) = &state.identity else {
         return Err(keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -31,7 +32,7 @@ pub(crate) fn require_token(
                 "The request has not been authenticated.",
             )
         })?;
-    service.verify(token, SystemTime::now()).map_err(|_| {
+    service.auth_context(token, SystemTime::now()).map_err(|_| {
         keystone_error(
             StatusCode::UNAUTHORIZED,
             "Unauthorized",

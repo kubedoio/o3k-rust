@@ -11,7 +11,7 @@ use axum::{
 };
 use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
 
-use crate::{AppState, auth::require_token, error::keystone_error};
+use crate::{AppState, auth::require_auth_context, error::keystone_error};
 
 #[derive(serde::Deserialize)]
 pub(crate) struct NetworkRequestBody {
@@ -156,6 +156,11 @@ pub(crate) fn port_response(value: PortRecord) -> PortResponse {
 
 pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
     match error {
+        NetworkError::Unauthorized => keystone_error(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized",
+            "The request has not been authenticated.",
+        ),
         NetworkError::NotFound => keystone_error(
             StatusCode::NOT_FOUND,
             "Not Found",
@@ -196,7 +201,7 @@ pub(crate) async fn list_extensions(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(response) = require_token(&state, &headers) {
+    if let Err(response) = require_auth_context(&state, &headers) {
         return response;
     }
     if let Err(response) = network_service(&state) {
@@ -210,7 +215,7 @@ pub(crate) async fn create_network(
     headers: axum::http::HeaderMap,
     request: Result<Json<NetworkRequestBody>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -225,10 +230,7 @@ pub(crate) async fn create_network(
             "invalid network request",
         );
     };
-    match service
-        .create_network(&token.project_id, body.network.name)
-        .await
-    {
+    match service.create_network(&auth, body.network.name).await {
         Ok(value) => (
             StatusCode::CREATED,
             Json(NetworkEnvelope {
@@ -244,7 +246,7 @@ pub(crate) async fn list_networks(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -252,7 +254,7 @@ pub(crate) async fn list_networks(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_networks(&token.project_id).await {
+    match service.list_networks(&auth).await {
         Ok(values) => Json(NetworkList {
             networks: values.into_iter().map(network_response).collect(),
         })
@@ -266,7 +268,7 @@ pub(crate) async fn show_network(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -274,7 +276,7 @@ pub(crate) async fn show_network(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_network(&token.project_id, id).await {
+    match service.get_network(&auth, id).await {
         Ok(value) => Json(NetworkEnvelope {
             network: network_response(value),
         })
@@ -288,7 +290,7 @@ pub(crate) async fn delete_network(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -296,7 +298,7 @@ pub(crate) async fn delete_network(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_network(&token.project_id, id).await {
+    match service.delete_network(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
@@ -307,7 +309,7 @@ pub(crate) async fn create_subnet(
     headers: axum::http::HeaderMap,
     request: Result<Json<SubnetRequestBody>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -341,7 +343,7 @@ pub(crate) async fn create_subnet(
         .and_then(|values| values.first());
     match service
         .create_subnet(
-            &token.project_id,
+            &auth,
             body.subnet.network_id,
             body.subnet.name,
             body.subnet.cidr,
@@ -366,7 +368,7 @@ pub(crate) async fn list_subnets(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -374,7 +376,7 @@ pub(crate) async fn list_subnets(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_subnets(&token.project_id).await {
+    match service.list_subnets(&auth).await {
         Ok(values) => Json(SubnetList {
             subnets: values.into_iter().map(subnet_response).collect(),
         })
@@ -388,7 +390,7 @@ pub(crate) async fn show_subnet(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -396,7 +398,7 @@ pub(crate) async fn show_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_subnet(&token.project_id, id).await {
+    match service.get_subnet(&auth, id).await {
         Ok(value) => Json(SubnetEnvelope {
             subnet: subnet_response(value),
         })
@@ -410,7 +412,7 @@ pub(crate) async fn delete_subnet(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -418,7 +420,7 @@ pub(crate) async fn delete_subnet(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_subnet(&token.project_id, id).await {
+    match service.delete_subnet(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
@@ -429,7 +431,7 @@ pub(crate) async fn create_port(
     headers: axum::http::HeaderMap,
     request: Result<Json<PortRequestBody>, JsonRejection>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -445,7 +447,7 @@ pub(crate) async fn create_port(
         );
     };
     match service
-        .create_port(&token.project_id, body.port.network_id, body.port.name)
+        .create_port(&auth, body.port.network_id, body.port.name)
         .await
     {
         Ok(value) => (
@@ -463,7 +465,7 @@ pub(crate) async fn list_ports(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -471,7 +473,7 @@ pub(crate) async fn list_ports(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.list_ports(&token.project_id).await {
+    match service.list_ports(&auth).await {
         Ok(values) => Json(PortList {
             ports: values.into_iter().map(port_response).collect(),
         })
@@ -485,7 +487,7 @@ pub(crate) async fn show_port(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -493,7 +495,7 @@ pub(crate) async fn show_port(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.get_port(&token.project_id, id).await {
+    match service.get_port(&auth, id).await {
         Ok(value) => Json(PortEnvelope {
             port: port_response(value),
         })
@@ -507,7 +509,7 @@ pub(crate) async fn delete_port(
     headers: axum::http::HeaderMap,
     Path(id): Path<uuid::Uuid>,
 ) -> axum::response::Response {
-    let token = match require_token(&state, &headers) {
+    let auth = match require_auth_context(&state, &headers) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -515,7 +517,7 @@ pub(crate) async fn delete_port(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match service.delete_port(&token.project_id, id).await {
+    match service.delete_port(&auth, id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => network_error(error),
     }
