@@ -35,7 +35,7 @@ impl PostgresStore {
         let options = PgConnectOptions::from_str(database_url).map_err(StoreError::Database)?;
         let pool = PgPoolOptions::new()
             .max_connections(50)
-            .acquire_timeout(Duration::from_secs(30))
+            .acquire_timeout(Duration::from_secs(5))
             .connect_with(options)
             .await
             .map_err(StoreError::Database)?;
