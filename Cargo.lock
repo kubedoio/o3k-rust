@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "o3k"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "serde",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-api"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "axum",
  "http",
@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-cellhv"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-provider",
@@ -1012,7 +1012,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-cinder"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-cinder",
@@ -1057,7 +1057,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute-agent"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1085,7 +1085,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-compute-bin"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -1106,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-config"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-config-drive"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1126,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-console"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "thiserror",
  "uuid",
@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-dhcp"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1144,7 +1144,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-domain"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-identity"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "base64",
  "hmac",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-image"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "o3k-store",
  "serde",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-libvirt"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-provider",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-network"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "o3k-store",
  "serde",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-placement"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-store",
@@ -1222,7 +1222,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-provider"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-domain",
@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-provider-contract"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "o3k-provider",
  "prost",
@@ -1246,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-reconciler"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-domain",
@@ -1261,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-scheduler"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "o3k-placement",
  "o3k-store",
@@ -1272,7 +1272,7 @@ dependencies = [
 
 [[package]]
 name = "o3k-store"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "o3kd"
-version = "0.3.0-alpha.1"
+version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "axum",
