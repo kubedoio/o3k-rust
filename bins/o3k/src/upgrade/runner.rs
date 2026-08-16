@@ -1238,10 +1238,14 @@ impl UpgradeIo for SystemUpgradeIo {
                     .to_owned(),
             );
         }
-        let bundle_installer = Self::sha256_file(&bundle_dir.join("packaging/install.sh"))?;
+        // The published install.sh asset is exported byte-for-byte from
+        // packaging/get-o3k.sh (make-release.sh drift-gates it by cmp), so
+        // the bundle comparison must target that file — the bundle's
+        // packaging/install.sh is the state installer, a different script.
+        let bundle_installer = Self::sha256_file(&bundle_dir.join("packaging/get-o3k.sh"))?;
         if !bundle_installer.eq_ignore_ascii_case(installer_sha256) {
             return cleanup(
-                "the bundle's install.sh does not match the published install.sh".to_owned(),
+                "the bundle's get-o3k.sh does not match the published install.sh".to_owned(),
             );
         }
         // upgrade_from fence (profile + min_version live in the target
