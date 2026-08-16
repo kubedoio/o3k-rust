@@ -480,8 +480,8 @@ phase_identity_after() {
   python3 - "$ID_FILE_AFTER" "$TARGET" "$UPGRADE_BACKUP_ID" "$srv" "$ip" "$dname" "$duuid" \
     "$alloc" "$EVID/upgrade-binaries-after.json" "$EVID/upgrade-fingerprints-after.json" <<'PY'
 import json, sys, time
-path, version, backup_id, server, fixed_ip, domain, domain_uuid, allocations = sys.argv[1:8]
-binaries_path, fingerprints_path = sys.argv[8:10]
+path, version, backup_id, server, fixed_ip, domain, domain_uuid, allocations = sys.argv[1:9]
+binaries_path, fingerprints_path = sys.argv[9:11]
 document = {
     "captured_at": int(time.time()),
     "installed_version": version,
