@@ -127,7 +127,7 @@ fn doctor_json_emits_contract_json_without_an_install() {
             return;
         }
     };
-    assert_eq!(checks.len(), 31, "doctor must run exactly 31 checks");
+    assert_eq!(checks.len(), 34, "doctor must run exactly 34 checks");
 }
 
 /// `o3k doctor` (human output) exits 0 or 1 and ends with the OVERALL line.

@@ -1,4 +1,4 @@
-//! The 31 doctor checks, grouped by output category. Each check is a
+//! The 34 doctor checks, grouped by output category. Each check is a
 //! `pub async fn check(ctx: &Context) -> Check`; internal errors are always
 //! converted to a sanitized FAIL, never a panic.
 

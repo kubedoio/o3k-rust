@@ -14,7 +14,10 @@
 #   dist/o3k-<version>-linux-x86_64.tar.gz.sha256
 #                                              packaging/make-release-archive.sh
 #   plus o3kd, o3k-compute, SHA256SUMS, sbom.spdx.json, and manifest.json
-#   from the bundle and the baseline build.
+#   from the bundle and the baseline build. The manifest declares
+#   schema_version (max migration prefix from crates/o3k-store/migrations/)
+#   and upgrade_from.min_version (from O3K_UPGRADE_FROM_MIN_VERSION; the
+#   release operator must name the previous published release explicitly).
 set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:-$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -1)}"
@@ -29,6 +32,43 @@ if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   echo "release source tree must be clean before packaging" >&2
   exit 2
 fi
+# schema_version: the maximum numeric migration prefix under
+# crates/o3k-store/migrations/ at build time (e.g. 0017_placement.sql -> 17).
+# This is the single migration authority: the release declares the schema
+# version its embedded migrator converges to, so the upgrade engine can verify
+# a post-start migration without embedding any migration SQL. Fail the build
+# when the directory is empty or any file name lacks a numeric prefix.
+MIGRATIONS_DIR="$ROOT_DIR/crates/o3k-store/migrations"
+SCHEMA_VERSION=""
+MIGRATION_COUNT=0
+for migration in "$MIGRATIONS_DIR"/*.sql; do
+  [[ -f "$migration" ]] || continue
+  MIGRATION_COUNT=$((MIGRATION_COUNT + 1))
+  base="${migration##*/}"
+  case "$base" in
+    [0-9]*_*.sql) prefix="${base%%_*}" ;;
+    *) echo "release migration file name has no numeric prefix: $base" >&2; exit 1 ;;
+  esac
+  case "$prefix" in
+    ''|*[!0-9]*) echo "release migration prefix is not numeric: $base" >&2; exit 1 ;;
+  esac
+  if [[ -z "$SCHEMA_VERSION" || "$((10#$prefix))" -gt "$SCHEMA_VERSION" ]]; then
+    SCHEMA_VERSION="$((10#$prefix))"
+  fi
+done
+[[ "$MIGRATION_COUNT" -gt 0 ]] || { echo "release migration directory is empty: $MIGRATIONS_DIR" >&2; exit 1; }
+# upgrade_from.min_version: the oldest installed release this build supports
+# upgrading from. It is deliberately NOT hardcoded — the release operator must
+# name the previous published release explicitly (see docs/RELEASE.md).
+UPGRADE_FROM_MIN_VERSION="${O3K_UPGRADE_FROM_MIN_VERSION:-}"
+if [[ -z "$UPGRADE_FROM_MIN_VERSION" ]]; then
+  echo "O3K_UPGRADE_FROM_MIN_VERSION is unset: set it to the previous published release version" >&2
+  echo "  e.g. O3K_UPGRADE_FROM_MIN_VERSION=v0.3.0-alpha.1 packaging/make-release.sh 0.4.0-alpha.1 libvirt" >&2
+  exit 1
+fi
+UPGRADE_FROM_VERSION_NO_V="${UPGRADE_FROM_MIN_VERSION#v}"
+[[ "$UPGRADE_FROM_VERSION_NO_V" =~ $VERSION_RE ]] \
+  || { echo "upgrade_from.min_version must be a published release version: $UPGRADE_FROM_MIN_VERSION" >&2; exit 2; }
 DIST_ROOT="${O3K_RELEASE_DIST_DIR:-$ROOT_DIR/dist}"
 if [[ -L "$DIST_ROOT" || ( -e "$DIST_ROOT" && ! -d "$DIST_ROOT" ) ]]; then
   echo "release dist root must be a real directory, not a symlink or special file" >&2
@@ -99,9 +139,11 @@ INSTALLER_SHA256="$(sha256sum "$INSTALL_SH" | awk '{print $1}')"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
 WORKFLOW="${GITHUB_WORKFLOW:-local}"
 # The manifest is written BEFORE SHA256SUMS so the final bundle verification
-# covers the installer record too.
-printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh"}\n' \
-  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" >"$OUT_DIR/manifest.json"
+# covers the installer record too. schema_version is the max migration prefix
+# computed above; upgrade_from.min_version is the operator-declared fence.
+printf '{"version":"%s","profile":"%s","source_commit":"%s","workflow":"%s","installer_sha256":"%s","installer_asset":"install.sh","schema_version":"%s","upgrade_from":{"min_version":"%s"}}\n' \
+  "$VERSION" "$PROFILE" "$COMMIT" "$WORKFLOW" "$INSTALLER_SHA256" \
+  "$SCHEMA_VERSION" "$UPGRADE_FROM_MIN_VERSION" >"$OUT_DIR/manifest.json"
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
 bash "$ROOT_DIR/packaging/verify-release-bundle.sh" "$OUT_DIR"
 echo "release prepared at $OUT_DIR"

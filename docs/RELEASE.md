@@ -49,6 +49,37 @@ bundle. `packaging/make-release.sh` runs this verification after creating the
 manifest and checksum file; it does not authenticate the bundle or replace
 artifact signing.
 
+## Release manifest
+
+`make-release.sh` writes `dist/o3k-<version>/manifest.json` with these fields:
+
+- `version` — the release version (no `v` prefix);
+- `profile` — `fake` or `libvirt`;
+- `source_commit`, `workflow` — build provenance;
+- `installer_sha256`, `installer_asset` — the `install.sh` release asset
+  record (see below);
+- `schema_version` — the maximum numeric migration prefix under
+  `crates/o3k-store/migrations/` at build time (e.g. `0017_placement.sql` →
+  `"17"`). Computed by `make-release.sh`; a build fails closed when the
+  migration directory is empty or any file name lacks a numeric prefix. This
+  is the single migration authority: the upgrade engine compares the
+  installed schema version against this value without embedding any
+  migration SQL;
+- `upgrade_from.min_version` — the oldest installed release this build
+  supports upgrading from. Taken verbatim from the `O3K_UPGRADE_FROM_MIN_VERSION`
+  environment variable (with or without a leading `v`); it is deliberately
+  **not** hardcoded, so a release build fails with an explicit instruction
+  when the operator has not named the previous published release:
+
+  ```bash
+  O3K_UPGRADE_FROM_MIN_VERSION=v0.3.0-alpha.1 \
+    packaging/make-release.sh 0.4.0-alpha.1 libvirt
+  ```
+
+The fields are backward-compatible additions: `verify-release-bundle.sh`
+accepts bundles with or without them, and older bundle readers ignore unknown
+fields.
+
 ## install.sh release asset
 
 The one-line installer is a first-class GitHub Release asset named exactly

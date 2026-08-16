@@ -147,6 +147,17 @@ fi
 # assertions skip with an explicit message rather than fail spuriously.
 if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; then
   ASSET_DIST="$WORK_DIR/asset-dist"
+  # The upgrade_from fence is operator-declared: a build without
+  # O3K_UPGRADE_FROM_MIN_VERSION must fail closed before any packaging.
+  if O3K_RELEASE_DIST_DIR="$ASSET_DIST" O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
+      bash "$ROOT_DIR/packaging/make-release.sh" 0.0.1 fake \
+      2>"$WORK_DIR/no-upgrade-from.err"; then
+    echo "release builder accepted an unset O3K_UPGRADE_FROM_MIN_VERSION" >&2
+    exit 1
+  fi
+  grep -Fq 'O3K_UPGRADE_FROM_MIN_VERSION is unset' "$WORK_DIR/no-upgrade-from.err" \
+    || { echo "missing operator instruction on the unset upgrade_from fence" >&2; exit 1; }
+  O3K_UPGRADE_FROM_MIN_VERSION=0.0.1-prev \
   O3K_RELEASE_DIST_DIR="$ASSET_DIST" \
   O3K_RELEASE_BINARIES_DIR="$BUNDLE_DIR/bin" \
     bash "$ROOT_DIR/packaging/make-release.sh" 0.0-installerasset fake
@@ -155,15 +166,25 @@ if [[ -z "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all)" ]]; th
   cmp -s "$ROOT_DIR/packaging/get-o3k.sh" "$ASSET_DIST/install.sh" \
     || { echo "dist/install.sh drifted from packaging/get-o3k.sh" >&2; exit 1; }
   EXPECTED_INSTALLER_SHA256="$(sha256sum "$ROOT_DIR/packaging/get-o3k.sh" | awk '{print $1}')"
-  python3 - "$ASSET_DIST/o3k-0.0-installerasset/manifest.json" "$EXPECTED_INSTALLER_SHA256" <<'PY'
+  # The declared schema_version must equal the max migration prefix under
+  # crates/o3k-store/migrations/ (computed independently so a future
+  # migration does not silently break this assertion).
+  EXPECTED_SCHEMA_VERSION="$(ls "$ROOT_DIR/crates/o3k-store/migrations/"*.sql \
+    | sed 's|.*/||' | sed -n 's/^\([0-9][0-9]*\)_.*\.sql$/\1/p' \
+    | sort -n | tail -n1 | sed 's/^0*//')"
+  [[ -n "$EXPECTED_SCHEMA_VERSION" ]] || { echo "no migrations found" >&2; exit 1; }
+  python3 - "$ASSET_DIST/o3k-0.0-installerasset/manifest.json" \
+    "$EXPECTED_INSTALLER_SHA256" "$EXPECTED_SCHEMA_VERSION" <<'PY'
 import json
 import sys
 
 manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 assert manifest.get("installer_asset") == "install.sh", manifest
 assert manifest.get("installer_sha256") == sys.argv[2], manifest
+assert manifest.get("schema_version") == sys.argv[3], manifest
+assert manifest.get("upgrade_from", {}).get("min_version") == "0.0.1-prev", manifest
 PY
-  echo "install.sh release asset contract passed (byte-identity + manifest installer_sha256)"
+  echo "install.sh release asset contract passed (byte-identity + manifest installer_sha256 + schema_version + upgrade_from.min_version)"
 else
   echo "skipping install.sh asset build assertions: source tree is not clean"
 fi

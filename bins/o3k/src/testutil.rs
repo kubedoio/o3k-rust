@@ -121,6 +121,7 @@ impl FakeExec {
             "/usr/local/bin/o3k-compute".to_owned(),
             "/usr/local/share/o3k/o3kd.service".to_owned(),
             "/usr/local/share/o3k/o3k-compute.service".to_owned(),
+            "/var/lib/o3k/backups/backup-chain.json".to_owned(),
         ];
         fake.char_devices = vec!["/dev/kvm".to_owned()];
         fake.dirs = vec!["/var/lib/o3k".to_owned(), "/usr/local/share/o3k".to_owned()];
@@ -190,6 +191,18 @@ impl FakeExec {
                 Ok(
                     "{\"bridge\": {\"name\": \"o3k-br0\", \"uplink\": null, \"created_by_o3k\": true}, \
                      \"taps\": {\"o3ktap-00000001\": {\"interface\": \"o3ktap-00000001\", \"instance_id\": \"inst-1\", \"port_id\": \"port-1\", \"mac\": \"02:00:00:00:00:01\", \"bridge\": \"o3k-br0\", \"created_by_o3k\": true}}}"
+                        .to_owned(),
+                ),
+            ),
+            (
+                "/var/lib/o3k/backups/backup-chain.json".to_owned(),
+                Ok(
+                    "{\"backups\":[{\"backup_id\":\"o3k-upgrade-0.1.0-alpha.1-0.2.0-alpha.2-1712345678\",\
+                     \"source_version\":\"0.1.0-alpha.1\",\"target_version\":\"0.2.0-alpha.2\",\
+                     \"source_commit\":\"d6351864\",\"created_at\":\"2026-01-01T00:00:00Z\",\
+                     \"binary_sha256\":{\"o3kd\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\
+                     \"schema_version_before\":17,\"db_restore_required_on_rollback\":false,\
+                     \"kind\":\"backup\"}]}"
                         .to_owned(),
                 ),
             ),

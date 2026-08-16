@@ -4,11 +4,11 @@
 use crate::context::Context;
 use crate::output::{Check, OverallStatus, Report, now_utc_rfc3339};
 
-/// Runs the 31 checks serially in the fixed order. The timestamp is captured
+/// Runs the 34 checks serially in the fixed order. The timestamp is captured
 /// at the start of the run.
 pub async fn run_all(ctx: &Context) -> Report {
     let timestamp = now_utc_rfc3339();
-    let mut checks: Vec<Check> = Vec::with_capacity(31);
+    let mut checks: Vec<Check> = Vec::with_capacity(34);
     checks.push(crate::checks::host::check(ctx).await);
     checks.push(crate::checks::host::check_kvm_device(ctx).await);
     checks.push(crate::checks::host::check_disk_space(ctx).await);
@@ -40,6 +40,9 @@ pub async fn run_all(ctx: &Context) -> Report {
     checks.push(crate::checks::release::check_version(ctx).await);
     checks.push(crate::checks::release::check_ownership_manifest(ctx).await);
     checks.push(crate::checks::release::check_binary_hashes(ctx).await);
+    checks.push(crate::checks::release::check_binary_set_consistent(ctx).await);
+    checks.push(crate::checks::release::check_backup_available(ctx).await);
+    checks.push(crate::checks::release::check_upgrade_state(ctx).await);
     let overall_status = overall_status(&checks);
     Report {
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -115,7 +118,7 @@ mod tests {
         assert_eq!(report.version, env!("CARGO_PKG_VERSION"));
     }
 
-    /// The full healthy fixture must produce 31 PASS checks and a healthy
+    /// The full healthy fixture must produce 34 PASS checks and a healthy
     /// verdict (the exit-code 0 semantics).
     #[tokio::test]
     async fn healthy_run_produces_only_passes() {
@@ -127,7 +130,7 @@ mod tests {
             true,
         );
         let report = run_all(&ctx).await;
-        assert_eq!(report.checks.len(), 31);
+        assert_eq!(report.checks.len(), 34);
         assert_eq!(report.overall_status, OverallStatus::Healthy);
         for check in &report.checks {
             assert_eq!(
@@ -219,7 +222,7 @@ mod tests {
                 return;
             }
         };
-        assert_eq!(checks.len(), 31);
+        assert_eq!(checks.len(), 34);
         for check_value in checks {
             let Some(check) = require_object(check_value, "check") else {
                 return;

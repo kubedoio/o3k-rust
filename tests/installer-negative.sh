@@ -18,7 +18,16 @@
 #     interrupted bootstrap, TLS partial-set fail-closed, TLS complete-set
 #     skip-and-preserve, converged second run, and a first-run success
 #     control that proves the BAKED default version (no O3K_VERSION, no pin
-#     line) resolves to the pinned v0.3.0-alpha.1 release asset path.
+#     line) resolves to the pinned v0.3.0-alpha.1 release asset path;
+#   - upgrade fence (issue #626): installed version newer than the resolved
+#     target -> implicit-downgrade refusal (exit 1, nothing mutated,
+#     nothing downloaded); installed version older -> verified delegation
+#     download (tarball + .sha256 + install.sh) into the upgrade-download
+#     directory, the exact `sudo .../bin/o3k upgrade` notice, exit 0, and no
+#     service/binary mutation; delegation re-run reuses the verified tarball;
+#     a tampered delegated tarball fails closed. The fence runs before apt
+#     and before any bundled script, so curl|sh never auto-upgrades an
+#     existing install.
 #
 # Version model under test: packaging/get-o3k.sh never consults a channel
 # service — it resolves O3K_VERSION env > O3K_PINNED_VERSION (optional
@@ -51,6 +60,7 @@ HTTP_PID=""
 HEALTH_PID_18080=""
 HEALTH_PID_9100=""
 ETC_O3K_CREATED=0
+USR_LOCAL_O3K_CREATED=0
 PASS=0
 FAIL=0
 SKIP=0
@@ -60,6 +70,8 @@ cleanup() {
   [[ -n "$HEALTH_PID_18080" ]] && kill "$HEALTH_PID_18080" 2>/dev/null || true
   [[ -n "$HEALTH_PID_9100" ]] && kill "$HEALTH_PID_9100" 2>/dev/null || true
   [[ "$ETC_O3K_CREATED" -eq 1 ]] && rm -rf -- /etc/o3k || true
+  [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rm -f -- /usr/local/share/o3k/release-manifest.json || true
+  [[ "$USR_LOCAL_O3K_CREATED" -eq 1 ]] && rmdir /usr/local/share/o3k 2>/dev/null || true
   rm -rf -- "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -680,6 +692,124 @@ PY
         || record_fail "missing installed-manifest notice"
     fi
   fi
+
+  # 18-21. upgrade fence (issue #626): a resolved target must never be
+  #     auto-installed over an existing release. These cases drive the REAL
+  #     fence with a fake installed release manifest at
+  #     /usr/local/share/o3k/release-manifest.json; they run only when that
+  #     path is absent so a real install is never touched. The upgrade
+  #     download directory is redirected to a sandbox via the documented
+  #     O3K_UPGRADE_DOWNLOAD_DIR override.
+  if [[ -e /usr/local/share/o3k/release-manifest.json || -L /usr/local/share/o3k ]]; then
+    record_skip "upgrade fence cases need an absent /usr/local/share/o3k/release-manifest.json (found one; refusing to touch it)"
+  else
+    mkdir -p /usr/local/share/o3k
+    USR_LOCAL_O3K_CREATED=1
+    export O3K_UPGRADE_DOWNLOAD_DIR="$MATRIX/upgrade-download"
+    endpoint_gets() { # endpoint_gets PATH — count of GET lines for a request path
+      grep -c "GET $1" "$MATRIX/endpoint-http.log" 2>/dev/null || true
+    }
+
+    # 18. installed version NEWER than the resolved target -> implicit
+    #     downgrade refused, exit 1, nothing mutated, nothing downloaded.
+    fresh_logs fence-newer
+    printf '{"version":"0.4.0-alpha.1","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
+    release_gets_before="$(endpoint_gets '/releases/v0.3.0-alpha.1/')"
+    expect_abort "upgrade fence refuses an implicit downgrade" \
+      "installed v0.4.0-alpha.1 is newer than requested v0.3.0-alpha.1; refusing implicit downgrade" \
+      "$out" "$err"
+    assert_no_script_run "no bundled script ran on an implicit downgrade"
+    [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
+      && record_pass "implicit downgrade mutated nothing (no apt/systemd calls)" \
+      || record_fail "implicit downgrade mutated the host (apt/systemctl ran)"
+    [[ ! -e "$MATRIX/upgrade-download" ]] \
+      && record_pass "implicit downgrade created no upgrade-download directory" \
+      || record_fail "implicit downgrade created an upgrade-download directory"
+    [[ "$(endpoint_gets '/releases/v0.3.0-alpha.1/')" -eq "$release_gets_before" ]] \
+      && record_pass "implicit downgrade downloaded nothing from the release endpoint" \
+      || record_fail "implicit downgrade fetched release assets"
+
+    # 19. installed version OLDER than the resolved target -> verified
+    #     delegation download into the upgrade-download directory + the exact
+    #     next command, exit 0, no service/binary mutation.
+    fresh_logs fence-older
+    printf '{"version":"0.2.0-alpha.2","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
+    publish_tarball "$MATRIX/good.tar.gz"
+    printf '#!/usr/bin/env sh\n# TEST FIXTURE install.sh release asset\n' \
+      >"$WWW/releases/v0.3.0-alpha.1/install.sh"
+    if run_wrapper "$out" "$err"; then
+      record_pass "upgrade fence delegates an older install (exit 0)"
+    else
+      record_fail "upgrade fence delegation failed (stderr: $(head -c 300 "$err"))"
+    fi
+    grep -Fq "Run: sudo $MATRIX/upgrade-download/o3k-0.3.0-alpha.1/bin/o3k upgrade" "$out" \
+      && record_pass "delegation prints the exact sudo o3k upgrade command" \
+      || record_fail "missing delegation command (stdout: $(head -c 300 "$out"))"
+    grep -Fq 'the installer never upgrades an existing installation automatically' "$out" \
+      && record_pass "delegation notice states curl|sh never auto-upgrades" \
+      || record_fail "missing no-auto-upgrade notice"
+    [[ -f "$MATRIX/upgrade-download/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz" \
+      && -f "$MATRIX/upgrade-download/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256" \
+      && -f "$MATRIX/upgrade-download/install.sh" ]] \
+      && record_pass "delegation download holds tarball + .sha256 + install.sh" \
+      || record_fail "delegation download files incomplete"
+    [[ "$(stat -c %a "$MATRIX/upgrade-download")" = "700" ]] \
+      && record_pass "delegation directory is private (0700)" \
+      || record_fail "delegation directory mode is not 0700"
+    (cd "$MATRIX/upgrade-download" && sha256sum -c --strict -- o3k-0.3.0-alpha.1-linux-x86_64.tar.gz.sha256 >/dev/null) \
+      && record_pass "delegated tarball matches the published SHA-256" \
+      || record_fail "delegated tarball failed published SHA-256"
+    cmp -s "$WWW/releases/v0.3.0-alpha.1/install.sh" "$MATRIX/upgrade-download/install.sh" \
+      && record_pass "install.sh copy is byte-identical to the published asset" \
+      || record_fail "install.sh copy drifted from the published asset"
+    assert_no_script_run "no bundled script ran during delegation"
+    [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
+      && record_pass "delegation performed no apt/systemd mutation" \
+      || record_fail "delegation mutated the host (apt/systemctl ran)"
+    [[ -z "$(find /usr/local/share/o3k -mindepth 1 -maxdepth 1 ! -name release-manifest.json -print -quit)" ]] \
+      && record_pass "delegation wrote nothing else under /usr/local/share/o3k" \
+      || record_fail "delegation mutated /usr/local/share/o3k"
+    [[ "$(endpoint_gets '/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz ')" -ge 1 ]] \
+      && record_pass "delegation fetched the tarball + .sha256 + install.sh from the release endpoint" \
+      || record_fail "release endpoint did not serve the delegation assets"
+
+    # 20. delegation re-run: the existing verified tarball is REUSED (no
+    #     re-download); only the install.sh asset copy is refreshed.
+    fresh_logs fence-reuse
+    tarball_gets_before="$(endpoint_gets '/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz ')"
+    install_gets_before="$(endpoint_gets '/releases/v0.3.0-alpha.1/install.sh ')"
+    if run_wrapper "$out" "$err"; then
+      record_pass "delegation re-run exits 0"
+    else
+      record_fail "delegation re-run failed (stderr: $(head -c 300 "$err"))"
+    fi
+    [[ "$(endpoint_gets '/releases/v0.3.0-alpha.1/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz ')" -eq "$tarball_gets_before" ]] \
+      && record_pass "delegation re-run reuses the verified tarball (no re-download)" \
+      || record_fail "delegation re-run re-downloaded the tarball"
+    [[ "$(endpoint_gets '/releases/v0.3.0-alpha.1/install.sh ')" -gt "$install_gets_before" ]] \
+      && record_pass "delegation re-run refreshes the install.sh asset copy" \
+      || record_fail "delegation re-run did not refresh the install.sh copy"
+    assert_no_script_run "no bundled script ran on the delegation re-run"
+    [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
+      && record_pass "delegation re-run remains non-mutating" \
+      || record_fail "delegation re-run mutated the host"
+
+    # 21. tampered delegated tarball: the re-verification fails closed and
+    #     nothing runs (the interrupted-delegation reuse rule).
+    fresh_logs fence-tamper
+    printf 'tampered\n' >>"$MATRIX/upgrade-download/o3k-0.3.0-alpha.1-linux-x86_64.tar.gz"
+    expect_abort "tampered delegated tarball fails closed on re-run" \
+      "published SHA-256 verification failed" "$out" "$err"
+    assert_no_script_run "no bundled script ran on a tampered delegated tarball"
+    [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
+      && record_pass "tampered delegation mutated nothing" \
+      || record_fail "tampered delegation mutated the host"
+
+    rm -f -- /usr/local/share/o3k/release-manifest.json
+    rmdir /usr/local/share/o3k 2>/dev/null || true
+    USR_LOCAL_O3K_CREATED=0
+    unset O3K_UPGRADE_DOWNLOAD_DIR
+  fi
 }
 
 # ------------------------------------------------- platform / version fence --
@@ -746,6 +876,71 @@ if bash -c 'source "$1"; check_version_format v0.3.0-alpha.1; check_version_form
 else
   record_fail "version fence rejected a valid release version"
 fi
+
+# --------------------------------------------- upgrade fence unit tests ------
+
+FENCE_FUNCS="$WORK_DIR/get-o3k-fence-functions.sh"
+# Same extraction mechanism as the platform/version guards: the embedded
+# python3 comparator and manifest reader are exercised with faked inputs in
+# subshells, against the exact shipped text.
+sed -n '/^compare_versions() {/,/^}/p; /^read_installed_version() {/,/^}/p' \
+  "$WRAPPER" >"$FENCE_FUNCS"
+if grep -q 'compare_versions()' "$FENCE_FUNCS" && grep -q 'read_installed_version()' "$FENCE_FUNCS"; then
+  record_pass "upgrade fence functions extracted from packaging/get-o3k.sh"
+else
+  record_fail "could not extract compare_versions/read_installed_version from packaging/get-o3k.sh"
+fi
+
+expect_compare() { # expect_compare DESC LEFT RIGHT EXPECTED_EXIT
+  local desc="$1" left="$2" right="$3" expected="$4" status=0
+  set +e
+  bash -c 'source "$1"; compare_versions "$2" "$3"' bash "$FENCE_FUNCS" "$left" "$right" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ "$status" -eq "$expected" ]] \
+    && record_pass "$desc" \
+    || record_fail "$desc (exit $status, expected $expected)"
+}
+
+expect_compare "compare: older release sorts below newer (exit 0)" 0.2.0-alpha.2 0.3.0-alpha.1 0
+expect_compare "compare: equal versions (exit 1)" v0.3.0-alpha.1 0.3.0-alpha.1 1
+expect_compare "compare: newer release sorts above older (exit 2)" 0.4.0-alpha.1 0.3.0-alpha.1 2
+expect_compare "compare: prerelease increments" 0.3.0-alpha.1 0.3.0-alpha.2 0
+expect_compare "compare: prerelease is older than its release" 0.3.0-alpha.1 0.3.0 0
+expect_compare "compare: release is newer than its prerelease" 0.3.0 0.3.0-alpha.1 2
+expect_compare "compare: two-dot form equals padded three-dot" 1.2 1.2.0 1
+expect_compare "compare: numeric prerelease identifiers order numerically" 0.3.0-alpha.2 0.3.0-alpha.10 0
+expect_compare "compare: unparseable input fails closed (exit 3)" latest 0.3.0-alpha.1 3
+expect_compare "compare: unparseable right side fails closed (exit 3)" 0.3.0-alpha.1 '0.3.0;rm' 3
+
+fence_manifest="$WORK_DIR/fence-manifest.json"
+printf '{"version":"0.3.0-alpha.1","profile":"libvirt"}\n' >"$fence_manifest"
+if [[ "$(bash -c 'source "$1"; read_installed_version "$2"' bash "$FENCE_FUNCS" "$fence_manifest" 2>/dev/null)" = "0.3.0-alpha.1" ]]; then
+  record_pass "read_installed_version parses the release manifest version"
+else
+  record_fail "read_installed_version did not parse the release manifest version"
+fi
+if [[ -z "$(bash -c 'source "$1"; read_installed_version "$2"' bash "$FENCE_FUNCS" "$WORK_DIR/absent-manifest.json" 2>/dev/null)" ]]; then
+  record_pass "read_installed_version is empty for a fresh host (absent manifest)"
+else
+  record_fail "read_installed_version returned a version for an absent manifest"
+fi
+printf 'not json\n' >"$WORK_DIR/bad-fence-manifest.json"
+set +e
+bash -c 'source "$1"; read_installed_version "$2"' bash "$FENCE_FUNCS" "$WORK_DIR/bad-fence-manifest.json" >/dev/null 2>&1
+bad_manifest_status=$?
+set -e
+[[ "$bad_manifest_status" -ne 0 ]] \
+  && record_pass "read_installed_version fails closed on a malformed manifest" \
+  || record_fail "read_installed_version accepted a malformed manifest"
+printf '{"version":""}\n' >"$WORK_DIR/empty-fence-manifest.json"
+set +e
+bash -c 'source "$1"; read_installed_version "$2"' bash "$FENCE_FUNCS" "$WORK_DIR/empty-fence-manifest.json" >/dev/null 2>&1
+empty_manifest_status=$?
+set -e
+[[ "$empty_manifest_status" -ne 0 ]] \
+  && record_pass "read_installed_version fails closed on an empty version field" \
+  || record_fail "read_installed_version accepted an empty version field"
 
 # ------------------------------------------------------ full-wrapper matrix --
 
