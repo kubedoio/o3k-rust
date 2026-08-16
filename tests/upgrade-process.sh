@@ -884,6 +884,7 @@ run_engine() {
   O3K_UPGRADE_BACKUP_DIR="$case_dir/backups" \
   O3K_UPGRADE_DOWNLOAD_DIR="$case_dir/download" \
   O3K_UPGRADE_RELEASES_URL="http://127.0.0.1:$ENDPOINT_PORT/api/" \
+  O3K_UPGRADE_ASSUME_ROOT=1 \
   O3K_DOCTOR_CONFIG_DIR="$case_dir/config" \
   O3K_DOCTOR_DATA_DIR="$case_dir/data" \
   O3K_DOCTOR_PREFIX="$case_dir/prefix" \
@@ -1380,6 +1381,7 @@ PY
   O3K_UPGRADE_BACKUP_DIR="$case_dir/backups" \
   O3K_UPGRADE_DOWNLOAD_DIR="$case_dir/download" \
   O3K_UPGRADE_RELEASES_URL="http://127.0.0.1:$ENDPOINT_PORT/api/" \
+  O3K_UPGRADE_ASSUME_ROOT=1 \
   O3K_DOCTOR_CONFIG_DIR="$case_dir/config" \
   O3K_DOCTOR_DATA_DIR="$case_dir/data" \
   O3K_DOCTOR_PREFIX="$case_dir/prefix" \

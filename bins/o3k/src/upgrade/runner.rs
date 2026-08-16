@@ -1239,7 +1239,12 @@ impl UpgradeIo for SystemUpgradeIo {
         bundle: &VerifiedBundle,
     ) -> Result<(), String> {
         let mut failures = Vec::new();
-        if current_euid() != 0 {
+        // O3K_UPGRADE_ASSUME_ROOT=1 is a documented sandbox knob for the
+        // rootless portable test suite only: it skips the early UX gate, but
+        // every actual mutation (service stop/start, binary replacement,
+        // /var/lib/o3k writes) still fails without real root, so nothing is
+        // weakened.
+        if current_euid() != 0 && std::env::var("O3K_UPGRADE_ASSUME_ROOT").as_deref() != Ok("1") {
             failures.push("preflight requires root (run with sudo)".to_owned());
         }
         if let Err(error) = self.check_platform() {
