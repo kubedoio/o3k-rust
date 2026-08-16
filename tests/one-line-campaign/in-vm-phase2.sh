@@ -172,6 +172,11 @@ log "reboot recovery: $RECOVERY_STATUS (o3kd=$O3KD_ACTIVE compute=$COMPUTE_ACTIV
 
 # ---- (b) one-liner re-run idempotency -----------------------------------------
 RERUN_STATUS=passed
+# NO_DUPLICATES is only mutated inside the rerun block below; with the block
+# skipped (upgrade campaign) nothing re-ran, so nothing could have been
+# duplicated and the OVERALL gate must not fail on a variable that was never
+# assigned (real-host log: "NO_DUPLICATES: unbound variable").
+NO_DUPLICATES=yes
 if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
   log "re-run idempotency skipped: the upgrade campaign leaves the NEW release installed and its installer fence refuses the OLD one-liner (covered by installer-negative + the campaign's own re-upgrade step)"
 else
@@ -275,11 +280,11 @@ TEARDOWN1_STATUS=passed
   TEARDOWN1_STATUS=failed; echo "ERROR: /usr/local/share/o3k/bootstrap-testlab.sh missing" >&2; }
 bash /usr/local/share/o3k/bootstrap-testlab.sh --teardown >"$EVID/teardown1.log" 2>&1 \
   || TEARDOWN1_STATUS=failed
-for probe in server test-vm port testlab-port subnet testlab-subnet \
-  network testlab-network; do
-  set -- $probe
-  if [ -n "$(openstack "$1" show "$2" -f value -c id 2>/dev/null || true)" ]; then
-    TEARDOWN1_STATUS=failed; echo "ERROR: $1 $2 still present after teardown" >&2
+for probe in "server test-vm" "port testlab-port" "subnet testlab-subnet" \
+  "network testlab-network"; do
+  read -r probe_type probe_name <<<"$probe"
+  if [ -n "$(openstack "$probe_type" show "$probe_name" -f value -c id 2>/dev/null || true)" ]; then
+    TEARDOWN1_STATUS=failed; echo "ERROR: $probe_type $probe_name still present after teardown" >&2
   fi
 done
 # Flavor absence after teardown: the installed bootstrap verifies deletion
@@ -294,14 +299,30 @@ log "teardown via installed bootstrap-testlab.sh: $TEARDOWN1_STATUS"
 
 # ---- (d) uninstall (accounts intentionally retained) ---------------------------
 UNINSTALL_STATUS=passed
-bash /usr/local/share/o3k/uninstall.sh --yes >"$EVID/uninstall1.log" 2>&1 \
-  || UNINSTALL_STATUS=failed
-id o3k >/dev/null 2>&1 && id o3k-compute >/dev/null 2>&1 \
-  || { UNINSTALL_STATUS=failed; echo "ERROR: service accounts missing after uninstall" >&2; }
-log "uninstall: $UNINSTALL_STATUS"
+if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
+  # Skip path: no reinstall restores the helper scripts afterwards, and a
+  # plain uninstall --yes here would delete /usr/local/share/o3k/* (including
+  # uninstall.sh, bootstrap-testlab.sh, and the .o3k-installed ownership
+  # manifest) before the purge block below could run — the real-host run died
+  # with "bootstrap-testlab.sh: No such file or directory" on teardown2/purge.
+  # Purge must therefore run FIRST while the helpers still exist; its
+  # uninstall.sh --purge --yes strictly subsumes the plain uninstall, so this
+  # step's account-retention invariant is re-verified after purge below.
+  log "uninstall --yes deferred: in the skip path purge runs first (its helper scripts must survive)"
+else
+  bash /usr/local/share/o3k/uninstall.sh --yes >"$EVID/uninstall1.log" 2>&1 \
+    || UNINSTALL_STATUS=failed
+  id o3k >/dev/null 2>&1 && id o3k-compute >/dev/null 2>&1 \
+    || { UNINSTALL_STATUS=failed; echo "ERROR: service accounts missing after uninstall" >&2; }
+  log "uninstall: $UNINSTALL_STATUS"
+fi
 
 # ---- (e) reinstall through the one-liner ----------------------------------------
 REINSTALL_STATUS=passed
+# R3_SRV_ID is only captured inside the reinstall block below; default it for
+# the skip path (no reinstall, hence no new server) so the evidence writer's
+# "$R3_SRV_ID" argument stays bound under set -u.
+R3_SRV_ID=unavailable
 if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
   log "reinstall skipped: the upgrade campaign leaves the NEW release installed and its installer fence refuses the OLD one-liner (covered by installer-negative)"
 else
@@ -345,6 +366,16 @@ bash /usr/local/share/o3k/uninstall.sh --purge --yes >"$EVID/purge.log" 2>&1 \
 id o3k >/dev/null 2>&1 && id o3k-compute >/dev/null 2>&1 \
   || { PURGE_STATUS=failed; echo "ERROR: service accounts missing after purge" >&2; }
 log "purge: $PURGE_STATUS (teardown2=$TEARDOWN2_STATUS)"
+if [ "${O3K_PHASE2_SKIP_IDEMPOTENCY:-0}" = 1 ]; then
+  # Skip path: the deferred plain-uninstall step is subsumed by the purge run
+  # above; only its account-retention invariant can still be observed, and a
+  # failed purge means the subsumed uninstall cannot be claimed passed.
+  [ "$PURGE_STATUS" = passed ] || { UNINSTALL_STATUS=failed; \
+    echo "ERROR: uninstall subsumed by purge, which failed" >&2; }
+  id o3k >/dev/null 2>&1 && id o3k-compute >/dev/null 2>&1 \
+    || { UNINSTALL_STATUS=failed; echo "ERROR: service accounts missing after uninstall" >&2; }
+  log "uninstall: $UNINSTALL_STATUS"
+fi
 
 # ---- (g) zero-residue + foreign canaries ---------------------------------------
 ZERO_RESIDUE=yes
