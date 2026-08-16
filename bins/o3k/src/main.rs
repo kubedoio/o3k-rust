@@ -179,6 +179,15 @@ fn run_upgrade_cli(trailing: &[String]) -> ExitCode {
         requested,
         check_only,
         assume_yes,
+        doctor_retry_attempts: std::env::var("O3K_UPGRADE_DOCTOR_RETRY_ATTEMPTS")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(5),
+        doctor_retry_delay_ms: std::env::var("O3K_UPGRADE_DOCTOR_RETRY_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(15_000),
     };
     let outcome = runtime.block_on(run_upgrade(&io, &args));
     render_upgrade_outcome("upgrade", outcome, json)
