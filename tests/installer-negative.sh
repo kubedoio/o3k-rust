@@ -713,10 +713,10 @@ PY
     # 18. installed version NEWER than the resolved target -> implicit
     #     downgrade refused, exit 1, nothing mutated, nothing downloaded.
     fresh_logs fence-newer
-    printf '{"version":"0.4.0-alpha.1","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
+    printf '{"version":"0.5.0-alpha.1","profile":"libvirt"}\n' >/usr/local/share/o3k/release-manifest.json
     release_gets_before="$(endpoint_gets '/releases/v0.4.0-alpha.1/')"
     expect_abort "upgrade fence refuses an implicit downgrade" \
-      "installed v0.4.0-alpha.1 is newer than requested v0.4.0-alpha.1; refusing implicit downgrade" \
+      "installed v0.5.0-alpha.1 is newer than requested v0.4.0-alpha.1; refusing implicit downgrade" \
       "$out" "$err"
     assert_no_script_run "no bundled script ran on an implicit downgrade"
     [[ ! -s "$O3K_TEST_APT_LOG" && ! -s "$O3K_TEST_SYSTEMCTL_LOG" ]] \
@@ -904,12 +904,12 @@ expect_compare() { # expect_compare DESC LEFT RIGHT EXPECTED_EXIT
 
 expect_compare "compare: older release sorts below newer (exit 0)" 0.2.0-alpha.2 0.4.0-alpha.1 0
 expect_compare "compare: equal versions (exit 1)" v0.4.0-alpha.1 0.4.0-alpha.1 1
-expect_compare "compare: newer release sorts above older (exit 2)" 0.4.0-alpha.1 0.4.0-alpha.1 2
-expect_compare "compare: prerelease increments" 0.4.0-alpha.1 0.3.0-alpha.2 0
-expect_compare "compare: prerelease is older than its release" 0.4.0-alpha.1 0.3.0 0
-expect_compare "compare: release is newer than its prerelease" 0.3.0 0.4.0-alpha.1 2
+expect_compare "compare: newer release sorts above older (exit 2)" 0.4.0-alpha.1 0.2.0-alpha.2 2
+expect_compare "compare: prerelease increments" 0.3.0-alpha.1 0.3.0-alpha.2 0
+expect_compare "compare: prerelease is older than its release" 0.3.0-alpha.1 0.3.0 0
+expect_compare "compare: release is newer than its prerelease" 0.3.0 0.3.0-alpha.1 2
 expect_compare "compare: two-dot form equals padded three-dot" 1.2 1.2.0 1
-expect_compare "compare: numeric prerelease identifiers order numerically" 0.3.0-alpha.2 0.4.0-alpha.10 0
+expect_compare "compare: numeric prerelease identifiers order numerically" 0.3.0-alpha.2 0.3.0-alpha.10 0
 expect_compare "compare: unparseable input fails closed (exit 3)" latest 0.4.0-alpha.1 3
 expect_compare "compare: unparseable right side fails closed (exit 3)" 0.4.0-alpha.1 '0.3.0;rm' 3
 
