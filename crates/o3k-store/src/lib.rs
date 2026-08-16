@@ -23,8 +23,14 @@ use uuid::Uuid;
 use std::os::unix::fs::PermissionsExt;
 
 mod artifact_transfer;
+pub mod conformance;
+pub mod postgres;
 pub mod quota;
 mod server_state;
+pub mod unified;
+
+pub use postgres::PostgresStore;
+pub use unified::O3kStore;
 
 /// Maximum attempts for an observation update contended by a concurrent
 /// SQLite writer. BEGIN IMMEDIATE makes the configured busy_timeout apply, so
