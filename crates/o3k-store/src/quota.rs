@@ -954,6 +954,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_port_reservations_cannot_over_allocate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for iteration in 0..25 {
+            let path = std::path::PathBuf::from(format!(
+                "/tmp/o3k-port-quota-race-{}-{}.sqlite",
+                std::process::id(),
+                iteration
+            ));
+            let _ = std::fs::remove_file(&path);
+            let store = crate::testkit::open_file(&path).await?;
+            let scope = OwnershipScope::project(
+                ScopeId::new_unchecked(format!("proj-port-race-{iteration}")),
+                None,
+                None,
+            );
+            let key = LimitKey::network_ports();
+            store
+                .set_limit(&scope, &key, LimitValue::Maximum(1))
+                .await?;
+
+            let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 1)];
+
+            let store1 = store.clone();
+            let store2 = store.clone();
+            let scope1 = scope.clone();
+            let scope2 = scope.clone();
+            let amounts1 = amounts.clone();
+            let amounts2 = amounts.clone();
+
+            let task1 =
+                tokio::spawn(
+                    async move { store1.reserve_quota(&scope1, "op-port-1", &amounts1).await },
+                );
+            let task2 =
+                tokio::spawn(
+                    async move { store2.reserve_quota(&scope2, "op-port-2", &amounts2).await },
+                );
+
+            let (res1, res2) = tokio::join!(task1, task2);
+            let r1 = res1?;
+            let r2 = res2?;
+
+            let successes = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
+            assert_eq!(
+                successes, 1,
+                "iteration {iteration}: exactly one concurrent port reservation must succeed for limit=1"
+            );
+
+            let usage = store.get_usage(&scope, &key).await?;
+            assert_eq!(usage.total_consumed(), 1);
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_image_bytes_reservations_cannot_over_allocate()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for iteration in 0..25 {
+            let path = std::path::PathBuf::from(format!(
+                "/tmp/o3k-image-bytes-race-{}-{}.sqlite",
+                std::process::id(),
+                iteration
+            ));
+            let _ = std::fs::remove_file(&path);
+            let store = crate::testkit::open_file(&path).await?;
+            let scope = OwnershipScope::project(
+                ScopeId::new_unchecked(format!("proj-bytes-race-{iteration}")),
+                None,
+                None,
+            );
+            let key = LimitKey::image_bytes();
+            // 100 MB limit
+            store
+                .set_limit(&scope, &key, LimitValue::Maximum(100 * 1024 * 1024))
+                .await?;
+
+            // Each request is 60 MB (so 2 concurrent requests sum to 120 MB > 100 MB limit)
+            let amounts = vec![ResourceAmount::new_unchecked(key.clone(), 60 * 1024 * 1024)];
+
+            let store1 = store.clone();
+            let store2 = store.clone();
+            let scope1 = scope.clone();
+            let scope2 = scope.clone();
+            let amounts1 = amounts.clone();
+            let amounts2 = amounts.clone();
+
+            let task1 = tokio::spawn(async move {
+                store1.reserve_quota(&scope1, "op-bytes-1", &amounts1).await
+            });
+            let task2 = tokio::spawn(async move {
+                store2.reserve_quota(&scope2, "op-bytes-2", &amounts2).await
+            });
+
+            let (res1, res2) = tokio::join!(task1, task2);
+            let r1 = res1?;
+            let r2 = res2?;
+
+            let successes = [r1.is_ok(), r2.is_ok()].iter().filter(|&&ok| ok).count();
+            assert_eq!(
+                successes, 1,
+                "iteration {iteration}: exactly one overlapping image-byte reservation must succeed"
+            );
+
+            let usage = store.get_usage(&scope, &key).await?;
+            assert_eq!(usage.total_consumed(), 60 * 1024 * 1024);
+
+            let _ = std::fs::remove_file(&path);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn existing_db_migration_defaults_to_unlimited() -> Result<(), Box<dyn std::error::Error>>
     {
         let path = std::path::PathBuf::from(format!(

@@ -8393,4 +8393,219 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn real_finite_server_quota_full_scenario_acceptance()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_kernel::audit::{AuditSink, MemoryAuditSink};
+        use o3k_provider::InstanceAction;
+
+        let database_path = PathBuf::from(format!(
+            "/tmp/o3k-quota-acceptance-{}.sqlite",
+            std::process::id()
+        ));
+        let placement_path = PathBuf::from(format!(
+            "/tmp/o3k-quota-acceptance-placement-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+
+        let raw_store = o3k_store::testkit::open_file(&database_path).await?;
+        let store: Arc<dyn ComputeRepository> = Arc::new(raw_store.clone());
+        let placement_repository: Arc<dyn o3k_store::PlacementRepository> = Arc::new(raw_store);
+        let placement =
+            o3k_placement::PlacementLedger::open(&placement_path, placement_repository).await?;
+        placement
+            .register_provider(
+                "node-quota",
+                std::collections::BTreeMap::from([
+                    (
+                        o3k_placement::VCPU.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 16,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::MEMORY_MB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 16384,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                    (
+                        o3k_placement::DISK_GB.to_owned(),
+                        o3k_placement::Inventory {
+                            total: 500,
+                            reserved: 0,
+                            allocation_ratio: 1.0,
+                            used: 0,
+                        },
+                    ),
+                ]),
+            )
+            .await?;
+
+        let provider = Arc::new(FakeComputeProvider::new());
+        let audit_sink = Arc::new(MemoryAuditSink::new());
+        let service = ComputeService::new(store.clone(), provider.clone())
+            .with_scheduler(Scheduler::new(placement.clone()))
+            .with_audit_sink(audit_sink.clone() as Arc<dyn AuditSink>);
+
+        let scope = OwnershipScope::project(ScopeId::new_unchecked("proj-finite"), None, None);
+        let auth = test_compute_auth("proj-finite", "user-finite", "member");
+
+        // 1. Configure finite server quota: compute:servers = 1
+        store
+            .set_limit(&scope, &LimitKey::compute_servers(), LimitValue::Maximum(1))
+            .await?;
+
+        let flavors = service.flavors_for_auth(&auth).await?;
+        let flavor_id = flavors[0].id;
+
+        // SCENARIO A: Create server-1 -> reaches ACTIVE
+        let server1 = service
+            .create_server_for_auth(
+                &auth,
+                ServerCreateInput {
+                    user_id: "user-finite".to_owned(),
+                    project_id: "proj-finite".to_owned(),
+                    name: "server-1".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "create-srv-1".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(server1.name, "server-1");
+        assert_eq!(server1.state, ServerState::Active);
+        assert_eq!(provider.instance_count(), 1);
+
+        // SCENARIO B: Attempt server-2 -> must be denied by quota
+        let server2_res = service
+            .create_server_for_auth(
+                &auth,
+                ServerCreateInput {
+                    user_id: "user-finite".to_owned(),
+                    project_id: "proj-finite".to_owned(),
+                    name: "server-2".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "create-srv-2".to_owned(),
+                },
+            )
+            .await;
+        assert!(matches!(
+            server2_res,
+            Err(ComputeError::QuotaExceeded { .. })
+        ));
+
+        // Independent proof after denial:
+        // - exactly one server instance exists in provider
+        assert_eq!(provider.instance_count(), 1);
+        // - exactly one active server resource exists in store
+        let active_servers = service.list_servers_for_auth(&auth).await?;
+        assert_eq!(active_servers.len(), 1);
+        assert_eq!(active_servers[0].id, server1.id);
+        // - exactly one placement allocation exists
+        let allocations = placement.provider("node-quota").await?.allocations;
+        assert_eq!(allocations.len(), 1);
+        // - canonical quota-denial AuditEvent exists
+        let events = audit_sink.events();
+        assert!(events.iter().any(|e| {
+            e.outcome == o3k_kernel::audit::AuditOutcome::Failed
+                && e.reason_category
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .contains("quota exceeded")
+        }));
+
+        // SCENARIO C: Verify server-1 remains healthy across actions
+        let srv_show = service.show_server_for_auth(&auth, server1.id).await?;
+        assert_eq!(srv_show.state, ServerState::Active);
+
+        let srv_stopped = service
+            .action_for_auth(&auth, server1.id, InstanceAction::Stop)
+            .await?;
+        assert_eq!(srv_stopped.state, ServerState::Stopped);
+
+        let srv_started = service
+            .action_for_auth(&auth, server1.id, InstanceAction::Start)
+            .await?;
+        assert_eq!(srv_started.state, ServerState::Active);
+
+        let srv_rebooted = service
+            .action_for_auth(&auth, server1.id, InstanceAction::Reboot)
+            .await?;
+        assert_eq!(srv_rebooted.state, ServerState::Active);
+
+        // SCENARIO D: Delete server-1 and wait for terminal absence
+        service.delete_server_for_auth(&auth, server1.id).await?;
+        assert_eq!(provider.instance_count(), 0);
+
+        let usage_after_del = store
+            .get_usage(&scope, &LimitKey::compute_servers())
+            .await?;
+        assert_eq!(usage_after_del.total_consumed(), 0);
+
+        // SCENARIO E: Create server-2 / replacement -> must now succeed
+        let replacement = service
+            .create_server_for_auth(
+                &auth,
+                ServerCreateInput {
+                    user_id: "user-finite".to_owned(),
+                    project_id: "proj-finite".to_owned(),
+                    name: "server-2".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "create-srv-2-replacement".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(replacement.name, "server-2");
+        assert_eq!(replacement.state, ServerState::Active);
+        assert_eq!(provider.instance_count(), 1);
+
+        // SCENARIO F: Delete replacement
+        service
+            .delete_server_for_auth(&auth, replacement.id)
+            .await?;
+        assert_eq!(provider.instance_count(), 0);
+
+        // SCENARIO G: Independent leak & residue verification
+        let final_usage = store
+            .get_usage(&scope, &LimitKey::compute_servers())
+            .await?;
+        assert_eq!(
+            final_usage.total_consumed(),
+            0,
+            "final quota consumed must be 0"
+        );
+        let final_servers = service.list_servers_for_auth(&auth).await?;
+        assert_eq!(
+            final_servers.len(),
+            0,
+            "no active servers must remain in store"
+        );
+
+        let _ = std::fs::remove_file(&database_path);
+        let _ = std::fs::remove_dir_all(&placement_path);
+
+        Ok(())
+    }
 }
