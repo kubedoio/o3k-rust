@@ -1293,6 +1293,7 @@ dependencies = [
  "base64",
  "md-5",
  "o3k-domain",
+ "o3k-kernel",
  "serde",
  "sqlx",
  "thiserror",

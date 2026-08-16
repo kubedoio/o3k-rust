@@ -1,5 +1,4 @@
-//! Shared OpenStack error-envelope helpers used across the protocol
-//! adapters.
+use std::borrow::Cow;
 
 use axum::{Json, http::StatusCode, response::IntoResponse};
 use serde::Serialize;
@@ -12,22 +11,22 @@ pub(crate) struct KeystoneErrorResponse {
 #[derive(Serialize)]
 pub(crate) struct KeystoneErrorBody {
     code: u16,
-    title: &'static str,
-    message: &'static str,
+    title: Cow<'static, str>,
+    message: Cow<'static, str>,
 }
 
 pub(crate) fn keystone_error(
     status: StatusCode,
-    title: &'static str,
-    message: &'static str,
+    title: impl Into<Cow<'static, str>>,
+    message: impl Into<Cow<'static, str>>,
 ) -> axum::response::Response {
     (
         status,
         Json(KeystoneErrorResponse {
             error: KeystoneErrorBody {
                 code: status.as_u16(),
-                title,
-                message,
+                title: title.into(),
+                message: message.into(),
             },
         }),
     )

@@ -273,6 +273,17 @@ pub(crate) fn compute_error(error: ComputeError) -> axum::response::Response {
             "Bad Request",
             "invalid compute request",
         ),
+        ComputeError::QuotaExceeded {
+            ref key,
+            limit,
+            used,
+            requested,
+        } => {
+            let message = format!(
+                "Quota exceeded for {key}: limit {limit}, used {used}, requested {requested}"
+            );
+            keystone_error(StatusCode::FORBIDDEN, "Forbidden", message)
+        }
         ComputeError::Store(o3k_store::StoreError::KeypairNotFound) => {
             keystone_error(StatusCode::NOT_FOUND, "Not Found", "keypair was not found")
         }

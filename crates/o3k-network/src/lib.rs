@@ -10,7 +10,8 @@ use std::{
 
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
+    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
+    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2935,6 +2936,13 @@ pub enum NetworkError {
     Conflict,
     #[error("network request is invalid")]
     InvalidRequest,
+    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
+    QuotaExceeded {
+        key: LimitKey,
+        limit: LimitValue,
+        used: u64,
+        requested: u64,
+    },
     #[error("subnet allocation pool is exhausted")]
     PoolExhausted,
     #[error("network store error")]
@@ -2948,6 +2956,18 @@ fn map_store_error(error: o3k_store::StoreError) -> NetworkError {
         o3k_store::StoreError::ResourceAlreadyExists => NetworkError::Conflict,
         o3k_store::StoreError::NetworkNotFound => NetworkError::NotFound,
         o3k_store::StoreError::NetworkInUse => NetworkError::Conflict,
+        o3k_store::StoreError::QuotaExceeded {
+            key,
+            limit,
+            used,
+            requested,
+        } => NetworkError::QuotaExceeded {
+            key,
+            limit,
+            used,
+            requested,
+        },
+        o3k_store::StoreError::ReservationConflict(_) => NetworkError::Conflict,
         other => NetworkError::Store(other),
     }
 }
@@ -3079,10 +3099,56 @@ impl NetworkService {
             project_id: project_id.to_owned(),
             status: "ACTIVE".to_owned(),
         };
+        let scope =
+            OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+        let amounts = vec![ResourceAmount::new(LimitKey::network_networks(), 1)];
+        let op_id = format!("o3k:network:create:{}:{}", project_id, network.id);
+        let quota_res = self
+            .inner
+            .repository
+            .reserve_quota(&scope, &op_id, &amounts)
+            .await
+            .map_err(|err| match err {
+                o3k_store::StoreError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                } => NetworkError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                },
+                o3k_store::StoreError::ReservationConflict(_) => NetworkError::Conflict,
+                other => map_store_error(other),
+            })?;
+
         match self.inner.repository.insert_network(&network).await {
-            Ok(()) => Ok(network),
-            Err(o3k_store::StoreError::ResourceAlreadyExists) => Err(NetworkError::Conflict),
-            Err(error) => Err(map_store_error(error)),
+            Ok(()) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .commit_reservation(&quota_res.id)
+                    .await;
+                Ok(network)
+            }
+            Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
+                Err(NetworkError::Conflict)
+            }
+            Err(error) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
+                Err(map_store_error(error))
+            }
         }
     }
 
@@ -3231,7 +3297,13 @@ impl NetworkService {
             .repository
             .delete_network(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let _ = self
+            .inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:network:create:{}:{}", project_id, id))
+            .await;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3360,10 +3432,56 @@ impl NetworkService {
             allocation_start: start,
             allocation_end: end,
         };
+        let scope =
+            OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+        let amounts = vec![ResourceAmount::new(LimitKey::network_subnets(), 1)];
+        let op_id = format!("o3k:subnet:create:{}:{}", project_id, subnet.id);
+        let quota_res = self
+            .inner
+            .repository
+            .reserve_quota(&scope, &op_id, &amounts)
+            .await
+            .map_err(|err| match err {
+                o3k_store::StoreError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                } => NetworkError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                },
+                o3k_store::StoreError::ReservationConflict(_) => NetworkError::Conflict,
+                other => map_store_error(other),
+            })?;
+
         match self.inner.repository.insert_subnet(&subnet).await {
-            Ok(()) => Ok(subnet),
-            Err(o3k_store::StoreError::ResourceAlreadyExists) => Err(NetworkError::Conflict),
-            Err(error) => Err(map_store_error(error)),
+            Ok(()) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .commit_reservation(&quota_res.id)
+                    .await;
+                Ok(subnet)
+            }
+            Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
+                Err(NetworkError::Conflict)
+            }
+            Err(error) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
+                Err(map_store_error(error))
+            }
         }
     }
 
@@ -3509,7 +3627,13 @@ impl NetworkService {
             .repository
             .delete_subnet(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let _ = self
+            .inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:subnet:create:{}:{}", project_id, id))
+            .await;
+        Ok(())
     }
 
     pub async fn create_port(
@@ -3621,10 +3745,58 @@ impl NetworkService {
                     binding_host: None,
                     binding_state: None,
                 };
+                let scope = OwnershipScope::project(
+                    ScopeId::new_unchecked(project_id.to_owned()),
+                    None,
+                    None,
+                );
+                let amounts = vec![ResourceAmount::new(LimitKey::network_ports(), 1)];
+                let op_id = format!("o3k:port:create:{}:{}", project_id, port.id);
+                let quota_res = self
+                    .inner
+                    .repository
+                    .reserve_quota(&scope, &op_id, &amounts)
+                    .await
+                    .map_err(|err| match err {
+                        o3k_store::StoreError::QuotaExceeded {
+                            key,
+                            limit,
+                            used,
+                            requested,
+                        } => NetworkError::QuotaExceeded {
+                            key,
+                            limit,
+                            used,
+                            requested,
+                        },
+                        o3k_store::StoreError::ReservationConflict(_) => NetworkError::Conflict,
+                        other => map_store_error(other),
+                    })?;
+
                 match self.inner.repository.insert_port(&port).await {
-                    Ok(()) => return Ok(port),
-                    Err(o3k_store::StoreError::ResourceAlreadyExists) => {}
-                    Err(error) => return Err(map_store_error(error)),
+                    Ok(()) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .commit_reservation(&quota_res.id)
+                            .await;
+                        return Ok(port);
+                    }
+                    Err(o3k_store::StoreError::ResourceAlreadyExists) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .release_reservation(&quota_res.id)
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = self
+                            .inner
+                            .repository
+                            .release_reservation(&quota_res.id)
+                            .await;
+                        return Err(map_store_error(error));
+                    }
                 }
             }
             candidate = candidate.saturating_add(1);
@@ -3767,7 +3939,13 @@ impl NetworkService {
             .repository
             .delete_port(project_id, &id)
             .await
-            .map_err(map_store_error)
+            .map_err(map_store_error)?;
+        let _ = self
+            .inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:port:create:{}:{}", project_id, id))
+            .await;
+        Ok(())
     }
 
     pub async fn record_binding_intent(
@@ -4845,6 +5023,51 @@ mod tests {
             Err(NetworkError::NotFound)
         ));
         fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_quota_enforcement_and_isolation() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::QuotaRepository;
+
+        let path = root("network-quota-isolation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
+
+        // Limit proj-a to 1 network
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::network_networks(),
+                LimitValue::Maximum(1),
+            )
+            .await?;
+
+        let auth_a = auth("proj-a");
+        let auth_b = auth("proj-b");
+
+        // 1. First network for proj-a succeeds
+        let net1 = service.create_network(&auth_a, "net-1".to_owned()).await?;
+        assert_eq!(net1.name, "net-1");
+
+        // 2. Second network for proj-a fails with QuotaExceeded
+        let res2 = service.create_network(&auth_a, "net-2".to_owned()).await;
+        assert!(matches!(res2, Err(NetworkError::QuotaExceeded { .. })));
+
+        // 3. Proj-b can create network (isolation)
+        let net_b = service.create_network(&auth_b, "net-b".to_owned()).await?;
+        assert_eq!(net_b.name, "net-b");
+
+        // 4. Deleting net1 frees quota for proj-a
+        service.delete_network(&auth_a, net1.id).await?;
+
+        let net2 = service.create_network(&auth_a, "net-2".to_owned()).await?;
+        assert_eq!(net2.name, "net-2");
+
+        let _ = fs::remove_dir_all(&path);
         Ok(())
     }
 }

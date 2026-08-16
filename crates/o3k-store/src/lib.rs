@@ -23,6 +23,7 @@ use uuid::Uuid;
 use std::os::unix::fs::PermissionsExt;
 
 mod artifact_transfer;
+pub mod quota;
 mod server_state;
 
 /// Maximum attempts for an observation update contended by a concurrent
@@ -559,7 +560,20 @@ pub enum StoreError {
     PlacementIntentConflict,
     #[error("placement allocation referenced by the create intent no longer exists")]
     PlacementAllocationNotFound,
+    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
+    QuotaExceeded {
+        key: o3k_kernel::LimitKey,
+        limit: o3k_kernel::LimitValue,
+        used: u64,
+        requested: u64,
+    },
+    #[error("reservation conflict for operation {0}")]
+    ReservationConflict(String),
+    #[error("reservation not found")]
+    ReservationNotFound,
 }
+
+pub use quota::QuotaRepository;
 
 #[async_trait]
 pub trait DurableStore: Send + Sync {
@@ -881,7 +895,7 @@ pub trait VolumeAttachmentRepository: Send + Sync {
 /// persistence surface. Application code depends on this trait instead of on
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
-pub trait ImageRepository: Send + Sync {
+pub trait ImageRepository: Send + Sync + QuotaRepository {
     async fn insert_image(&self, image: &ImageMetadataRecord) -> Result<(), StoreError>;
     async fn list_images(&self, project_id: &str) -> Result<Vec<ImageMetadataRecord>, StoreError>;
     async fn get_image(
@@ -908,7 +922,7 @@ pub trait ImageRepository: Send + Sync {
 /// persistence surface. Application code depends on this trait instead of on
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
-pub trait NetworkRepository: Send + Sync {
+pub trait NetworkRepository: Send + Sync + QuotaRepository {
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError>;
     async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError>;
     async fn get_network(
@@ -1022,7 +1036,9 @@ pub trait PlacementRepository: Send + Sync {
 /// Application code depends on this port; the composition root chooses the
 /// concrete adapter.
 #[async_trait]
-pub trait ComputeRepository: DurableStore + KeypairRepository + VolumeAttachmentRepository {
+pub trait ComputeRepository:
+    DurableStore + KeypairRepository + VolumeAttachmentRepository + QuotaRepository
+{
     async fn list_resources_by_kind(&self, kind: &str) -> Result<Vec<ResourceRecord>, StoreError>;
 }
 

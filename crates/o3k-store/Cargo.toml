@@ -14,9 +14,10 @@ async-trait.workspace = true
 base64.workspace = true
 md-5.workspace = true
 o3k-domain = { path = "../o3k-domain" }
-serde.workspace = true
-sqlx.workspace = true
-thiserror.workspace = true
-tokio.workspace = true
-uuid.workspace = true
-url.workspace = true
+o3k-kernel = { path = "../o3k-kernel" }
+serde = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+url = { workspace = true }

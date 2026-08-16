@@ -75,6 +75,36 @@ impl ServiceNamespace {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    #[must_use]
+    pub fn compute() -> Self {
+        Self::new_unchecked("compute".to_owned())
+    }
+
+    #[must_use]
+    pub fn image() -> Self {
+        Self::new_unchecked("image".to_owned())
+    }
+
+    #[must_use]
+    pub fn network() -> Self {
+        Self::new_unchecked("network".to_owned())
+    }
+
+    #[must_use]
+    pub fn identity() -> Self {
+        Self::new_unchecked("identity".to_owned())
+    }
+
+    #[must_use]
+    pub fn placement() -> Self {
+        Self::new_unchecked("placement".to_owned())
+    }
+
+    #[must_use]
+    pub fn volume() -> Self {
+        Self::new_unchecked("volume".to_owned())
+    }
 }
 
 impl fmt::Display for ServiceNamespace {

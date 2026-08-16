@@ -11,7 +11,8 @@ use std::{
 
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
+    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
+    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
@@ -39,8 +40,6 @@ const QEMU_IMG_MAX_OPEN_FILES: u64 = 128;
 /// matrix harness and the unit test only.
 const O3K_TEST_QEMU_IMG_FAIL: &str = "O3K_TEST_QEMU_IMG_FAIL";
 
-// qcow2 structural gate constants, from the QEMU qcow2 format documentation
-// (docs/interop/qcow2.rst).
 const QCOW2_VERSION_2_HEADER: u64 = 72;
 const QCOW2_VERSION_3_HEADER: u64 = 104;
 const QCOW2_MAX_HEADER_LENGTH: u64 = 1 << 20;
@@ -114,6 +113,13 @@ pub enum ImageError {
     InvalidMetadata,
     #[error("image upload exceeds the configured limit")]
     TooLarge,
+    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
+    QuotaExceeded {
+        key: LimitKey,
+        limit: LimitValue,
+        used: u64,
+        requested: u64,
+    },
     #[error("image storage error")]
     Storage(#[source] io::Error),
     #[error("image metadata is corrupt")]
@@ -1266,12 +1272,49 @@ impl ImageService {
             size: None,
             checksum: None,
         };
-        self.inner
+        let scope =
+            OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+        let amounts = vec![ResourceAmount::new(LimitKey::image_images(), 1)];
+        let op_id = format!("o3k:image:create:{}:{}", project_id, record.id);
+        let quota_res = self
+            .inner
             .repository
-            .insert_image(&record)
+            .reserve_quota(&scope, &op_id, &amounts)
             .await
-            .map_err(Self::map_store_error)?;
-        image_from_store(record)
+            .map_err(|err| match err {
+                StoreError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                } => ImageError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                },
+                StoreError::ReservationConflict(_) => ImageError::Conflict,
+                other => ImageError::Store(other),
+            })?;
+
+        match self.inner.repository.insert_image(&record).await {
+            Ok(()) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .commit_reservation(&quota_res.id)
+                    .await;
+                image_from_store(record)
+            }
+            Err(error) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
+                Err(Self::map_store_error(error))
+            }
+        }
     }
 
     pub async fn list(&self, auth: &AuthContext) -> Result<Vec<ImageRecord>, ImageError> {
@@ -1513,14 +1556,52 @@ impl ImageService {
             let mut reader = std::io::Cursor::new(content);
             validate_qcow2_structure(&mut reader, content.len() as u64)?;
         }
+        let scope =
+            OwnershipScope::project(ScopeId::new_unchecked(project_id.to_owned()), None, None);
+        let amounts = vec![ResourceAmount::new(
+            LimitKey::image_bytes(),
+            content.len() as u64,
+        )];
+        let op_id = format!("o3k:image:upload:{}:{}", project_id, id);
+        let quota_res = self
+            .inner
+            .repository
+            .reserve_quota(&scope, &op_id, &amounts)
+            .await
+            .map_err(|err| match err {
+                StoreError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                } => ImageError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                },
+                StoreError::ReservationConflict(_) => ImageError::Conflict,
+                other => ImageError::Store(other),
+            })?;
+
         let content_path = content_path(&self.inner.root, id);
         let temporary_path = content_path.with_extension(format!("upload-{}", Uuid::now_v7()));
         if let Err(error) = fs::write(&temporary_path, content) {
             let _ = fs::remove_file(&temporary_path);
+            let _ = self
+                .inner
+                .repository
+                .release_reservation(&quota_res.id)
+                .await;
             return Err(ImageError::Storage(error));
         }
         if let Err(error) = fs::rename(&temporary_path, &content_path) {
             let _ = fs::remove_file(&temporary_path);
+            let _ = self
+                .inner
+                .repository
+                .release_reservation(&quota_res.id)
+                .await;
             return Err(ImageError::Storage(error));
         }
         let checksum = format!("{:x}", Sha256::digest(content));
@@ -1530,9 +1611,21 @@ impl ImageService {
             .activate_image(project_id, &id, content.len() as u64, &checksum)
             .await
         {
-            Ok(record) => image_from_store(record),
+            Ok(record) => {
+                let _ = self
+                    .inner
+                    .repository
+                    .commit_reservation(&quota_res.id)
+                    .await;
+                image_from_store(record)
+            }
             Err(error) => {
                 let _ = fs::remove_file(&content_path);
+                let _ = self
+                    .inner
+                    .repository
+                    .release_reservation(&quota_res.id)
+                    .await;
                 Err(Self::map_store_error(error))
             }
         }
@@ -1597,6 +1690,16 @@ impl ImageService {
         if content.exists() {
             fs::remove_file(content).map_err(ImageError::Storage)?;
         }
+        let _ = self
+            .inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:image:create:{}:{}", project_id, id))
+            .await;
+        let _ = self
+            .inner
+            .repository
+            .release_reservation_for_operation(&format!("o3k:image:upload:{}:{}", project_id, id))
+            .await;
         Ok(())
     }
 
@@ -3104,6 +3207,79 @@ esac
             validate_bytes(&full[..1024 * 1024]),
             Err(ImageError::FormatVerificationFailed)
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn image_quota_enforcement_and_isolation() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::QuotaRepository;
+
+        let path = root("quota-isolation");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ImageService::open(&path, DEFAULT_MAX_UPLOAD_BYTES, store.clone()).await?;
+
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
+
+        // Limit proj-a to 1 image
+        store
+            .set_limit(&scope_a, &LimitKey::image_images(), LimitValue::Maximum(1))
+            .await?;
+
+        let auth_a = auth("proj-a");
+        let auth_b = auth("proj-b");
+
+        // 1. First image for proj-a succeeds
+        let img1 = service
+            .create(
+                &auth_a,
+                "img-1".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        assert_eq!(img1.name, "img-1");
+
+        // 2. Second image for proj-a fails with QuotaExceeded
+        let res2 = service
+            .create(
+                &auth_a,
+                "img-2".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await;
+        assert!(matches!(res2, Err(ImageError::QuotaExceeded { .. })));
+
+        // 3. Proj-b can create an image (isolation)
+        let img_b = service
+            .create(
+                &auth_b,
+                "img-b".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        assert_eq!(img_b.name, "img-b");
+
+        // 4. Deleting img1 frees quota for proj-a
+        service.delete(&auth_a, img1.id).await?;
+
+        let img2 = service
+            .create(
+                &auth_a,
+                "img-2".to_owned(),
+                "private".to_owned(),
+                "bare".to_owned(),
+                "raw".to_owned(),
+            )
+            .await?;
+        assert_eq!(img2.name, "img-2");
+
+        let _ = fs::remove_dir_all(&path);
         Ok(())
     }
 }

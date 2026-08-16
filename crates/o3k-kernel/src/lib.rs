@@ -18,6 +18,7 @@ pub mod auth_context;
 pub mod authorization;
 pub mod error;
 pub mod principal;
+pub mod quota;
 pub mod registry;
 pub mod resource;
 pub mod scope;
@@ -33,6 +34,10 @@ pub use authorization::{
 };
 pub use error::KernelError;
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};
+pub use quota::{
+    LimitKey, LimitValue, QuotaDecision, Reservation, ReservationId, ReservationState,
+    ResourceAmount, Usage,
+};
 pub use registry::{
     ApiSurface, EndpointTemplate, KernelRegistry, KeystoneCatalogEndpoint, KeystoneCatalogService,
     ServiceDescriptor, ServiceId, ServiceNamespace, ServiceOwnership,

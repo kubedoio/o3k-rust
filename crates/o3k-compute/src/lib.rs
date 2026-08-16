@@ -4,7 +4,8 @@ use async_trait::async_trait;
 pub use o3k_domain::{Server, ServerId, ServerState};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
-    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
+    LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
+    ResourceTarget, ResourceType, ScopeId, ServiceNamespace, StaticAuthorizer,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
@@ -102,6 +103,13 @@ pub enum ComputeError {
     Conflict,
     #[error("compute request is invalid")]
     InvalidRequest,
+    #[error("quota exceeded for {key}: limit {limit}, used {used}, requested {requested}")]
+    QuotaExceeded {
+        key: LimitKey,
+        limit: LimitValue,
+        used: u64,
+        requested: u64,
+    },
     #[error("compute store error")]
     Store(#[from] StoreError),
     #[error("compute reconciliation error")]
@@ -1319,6 +1327,33 @@ impl ComputeService {
             &Uuid::NAMESPACE_URL,
             format!("o3k:operation:{project_id}:{idempotency_key}").as_bytes(),
         );
+        let scope = OwnershipScope::project(ScopeId::new_unchecked(project_id.clone()), None, None);
+        let amounts = vec![
+            ResourceAmount::new(LimitKey::compute_servers(), 1),
+            ResourceAmount::new(LimitKey::compute_vcpus(), flavor.vcpus as u64),
+            ResourceAmount::new(LimitKey::compute_memory_mb(), flavor.ram_mib),
+            ResourceAmount::new(LimitKey::compute_disk_gb(), flavor.disk_gib),
+        ];
+        let quota_res = self
+            .store
+            .reserve_quota(&scope, &operation_id.to_string(), &amounts)
+            .await
+            .map_err(|err| match err {
+                StoreError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                } => ComputeError::QuotaExceeded {
+                    key,
+                    limit,
+                    used,
+                    requested,
+                },
+                StoreError::ReservationConflict(_) => ComputeError::Conflict,
+                other => ComputeError::Store(other),
+            })?;
+
         let request = CreateInstanceRequest {
             operation_id,
             o3k_server_id: server_id,
@@ -1811,7 +1846,11 @@ impl ComputeService {
             }
             return Err(ComputeError::Conflict);
         }
-        self.show_server(&project_id, ServerId::from_uuid(id)).await
+        let server = self
+            .show_server(&project_id, ServerId::from_uuid(id))
+            .await?;
+        let _ = self.store.commit_reservation(&quota_res.id).await;
+        Ok(server)
     }
 
     pub async fn list_servers_for_auth(
@@ -2879,6 +2918,10 @@ impl ComputeService {
             // media that the earlier run could not.
             self.unbind_ports_from_intent(&intent).await;
             self.cleanup_config_drive_best_effort(&id.as_uuid().to_string());
+            let _ = self
+                .store
+                .release_reservation_for_operation(&intent.operation_id.to_string())
+                .await;
             return Ok(());
         }
         if resource.provider_id.is_none() {
@@ -2963,6 +3006,10 @@ impl ComputeService {
                 o3k_store::OperationState::Succeeded,
             )
             .await;
+            let _ = self
+                .store
+                .release_reservation_for_operation(&intent.operation_id.to_string())
+                .await;
             // Issue #88 S3 residue: the create may have been ACCEPTED by an
             // agent (the config-drive transfers commit before acceptance)
             // that crashed before any libvirt mutation. The accepted
@@ -3035,6 +3082,10 @@ impl ComputeService {
             o3k_store::OperationState::Succeeded,
         )
         .await;
+        let _ = self
+            .store
+            .release_reservation_for_operation(&intent.operation_id.to_string())
+            .await;
         Ok(())
     }
 
@@ -8055,6 +8106,113 @@ mod tests {
         service
             .delete_keypair_for_auth(&member_auth, "my-key")
             .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compute_quota_enforcement_and_isolation() -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::QuotaRepository;
+
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+
+        let scope_a = OwnershipScope::project(ScopeId::new_unchecked("proj-a"), None, None);
+
+        // Limit proj-a to 1 server
+        store
+            .set_limit(
+                &scope_a,
+                &LimitKey::compute_servers(),
+                LimitValue::Maximum(1),
+            )
+            .await?;
+
+        let auth_a = test_compute_auth("proj-a", "user-1", "member");
+        let auth_b = test_compute_auth("proj-b", "user-2", "member");
+
+        let flavors = service.flavors_for_auth(&auth_a).await?;
+        let flavor_id = flavors[0].id;
+
+        // 1. First server for proj-a succeeds
+        let server1 = service
+            .create_server_for_auth(
+                &auth_a,
+                ServerCreateInput {
+                    user_id: "user-1".to_owned(),
+                    project_id: "proj-a".to_owned(),
+                    name: "srv-1".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "idem-1".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(server1.name, "srv-1");
+
+        // 2. Second server for proj-a fails with QuotaExceeded
+        let res2 = service
+            .create_server_for_auth(
+                &auth_a,
+                ServerCreateInput {
+                    user_id: "user-1".to_owned(),
+                    project_id: "proj-a".to_owned(),
+                    name: "srv-2".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "idem-2".to_owned(),
+                },
+            )
+            .await;
+        assert!(matches!(res2, Err(ComputeError::QuotaExceeded { .. })));
+
+        // 3. Proj-b can create server because its quota is Unlimited (tenant isolation)
+        let server_b = service
+            .create_server_for_auth(
+                &auth_b,
+                ServerCreateInput {
+                    user_id: "user-2".to_owned(),
+                    project_id: "proj-b".to_owned(),
+                    name: "srv-b1".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "idem-b1".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(server_b.name, "srv-b1");
+
+        // 4. Deleting server1 frees quota for proj-a
+        service.delete_server_for_auth(&auth_a, server1.id).await?;
+
+        // Now srv-2 can be created
+        let server2 = service
+            .create_server_for_auth(
+                &auth_a,
+                ServerCreateInput {
+                    user_id: "user-1".to_owned(),
+                    project_id: "proj-a".to_owned(),
+                    name: "srv-2".to_owned(),
+                    image_id: "img-1".to_owned(),
+                    flavor_id,
+                    network_ids: vec!["net-1".to_owned()],
+                    key_name: None,
+                    config_drive: None,
+                    idempotency_key: "idem-2".to_owned(),
+                },
+            )
+            .await?;
+        assert_eq!(server2.name, "srv-2");
 
         Ok(())
     }

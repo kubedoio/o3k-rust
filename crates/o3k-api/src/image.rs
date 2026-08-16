@@ -83,6 +83,17 @@ pub(crate) fn image_error(error: ImageError) -> axum::response::Response {
             "Request Entity Too Large",
             "image upload exceeds the configured limit",
         ),
+        ImageError::QuotaExceeded {
+            ref key,
+            limit,
+            used,
+            requested,
+        } => {
+            let message = format!(
+                "Quota exceeded for {key}: limit {limit}, used {used}, requested {requested}"
+            );
+            keystone_error(StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large", message)
+        }
         ImageError::UnsupportedFormat | ImageError::ChecksumMismatch | ImageError::InvalidPath => {
             keystone_error(
                 StatusCode::BAD_REQUEST,

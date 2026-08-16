@@ -176,6 +176,17 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             "Bad Request",
             "invalid network request",
         ),
+        NetworkError::QuotaExceeded {
+            ref key,
+            limit,
+            used,
+            requested,
+        } => {
+            let message = format!(
+                "Quota exceeded for {key}: limit {limit}, used {used}, requested {requested}"
+            );
+            keystone_error(StatusCode::CONFLICT, "Conflict", message)
+        }
         NetworkError::Store(_) | NetworkError::CorruptMetadata(_) => keystone_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Internal Server Error",
