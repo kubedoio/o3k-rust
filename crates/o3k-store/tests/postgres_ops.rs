@@ -15,15 +15,12 @@ use o3k_store::{
 
 async fn get_test_store() -> Option<(String, PostgresStore)> {
     if let Ok(url) = env::var("O3K_DATABASE_URL") {
-        if let Ok(store) = PostgresStore::connect(&url).await {
-            return Some((url, store));
-        }
+        let store = PostgresStore::connect(&url).await.ok()?;
+        return Some((url, store));
     }
     let default_url = "postgres://o3k:password@127.0.0.1/o3k_test".to_owned();
-    if let Ok(store) = PostgresStore::connect(&default_url).await {
-        return Some((default_url, store));
-    }
-    None
+    let store = PostgresStore::connect(&default_url).await.ok()?;
+    Some((default_url, store))
 }
 
 #[tokio::test]
