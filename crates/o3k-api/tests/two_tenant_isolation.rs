@@ -9,6 +9,7 @@ use o3k_api::AppState;
 use o3k_compute::ComputeService;
 use o3k_identity::{BootstrapConfig, ExtraProjectSeed, Secret, TokenService};
 use o3k_image::ImageService;
+use o3k_kernel::{AuditOutcome, MemoryAuditSink};
 use o3k_network::NetworkService;
 use o3k_provider::FakeComputeProvider;
 use o3k_store::{DurableStore, testkit::TestStore};
@@ -24,6 +25,7 @@ struct TwoTenantHarness {
     app: axum::Router,
     store: Arc<TestStore>,
     provider: Arc<FakeComputeProvider>,
+    audit_sink: Arc<MemoryAuditSink>,
     token_a: String,
     token_b: String,
     image_dir: std::path::PathBuf,
@@ -51,8 +53,11 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
     )
     .await?;
 
+    let audit_sink = Arc::new(MemoryAuditSink::new());
+
     let provider = Arc::new(FakeComputeProvider::new());
-    let compute = ComputeService::new(store.clone(), provider.clone());
+    let compute =
+        ComputeService::new(store.clone(), provider.clone()).with_audit_sink(audit_sink.clone());
     let identity = TokenService::load(
         store.clone(),
         Secret::new("a-secure-signing-key-with-at-least-32-bytes".to_owned()),
@@ -60,9 +65,13 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
     )
     .await?;
     let image_dir = std::env::temp_dir().join(format!("o3k-img-test-{}", uuid::Uuid::now_v7()));
-    let image = ImageService::open(&image_dir, 1024 * 1024, store.clone()).await?;
+    let image = ImageService::open(&image_dir, 1024 * 1024, store.clone())
+        .await?
+        .with_audit_sink(audit_sink.clone());
     let net_dir = std::env::temp_dir().join(format!("o3k-net-test-{}", uuid::Uuid::now_v7()));
-    let network = NetworkService::open(&net_dir, store.clone()).await?;
+    let network = NetworkService::open(&net_dir, store.clone())
+        .await?
+        .with_audit_sink(audit_sink.clone());
 
     let state = AppState::new()
         .with_identity(identity)
@@ -79,6 +88,7 @@ async fn build_harness() -> Result<TwoTenantHarness, Box<dyn std::error::Error>>
         app,
         store,
         provider,
+        audit_sink,
         token_a,
         token_b,
         image_dir,
@@ -299,7 +309,29 @@ async fn two_tenant_path_and_resource_isolation() -> Result<(), Box<dyn std::err
     assert_eq!(harness.provider.instance_count(), 0);
     assert!(harness.store.get_resource(fake_srv_id).await.is_err());
 
-    // 11. Clean up temp dirs
+    // 11. Assert audit trail captures outcomes correctly without secrets
+    let events = harness.audit_sink.events();
+    assert!(!events.is_empty(), "audit sink must record events");
+
+    let succeeded_count = events
+        .iter()
+        .filter(|e| e.outcome == AuditOutcome::Succeeded)
+        .count();
+
+    assert!(
+        succeeded_count >= 3,
+        "expected at least 3 successful mutations (image create, network create, keypair create), got {succeeded_count}"
+    );
+
+    // Verify no secrets/tokens leaked in audit events
+    for event in &events {
+        let serialized = serde_json::to_string(event)?;
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("tenant-b-password"));
+    }
+
+    // 12. Clean up temp dirs
     let _ = std::fs::remove_dir_all(&harness.image_dir);
     let _ = std::fs::remove_dir_all(&harness.net_dir);
 

@@ -10,8 +10,8 @@ use std::{
 };
 
 use o3k_kernel::{
-    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
-    ResourceType, StaticAuthorizer,
+    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
+    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
 };
 use o3k_store::{ImageMetadataRecord, ImageRepository, StoreError};
 use serde::{Deserialize, Serialize};
@@ -1138,6 +1138,7 @@ pub struct ImageService {
     lock: Arc<tokio::sync::Mutex<()>>,
     max_upload_bytes: usize,
     authorizer: Arc<dyn Authorizer>,
+    audit_sink: Arc<dyn AuditSink>,
 }
 
 struct Inner {
@@ -1161,12 +1162,19 @@ impl ImageService {
             lock: Arc::new(tokio::sync::Mutex::new(())),
             max_upload_bytes,
             authorizer: Arc::new(StaticAuthorizer::standard()),
+            audit_sink: Arc::new(NoopAuditSink),
         })
     }
 
     #[must_use]
     pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
         self.authorizer = authorizer;
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = audit_sink;
         self
     }
 
@@ -1178,26 +1186,56 @@ impl ImageService {
         container_format: String,
         disk_format: String,
     ) -> Result<ImageRecord, ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "CreateImage").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "CreateImage".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "CreateImage")
-                .map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::Unauthorized);
         }
-        self.create_for_project(
-            auth.effective_scope().id().as_str(),
-            name,
-            visibility,
-            container_format,
-            disk_format,
-        )
-        .await
+        match self
+            .create_for_project(
+                auth.effective_scope().id().as_str(),
+                name,
+                visibility,
+                container_format,
+                disk_format,
+            )
+            .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("image", "image").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
+                        }),
+                        ResourceId::new(record.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn create_for_project(
@@ -1237,16 +1275,25 @@ impl ImageService {
     }
 
     pub async fn list(&self, auth: &AuthContext) -> Result<Vec<ImageRecord>, ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "ListImages").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "ListImages".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "ListImages")
-                .map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::Unauthorized);
         }
         self.list_for_project(auth.effective_scope().id().as_str())
@@ -1265,16 +1312,26 @@ impl ImageService {
     }
 
     pub async fn get(&self, auth: &AuthContext, id: Uuid) -> Result<ImageRecord, ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "ReadImage").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "ReadImage".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "ReadImage").map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
         self.get_for_project(auth.effective_scope().id().as_str(), id)
@@ -1301,17 +1358,26 @@ impl ImageService {
         auth: &AuthContext,
         id: Uuid,
     ) -> Result<ImageArtifact, ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "DownloadImage").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "DownloadImage".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "DownloadImage")
-                .map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
         self.resolve_artifact_for_project(auth.effective_scope().id().as_str(), id)
@@ -1375,21 +1441,51 @@ impl ImageService {
         id: Uuid,
         content: &[u8],
     ) -> Result<ImageRecord, ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "UploadImage").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "UploadImage".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "UploadImage")
-                .map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
-        self.upload_for_project(auth.effective_scope().id().as_str(), id, content)
+        match self
+            .upload_for_project(auth.effective_scope().id().as_str(), id, content)
             .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("image", "image").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn upload_for_project(
@@ -1443,21 +1539,51 @@ impl ImageService {
     }
 
     pub async fn delete(&self, auth: &AuthContext, id: Uuid) -> Result<(), ImageError> {
+        let ns = ServiceNamespace::new("image")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("image".to_owned()));
+        let act = ActionId::new("image", "DeleteImage").unwrap_or_else(|_| {
+            ActionId::new_unchecked("image".to_owned(), "DeleteImage".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("image", "DeleteImage")
-                .map_err(|_| ImageError::InvalidMetadata)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("image", "image").map_err(|_| ImageError::InvalidMetadata)?,
                 ResourceId::new(id.to_string()).map_err(|_| ImageError::InvalidMetadata)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ImageError::NotFound);
         }
-        self.delete_for_project(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_for_project(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("image", "image").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("image".to_owned(), "image".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_for_project(&self, project_id: &str, id: Uuid) -> Result<(), ImageError> {

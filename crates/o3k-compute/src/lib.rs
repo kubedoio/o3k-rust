@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 pub use o3k_domain::{Server, ServerId, ServerState};
 use o3k_kernel::{
-    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
-    ResourceType, StaticAuthorizer,
+    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
+    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
 };
 #[cfg(test)]
 use o3k_provider::FakeComputeProvider;
@@ -126,6 +126,7 @@ pub struct ComputeService {
     binding_projector: Option<Arc<dyn PortBindingProjector>>,
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
+    audit_sink: Arc<dyn AuditSink>,
 }
 
 #[derive(Clone)]
@@ -392,12 +393,19 @@ impl ComputeService {
             binding_projector: None,
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
+            audit_sink: Arc::new(NoopAuditSink),
         }
     }
 
     #[must_use]
     pub fn with_authorizer(mut self, authorizer: Arc<dyn Authorizer>) -> Self {
         self.authorizer = authorizer;
+        self
+    }
+
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = audit_sink;
         self
     }
 
@@ -894,16 +902,25 @@ impl ComputeService {
     }
 
     pub async fn flavors_for_auth(&self, auth: &AuthContext) -> Result<Vec<Flavor>, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ListFlavors").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ListFlavors".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ListFlavors")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
         self.flavors_for_project(auth.effective_scope().id().as_str())
@@ -935,26 +952,56 @@ impl ComputeService {
         ram_mib: u64,
         disk_gib: u64,
     ) -> Result<Flavor, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "CreateFlavor").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "CreateFlavor".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "CreateFlavor")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
-        self.create_flavor(
-            auth.effective_scope().id().as_str(),
-            name,
-            vcpus,
-            ram_mib,
-            disk_gib,
-        )
-        .await
+        match self
+            .create_flavor(
+                auth.effective_scope().id().as_str(),
+                name,
+                vcpus,
+                ram_mib,
+                disk_gib,
+            )
+            .await
+        {
+            Ok(flavor) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "flavor").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "flavor".to_owned())
+                        }),
+                        ResourceId::new(flavor.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(flavor)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn create_flavor(
@@ -1002,17 +1049,26 @@ impl ComputeService {
         auth: &AuthContext,
         id: Uuid,
     ) -> Result<Flavor, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ReadFlavor").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ReadFlavor".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ReadFlavor")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
         self.flavor_for_project(auth.effective_scope().id().as_str(), id)
@@ -1039,21 +1095,51 @@ impl ComputeService {
         auth: &AuthContext,
         id: Uuid,
     ) -> Result<(), ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "DeleteFlavor").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "DeleteFlavor".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "DeleteFlavor")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "flavor").map_err(|_| ComputeError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.delete_flavor(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_flavor(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "flavor").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "flavor".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_flavor(&self, project_id: &str, id: Uuid) -> Result<(), ComputeError> {
@@ -1123,19 +1209,47 @@ impl ComputeService {
         auth: &AuthContext,
         input: ServerCreateInput,
     ) -> Result<Server, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "CreateServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "CreateServer".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "CreateServer")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
-        self.create_server_for_user(input).await
+        match self.create_server_for_user(input).await {
+            Ok(server) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "server").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned())
+                        }),
+                        ResourceId::new(server.id.as_uuid().to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(server)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn create_server(
@@ -1704,16 +1818,25 @@ impl ComputeService {
         &self,
         auth: &AuthContext,
     ) -> Result<Vec<Server>, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ListServers").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ListServers".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ListServers")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
         self.list_servers(auth.effective_scope().id().as_str())
@@ -1756,10 +1879,14 @@ impl ComputeService {
         auth: &AuthContext,
         id: ServerId,
     ) -> Result<Server, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ReadServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ReadServer".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ReadServer")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
                 ResourceId::new(id.as_uuid().to_string())
@@ -1767,7 +1894,12 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
         self.show_server(auth.effective_scope().id().as_str(), id)
@@ -1979,10 +2111,14 @@ impl ComputeService {
         tag: Option<String>,
         delete_on_termination: bool,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let ns = ServiceNamespace::new("volume")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("volume".to_owned()));
+        let act = ActionId::new("volume", "AttachVolume").unwrap_or_else(|_| {
+            ActionId::new_unchecked("volume".to_owned(), "AttachVolume".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("volume", "AttachVolume")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("volume", "volume_attachment")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -1991,18 +2127,47 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.attach_volume(
-            auth.effective_scope().id().as_str(),
-            server_id,
-            volume_id,
-            device,
-            tag,
-            delete_on_termination,
-        )
-        .await
+        match self
+            .attach_volume(
+                auth.effective_scope().id().as_str(),
+                server_id,
+                volume_id,
+                device,
+                tag,
+                delete_on_termination,
+            )
+            .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("volume", "volume_attachment").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked(
+                                "volume".to_owned(),
+                                "volume_attachment".to_owned(),
+                            )
+                        }),
+                        ResourceId::new(record.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn attach_volume(
@@ -2032,10 +2197,14 @@ impl ComputeService {
         auth: &AuthContext,
         server_id: ServerId,
     ) -> Result<Vec<VolumeAttachmentRecord>, ComputeError> {
+        let ns = ServiceNamespace::new("volume")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("volume".to_owned()));
+        let act = ActionId::new("volume", "ListVolumeAttachments").unwrap_or_else(|_| {
+            ActionId::new_unchecked("volume".to_owned(), "ListVolumeAttachments".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("volume", "ListVolumeAttachments")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("volume", "volume_attachment")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -2044,7 +2213,12 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
         self.list_volume_attachments(auth.effective_scope().id().as_str(), server_id)
@@ -2073,10 +2247,14 @@ impl ComputeService {
         server_id: ServerId,
         attachment_id: Uuid,
     ) -> Result<VolumeAttachmentRecord, ComputeError> {
+        let ns = ServiceNamespace::new("volume")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("volume".to_owned()));
+        let act = ActionId::new("volume", "ReadVolumeAttachment").unwrap_or_else(|_| {
+            ActionId::new_unchecked("volume".to_owned(), "ReadVolumeAttachment".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("volume", "ReadVolumeAttachment")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("volume", "volume_attachment")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -2085,7 +2263,12 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
         self.get_volume_attachment(
@@ -2115,10 +2298,14 @@ impl ComputeService {
         server_id: ServerId,
         attachment_id: Uuid,
     ) -> Result<(), ComputeError> {
+        let ns = ServiceNamespace::new("volume")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("volume".to_owned()));
+        let act = ActionId::new("volume", "DetachVolume").unwrap_or_else(|_| {
+            ActionId::new_unchecked("volume".to_owned(), "DetachVolume".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("volume", "DetachVolume")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("volume", "volume_attachment")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -2127,15 +2314,44 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.detach_volume(
-            auth.effective_scope().id().as_str(),
-            server_id,
-            attachment_id,
-        )
-        .await
+        match self
+            .detach_volume(
+                auth.effective_scope().id().as_str(),
+                server_id,
+                attachment_id,
+            )
+            .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("volume", "volume_attachment").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked(
+                                "volume".to_owned(),
+                                "volume_attachment".to_owned(),
+                            )
+                        }),
+                        ResourceId::new(attachment_id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn detach_volume(
@@ -2341,43 +2557,82 @@ impl ComputeService {
         name: String,
         public_key: String,
     ) -> Result<Keypair, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ImportKeypair").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ImportKeypair".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ImportKeypair")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "keypair")
                     .map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
-        self.create_keypair(
-            auth.principal().id().as_str(),
-            auth.effective_scope().id().as_str(),
-            name,
-            public_key,
-        )
-        .await
+        match self
+            .create_keypair(
+                auth.principal().id().as_str(),
+                auth.effective_scope().id().as_str(),
+                name,
+                public_key,
+            )
+            .await
+        {
+            Ok(kp) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "keypair").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "keypair".to_owned())
+                        }),
+                        ResourceId::new(kp.name.clone()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(kp)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn list_keypairs_for_auth(
         &self,
         auth: &AuthContext,
     ) -> Result<Vec<Keypair>, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ListKeypairs").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ListKeypairs".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ListKeypairs")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("compute", "keypair")
                     .map_err(|_| ComputeError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::Unauthorized);
         }
         self.list_keypairs(
@@ -2406,10 +2661,14 @@ impl ComputeService {
         auth: &AuthContext,
         name: &str,
     ) -> Result<Keypair, ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "ReadKeypair").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "ReadKeypair".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "ReadKeypair")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "keypair")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -2417,7 +2676,12 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
         self.show_keypair(
@@ -2449,10 +2713,14 @@ impl ComputeService {
         auth: &AuthContext,
         name: &str,
     ) -> Result<(), ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "DeleteKeypair").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "DeleteKeypair".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "DeleteKeypair")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "keypair")
                     .map_err(|_| ComputeError::InvalidRequest)?,
@@ -2460,15 +2728,41 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.delete_keypair(
-            auth.principal().id().as_str(),
-            auth.effective_scope().id().as_str(),
-            name,
-        )
-        .await
+        match self
+            .delete_keypair(
+                auth.principal().id().as_str(),
+                auth.effective_scope().id().as_str(),
+                name,
+            )
+            .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "keypair").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "keypair".to_owned())
+                        }),
+                        ResourceId::new(name.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_keypair(
@@ -2506,10 +2800,14 @@ impl ComputeService {
         auth: &AuthContext,
         id: ServerId,
     ) -> Result<(), ComputeError> {
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", "DeleteServer").unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), "DeleteServer".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", "DeleteServer")
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
                 ResourceId::new(id.as_uuid().to_string())
@@ -2517,11 +2815,37 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.delete_server(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_server(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "server").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned())
+                        }),
+                        ResourceId::new(id.as_uuid().to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_server(&self, project_id: &str, id: ServerId) -> Result<(), ComputeError> {
@@ -2790,10 +3114,14 @@ impl ComputeService {
             InstanceAction::Stop => "StopServer",
             InstanceAction::Reboot => "RebootServer",
         };
+        let ns = ServiceNamespace::new("compute")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("compute".to_owned()));
+        let act = ActionId::new("compute", action_name).unwrap_or_else(|_| {
+            ActionId::new_unchecked("compute".to_owned(), action_name.to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("compute", action_name)
-                .map_err(|_| ComputeError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
                 ResourceId::new(id.as_uuid().to_string())
@@ -2801,11 +3129,37 @@ impl ComputeService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(ComputeError::NotFound);
         }
-        self.action(auth.effective_scope().id().as_str(), id, action)
+        match self
+            .action(auth.effective_scope().id().as_str(), id, action)
             .await
+        {
+            Ok(server) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("compute", "server").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("compute".to_owned(), "server".to_owned())
+                        }),
+                        ResourceId::new(server.id.as_uuid().to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(server)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn action(

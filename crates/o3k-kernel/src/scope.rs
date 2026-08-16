@@ -100,3 +100,20 @@ impl OwnershipScope {
         self.domain_id.as_deref()
     }
 }
+
+impl fmt::Display for OwnershipScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.kind.as_str(), self.id)
+    }
+}
+
+impl ScopeKind {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Domain => "domain",
+            Self::System => "system",
+        }
+    }
+}

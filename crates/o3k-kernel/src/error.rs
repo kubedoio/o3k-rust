@@ -18,6 +18,15 @@ pub enum KernelError {
     #[error("invalid action identifier: {0}")]
     InvalidActionId(String),
 
+    #[error("invalid service identifier: {0}")]
+    InvalidServiceId(String),
+
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(String),
+
+    #[error("invalid identifier: {0}")]
+    InvalidIdentifier(String),
+
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 }

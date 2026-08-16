@@ -733,6 +733,7 @@ pub struct TokenService {
     signing_key: Secret,
     token_ttl: Duration,
     catalog_endpoint: String,
+    registry: Option<o3k_kernel::KernelRegistry>,
 }
 
 impl TokenService {
@@ -764,11 +765,33 @@ impl TokenService {
         if snapshot.domains.is_empty() {
             return Err(AuthError::IdentityUnavailable);
         }
+        let catalog_endpoint = snapshot
+            .endpoints
+            .iter()
+            .find_map(|ep| {
+                let is_identity = snapshot
+                    .services
+                    .iter()
+                    .any(|s| s.id == ep.service_id && s.service_type == "identity");
+                if is_identity || ep.service_id == "identity" {
+                    if let Some(pos) = ep.url.find("/v3") {
+                        Some(ep.url[..pos].to_owned())
+                    } else if let Some(pos) = ep.url.find("/v2") {
+                        Some(ep.url[..pos].to_owned())
+                    } else {
+                        Some(ep.url.trim_end_matches('/').to_owned())
+                    }
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "http://127.0.0.1:8080".to_owned());
         Ok(Self {
             snapshot,
             signing_key,
             token_ttl,
-            catalog_endpoint: "http://127.0.0.1:8080".to_owned(),
+            catalog_endpoint,
+            registry: None,
         })
     }
 
@@ -776,6 +799,13 @@ impl TokenService {
     #[must_use]
     pub fn with_catalog_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.catalog_endpoint = endpoint.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    /// Set the canonical Cloud Kernel registry used to project the service catalog.
+    #[must_use]
+    pub fn with_registry(mut self, registry: o3k_kernel::KernelRegistry) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -1168,39 +1198,49 @@ impl TokenService {
         })
     }
 
-    /// Builds the service catalog from durable service and endpoint records.
+    /// Builds the service catalog projected from the canonical Cloud Kernel registry.
     /// URLs are validated configuration and never derived from request
     /// headers. The `{project_id}` placeholder is substituted per token scope.
     fn catalog(&self, project_id: &str) -> Vec<ServiceDetails> {
-        let mut catalog: Vec<ServiceDetails> = self
+        let cinder_url = self
+            .snapshot
+            .endpoints
+            .iter()
+            .find(|ep| ep.service_id == "cinder")
+            .map(|ep| ep.url.replace("/{project_id}", "").replace("/v3", ""));
+
+        let registry = self.registry.clone().unwrap_or_else(|| {
+            o3k_kernel::KernelRegistry::standard(&self.catalog_endpoint, cinder_url.as_deref())
+        });
+
+        let enabled_services: std::collections::HashSet<&str> = self
             .snapshot
             .services
             .iter()
-            .filter(|service| service.enabled)
-            .map(|service| {
-                let endpoints: Vec<EndpointDetails> = self
-                    .snapshot
-                    .endpoints
-                    .iter()
-                    .filter(|endpoint| endpoint.enabled && endpoint.service_id == service.id)
-                    .map(|endpoint| EndpointDetails {
-                        url: endpoint.url.replace("{project_id}", project_id),
-                        interface: endpoint.interface.clone(),
-                        region: endpoint.region.clone(),
-                        region_id: endpoint.region.clone(),
-                    })
-                    .collect();
-                ServiceDetails {
-                    name: service.name.clone(),
-                    service_type: service.service_type.clone(),
-                    id: service.id.clone(),
-                    endpoints,
-                }
-            })
+            .filter(|s| s.enabled)
+            .map(|s| s.id.as_str())
             .collect();
-        catalog.sort_by(|left, right| left.service_type.cmp(&right.service_type));
-        catalog.retain(|service| !service.endpoints.is_empty());
-        catalog
+
+        let projected = registry.project_keystone_catalog(project_id);
+        projected
+            .into_iter()
+            .filter(|svc| enabled_services.is_empty() || enabled_services.contains(svc.id.as_str()))
+            .map(|svc| ServiceDetails {
+                name: svc.name,
+                service_type: svc.service_type,
+                id: svc.id,
+                endpoints: svc
+                    .endpoints
+                    .into_iter()
+                    .map(|ep| EndpointDetails {
+                        url: ep.url,
+                        interface: ep.interface,
+                        region: ep.region,
+                        region_id: ep.region_id,
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 }
 
@@ -1419,6 +1459,7 @@ pub mod testkit {
             Duration::from_secs(3600),
         )
         .await
+        .map(|svc| svc.with_catalog_endpoint(catalog_endpoint))
     }
 
     /// A password authentication request for the bootstrap administrator in

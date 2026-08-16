@@ -9,8 +9,8 @@ use std::{
 };
 
 use o3k_kernel::{
-    ActionId, AuthContext, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget,
-    ResourceType, StaticAuthorizer,
+    ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
+    NoopAuditSink, ResourceId, ResourceTarget, ResourceType, ServiceNamespace, StaticAuthorizer,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2957,6 +2957,7 @@ pub struct NetworkService {
     inner: Arc<Inner>,
     lock: Arc<tokio::sync::Mutex<()>>,
     authorizer: Arc<dyn Authorizer>,
+    audit_sink: Arc<dyn AuditSink>,
 }
 
 struct Inner {
@@ -2984,6 +2985,7 @@ impl NetworkService {
             inner,
             lock: Arc::new(tokio::sync::Mutex::new(())),
             authorizer: Arc::new(StaticAuthorizer::standard()),
+            audit_sink: Arc::new(NoopAuditSink),
         })
     }
 
@@ -2993,26 +2995,62 @@ impl NetworkService {
         self
     }
 
+    #[must_use]
+    pub fn with_audit_sink(mut self, audit_sink: Arc<dyn AuditSink>) -> Self {
+        self.audit_sink = audit_sink;
+        self
+    }
+
     pub async fn create_network(
         &self,
         auth: &AuthContext,
         name: String,
     ) -> Result<NetworkRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "CreateNetwork").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "CreateNetwork".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "CreateNetwork")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "network")
                     .map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
-        self.create_network_for_project(auth.effective_scope().id().as_str(), name)
+        match self
+            .create_network_for_project(auth.effective_scope().id().as_str(), name)
             .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "network").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "network".to_owned())
+                        }),
+                        ResourceId::new(record.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn create_network_for_project(
@@ -3052,17 +3090,26 @@ impl NetworkService {
         &self,
         auth: &AuthContext,
     ) -> Result<Vec<NetworkRecord>, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ListNetworks").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ListNetworks".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ListNetworks")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "network")
                     .map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
         self.list_networks_for_project(auth.effective_scope().id().as_str())
@@ -3085,10 +3132,14 @@ impl NetworkService {
         auth: &AuthContext,
         id: Uuid,
     ) -> Result<NetworkRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ReadNetwork").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ReadNetwork".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ReadNetwork")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "network")
                     .map_err(|_| NetworkError::InvalidRequest)?,
@@ -3096,7 +3147,12 @@ impl NetworkService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
         self.get_network_for_project(auth.effective_scope().id().as_str(), id)
@@ -3117,10 +3173,14 @@ impl NetworkService {
     }
 
     pub async fn delete_network(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "DeleteNetwork").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "DeleteNetwork".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "DeleteNetwork")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "network")
                     .map_err(|_| NetworkError::InvalidRequest)?,
@@ -3128,11 +3188,37 @@ impl NetworkService {
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
-        self.delete_network_for_project(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_network_for_project(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "network").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "network".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_network_for_project(
@@ -3159,28 +3245,58 @@ impl NetworkService {
         allocation_start: Option<Ipv4Addr>,
         allocation_end: Option<Ipv4Addr>,
     ) -> Result<SubnetRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "CreateSubnet").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "CreateSubnet".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "CreateSubnet")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
-        self.create_subnet_for_project(
-            auth.effective_scope().id().as_str(),
-            network_id,
-            name,
-            cidr,
-            gateway_ip,
-            allocation_start,
-            allocation_end,
-        )
-        .await
+        match self
+            .create_subnet_for_project(
+                auth.effective_scope().id().as_str(),
+                network_id,
+                name,
+                cidr,
+                gateway_ip,
+                allocation_start,
+                allocation_end,
+            )
+            .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "subnet").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "subnet".to_owned())
+                        }),
+                        ResourceId::new(record.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3255,16 +3371,25 @@ impl NetworkService {
         &self,
         auth: &AuthContext,
     ) -> Result<Vec<SubnetRecord>, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ListSubnets").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ListSubnets".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ListSubnets")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
         self.list_subnets_for_project(auth.effective_scope().id().as_str())
@@ -3287,17 +3412,26 @@ impl NetworkService {
         auth: &AuthContext,
         id: Uuid,
     ) -> Result<SubnetRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ReadSubnet").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ReadSubnet".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ReadSubnet")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
         self.get_subnet_for_project(auth.effective_scope().id().as_str(), id)
@@ -3318,21 +3452,51 @@ impl NetworkService {
     }
 
     pub async fn delete_subnet(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "DeleteSubnet").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "DeleteSubnet".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "DeleteSubnet")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "subnet").map_err(|_| NetworkError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
-        self.delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_subnet_for_project(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "subnet").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "subnet".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_subnet_for_project(
@@ -3354,20 +3518,50 @@ impl NetworkService {
         network_id: Uuid,
         name: String,
     ) -> Result<PortRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "CreatePort").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "CreatePort".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "CreatePort")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
-        self.create_port_for_project(auth.effective_scope().id().as_str(), network_id, name)
+        match self
+            .create_port_for_project(auth.effective_scope().id().as_str(), network_id, name)
             .await
+        {
+            Ok(record) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "port").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "port".to_owned())
+                        }),
+                        ResourceId::new(record.id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(record)
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn create_port_for_project(
@@ -3439,16 +3633,25 @@ impl NetworkService {
     }
 
     pub async fn list_ports(&self, auth: &AuthContext) -> Result<Vec<PortRecord>, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ListPorts").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ListPorts".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ListPorts")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::collection(
                 ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::Unauthorized);
         }
         self.list_ports_for_project(auth.effective_scope().id().as_str())
@@ -3467,17 +3670,26 @@ impl NetworkService {
     }
 
     pub async fn get_port(&self, auth: &AuthContext, id: Uuid) -> Result<PortRecord, NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "ReadPort").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "ReadPort".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "ReadPort")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
         self.get_port_for_project(auth.effective_scope().id().as_str(), id)
@@ -3498,21 +3710,51 @@ impl NetworkService {
     }
 
     pub async fn delete_port(&self, auth: &AuthContext, id: Uuid) -> Result<(), NetworkError> {
+        let ns = ServiceNamespace::new("network")
+            .unwrap_or_else(|_| ServiceNamespace::new_unchecked("network".to_owned()));
+        let act = ActionId::new("network", "DeletePort").unwrap_or_else(|_| {
+            ActionId::new_unchecked("network".to_owned(), "DeletePort".to_owned())
+        });
         let req = AuthorizationRequest {
             auth_context: auth,
-            action: ActionId::new("network", "DeletePort")
-                .map_err(|_| NetworkError::InvalidRequest)?,
+            action: act.clone(),
             resource_target: ResourceTarget::instance(
                 ResourceType::new("network", "port").map_err(|_| NetworkError::InvalidRequest)?,
                 ResourceId::new(id.to_string()).map_err(|_| NetworkError::InvalidRequest)?,
                 Some(auth.effective_scope().id().clone()),
             ),
         };
-        if !self.authorizer.authorize(&req).is_allowed() {
+        let decision = self.authorizer.authorize(&req);
+        if !decision.is_allowed() {
+            let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Denied)
+                .with_decision(decision)
+                .with_reason("unauthorized");
+            self.audit_sink.record(&event);
             return Err(NetworkError::NotFound);
         }
-        self.delete_port_for_project(auth.effective_scope().id().as_str(), id)
+        match self
+            .delete_port_for_project(auth.effective_scope().id().as_str(), id)
             .await
+        {
+            Ok(()) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Succeeded)
+                    .with_resource(
+                        ResourceType::new("network", "port").unwrap_or_else(|_| {
+                            ResourceType::new_unchecked("network".to_owned(), "port".to_owned())
+                        }),
+                        ResourceId::new(id.to_string()).ok(),
+                        Some(auth.effective_scope().clone()),
+                    );
+                self.audit_sink.record(&event);
+                Ok(())
+            }
+            Err(error) => {
+                let event = AuditEvent::from_auth(auth, ns, act, AuditOutcome::Failed)
+                    .with_reason(error.to_string());
+                self.audit_sink.record(&event);
+                Err(error)
+            }
+        }
     }
 
     pub async fn delete_port_for_project(

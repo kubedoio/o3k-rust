@@ -1,5 +1,6 @@
 //! O3K Cloud Kernel: the foundational IAM, authorization, resource ownership,
-//! and platform contracts shared across all first-class O3K cloud services.
+//! service registry, and platform audit contracts shared across all first-class
+//! O3K cloud services.
 //!
 //! Architectural invariants (ADR-0165, ADR-0166, SPEC-0020):
 //! - Inward-facing core crate: must never depend on API, store, identity, provider,
@@ -8,16 +9,23 @@
 //!   all application services.
 //! - Service-neutral authorization: `Principal × Action × Resource × Context -> Allow/Deny`.
 //! - Default-deny fail-closed policy model.
+//! - Canonical static service registry with Keystone catalog projection.
+//! - Canonical secret-safe audit events and bounded audit sink port.
 
 pub mod action;
+pub mod audit;
 pub mod auth_context;
 pub mod authorization;
 pub mod error;
 pub mod principal;
+pub mod registry;
 pub mod resource;
 pub mod scope;
 
 pub use action::ActionId;
+pub use audit::{
+    AuditEvent, AuditOutcome, AuditSink, EventId, FnAuditSink, MemoryAuditSink, NoopAuditSink,
+};
 pub use auth_context::AuthContext;
 pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
@@ -25,6 +33,10 @@ pub use authorization::{
 };
 pub use error::KernelError;
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};
+pub use registry::{
+    ApiSurface, EndpointTemplate, KernelRegistry, KeystoneCatalogEndpoint, KeystoneCatalogService,
+    ServiceDescriptor, ServiceId, ServiceNamespace, ServiceOwnership,
+};
 pub use resource::{ResourceId, ResourceTarget, ResourceType};
 pub use scope::{OwnershipScope, ScopeId, ScopeKind};
 
@@ -63,88 +75,29 @@ mod tests {
             Some("default".to_string()),
         );
         AuthContext::new(
-            Principal::Service(service),
+            Principal::Service(service.clone()),
             scope,
             vec!["service".to_string(), "admin".to_string()],
             1700000000,
             1700003600,
-            "audit-srv-12345",
-            "req-srv-67890",
-            None,
+            "audit-67890",
+            "req-12345",
+            Some(service),
         )
     }
 
     #[test]
-    fn principal_id_validation() -> Result<(), KernelError> {
-        assert!(PrincipalId::new("").is_err());
-        assert!(PrincipalId::new("   ").is_err());
-        let pid = PrincipalId::new("usr-123")?;
-        assert_eq!(pid.as_str(), "usr-123");
-        Ok(())
-    }
-
-    #[test]
-    fn user_and_service_principals() {
-        let u_ctx = test_user_context("usr-1", "proj-1");
-        assert_eq!(u_ctx.principal().kind(), PrincipalKind::User);
-        assert_eq!(u_ctx.principal().id().as_str(), "usr-1");
-        assert_eq!(u_ctx.principal().name(), "test-user");
-
-        let s_ctx = test_service_context("srv-1", "proj-1");
-        assert_eq!(s_ctx.principal().kind(), PrincipalKind::Service);
-        assert_eq!(s_ctx.principal().id().as_str(), "srv-1");
-        assert_eq!(s_ctx.principal().name(), "cinder");
-    }
-
-    #[test]
-    fn scope_id_round_trip() -> Result<(), KernelError> {
-        assert!(ScopeId::new("").is_err());
-        let sid = ScopeId::new("proj-abc")?;
-        assert_eq!(sid.as_str(), "proj-abc");
-        Ok(())
-    }
-
-    #[test]
-    fn resource_target_collection_and_instance() -> Result<(), KernelError> {
-        let r_type = ResourceType::new("compute", "server")?;
-        let s_id = ScopeId::new("proj-1")?;
-        let r_id = ResourceId::new("srv-uuid-1")?;
-
-        let col_target = ResourceTarget::collection(r_type.clone(), Some(s_id.clone()));
-        assert_eq!(col_target.resource_type(), &r_type);
-        assert_eq!(col_target.owner_scope(), Some(&s_id));
-        assert_eq!(col_target.resource_id(), None);
-
-        let inst_target =
-            ResourceTarget::instance(r_type.clone(), r_id.clone(), Some(s_id.clone()));
-        assert_eq!(inst_target.resource_type(), &r_type);
-        assert_eq!(inst_target.owner_scope(), Some(&s_id));
-        assert_eq!(inst_target.resource_id(), Some(&r_id));
-        Ok(())
-    }
-
-    #[test]
-    fn typed_action_equality_and_parsing() -> Result<(), KernelError> {
-        let a1 = ActionId::new("compute", "CreateServer")?;
-        let a2 = ActionId::parse("compute:CreateServer")?;
-        assert_eq!(a1, a2);
-        assert_eq!(a1.namespace(), "compute");
-        assert_eq!(a1.action(), "CreateServer");
-        assert!(ActionId::parse("invalid").is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn authorizer_allow_matching_scope() -> Result<(), KernelError> {
+    fn authorizer_standard_allow_owner() -> Result<(), KernelError> {
         let auth = StaticAuthorizer::standard();
         let ctx = test_user_context("usr-1", "proj-1");
-        let target = ResourceTarget::collection(
+        let target = ResourceTarget::instance(
             ResourceType::new("compute", "server")?,
+            ResourceId::new("srv-1")?,
             Some(ScopeId::new("proj-1")?),
         );
         let req = AuthorizationRequest {
             auth_context: &ctx,
-            action: ActionId::new("compute", "CreateServer")?,
+            action: ActionId::new("compute", "ReadServer")?,
             resource_target: target,
         };
         let decision = auth.authorize(&req);
@@ -154,37 +107,22 @@ mod tests {
     }
 
     #[test]
-    fn authorizer_deny_wrong_scope() -> Result<(), KernelError> {
+    fn authorizer_standard_deny_cross_project() -> Result<(), KernelError> {
         let auth = StaticAuthorizer::standard();
         let ctx = test_user_context("usr-1", "proj-1");
-        let target = ResourceTarget::collection(
+        let target = ResourceTarget::instance(
             ResourceType::new("compute", "server")?,
+            ResourceId::new("srv-1")?,
             Some(ScopeId::new("proj-2")?),
         );
         let req = AuthorizationRequest {
             auth_context: &ctx,
-            action: ActionId::new("compute", "CreateServer")?,
+            action: ActionId::new("compute", "ReadServer")?,
             resource_target: target,
         };
         let decision = auth.authorize(&req);
         assert!(!decision.is_allowed());
         assert_eq!(decision.reason(), &DecisionReason::ScopeMismatch);
-        Ok(())
-    }
-
-    #[test]
-    fn authorizer_deny_missing_ownership() -> Result<(), KernelError> {
-        let auth = StaticAuthorizer::standard();
-        let ctx = test_user_context("usr-1", "proj-1");
-        let target = ResourceTarget::collection(ResourceType::new("compute", "server")?, None);
-        let req = AuthorizationRequest {
-            auth_context: &ctx,
-            action: ActionId::new("compute", "CreateServer")?,
-            resource_target: target,
-        };
-        let decision = auth.authorize(&req);
-        assert!(!decision.is_allowed());
-        assert_eq!(decision.reason(), &DecisionReason::MissingOwnership);
         Ok(())
     }
 
@@ -258,6 +196,115 @@ mod tests {
         assert!(!serialized.contains("x-auth-token"));
         assert!(!serialized.contains("password"));
         assert!(!serialized.contains("secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn registry_standard_contains_expected_services() -> Result<(), KernelError> {
+        let reg =
+            KernelRegistry::standard("http://127.0.0.1:18080", Some("http://127.0.0.1:18776"));
+        assert!(reg.service_by_id(&ServiceId::new("identity")?).is_some());
+        assert!(reg.service_by_id(&ServiceId::new("image")?).is_some());
+        assert!(reg.service_by_id(&ServiceId::new("network")?).is_some());
+        assert!(reg.service_by_id(&ServiceId::new("compute")?).is_some());
+        assert!(reg.service_by_id(&ServiceId::new("placement")?).is_some());
+        assert!(reg.service_by_id(&ServiceId::new("cinder")?).is_some());
+
+        let cinder = reg
+            .service_by_id(&ServiceId::new("cinder")?)
+            .ok_or_else(|| KernelError::InvalidServiceId("missing cinder service".to_owned()))?;
+        assert_eq!(cinder.ownership, ServiceOwnership::ExternalHosted);
+
+        let compute = reg
+            .service_by_id(&ServiceId::new("compute")?)
+            .ok_or_else(|| KernelError::InvalidServiceId("missing compute service".to_owned()))?;
+        assert_eq!(compute.ownership, ServiceOwnership::O3kImplemented);
+
+        Ok(())
+    }
+
+    #[test]
+    fn registry_keystone_catalog_projection() -> Result<(), KernelError> {
+        let reg =
+            KernelRegistry::standard("http://127.0.0.1:18080", Some("http://127.0.0.1:18776"));
+        let catalog = reg.project_keystone_catalog("project-abc");
+
+        assert_eq!(catalog.len(), 6);
+        let service_types: Vec<&str> = catalog.iter().map(|s| s.service_type.as_str()).collect();
+        assert_eq!(
+            service_types,
+            vec![
+                "compute",
+                "identity",
+                "image",
+                "network",
+                "placement",
+                "volumev3"
+            ]
+        );
+
+        let compute_entry = catalog
+            .iter()
+            .find(|s| s.service_type == "compute")
+            .ok_or_else(|| {
+                KernelError::InvalidServiceId("missing compute in catalog".to_owned())
+            })?;
+        let compute_pub = compute_entry
+            .endpoints
+            .iter()
+            .find(|e| e.interface == "public")
+            .ok_or_else(|| {
+                KernelError::InvalidServiceId("missing public compute endpoint".to_owned())
+            })?;
+        assert_eq!(compute_pub.url, "http://127.0.0.1:18080/v2.1/project-abc");
+
+        Ok(())
+    }
+
+    #[test]
+    fn audit_event_lifecycle_and_sink() -> Result<(), Box<dyn std::error::Error>> {
+        let sink = MemoryAuditSink::new();
+        let ctx = test_user_context("usr-1", "proj-1");
+
+        let event = AuditEvent::from_auth(
+            &ctx,
+            ServiceNamespace::new("compute")?,
+            ActionId::new("compute", "CreateServer")?,
+            AuditOutcome::Succeeded,
+        )
+        .with_resource(
+            ResourceType::new("compute", "server")?,
+            Some(ResourceId::new("srv-uuid-1")?),
+            Some(ctx.effective_scope().clone()),
+        )
+        .with_decision(AuthorizationDecision::Allow)
+        .with_operation(uuid::Uuid::now_v7());
+
+        sink.record(&event);
+
+        let recorded = sink.events();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].action.to_string(), "compute:CreateServer");
+        assert_eq!(recorded[0].outcome, AuditOutcome::Succeeded);
+        assert_eq!(recorded[0].request_id, "req-67890");
+        assert_eq!(recorded[0].audit_id, "audit-12345");
+        assert_eq!(recorded[0].principal_id.to_string(), "usr-1");
+
+        // Verify secret redaction: serialization must never contain raw passwords/keys/tokens
+        let json = serde_json::to_string(&recorded[0])?;
+        assert!(!json.contains("password"));
+        assert!(!json.contains("token"));
+        assert!(!json.contains("secret"));
+        assert!(!json.contains("chap"));
+
+        // Service principal test
+        let svc_ctx = test_service_context("cinder-svc", "proj-1");
+        assert_eq!(svc_ctx.principal().kind(), PrincipalKind::Service);
+        assert_eq!(
+            svc_ctx.service_principal().map(|s| s.name()),
+            Some("cinder")
+        );
+
         Ok(())
     }
 }

@@ -1,0 +1,125 @@
+# contracts/cloud-kernel-services.yaml
+# Machine-readable O3K Cloud Kernel service registry inventory (P4 Slice 2, ADR-0165, ADR-0166, SPEC-0020).
+schema_version: 1
+status: "accepted"
+
+services:
+  - service_id: "identity"
+    name: "identity"
+    service_type: "identity"
+    namespace: "identity"
+    ownership: "o3k-implemented"
+    profiles: ["native-rust-testlab", "openstack-service-testbed"]
+    resource_types: ["token", "project", "user", "role"]
+    actions:
+      - "identity:IssueToken"
+      - "identity:ValidateToken"
+      - "identity:RevokeToken"
+    api_surfaces:
+      - name: "OpenStack Identity API"
+        prefix: "/v3"
+        version: "3.14"
+
+  - service_id: "image"
+    name: "image"
+    service_type: "image"
+    namespace: "image"
+    ownership: "o3k-implemented"
+    profiles: ["native-rust-testlab", "openstack-service-testbed"]
+    resource_types: ["image"]
+    actions:
+      - "image:ListImages"
+      - "image:CreateImage"
+      - "image:ReadImage"
+      - "image:DeleteImage"
+      - "image:UploadImage"
+      - "image:DownloadImage"
+    api_surfaces:
+      - name: "OpenStack Image API"
+        prefix: "/v2"
+        version: "2.8"
+
+  - service_id: "network"
+    name: "network"
+    service_type: "network"
+    namespace: "network"
+    ownership: "o3k-implemented"
+    profiles: ["native-rust-testlab", "openstack-service-testbed"]
+    resource_types: ["network", "subnet", "port", "extension"]
+    actions:
+      - "network:ListNetworks"
+      - "network:CreateNetwork"
+      - "network:ReadNetwork"
+      - "network:DeleteNetwork"
+      - "network:ListSubnets"
+      - "network:CreateSubnet"
+      - "network:ReadSubnet"
+      - "network:DeleteSubnet"
+      - "network:ListPorts"
+      - "network:CreatePort"
+      - "network:ReadPort"
+      - "network:DeletePort"
+      - "network:ListExtensions"
+    api_surfaces:
+      - name: "OpenStack Network API"
+        prefix: "/v2.0"
+        version: "2.0"
+
+  - service_id: "compute"
+    name: "compute"
+    service_type: "compute"
+    namespace: "compute"
+    ownership: "o3k-implemented"
+    profiles: ["native-rust-testlab", "openstack-service-testbed"]
+    resource_types: ["flavor", "keypair", "server", "volume_attachment"]
+    actions:
+      - "compute:ListFlavors"
+      - "compute:CreateFlavor"
+      - "compute:ReadFlavor"
+      - "compute:DeleteFlavor"
+      - "compute:ListKeypairs"
+      - "compute:ImportKeypair"
+      - "compute:ReadKeypair"
+      - "compute:DeleteKeypair"
+      - "compute:ListServers"
+      - "compute:CreateServer"
+      - "compute:ReadServer"
+      - "compute:DeleteServer"
+      - "compute:StopServer"
+      - "compute:StartServer"
+      - "compute:RebootServer"
+      - "compute:ReadConsole"
+      - "volume:ListVolumeAttachments"
+      - "volume:AttachVolume"
+      - "volume:ReadVolumeAttachment"
+      - "volume:DetachVolume"
+    api_surfaces:
+      - name: "OpenStack Compute API"
+        prefix: "/v2.1"
+        version: "2.1"
+
+  - service_id: "placement"
+    name: "placement"
+    service_type: "placement"
+    namespace: "placement"
+    ownership: "o3k-implemented"
+    profiles: ["native-rust-testlab", "openstack-service-testbed"]
+    resource_types: ["resource_provider", "allocation"]
+    actions: []
+    api_surfaces:
+      - name: "OpenStack Placement API"
+        prefix: "/placement"
+        version: "1.0"
+
+  - service_id: "cinder"
+    name: "cinder"
+    service_type: "volumev3"
+    namespace: "volume"
+    ownership: "external-hosted"
+    profiles: ["openstack-service-testbed"]
+    resource_types: ["volume"]
+    actions: []
+    api_surfaces:
+      - name: "OpenStack Block Storage API v3"
+        prefix: "/v3"
+        version: "3.0"
