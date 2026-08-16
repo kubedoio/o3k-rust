@@ -206,8 +206,10 @@ SCHEMA_VERSION="17"
 
 # build_release_tarball VERSION SCHEMA MIN_VERSION OUT — builds a
 # deterministic release bundle tarball (manifest.json + SHA256SUMS + the
-# three binaries + packaging/install.sh) whose SHA256SUMS covers exactly the
-# regular files, with installer_sha256 naming the bundled install.sh.
+# three binaries + packaging/get-o3k.sh as the published installer wrapper
+# + packaging/install.sh as the state installer) whose SHA256SUMS covers
+# exactly the regular files, with installer_sha256 naming
+# packaging/get-o3k.sh (mirroring make-release.sh's export).
 build_release_tarball() {
   python3 - "$1" "$2" "$3" "$4" <<'PY'
 import hashlib
@@ -222,13 +224,19 @@ root = pathlib.Path(f"o3k-{version}")
 bundle = {}
 for name in ("o3kd", "o3k", "o3k-compute"):
     bundle[f"bin/{name}"] = f"fixture release binary {name} {version}\n".encode()
+bundle["packaging/get-o3k.sh"] = (
+    "#!/usr/bin/env bash\n"
+    "# TEST FIXTURE — the published one-line installer wrapper.\n"
+    "printf 'wrapper %s\\n' \"$*\" >>\"${O3K_TEST_SCRIPT_LOG:?}\"\n"
+    "exit 0\n"
+).encode()
 bundle["packaging/install.sh"] = (
     "#!/usr/bin/env bash\n"
-    "# TEST FIXTURE — records its invocation, performs no installation.\n"
+    "# TEST FIXTURE — the state installer; records its invocation.\n"
     "printf 'install %s\\n' \"$*\" >>\"${O3K_TEST_SCRIPT_LOG:?}\"\n"
     "exit 0\n"
 ).encode()
-installer_sha = hashlib.sha256(bundle["packaging/install.sh"]).hexdigest()
+installer_sha = hashlib.sha256(bundle["packaging/get-o3k.sh"]).hexdigest()
 manifest = {
     "version": version,
     "profile": "libvirt",
@@ -292,7 +300,7 @@ for version in sys.argv[2:]:
     directory = release_root / f"v{version}"
     tarball = directory / f"o3k-{version}-linux-x86_64.tar.gz"
     with tarfile.open(tarball, "r:gz") as tar:
-        install = tar.extractfile(f"./o3k-{version}/packaging/install.sh").read()
+        install = tar.extractfile(f"./o3k-{version}/packaging/get-o3k.sh").read()
         sha = tar.extractfile(f"./o3k-{version}/SHA256SUMS").read()
         manifest = tar.extractfile(f"./o3k-{version}/manifest.json").read()
     (directory / "install.sh").write_bytes(install)
