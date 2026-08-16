@@ -31,6 +31,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// GitHub Releases API for the official O3K Rust repository.
 pub const DEFAULT_RELEASES_URL: &str = "https://api.github.com/repos/kubedoio/o3k-rust/releases";
+/// The canonical GitHub release-asset download base. The asset naming is a
+/// fixed release contract (`o3k-<version>-linux-x86_64.tar.gz(.sha256)` +
+/// `install.sh` under `v<version>/`), so when the releases API is
+/// unreachable the engine can construct the same URLs directly — integrity
+/// still comes from the published checksums, never from the API.
+pub const DEFAULT_DOWNLOAD_BASE: &str = "https://github.com/kubedoio/o3k-rust/releases/download";
 /// Bound on release-asset downloads (a release is tens of MB).
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Bound on the GitHub API call.
@@ -65,6 +71,7 @@ pub struct SystemUpgradeIo {
     pub backup_dir: PathBuf,
     pub download_dir: PathBuf,
     pub releases_url: String,
+    pub download_base: String,
 }
 
 impl SystemUpgradeIo {
@@ -84,6 +91,8 @@ impl SystemUpgradeIo {
                 .unwrap_or_else(|| data_dir.join("upgrade-download")),
             releases_url: std::env::var("O3K_UPGRADE_RELEASES_URL")
                 .unwrap_or_else(|_| DEFAULT_RELEASES_URL.to_owned()),
+            download_base: std::env::var("O3K_UPGRADE_DOWNLOAD_BASE")
+                .unwrap_or_else(|_| DEFAULT_DOWNLOAD_BASE.to_owned()),
             prefix,
         }
     }
@@ -745,15 +754,19 @@ impl SystemUpgradeIo {
         current
     }
 
-    /// Fetches the official release asset URLs for a target version.
-    async fn fetch_release_assets(&self, target: &ReleaseVersion) -> Result<ReleaseAssets, String> {
+    /// Looks the target's asset URLs up through the releases API (primary
+    /// source; the caller falls back to the canonical naming contract).
+    async fn release_assets_from_api(
+        &self,
+        target: &ReleaseVersion,
+        tarball_name: &str,
+    ) -> Result<ReleaseAssets, String> {
         let body = self.curl_stdout(&self.releases_url, API_TIMEOUT).await?;
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| format!("releases API response is not JSON: {error}"))?;
         let releases = value
             .as_array()
             .ok_or_else(|| "releases API response is not a list".to_owned())?;
-        let tarball_name = format!("o3k-{target}-linux-x86_64.tar.gz");
         for release in releases {
             let assets = release
                 .get("assets")
@@ -773,10 +786,10 @@ impl SystemUpgradeIo {
                             .map(str::to_owned)
                     })
             };
-            if find(&tarball_name).is_none() {
+            if find(tarball_name).is_none() {
                 continue;
             }
-            let tarball = find(&tarball_name)
+            let tarball = find(tarball_name)
                 .ok_or_else(|| format!("the release asset {tarball_name} has no download URL"))?;
             let sha256 = find(&format!("{tarball_name}.sha256"));
             let install = find("install.sh");
@@ -792,6 +805,39 @@ impl SystemUpgradeIo {
             };
         }
         Err(format!("no published release asset found for o3k-{target}"))
+    }
+
+    /// Fetches the official release asset URLs for a target version. The
+    /// releases API is the primary source; when it is unreachable, empty,
+    /// or missing the target's assets, the canonical asset naming contract
+    /// is used directly against the download base (integrity still comes
+    /// from the published checksums, never from the API).
+    async fn fetch_release_assets(&self, target: &ReleaseVersion) -> Result<ReleaseAssets, String> {
+        let tarball_name = format!("o3k-{target}-linux-x86_64.tar.gz");
+        match self.release_assets_from_api(target, &tarball_name).await {
+            Ok(assets) => Ok(assets),
+            Err(_api_error) => {
+                // Canonical fallback: the asset naming is a fixed release
+                // contract; checksum verification still gates integrity.
+                Ok(Self::canonical_assets(
+                    &self.download_base,
+                    target,
+                    &tarball_name,
+                ))
+            }
+        }
+    }
+
+    /// The canonical asset URLs under the download base (the release asset
+    /// naming contract, independent of the API).
+    #[must_use]
+    fn canonical_assets(base: &str, target: &ReleaseVersion, tarball_name: &str) -> ReleaseAssets {
+        let base = base.trim_end_matches('/');
+        ReleaseAssets {
+            tarball: format!("{base}/v{target}/{tarball_name}"),
+            sha256: format!("{base}/v{target}/{tarball_name}.sha256"),
+            install: format!("{base}/v{target}/install.sh"),
+        }
     }
 
     /// Resolves the newest published release in the installed channel
@@ -1787,7 +1833,36 @@ dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd  ./docs/readme.
             backup_dir: PathBuf::from("/sandbox/backups"),
             download_dir: PathBuf::from("/sandbox/download"),
             releases_url: DEFAULT_RELEASES_URL.to_owned(),
+            download_base: DEFAULT_DOWNLOAD_BASE.to_owned(),
         };
         assert_eq!(io.lock_path(), PathBuf::from("/sandbox/state.json.lock"));
+    }
+
+    #[test]
+    fn canonical_assets_follow_the_release_naming_contract() {
+        let target = match "0.4.0-alpha.1".parse::<ReleaseVersion>() {
+            Ok(version) => version,
+            Err(_) => {
+                assert!(false, "the literal version must parse");
+                return;
+            }
+        };
+        let assets = SystemUpgradeIo::canonical_assets(
+            "https://github.com/kubedoio/o3k-rust/releases/download/",
+            &target,
+            "o3k-0.4.0-alpha.1-linux-x86_64.tar.gz",
+        );
+        assert_eq!(
+            assets.tarball,
+            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            assets.sha256,
+            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/o3k-0.4.0-alpha.1-linux-x86_64.tar.gz.sha256"
+        );
+        assert_eq!(
+            assets.install,
+            "https://github.com/kubedoio/o3k-rust/releases/download/v0.4.0-alpha.1/install.sh"
+        );
     }
 }
