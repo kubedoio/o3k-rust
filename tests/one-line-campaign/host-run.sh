@@ -146,10 +146,10 @@ curl -sf "http://127.0.0.1:$PORT/version" >/dev/null \
   || { echo "endpoint shim did not come up" >&2; exit 1; }
 log "endpoint shim serving on 0.0.0.0:$PORT (pid $ENDPOINT_PID)"
 
-# ---- copy ONLY the three in-VM scripts (no repo, no bundle, no image) ---------
+# ---- copy the in-VM scripts (no repo, no bundle, no image) ---------------------
 ssh_vm "mkdir -p $VM_SCRIPTS $VM_EVID"
 scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/in-vm-phase1.sh" "$SCRIPT_DIR/in-vm-phase2.sh" \
-  "$SCRIPT_DIR/in-vm-doctor.sh" tester@localhost:"$VM_SCRIPTS/"
+  "$SCRIPT_DIR/in-vm-doctor.sh" "$SCRIPT_DIR/in-vm-upgrade.sh" tester@localhost:"$VM_SCRIPTS/"
 
 # ---- phase 1: install through the one-liner, assert, reboot --------------------
 log "phase 1: one-liner install"
@@ -224,6 +224,68 @@ if ! grep -Fq 'DOCTOR-COMPLETE status=passed' <<<"$DOCTOR_MARKER"; then
   exit 1
 fi
 log "doctor phase complete"
+
+# ---- upgrade phase: real-release upgrade/rollback/re-upgrade (issue #626) ----
+# Optional, env-gated: O3K_UPGRADE_TARGET_VERSION (e.g. v0.4.0-alpha.1) plus
+# O3K_UPGRADE_RELEASE_BASE (the public release asset base; default GitHub).
+# The VM fetches the NEW release through the exact public installer command,
+# runs the staged `o3k upgrade`, reboots, verifies recovery, rolls back,
+# re-upgrades, and writes one-line-<distro>-upgrade.json. The reboot boundary
+# is handled by re-running the SAME script after SSH returns with a NEW
+# boot_id (the script resumes via its own marker file).
+if [ -n "${O3K_UPGRADE_TARGET_VERSION:-}" ]; then
+  log "upgrade phase: ${O3K_CAMPAIGN_VERSION:-<current>} -> $O3K_UPGRADE_TARGET_VERSION"
+  UPGRADE_DIAG_CMD='sudo free -m; sudo journalctl -u o3kd --no-pager -n 40; sudo journalctl -u o3k-compute --no-pager -n 40; sudo cat /var/lib/o3k/.o3k-upgrade-state.json 2>/dev/null; sudo ls -la /var/lib/o3k/backups 2>/dev/null'
+  ssh_vm "sudo rm -f $VM_EVID/upgrade-done $VM_EVID/UPGRADE-REBOOT-PENDING"
+  UPGRADE_MARKER=""
+  for run in 1 2 3; do
+    [ "$run" -gt 1 ] && log "upgrade phase re-run #$run after the reboot boundary"
+    ssh_vm "sudo nohup env O3K_UPGRADE_TARGET_VERSION=$O3K_UPGRADE_TARGET_VERSION \
+      O3K_UPGRADE_RELEASE_BASE=${O3K_UPGRADE_RELEASE_BASE:-https://github.com/kubedoio/o3k-rust/releases/download} \
+      bash $VM_SCRIPTS/in-vm-upgrade.sh $DISTRO $VM_EVID $SOURCE_SHA \
+      >$VM_EVID/upgrade-console.log 2>&1 </dev/null &"
+    UPGRADE_MARKER=""
+    ssh_failures=0
+    for i in $(seq 1 240); do
+      sleep 10
+      UPGRADE_MARKER="$(ssh_vm "sudo cat $VM_EVID/upgrade-done 2>/dev/null" 2>/dev/null || true)"
+      if [ -n "$UPGRADE_MARKER" ]; then break; fi
+      if ! ssh_vm true 2>/dev/null; then
+        ssh_failures=$((ssh_failures + 1))
+        if [ "$ssh_failures" -ge 2 ]; then break; fi
+      else
+        ssh_failures=0
+      fi
+    done
+    log "upgrade phase run #$run poll result: ${UPGRADE_MARKER:-<no marker yet>}"
+    [ -n "$UPGRADE_MARKER" ] && break
+    # SSH went down without a terminal marker: the in-VM script rebooted.
+    # Wait for SSH + a NEW boot_id, then re-run (resume via the marker).
+    log "upgrade phase: SSH dropped; waiting for the upgrade reboot to land"
+    SSH_BACK=0
+    BOOT_ID_AFTER=""
+    for i in $(seq 1 180); do
+      BOOT_ID_AFTER="$(ssh_vm 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null || true)"
+      if [ -n "$BOOT_ID_AFTER" ] && [ "$BOOT_ID_AFTER" != "$BOOT_ID_BEFORE" ]; then
+        SSH_BACK=1; break
+      fi
+      sleep 5
+    done
+    [ "$SSH_BACK" = 1 ] || { echo "VM never came back after the upgrade reboot" >&2; ssh_vm "$UPGRADE_DIAG_CMD" >>"$EVID/vm-${DISTRO}-upgrade-diagnostics.log" 2>&1 || true; exit 1; }
+    BOOT_ID_BEFORE="$BOOT_ID_AFTER"
+    log "SSH up after the upgrade reboot (new boot_id)"
+  done
+  ssh_vm "mkdir -p $VM_EVID/upgrade"
+  scp "${SCP_OPTS[@]}" -r tester@localhost:"$VM_EVID/." "$EVID/upgrade/" 2>/dev/null || true
+  [ -f "$EVID/upgrade/upgrade-console.log" ] && tail -40 "$EVID/upgrade/upgrade-console.log" \
+    | tee -a "$EVID/vm-${DISTRO}-upgrade.log"
+  if ! grep -Fq 'UPGRADE-COMPLETE status=passed' <<<"$UPGRADE_MARKER"; then
+    echo "upgrade phase failed or timed out: ${UPGRADE_MARKER:-no marker}" >&2
+    ssh_vm "$UPGRADE_DIAG_CMD" >>"$EVID/vm-${DISTRO}-upgrade-diagnostics.log" 2>&1 || true
+    exit 1
+  fi
+  log "upgrade phase complete"
+fi
 
 # ---- phase 2: recovery, idempotency, removal, purge, evidence ------------------
 # Run detached inside the VM and poll a marker file over fresh SSH sessions:
