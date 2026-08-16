@@ -333,11 +333,13 @@ delegate_upgrade_download() {
   mv -- "$dest/install.sh.tmp" "$dest/install.sh"
   # Extract the verified tarball so `.../o3k-<target>/bin/o3k upgrade` exists
   # (entry point only; the engine re-verifies everything before mutating).
+  # The tarball root is already `o3k-<version>/`, so extraction targets the
+  # download directory itself (same convention as the install flow's
+  # `safe_extract "$TMP_DIR/$ASSET" "$TMP_DIR" ...`).
   bundle_dir="$dest/o3k-${VERSION_NO_V}"
   if [ ! -x "$bundle_dir/bin/o3k" ]; then
     rm -rf -- "$bundle_dir"
-    mkdir -p "$bundle_dir"
-    safe_extract "$dest/$asset" "$bundle_dir" "$dest/delegation-entries.txt"
+    safe_extract "$dest/$asset" "$dest" "$dest/delegation-entries.txt"
   fi
   chmod 0600 "$dest/$asset" "$dest/$asset.sha256" "$dest/install.sh"
   if [ "$reused" -eq 1 ]; then
