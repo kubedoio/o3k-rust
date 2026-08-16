@@ -125,6 +125,14 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
             "journalctl -u o3k-compute -n 100".to_owned(),
         ]);
     };
+    if ctx.is_postgres() || !ctx.exec.is_regular_file(&ctx.database_path()) {
+        return Check::new(
+            "compute.agent_epoch",
+            Category::Compute,
+            CheckStatus::NotApplicable,
+            "no persisted agent epoch yet",
+        );
+    }
     let epochs = match ctx.db.latest_epochs(&ctx.database_path()).await {
         Ok(epochs) => epochs,
         Err(error) => {
@@ -197,6 +205,14 @@ pub async fn check_agent_epoch(ctx: &Context) -> Check {
 pub async fn check_agent_capabilities(ctx: &Context) -> Check {
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("compute.agent_capabilities", Category::Compute);
+    }
+    if ctx.is_postgres() || !ctx.exec.is_regular_file(&ctx.database_path()) {
+        return Check::new(
+            "compute.agent_capabilities",
+            Category::Compute,
+            CheckStatus::NotApplicable,
+            "no compute providers registered",
+        );
     }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
@@ -272,6 +288,14 @@ pub async fn check_agent_capabilities(ctx: &Context) -> Check {
 /// inventory row must equal the sum of live allocations for that
 /// (provider, resource class) pair.
 pub async fn check_placement_consistent(ctx: &Context) -> Check {
+    if ctx.is_postgres() || !ctx.exec.is_regular_file(&ctx.database_path()) {
+        return Check::new(
+            "compute.placement_consistent",
+            Category::Compute,
+            CheckStatus::NotApplicable,
+            "no compute providers registered",
+        );
+    }
     let providers = match ctx.db.placement_providers(&ctx.database_path()).await {
         Ok(providers) => providers,
         Err(error) => {

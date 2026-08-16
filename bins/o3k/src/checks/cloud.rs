@@ -51,6 +51,14 @@ pub async fn check_api_discovery(ctx: &Context) -> Check {
 /// `cloud.testvm_status`: bootstrap test-vm resources must all be ACTIVE.
 /// States are listed, never names' credentials.
 pub async fn check_testvm_status(ctx: &Context) -> Check {
+    if ctx.is_postgres() || !ctx.exec.is_regular_file(&ctx.database_path()) {
+        return Check::new(
+            "cloud.testvm_status",
+            Category::Cloud,
+            CheckStatus::NotApplicable,
+            "no bootstrap test-vm resources",
+        );
+    }
     let instances = match ctx.db.compute_instances(&ctx.database_path()).await {
         Ok(instances) => instances,
         Err(error) => {

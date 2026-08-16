@@ -228,23 +228,24 @@ limits.
 
 ### PostgreSQL
 
-PostgreSQL is the intended database for production-oriented,
-stronger-availability, or possible multi-controller profiles.
+PostgreSQL is the supported production-oriented persistence backend for O3K
+(verified against PostgreSQL 16).
 
-It is not supported merely because architecture mentions it.
+SQLite remains the supported default for TestLab and single-controller profiles.
 
-Support requires:
+Support is backed by:
 
-- real adapter;
-- store-conformance suite;
-- migrations/upgrade/rollback behavior;
-- transaction/isolation semantics;
-- backup/restore documentation;
-- process/failure evidence;
-- release artifacts identifying the verified profile.
+- `PostgresStore` implementing all repository ports;
+- unified store-conformance suite running identical tests against SQLite and PostgreSQL;
+- PostgreSQL migrations matching the initial Cloud Kernel schema;
+- transaction and concurrency invariants (fencing, quota advisory locking, error normalization);
+- standard backup/restore (`pg_dump` / `psql`);
+- process outage and recovery validation;
+- portable TestLab and real libvirt gate execution.
 
-Until then, user-facing text must say `planned` or
-`production-profile target`.
+Note: PostgreSQL support in P5 is for fresh PostgreSQL deployments. Automatic
+SQLite -> PostgreSQL database migration is NOT yet supported. HA / multi-controller
+claims remain planned for subsequent milestones (P6+).
 
 ## Footprint claims
 

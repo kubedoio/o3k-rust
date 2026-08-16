@@ -169,13 +169,13 @@ retrying an operation whose side effect may already have happened.
 | Placement | O3K Capacity / Placement |
 | Cinder | O3K Volume compatibility / hosted integration today |
 
-## PostgreSQL direction
+## Persistence
 
-SQLite is the current minimal/TestLab default.
+- **SQLite**: supported default for TestLab and single-controller profiles.
+- **PostgreSQL**: supported production-oriented persistence profile (verified with PostgreSQL 16).
 
-PostgreSQL is the production-oriented persistence target and a prerequisite for
-the future HA Kubernetes profile. O3K will not use shared-SQLite or
-distributed-filesystem workarounds as a shortcut to Kubernetes HA.
+PostgreSQL is a prerequisite for the future HA Kubernetes profile. O3K does not
+use shared-SQLite or distributed-filesystem workarounds as a shortcut to Kubernetes HA.
 
 ## Product profiles
 

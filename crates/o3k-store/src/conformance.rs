@@ -73,6 +73,10 @@ pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_network_repository(store.clone()).await;
     test_placement_repository(store.clone()).await;
     test_quota_repository(store.clone()).await;
+    test_concurrent_finite_quota_limit_1(store.clone()).await;
+    test_concurrent_placement_allocation_fencing(store.clone()).await;
+    test_duplicate_port_ip_mac_conflict(store.clone()).await;
+    test_operation_state_monotonicity(store.clone()).await;
 }
 
 pub async fn test_durable_store_resources<S: StoreUnderTest>(store: Arc<S>) {
@@ -1295,6 +1299,263 @@ pub async fn test_quota_repository<S: StoreUnderTest>(store: Arc<S>) {
     // Re-reserving an already released operation fails with conflict
     let released_err = store.reserve_quota(&scope, &op1, &req1).await.unwrap_err();
     assert!(matches!(released_err, StoreError::ReservationConflict(_)));
+}
+
+pub async fn test_concurrent_finite_quota_limit_1<S: StoreUnderTest>(store: Arc<S>) {
+    let proj = format!("proj-race-{}", Uuid::now_v7());
+    let scope = OwnershipScope::new(ScopeId::new_unchecked(proj), ScopeKind::Project, None, None);
+    let key = LimitKey::compute_servers();
+
+    store
+        .set_limit(&scope, &key, LimitValue::Maximum(1))
+        .await
+        .expect("set_limit 1");
+
+    let num_tasks = 10;
+    let mut handles = Vec::new();
+    for _ in 0..num_tasks {
+        let store = store.clone();
+        let scope = scope.clone();
+        let key = key.clone();
+        let op_id = format!("op-race-{}", Uuid::now_v7());
+        handles.push(tokio::spawn(async move {
+            let req = vec![ResourceAmount::new(key, 1)];
+            store.reserve_quota(&scope, &op_id, &req).await
+        }));
+    }
+
+    let mut successes = 0;
+    let mut quota_exceeded = 0;
+    for handle in handles {
+        match handle.await.expect("join handle") {
+            Ok(_) => successes += 1,
+            Err(StoreError::QuotaExceeded { .. }) => quota_exceeded += 1,
+            Err(other) => panic!("unexpected error during quota race: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "Exactly 1 reservation must succeed with limit=1 under race"
+    );
+    assert_eq!(
+        quota_exceeded,
+        num_tasks - 1,
+        "All other concurrent requests must fail with QuotaExceeded"
+    );
+}
+
+pub async fn test_concurrent_placement_allocation_fencing<S: StoreUnderTest>(store: Arc<S>) {
+    let node_id = format!("node-race-{}", Uuid::now_v7());
+    let inventories = vec![PlacementInventoryRecord {
+        resource_class: "VCPU".to_owned(),
+        total: 4,
+        reserved: 0,
+        allocation_ratio: 1.0,
+        used: 0,
+    }];
+    let provider = store
+        .register_provider(&node_id, &inventories)
+        .await
+        .expect("register_provider");
+
+    let initial_gen = provider.generation;
+
+    // Concurrently try to commit 2 allocations using the exact same generation
+    let alloc1 = PlacementAllocationRecord {
+        id: format!("alloc1-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer1-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    let alloc2 = PlacementAllocationRecord {
+        id: format!("alloc2-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer2-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+
+    let store1 = store.clone();
+    let prov_id1 = provider.id.clone();
+    let alloc1_clone = alloc1.clone();
+    let h1 = tokio::spawn(async move {
+        store1
+            .commit_allocation(&prov_id1, initial_gen, &alloc1_clone)
+            .await
+    });
+
+    let store2 = store.clone();
+    let prov_id2 = provider.id.clone();
+    let alloc2_clone = alloc2.clone();
+    let h2 = tokio::spawn(async move {
+        store2
+            .commit_allocation(&prov_id2, initial_gen, &alloc2_clone)
+            .await
+    });
+
+    let res1 = h1.await.expect("join h1");
+    let res2 = h2.await.expect("join h2");
+
+    let outcomes = [res1, res2];
+    let successes = outcomes.iter().filter(|r| r.is_ok()).count();
+    let conflicts = outcomes
+        .iter()
+        .filter(|r| matches!(r, Err(StoreError::PlacementStaleGeneration)))
+        .count();
+
+    assert_eq!(
+        successes, 1,
+        "Exactly 1 allocation must succeed for a given provider generation"
+    );
+    assert_eq!(
+        conflicts, 1,
+        "The concurrent competing allocation must fail with PlacementStaleGeneration"
+    );
+
+    // Stale generation attempt must fail with PlacementStaleGeneration
+    let stale_alloc = PlacementAllocationRecord {
+        id: format!("alloc-stale-{}", Uuid::now_v7()),
+        consumer_id: format!("consumer-stale-{}", Uuid::now_v7()),
+        provider_id: provider.id.clone(),
+        resources: vec![PlacementResourceRecord {
+            resource_class: "VCPU".to_owned(),
+            amount: 1,
+        }],
+    };
+    let stale_res = store.commit_allocation(&provider.id, 0, &stale_alloc).await;
+    assert!(
+        matches!(stale_res, Err(StoreError::PlacementStaleGeneration)),
+        "Stale provider generation must be rejected"
+    );
+}
+
+pub async fn test_duplicate_port_ip_mac_conflict<S: StoreUnderTest>(store: Arc<S>) {
+    let proj = format!("proj-net-{}", Uuid::now_v7());
+    let net_id = Uuid::now_v7();
+    let net = NetworkRecord {
+        id: net_id,
+        project_id: proj.clone(),
+        name: "test-net".to_owned(),
+        status: "ACTIVE".to_owned(),
+    };
+    store.insert_network(&net).await.expect("insert_network");
+
+    let subnet_id = Uuid::now_v7();
+    let subnet = SubnetRecord {
+        id: subnet_id,
+        network_id: net_id,
+        project_id: proj.clone(),
+        name: "test-subnet".to_owned(),
+        cidr: "192.168.1.0/24".to_owned(),
+        gateway_ip: Ipv4Addr::from_str("192.168.1.1").unwrap(),
+        allocation_start: Ipv4Addr::from_str("192.168.1.10").unwrap(),
+        allocation_end: Ipv4Addr::from_str("192.168.1.200").unwrap(),
+    };
+    store.insert_subnet(&subnet).await.expect("insert_subnet");
+
+    let port1_id = Uuid::now_v7();
+    let port1 = PortRecord {
+        id: port1_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-1".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.50").unwrap(),
+        mac_address: "fa:16:3e:00:11:22".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    store.insert_port(&port1).await.expect("insert port 1");
+
+    // Insert port with duplicate IP
+    let port2_id = Uuid::now_v7();
+    let port2_dup_ip = PortRecord {
+        id: port2_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-2".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.50").unwrap(),
+        mac_address: "fa:16:3e:00:11:33".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    let dup_ip_err = store.insert_port(&port2_dup_ip).await;
+    assert!(
+        dup_ip_err.is_err(),
+        "Duplicate fixed IP on subnet must be rejected"
+    );
+
+    // Insert port with duplicate MAC
+    let port3_id = Uuid::now_v7();
+    let port3_dup_mac = PortRecord {
+        id: port3_id,
+        network_id: net_id,
+        subnet_id: Some(subnet_id),
+        project_id: proj.clone(),
+        name: "port-3".to_owned(),
+        fixed_ip: Ipv4Addr::from_str("192.168.1.51").unwrap(),
+        mac_address: "fa:16:3e:00:11:22".to_owned(),
+        binding_host: None,
+        binding_state: None,
+        status: "ACTIVE".to_owned(),
+    };
+    let dup_mac_err = store.insert_port(&port3_dup_mac).await;
+    assert!(
+        dup_mac_err.is_err(),
+        "Duplicate MAC address must be rejected"
+    );
+}
+
+pub async fn test_operation_state_monotonicity<S: StoreUnderTest>(store: Arc<S>) {
+    let res_id = Uuid::now_v7();
+    let proj = format!("proj-{}", Uuid::now_v7());
+    let res = ResourceRecord {
+        id: res_id,
+        kind: "compute_instance".to_owned(),
+        project_id: proj,
+        generation: 1,
+        observed_generation: 0,
+        desired_state: "active".to_owned(),
+        observed_state: "building".to_owned(),
+        provider_id: None,
+    };
+    store.insert_resource(&res).await.expect("insert_resource");
+
+    let op_id = Uuid::now_v7();
+    let op = OperationRecord {
+        id: op_id,
+        resource_id: res_id,
+        kind: "lifecycle:create".to_owned(),
+        state: OperationState::Succeeded,
+        provider_operation_id: Some("prov-op-1".to_owned()),
+        error_category: None,
+        error_message: None,
+    };
+    store.insert_operation(&op).await.expect("insert_operation");
+
+    // Attempting to regress terminal Succeeded state fails
+    let regress_res = store
+        .update_operation(
+            op_id,
+            OperationState::Running,
+            Some("prov-op-2"),
+            None,
+            None,
+        )
+        .await;
+    assert!(
+        regress_res.is_err(),
+        "Updating terminal Succeeded operation to Running must fail"
+    );
 }
 
 #[cfg(test)]

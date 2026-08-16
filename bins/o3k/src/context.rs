@@ -220,6 +220,22 @@ impl Context {
         self.data_dir.join("o3k.sqlite")
     }
 
+    /// Database backend configured in o3kd.env (`sqlite` or `postgres`).
+    #[must_use]
+    pub fn database_backend(&self) -> &str {
+        self.o3kd_env
+            .get("O3K_DATABASE_BACKEND")
+            .map(String::as_str)
+            .unwrap_or("sqlite")
+    }
+
+    /// True when PostgreSQL database backend is configured.
+    #[must_use]
+    pub fn is_postgres(&self) -> bool {
+        let backend = self.database_backend();
+        backend.eq_ignore_ascii_case("postgres") || backend.eq_ignore_ascii_case("postgresql")
+    }
+
     /// Path of the network ownership manifest.
     #[must_use]
     pub fn ownership_path(&self) -> PathBuf {

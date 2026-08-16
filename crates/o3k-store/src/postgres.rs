@@ -34,8 +34,8 @@ impl PostgresStore {
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let options = PgConnectOptions::from_str(database_url).map_err(StoreError::Database)?;
         let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .acquire_timeout(Duration::from_secs(10))
+            .max_connections(50)
+            .acquire_timeout(Duration::from_secs(30))
             .connect_with(options)
             .await
             .map_err(StoreError::Database)?;
@@ -3400,6 +3400,14 @@ impl QuotaRepository for PostgresStore {
 
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
+        // Acquire advisory transaction lock for this tenant scope to serialize concurrent quota reservations
+        let lock_key = format!("quota:{}:{}", scope.kind().as_str(), scope.id().as_str());
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+
         // Check if a reservation already exists for this operation_id
         let existing = sqlx::query(
             "SELECT id, scope_id, scope_kind, state, created_at FROM quota_reservations WHERE operation_id = $1 FOR UPDATE",
@@ -3458,14 +3466,18 @@ impl QuotaRepository for PostgresStore {
             return Err(StoreError::ReservationConflict(operation_id.to_owned()));
         }
 
-        // Evaluate limit headroom for each requested amount
+        // Evaluate limit headroom for each requested amount inside transaction
         for amount in amounts {
-            let limit = self.get_limit(scope, &amount.key).await?;
+            let limit = Self::get_limit_tx(&mut tx, scope, &amount.key).await?;
             if let LimitValue::Maximum(max) = limit {
-                let in_use = self.query_pg_in_use_usage(scope, &amount.key).await?;
-                let reserved = self
-                    .query_pg_reserved_usage(scope, &amount.key, Some(operation_id))
-                    .await?;
+                let in_use = Self::query_pg_in_use_usage_tx(&mut tx, scope, &amount.key).await?;
+                let reserved = Self::query_pg_reserved_usage_tx(
+                    &mut tx,
+                    scope,
+                    &amount.key,
+                    Some(operation_id),
+                )
+                .await?;
                 let current_consumed = in_use + reserved;
                 if current_consumed + amount.amount > max {
                     return Err(StoreError::QuotaExceeded {
@@ -3642,8 +3654,45 @@ impl QuotaRepository for PostgresStore {
 }
 
 impl PostgresStore {
-    async fn query_pg_in_use_usage(
-        &self,
+    async fn get_limit_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<LimitValue, StoreError> {
+        if !key.is_known() {
+            return Err(StoreError::Corrupt(format!(
+                "unknown or unregistered limit key '{key}'"
+            )));
+        }
+
+        let row = sqlx::query(
+            "SELECT limit_value FROM quota_limits WHERE scope_id = $1 AND scope_kind = $2 AND namespace = $3 AND resource = $4",
+        )
+        .bind(scope.id().as_str())
+        .bind(scope.kind().as_str())
+        .bind(key.namespace().as_str())
+        .bind(key.resource())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StoreError::Database)?;
+
+        match row {
+            Some(row) => {
+                let val: Option<i64> = row.get(0);
+                match val {
+                    None => Ok(LimitValue::Unlimited),
+                    Some(max) if max >= 0 => Ok(LimitValue::Maximum(max as u64)),
+                    Some(neg) => Err(StoreError::Corrupt(format!(
+                        "malformed negative limit value {neg} for '{key}' in durable storage"
+                    ))),
+                }
+            }
+            None => Ok(LimitValue::Unlimited),
+        }
+    }
+
+    async fn query_pg_in_use_usage_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         scope: &OwnershipScope,
         key: &LimitKey,
     ) -> Result<u64, StoreError> {
@@ -3657,7 +3706,7 @@ impl PostgresStore {
                     "SELECT COUNT(*)::BIGINT FROM resources WHERE project_id = $1 AND kind = 'compute_instance' AND UPPER(observed_state) != 'DELETED'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
@@ -3671,7 +3720,7 @@ impl PostgresStore {
                      WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'VCPU'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let sum: i64 = row.get(0);
@@ -3685,7 +3734,7 @@ impl PostgresStore {
                      WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'MEMORY_MB'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let sum: i64 = row.get(0);
@@ -3699,7 +3748,7 @@ impl PostgresStore {
                      WHERE res.project_id = $1 AND res.kind = 'compute_instance' AND UPPER(res.observed_state) != 'DELETED' AND r.resource_class = 'DISK_GB'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let sum: i64 = row.get(0);
@@ -3710,7 +3759,7 @@ impl PostgresStore {
                     "SELECT COUNT(*)::BIGINT FROM image_metadata WHERE project_id = $1 AND status != 'deleted'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
@@ -3721,7 +3770,7 @@ impl PostgresStore {
                     "SELECT COALESCE(SUM(size), 0)::BIGINT FROM image_metadata WHERE project_id = $1 AND status = 'active'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let sum: i64 = row.get(0);
@@ -3732,7 +3781,7 @@ impl PostgresStore {
                     "SELECT COUNT(*)::BIGINT FROM network_networks WHERE project_id = $1 AND status != 'deleted'",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
@@ -3743,7 +3792,7 @@ impl PostgresStore {
                     "SELECT COUNT(*)::BIGINT FROM network_subnets WHERE project_id = $1",
                 )
                 .bind(scope_id)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
@@ -3753,7 +3802,7 @@ impl PostgresStore {
                 let row =
                     sqlx::query("SELECT COUNT(*)::BIGINT FROM network_ports WHERE project_id = $1")
                         .bind(scope_id)
-                        .fetch_one(&self.pool)
+                        .fetch_one(&mut **tx)
                         .await
                         .map_err(StoreError::Database)?;
                 let count: i64 = row.get(0);
@@ -3765,8 +3814,8 @@ impl PostgresStore {
         }
     }
 
-    async fn query_pg_reserved_usage(
-        &self,
+    async fn query_pg_reserved_usage_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         scope: &OwnershipScope,
         key: &LimitKey,
         exclude_op: Option<&str>,
@@ -3782,7 +3831,7 @@ impl PostgresStore {
             .bind(key.namespace().as_str())
             .bind(key.resource())
             .bind(op)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut **tx)
             .await
             .map_err(StoreError::Database)?
         } else {
@@ -3795,13 +3844,36 @@ impl PostgresStore {
             .bind(scope.kind().as_str())
             .bind(key.namespace().as_str())
             .bind(key.resource())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut **tx)
             .await
             .map_err(StoreError::Database)?
         };
 
         let sum: i64 = row.get(0);
         parse_pg_non_negative_u64(sum, "reserved amounts sum")
+    }
+
+    async fn query_pg_in_use_usage(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+    ) -> Result<u64, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let res = Self::query_pg_in_use_usage_tx(&mut tx, scope, key).await?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(res)
+    }
+
+    async fn query_pg_reserved_usage(
+        &self,
+        scope: &OwnershipScope,
+        key: &LimitKey,
+        exclude_op: Option<&str>,
+    ) -> Result<u64, StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let res = Self::query_pg_reserved_usage_tx(&mut tx, scope, key, exclude_op).await?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(res)
     }
 }
 
