@@ -24,11 +24,16 @@ use std::os::unix::fs::PermissionsExt;
 
 mod artifact_transfer;
 pub mod conformance;
+pub mod coordination;
 pub mod postgres;
 pub mod quota;
 mod server_state;
 pub mod unified;
 
+pub use coordination::{
+    ControllerEpoch, ControllerId, ControllerSession, ControllerState, CoordinationRepository,
+    FencingToken, LeaseAcquireOutcome, WorkLease,
+};
 pub use postgres::PostgresStore;
 pub use unified::O3kStore;
 
@@ -1082,7 +1087,7 @@ pub mod testkit {
 
 #[derive(Clone, Debug)]
 pub struct SqliteStore {
-    pool: SqlitePool,
+    pub(crate) pool: SqlitePool,
     agent_command_projection_lock: Arc<tokio::sync::Mutex<()>>,
 }
 

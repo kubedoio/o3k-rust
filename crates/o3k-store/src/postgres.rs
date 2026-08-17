@@ -27,7 +27,7 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct PostgresStore {
-    pool: PgPool,
+    pub(crate) pool: PgPool,
 }
 
 impl PostgresStore {
@@ -100,7 +100,8 @@ impl PostgresStore {
                 image_metadata, network_networks, network_subnets, network_ports,
                 placement_providers, placement_inventories, placement_allocations,
                 placement_allocation_resources, placement_allocation_intents, placement_allocation_intent_resources,
-                quota_limits, quota_reservations, quota_reservation_amounts
+                quota_limits, quota_reservations, quota_reservation_amounts,
+                controller_sessions, work_leases
             CASCADE",
         )
         .execute(&self.pool)

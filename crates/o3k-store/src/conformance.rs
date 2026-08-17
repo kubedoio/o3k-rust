@@ -12,13 +12,14 @@ use uuid::Uuid;
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, ComputeRepository, DurableStore, IdentityRepository,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
-    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    ArtifactTransferUpdate, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
+    ControllerState, CoordinationRepository, DurableStore, IdentityRepository, ImageMetadataRecord,
+    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate,
+    ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    LeaseAcquireOutcome, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
+    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
     StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
     quota::QuotaRepository,
@@ -37,6 +38,7 @@ pub trait StoreUnderTest:
     + PlacementRepository
     + QuotaRepository
     + ComputeRepository
+    + CoordinationRepository
     + Send
     + Sync
     + 'static
@@ -53,6 +55,7 @@ impl<T> StoreUnderTest for T where
         + PlacementRepository
         + QuotaRepository
         + ComputeRepository
+        + CoordinationRepository
         + Send
         + Sync
         + 'static
@@ -73,6 +76,7 @@ pub async fn run_all_conformance_tests<S: StoreUnderTest>(store: Arc<S>) {
     test_network_repository(store.clone()).await;
     test_placement_repository(store.clone()).await;
     test_quota_repository(store.clone()).await;
+    test_coordination_repository(store.clone()).await;
     test_concurrent_finite_quota_limit_1(store.clone()).await;
     test_concurrent_placement_allocation_fencing(store.clone()).await;
     test_duplicate_port_ip_mac_conflict(store.clone()).await;
@@ -1555,6 +1559,244 @@ pub async fn test_operation_state_monotonicity<S: StoreUnderTest>(store: Arc<S>)
     assert!(
         regress_res.is_err(),
         "Updating terminal Succeeded operation to Running must fail"
+    );
+}
+
+pub async fn test_coordination_repository<S: StoreUnderTest>(store: Arc<S>) {
+    let ctrl1 = ControllerId::new(format!("ctrl-{}", Uuid::now_v7()));
+    let epoch1 = ControllerEpoch::new(format!("epoch-{}", Uuid::now_v7()));
+    let ctrl2 = ControllerId::new(format!("ctrl-{}", Uuid::now_v7()));
+    let epoch2 = ControllerEpoch::new(format!("epoch-{}", Uuid::now_v7()));
+
+    // 1. Register controller session
+    let session = ControllerSession {
+        controller_id: ctrl1.clone(),
+        controller_epoch: epoch1.clone(),
+        started_at: String::new(),
+        heartbeat_at: String::new(),
+        lease_until: String::new(),
+        software_version: "0.4.0-alpha.1".to_owned(),
+        source_commit: "HEAD".to_owned(),
+        state: ControllerState::Active,
+    };
+    store
+        .register_controller_session(&session, std::time::Duration::from_secs(30))
+        .await
+        .expect("register_controller_session");
+
+    let sessions = store
+        .list_active_controller_sessions()
+        .await
+        .expect("list_active_controller_sessions");
+    assert!(
+        sessions
+            .iter()
+            .any(|s| s.controller_id == ctrl1 && s.controller_epoch == epoch1),
+        "registered session must be in active sessions list"
+    );
+
+    // Heartbeat
+    let hb = store
+        .heartbeat_controller_session(&ctrl1, &epoch1, std::time::Duration::from_secs(30))
+        .await
+        .expect("heartbeat");
+    assert!(hb, "heartbeat on active session must succeed");
+
+    // 2. Initial work lease acquisition
+    let work_key = format!("op:{}", Uuid::now_v7());
+    let outcome = store
+        .acquire_work_lease(
+            &work_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("acquire_work_lease");
+
+    let lease = match outcome {
+        LeaseAcquireOutcome::Acquired { lease } => {
+            assert_eq!(lease.work_key, work_key);
+            assert_eq!(lease.owner_controller_id, ctrl1);
+            assert_eq!(lease.owner_controller_epoch, epoch1);
+            assert_eq!(lease.fencing_token, 1);
+            lease
+        }
+        LeaseAcquireOutcome::Busy { .. } => panic!("first acquire must succeed"),
+    };
+
+    // Inspect
+    let inspected = store
+        .inspect_work_lease(&work_key)
+        .await
+        .expect("inspect_work_lease")
+        .expect("lease must exist");
+    assert_eq!(inspected, lease);
+
+    // 3. Same owner re-acquisition preserves fencing token
+    let reacquired = store
+        .acquire_work_lease(
+            &work_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("reacquire_work_lease");
+    match reacquired {
+        LeaseAcquireOutcome::Acquired { lease: re_lease } => {
+            assert_eq!(
+                re_lease.fencing_token, 1,
+                "re-acquisition by same owner must not bump fencing token"
+            );
+        }
+        _ => panic!("same owner reacquire must succeed"),
+    }
+
+    // 4. Renewal by owner
+    let renewed = store
+        .renew_work_lease(
+            &work_key,
+            &ctrl1,
+            &epoch1,
+            1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("renew_work_lease");
+    assert!(renewed, "valid renewal must return true");
+
+    // Renewal with stale fencing token fails
+    let stale_renew = store
+        .renew_work_lease(
+            &work_key,
+            &ctrl1,
+            &epoch1,
+            99,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("stale renew");
+    assert!(!stale_renew, "stale fencing token renewal must fail");
+
+    // 5. Competing controller sees Busy
+    let busy_outcome = store
+        .acquire_work_lease(
+            &work_key,
+            "operation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("competing acquire");
+    match busy_outcome {
+        LeaseAcquireOutcome::Busy {
+            owner_controller_id,
+            fencing_token,
+            ..
+        } => {
+            assert_eq!(owner_controller_id, ctrl1);
+            assert_eq!(fencing_token, 1);
+        }
+        _ => panic!("competing controller must see Busy on active lease"),
+    }
+
+    // 6. Expired lease takeover atomically increments fencing token
+    let expire_key = format!("op-expire:{}", Uuid::now_v7());
+    let exp_outcome1 = store
+        .acquire_work_lease(
+            &expire_key,
+            "operation",
+            &ctrl1,
+            &epoch1,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .expect("acquire expire lease");
+    match exp_outcome1 {
+        LeaseAcquireOutcome::Acquired { lease } => {
+            assert_eq!(lease.fencing_token, 1);
+        }
+        _ => panic!("acquire expire lease must succeed"),
+    }
+
+    // Wait for expiration
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // Takeover by ctrl2
+    let exp_outcome2 = store
+        .acquire_work_lease(
+            &expire_key,
+            "operation",
+            &ctrl2,
+            &epoch2,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("takeover expired lease");
+    match exp_outcome2 {
+        LeaseAcquireOutcome::Acquired { lease } => {
+            assert_eq!(lease.owner_controller_id, ctrl2);
+            assert_eq!(
+                lease.fencing_token, 2,
+                "takeover must increment fencing token (1 -> 2)"
+            );
+        }
+        _ => panic!("takeover on expired lease must succeed"),
+    }
+
+    // Old owner ctrl1 tries to renew with old fence 1 -> rejected!
+    let old_renew = store
+        .renew_work_lease(
+            &expire_key,
+            &ctrl1,
+            &epoch1,
+            1,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .expect("old renew");
+    assert!(!old_renew, "old owner must be fenced after takeover");
+
+    // Old owner ctrl1 tries to release with old fence 1 -> rejected!
+    let old_release = store
+        .release_work_lease(&expire_key, &ctrl1, &epoch1, 1)
+        .await
+        .expect("old release");
+    assert!(!old_release, "old owner release must be rejected");
+
+    // Current owner ctrl2 releases cleanly
+    let new_release = store
+        .release_work_lease(&expire_key, &ctrl2, &epoch2, 2)
+        .await
+        .expect("new release");
+    assert!(new_release, "current owner release must succeed");
+
+    let after_release = store
+        .inspect_work_lease(&expire_key)
+        .await
+        .expect("inspect after release");
+    assert!(after_release.is_none(), "released lease must be removed");
+
+    // 7. Drain controller session
+    let drain_res = store
+        .drain_controller_session(&ctrl1, &epoch1)
+        .await
+        .expect("drain_controller_session");
+    assert!(drain_res, "drain session must succeed");
+
+    let sessions_after_drain = store
+        .list_active_controller_sessions()
+        .await
+        .expect("list active sessions after drain");
+    assert!(
+        !sessions_after_drain
+            .iter()
+            .any(|s| s.controller_id == ctrl1 && s.controller_epoch == epoch1),
+        "drained session must not appear in active sessions list"
     );
 }
 

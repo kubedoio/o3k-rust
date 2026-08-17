@@ -361,6 +361,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(o3k_store::O3kStore::connect_postgres(url).await?)
         }
     };
+
+    let controller_id = o3k_store::ControllerId::new(
+        std::env::var("O3K_CONTROLLER_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
+    );
+    let controller_epoch = o3k_store::ControllerEpoch::random();
+    let session = o3k_store::ControllerSession {
+        controller_id: controller_id.clone(),
+        controller_epoch: controller_epoch.clone(),
+        started_at: String::new(),
+        heartbeat_at: String::new(),
+        lease_until: String::new(),
+        software_version: env!("CARGO_PKG_VERSION").to_owned(),
+        source_commit: std::env::var("O3K_SOURCE_COMMIT").unwrap_or_else(|_| "HEAD".to_owned()),
+        state: o3k_store::ControllerState::Active,
+    };
+
+    let coordination_store: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+    coordination_store
+        .register_controller_session(&session, Duration::from_secs(15))
+        .await?;
+
+    info!(
+        controller_id = %controller_id,
+        controller_epoch = %controller_epoch,
+        "controller session registered"
+    );
+
+    let heartbeat_store = coordination_store.clone();
+    let heartbeat_ctrl_id = controller_id.clone();
+    let heartbeat_ctrl_epoch = controller_epoch.clone();
+    let session_heartbeat_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = heartbeat_store
+                .heartbeat_controller_session(
+                    &heartbeat_ctrl_id,
+                    &heartbeat_ctrl_epoch,
+                    Duration::from_secs(15),
+                )
+                .await
+            {
+                tracing::warn!(%error, "controller session heartbeat failed");
+            }
+        }
+    });
+
     let identity_store = store.clone();
     let image_repository: Arc<dyn o3k_store::ImageRepository> = store.clone();
     let image_service = o3k_image::ImageService::open(
@@ -665,6 +713,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         task.abort();
         let _ = task.await;
     }
+    session_heartbeat_task.abort();
+    let _ = session_heartbeat_task.await;
+    let _ = coordination_store
+        .drain_controller_session(&controller_id, &controller_epoch)
+        .await;
+    info!(
+        controller_id = %controller_id,
+        controller_epoch = %controller_epoch,
+        "controller session drained"
+    );
     Ok(())
 }
 
