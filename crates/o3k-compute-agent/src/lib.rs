@@ -7270,11 +7270,11 @@ mod tests {
         // Now simulate expired takeover: stop A's background renewal, let lease expire, and B takes over with fence 2
         registry_a.abort_stream_renewal(agent_id).await;
         let work_key = format!("agent:{}", agent_id);
-        // Renew with 1s TTL and wait 1.5s for expiry in SQLite
+        // Renew with 1s TTL and wait 2.2s for expiry in SQLite
         let _ = coord
             .renew_work_lease(&work_key, &ctrl_a, &epoch_a, 1, Duration::from_secs(1))
             .await;
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(2200)).await;
 
         let takeover = coord
             .acquire_work_lease(
