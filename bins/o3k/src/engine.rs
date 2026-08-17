@@ -144,6 +144,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn kubernetes_mode_healthy_run_produces_healthy_verdict() {
+        let mut ctx = context_with(
+            FakeExec::healthy(),
+            FakeHttp::healthy(),
+            FakeDb::healthy(),
+            false,
+            false,
+        );
+        ctx.deployment_mode = crate::context::DeploymentMode::Kubernetes;
+        ctx.o3kd_env
+            .insert("O3K_DATABASE_BACKEND".to_owned(), "postgres".to_owned());
+        ctx.o3kd_env.insert(
+            "O3K_DATABASE_URL".to_owned(),
+            "postgres://o3k:pass@127.0.0.1/o3k".to_owned(),
+        );
+        ctx.o3kd_env
+            .insert("O3K_BOOTSTRAP_PASSWORD".to_owned(), "secret".to_owned());
+        let report = run_all(&ctx).await;
+        assert_eq!(report.checks.len(), 34);
+        assert_eq!(report.overall_status, OverallStatus::Healthy);
+        for check in &report.checks {
+            assert_ne!(
+                check.status,
+                CheckStatus::Fail,
+                "check {} failed: {}",
+                check.id,
+                check.summary
+            );
+        }
+    }
+
     /// Helper asserting a JSON value is an object; returns the map or None
     /// (the caller returns from the test).
     fn require_object<'a>(

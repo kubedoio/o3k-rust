@@ -385,3 +385,41 @@ pub fn sanitize_error(message: &str) -> String {
         truncated
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deployment_mode_default_is_systemd() {
+        assert_eq!(DeploymentMode::default(), DeploymentMode::Systemd);
+    }
+
+    #[test]
+    fn parse_env_contents_handles_exports_quotes_comments() {
+        let text = r#"
+            # comment
+            export O3K_KEY_1="value1"
+            O3K_KEY_2='value2'
+            O3K_KEY_3=value3
+            export EMPTY_VAL=
+            INVALID_LINE
+        "#;
+        let map = parse_env_contents(text);
+        assert_eq!(map.get("O3K_KEY_1").map(String::as_str), Some("value1"));
+        assert_eq!(map.get("O3K_KEY_2").map(String::as_str), Some("value2"));
+        assert_eq!(map.get("O3K_KEY_3").map(String::as_str), Some("value3"));
+        assert_eq!(map.get("EMPTY_VAL").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn sanitize_error_truncates_long_strings_and_strips_newlines() {
+        let msg = "line1\nline2\rline3";
+        assert_eq!(sanitize_error(msg), "line1 line2 line3");
+
+        let long = "a".repeat(300);
+        let sanitized = sanitize_error(&long);
+        assert_eq!(sanitized.len(), 200);
+        assert!(sanitized.ends_with("..."));
+    }
+}
