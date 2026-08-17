@@ -9,8 +9,19 @@
 coverage/
 artifacts/
 
-# Local opencode tooling (not part of the repository)
+# Local coding-agent/tooling state (not part of the repository)
 /.opencode/
+/.kimi/
+/.codex/
+/.agents/
+/.gstack/
+/.worktrees/
+/.sccache/
+
+# Generic local build/test noise
+*.log
+*.tmp
+*.profraw
 
 # Real-host gate evidence artifacts (regenerated per run)
 /cinder-chap-compute-result.json
