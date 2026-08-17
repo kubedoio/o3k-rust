@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "o3k.fullname" . }}-config
+  labels:
+    {{- include "o3k.labels" . | nindent 4 }}
+data:
+  O3K_DEPLOYMENT_PROFILE: "kubernetes"
+  O3K_DATA_DIR: {{ .Values.persistence.mountPath | quote }}
+  O3K_LISTEN_ADDR: "0.0.0.0:8080"
+  O3K_COMPUTE_CONTROL_ADDR: "0.0.0.0:18443"
+  O3K_LOG_FILTER: {{ .Values.config.logLevel | default "info" | quote }}
+  O3K_LOG_FORMAT: {{ .Values.config.logFormat | default "json" | quote }}
+  O3K_PROVIDER: {{ .Values.config.provider | default "agent" | quote }}
+  {{- if .Values.config.publicCatalogUrl }}
+  O3K_PUBLIC_CATALOG_URL: {{ .Values.config.publicCatalogUrl | quote }}
+  {{- end }}

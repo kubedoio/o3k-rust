@@ -98,6 +98,9 @@ hard_forbidden_dependencies = [
   "o3k-compute-agent",
   "o3k-provider-contract",
   "prost",
+  "kube",
+  "k8s-openapi",
+  "kube-runtime",
 ]
 
 # The agent/Cinder adapter dependencies previously listed here (o3k-cinder,

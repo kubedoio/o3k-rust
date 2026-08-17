@@ -102,7 +102,7 @@ claim_rules:
     type: deployment-target
     normative_adr: docs/adr/ADR-0167-kubernetes-native-control-plane-deployment.md
     packaging_target: oci-image-and-helm
-    support_status: planned
+    support_status: single-controller-supported
     ha_claim_requires:
       - postgresql-adapter-and-conformance-evidence
       - durable-multi-controller-work-ownership-and-fencing

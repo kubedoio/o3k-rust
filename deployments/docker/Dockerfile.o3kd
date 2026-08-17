@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# ------------------------------------------------------------------------------
+# Build stage
+# ------------------------------------------------------------------------------
+FROM rust:1.80-bookworm AS builder
+
+WORKDIR /usr/src/o3k
+
+# Install protobuf compiler and required build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libssl-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace manifests and source
+COPY Cargo.toml Cargo.lock ./
+COPY contracts/ contracts/
+COPY proto/ proto/
+COPY bins/ bins/
+COPY crates/ crates/
+
+# Build release binaries for o3kd and o3k CLI
+RUN cargo build --release --bin o3kd --bin o3k
+
+# ------------------------------------------------------------------------------
+# Runtime stage
+# ------------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+ARG VERSION="0.2.0-alpha.1"
+ARG VCS_REF="HEAD"
+
+LABEL org.opencontainers.image.title="o3kd" \
+      org.opencontainers.image.description="O3K Cloud Operating System Control Plane Daemon" \
+      org.opencontainers.image.url="https://github.com/kubedoio/o3k-rust" \
+      org.opencontainers.image.source="https://github.com/kubedoio/o3k-rust" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.vendor="Kubedo" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+# Install minimal runtime dependencies:
+# - ca-certificates for TLS
+# - genisoimage for config-drive ISO generation
+# - curl for health probes / diagnostics
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    genisoimage \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root system user and group (UID/GID 10001)
+RUN groupadd -g 10001 o3k && \
+    useradd -u 10001 -g 10001 -d /var/lib/o3k -s /usr/sbin/nologin -c "O3K Daemon User" o3k && \
+    mkdir -p /var/lib/o3k /etc/o3k /etc/o3k/tls && \
+    chown -R 10001:10001 /var/lib/o3k /etc/o3k
+
+# Copy release binaries from builder stage
+COPY --from=builder /usr/src/o3k/target/release/o3kd /usr/local/bin/o3kd
+COPY --from=builder /usr/src/o3k/target/release/o3k /usr/local/bin/o3k
+
+USER 10001:10001
+WORKDIR /var/lib/o3k
+ENV O3K_DATA_DIR=/var/lib/o3k \
+    O3K_LISTEN_ADDR=0.0.0.0:8080 \
+    O3K_COMPUTE_CONTROL_ADDR=0.0.0.0:18443 \
+    O3K_DEPLOYMENT_PROFILE=kubernetes \
+    O3K_DATABASE_BACKEND=postgres
+
+EXPOSE 8080 18443
+
+ENTRYPOINT ["/usr/local/bin/o3kd"]

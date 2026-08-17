@@ -123,6 +123,13 @@ pub trait DoctorDb: Send + Sync {
     async fn network_ports(&self, path: &Path) -> Result<Vec<PortRow>, String>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeploymentMode {
+    #[default]
+    Systemd,
+    Kubernetes,
+}
+
 /// Resolved doctor context: paths, addresses, in-memory environment maps,
 /// and the three seams. The environment maps are kept in memory only and
 /// must never be printed or serialized.
@@ -132,6 +139,7 @@ pub struct Context {
     pub listen_addr: String,
     pub compute_health_addr: String,
     pub compute_data_dir: PathBuf,
+    pub deployment_mode: DeploymentMode,
     /// Root where `bins/o3k-compute` opens its `DhcpService`
     /// (`<compute_data_dir>/dhcp`).
     pub dhcp_root: PathBuf,
@@ -167,8 +175,37 @@ impl Context {
     pub fn load(exec: Arc<dyn Exec>, http: Arc<dyn HttpClient>, db: Arc<dyn DoctorDb>) -> Self {
         let config_dir = path_override("O3K_DOCTOR_CONFIG_DIR")
             .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_DIR));
-        let o3kd_env = parse_env_file(&config_dir.join("o3kd.env"));
+        let mut o3kd_env = parse_env_file(&config_dir.join("o3kd.env"));
+        for (key, val) in std::env::vars() {
+            if key.starts_with("O3K_") {
+                o3kd_env.insert(key, val);
+            }
+        }
         let compute_env = parse_env_file(&config_dir.join("o3k-compute.env"));
+        let deployment_mode = if std::env::var("O3K_DEPLOYMENT_MODE")
+            .map(|v| v.to_ascii_lowercase())
+            .as_deref()
+            == Ok("kubernetes")
+            || std::env::var("O3K_DEPLOYMENT_PROFILE")
+                .map(|v| v.to_ascii_lowercase())
+                .as_deref()
+                == Ok("kubernetes")
+            || o3kd_env
+                .get("O3K_DEPLOYMENT_MODE")
+                .map(|v| v.to_ascii_lowercase())
+                .as_deref()
+                == Some("kubernetes")
+            || o3kd_env
+                .get("O3K_DEPLOYMENT_PROFILE")
+                .map(|v| v.to_ascii_lowercase())
+                .as_deref()
+                == Some("kubernetes")
+            || std::env::var("KUBERNETES_SERVICE_HOST").is_ok()
+        {
+            DeploymentMode::Kubernetes
+        } else {
+            DeploymentMode::Systemd
+        };
         let data_dir = path_override("O3K_DOCTOR_DATA_DIR").unwrap_or_else(|| {
             PathBuf::from(
                 o3kd_env
@@ -202,6 +239,7 @@ impl Context {
             dhcp_root: compute_data_dir.join("dhcp"),
             network_root: compute_data_dir.join("network"),
             compute_data_dir,
+            deployment_mode,
             libvirt_profile,
             is_root: current_euid() == 0,
             prefix_candidates,
@@ -212,6 +250,12 @@ impl Context {
             http,
             db,
         }
+    }
+
+    /// True when running in Kubernetes deployment mode.
+    #[must_use]
+    pub fn is_kubernetes(&self) -> bool {
+        self.deployment_mode == DeploymentMode::Kubernetes
     }
 
     /// Path of the control-plane SQLite database.

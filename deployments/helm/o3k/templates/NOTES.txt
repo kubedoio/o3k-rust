@@ -1,0 +1,21 @@
+O3K Cloud Operating System (Control Plane) deployed successfully!
+
+1. Get the OpenStack API Service URL:
+{{- if contains "NodePort" .Values.service.api.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "o3k.fullname" . }}-api)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo "OpenStack Keystone/API endpoint: http://$NODE_IP:$NODE_PORT/v3"
+{{- else if contains "ClusterIP" .Values.service.api.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "{{ include "o3k.selectorLabels" . }}" -o jsonpath="{.items[0].metadata.name}")
+  echo "Forward OpenStack API port locally:"
+  echo "  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 5000:8080"
+  echo "  export OS_AUTH_URL=http://127.0.0.1:5000/v3"
+{{- end }}
+
+2. Compute Agent (o3k-compute) Connection:
+  External compute hypervisors should connect to the gRPC compute endpoint:
+  {{ include "o3k.fullname" . }}-compute:{{ .Values.service.compute.port }}
+
+3. Diagnostics / Doctor:
+  To run o3k doctor inside the control-plane container:
+  kubectl --namespace {{ .Release.Namespace }} exec -it deployment/{{ include "o3k.fullname" . }} -- o3k doctor

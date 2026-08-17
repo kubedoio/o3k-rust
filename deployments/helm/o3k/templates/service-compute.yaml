@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "o3k.fullname" . }}-compute
+  labels:
+    {{- include "o3k.labels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: compute-control
+spec:
+  type: {{ .Values.service.compute.type }}
+  ports:
+    - port: {{ .Values.service.compute.port }}
+      targetPort: {{ .Values.service.compute.targetPort }}
+      protocol: TCP
+      name: grpc-compute
+      {{- if and (eq .Values.service.compute.type "NodePort") .Values.service.compute.nodePort }}
+      nodePort: {{ .Values.service.compute.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "o3k.selectorLabels" . | nindent 4 }}

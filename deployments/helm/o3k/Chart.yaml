@@ -1,0 +1,17 @@
+apiVersion: v2
+name: o3k
+description: O3K Cloud Operating System Control Plane (Single-Controller)
+type: application
+version: 0.1.0
+appVersion: "0.2.0-alpha.1"
+keywords:
+  - openstack
+  - cloud-os
+  - control-plane
+  - iaas
+home: https://github.com/kubedoio/o3k-rust
+sources:
+  - https://github.com/kubedoio/o3k-rust
+maintainers:
+  - name: O3K Authors
+    email: info@kubedo.com

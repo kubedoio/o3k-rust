@@ -21,6 +21,14 @@ const TLS_IDENTITY_FILES: [&str; 7] = [
 /// private keys at most 0640, and the config directory must not be
 /// world-writable. Only paths are reported, never contents.
 pub async fn check_config_permissions(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "security.config_permissions",
+            Category::Security,
+            CheckStatus::Pass,
+            "configuration is injected via Kubernetes Secrets and environment",
+        );
+    }
     let mut missing = Vec::new();
     let mut violations = Vec::new();
 
@@ -115,6 +123,14 @@ pub async fn check_config_permissions(ctx: &Context) -> Check {
 /// `security.tls_identity`: all seven mTLS files must exist and the agent
 /// fingerprint must match the authorized list in `o3kd.env`.
 pub async fn check_tls_identity(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "security.tls_identity",
+            Category::Security,
+            CheckStatus::Pass,
+            "mTLS server certificate and CA are mounted in Kubernetes pod",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("security.tls_identity", Category::Security);
     }

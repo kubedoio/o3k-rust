@@ -587,6 +587,7 @@ pub fn context_with(
         listen_addr: "127.0.0.1:8080".to_owned(),
         compute_health_addr: "127.0.0.1:9100".to_owned(),
         compute_data_dir: compute_data_dir.clone(),
+        deployment_mode: crate::context::DeploymentMode::Systemd,
         dhcp_root: compute_data_dir.join("dhcp"),
         network_root: compute_data_dir.join("network"),
         libvirt_profile,

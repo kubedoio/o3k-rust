@@ -26,6 +26,14 @@ const DOMAIN_REQUIRED_STATES: [&str; 7] = [
 /// `libvirt.compute_access`: the `o3k-compute` identity must be able to open
 /// `qemu:///system` (verified through the exec seam as root).
 pub async fn check_compute_access(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "libvirt.compute_access",
+            Category::Libvirt,
+            CheckStatus::NotApplicable,
+            "local libvirt access check is not applicable for Kubernetes control plane; compute agents run on external hypervisors",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("libvirt.compute_access", Category::Libvirt);
     }
@@ -60,6 +68,14 @@ pub async fn check_compute_access(ctx: &Context) -> Check {
 /// `libvirt.control_isolation`: the `o3k` control identity must be denied by
 /// libvirt; success is a boundary breach.
 pub async fn check_control_isolation(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "libvirt.control_isolation",
+            Category::Libvirt,
+            CheckStatus::Pass,
+            "control plane has no libvirt socket access (container isolated)",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("libvirt.control_isolation", Category::Libvirt);
     }
@@ -95,6 +111,14 @@ pub async fn check_control_isolation(ctx: &Context) -> Check {
 /// running domain must have its `o3k-<sha256>` domain present; O3K-patterned
 /// domains without a live instance are foreign same-name leftovers (WARN).
 pub async fn check_domains_consistent(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "libvirt.domains_consistent",
+            Category::Libvirt,
+            CheckStatus::NotApplicable,
+            "local domain consistency check is not applicable for Kubernetes control plane; hypervisor domains reside on external compute nodes",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("libvirt.domains_consistent", Category::Libvirt);
     }

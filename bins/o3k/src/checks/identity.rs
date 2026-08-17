@@ -29,6 +29,22 @@ pub async fn check_configured(ctx: &Context) -> Check {
     let status_path = format!("stat -c '%a %n' {}", path.display());
     let mut missing = Vec::new();
     if !ctx.exec.is_regular_file(&path) {
+        if ctx.is_kubernetes() {
+            if ctx.o3kd_env.contains_key("O3K_BOOTSTRAP_PASSWORD") {
+                return Check::new(
+                    "identity.configured",
+                    Category::Identity,
+                    CheckStatus::Pass,
+                    "identity bootstrap credentials configured via environment",
+                );
+            }
+            return Check::new(
+                "identity.configured",
+                Category::Identity,
+                CheckStatus::NotApplicable,
+                "admin-openrc client credentials not mounted in control plane pod",
+            );
+        }
         return Check::new(
             "identity.configured",
             Category::Identity,
@@ -150,6 +166,50 @@ fn token_request_body(values: &std::collections::BTreeMap<String, String>) -> St
 pub async fn check_authenticated(ctx: &Context) -> Check {
     let path = ctx.admin_openrc_path();
     if !ctx.exec.is_regular_file(&path) {
+        if ctx.is_kubernetes() {
+            if let Some(password) = ctx.o3kd_env.get("O3K_BOOTSTRAP_PASSWORD") {
+                let auth_url = format!("http://{}/v3", ctx.listen_addr);
+                let mut values = std::collections::BTreeMap::new();
+                values.insert("OS_USERNAME".to_owned(), "admin".to_owned());
+                values.insert("OS_PASSWORD".to_owned(), password.clone());
+                values.insert("OS_PROJECT_NAME".to_owned(), "admin".to_owned());
+                let token_url = format!("{auth_url}/auth/tokens");
+                let body = token_request_body(&values);
+                let response = match ctx.http.post_json(&token_url, &body).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return Check::new(
+                            "identity.authenticated",
+                            Category::Identity,
+                            CheckStatus::Fail,
+                            format!("identity endpoint connection failed: {error}"),
+                        )
+                        .with_actions(crate::checks::o3kd_actions());
+                    }
+                };
+                if response.status == 201 && response.header("x-subject-token").is_some() {
+                    return Check::new(
+                        "identity.authenticated",
+                        Category::Identity,
+                        CheckStatus::Pass,
+                        "identity endpoint authenticated successfully",
+                    );
+                }
+                return Check::new(
+                    "identity.authenticated",
+                    Category::Identity,
+                    CheckStatus::Fail,
+                    format!("identity endpoint returned HTTP {}", response.status),
+                )
+                .with_actions(crate::checks::o3kd_actions());
+            }
+            return Check::new(
+                "identity.authenticated",
+                Category::Identity,
+                CheckStatus::NotApplicable,
+                "identity bootstrap credentials not configured in container",
+            );
+        }
         return Check::new(
             "identity.authenticated",
             Category::Identity,

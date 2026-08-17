@@ -53,6 +53,14 @@ async fn load_manifest(ctx: &Context) -> Result<Option<OwnershipManifest>, Strin
 
 /// `network.bridge_state`: the manifest's bridge must exist on the host.
 pub async fn check_bridge_state(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "network.bridge_state",
+            Category::Network,
+            CheckStatus::NotApplicable,
+            "host network bridge checks are not applicable for Kubernetes control plane; networking resides on external compute agents",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("network.bridge_state", Category::Network);
     }
@@ -119,6 +127,14 @@ pub async fn check_bridge_state(ctx: &Context) -> Check {
 /// `network.tap_state`: every recorded TAP must exist; O3K-prefixed host
 /// interfaces without an ownership record are stale leftovers.
 pub async fn check_tap_state(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "network.tap_state",
+            Category::Network,
+            CheckStatus::NotApplicable,
+            "host TAP checks are not applicable for Kubernetes control plane; networking resides on external compute agents",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("network.tap_state", Category::Network);
     }
@@ -213,6 +229,14 @@ fn pidfile_pid(contents: &str) -> Option<u32> {
 /// at a live process whose cmdline contains the dhcp root and whose kernel
 /// start time matches the adjacent `.owner` record.
 pub async fn check_dhcp_state(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "network.dhcp_state",
+            Category::Network,
+            CheckStatus::NotApplicable,
+            "host DHCP checks are not applicable for Kubernetes control plane; networking resides on external compute agents",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("network.dhcp_state", Category::Network);
     }
@@ -345,6 +369,14 @@ async fn dhcp_binding_count(ctx: &Context) -> usize {
 /// must reference live instances, and an adopted (not created) bridge is a
 /// WARN.
 pub async fn check_ownership_records(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "network.ownership_records",
+            Category::Network,
+            CheckStatus::NotApplicable,
+            "host network ownership checks are not applicable for Kubernetes control plane",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("network.ownership_records", Category::Network);
     }

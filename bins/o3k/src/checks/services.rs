@@ -47,6 +47,14 @@ fn unit_check(id: &str, unit: &str, daemon: &str, state: UnitState, actions: Vec
 
 /// `services.o3kd_unit`: the control-plane daemon unit must be active.
 pub async fn check_o3kd_unit(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "services.o3kd_unit",
+            Category::Services,
+            CheckStatus::NotApplicable,
+            "systemd service unit checks are not applicable in Kubernetes deployment mode",
+        );
+    }
     let state = ctx.exec.systemctl_is_active("o3kd.service").await;
     unit_check(
         "services.o3kd_unit",
@@ -60,6 +68,14 @@ pub async fn check_o3kd_unit(ctx: &Context) -> Check {
 /// `services.compute_unit`: the compute agent unit must be active in the
 /// libvirt profile.
 pub async fn check_compute_unit(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "services.compute_unit",
+            Category::Services,
+            CheckStatus::NotApplicable,
+            "systemd service unit checks are not applicable in Kubernetes deployment mode; compute agent runs externally",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("services.compute_unit", Category::Services);
     }

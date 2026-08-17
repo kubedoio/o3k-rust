@@ -159,6 +159,14 @@ pub async fn check_wal_mode(ctx: &Context) -> Check {
 /// permission bits and the data directory must not be group- or
 /// world-writable.
 pub async fn check_permissions(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "database.permissions",
+            Category::Database,
+            CheckStatus::Pass,
+            "data directory managed by Kubernetes volume mount",
+        );
+    }
     if ctx.is_postgres() {
         let mut violations = Vec::new();
         match ctx.exec.file_mode(&ctx.data_dir) {

@@ -19,6 +19,13 @@ pub enum DatabaseBackend {
     Postgres,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeploymentProfile {
+    #[default]
+    Standalone,
+    Kubernetes,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
     Json,
@@ -61,6 +68,7 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub data_dir: PathBuf,
     pub database_backend: DatabaseBackend,
+    pub deployment_profile: DeploymentProfile,
     pub log_format: LogFormat,
     pub log_filter: String,
     pub provider: Provider,
@@ -89,6 +97,7 @@ impl fmt::Debug for Config {
             .field("listen_addr", &self.listen_addr)
             .field("data_dir", &self.data_dir)
             .field("database_backend", &self.database_backend)
+            .field("deployment_profile", &self.deployment_profile)
             .field("database_url", &self.database_url)
             .field("log_format", &self.log_format)
             .field("log_filter", &self.log_filter)
@@ -223,6 +232,12 @@ pub enum ConfigError {
     InvalidDatabaseBackend,
     #[error("PostgreSQL database backend requires O3K_DATABASE_URL / database_url")]
     MissingDatabaseUrl,
+    #[error("deployment profile must be `standalone` or `kubernetes`")]
+    InvalidDeploymentProfile,
+    #[error(
+        "PostgreSQL database backend is strictly required for the Kubernetes deployment profile; SQLite is rejected"
+    )]
+    KubernetesRequiresPostgres,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -232,6 +247,7 @@ struct PartialConfig {
     data_dir: Option<String>,
     database_backend: Option<String>,
     database_url: Option<String>,
+    deployment_profile: Option<String>,
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
@@ -258,6 +274,7 @@ struct FileConfig {
     data_dir: Option<String>,
     database_backend: Option<String>,
     database_url: Option<String>,
+    deployment_profile: Option<String>,
     log_format: Option<String>,
     log_filter: Option<String>,
     provider: Option<String>,
@@ -284,6 +301,7 @@ impl From<FileConfig> for PartialConfig {
             data_dir: file.data_dir,
             database_backend: file.database_backend,
             database_url: file.database_url,
+            deployment_profile: file.deployment_profile,
             log_format: file.log_format,
             log_filter: file.log_filter,
             provider: file.provider,
@@ -322,6 +340,9 @@ impl PartialConfig {
         }
         if other.database_url.is_some() {
             self.database_url = other.database_url;
+        }
+        if other.deployment_profile.is_some() {
+            self.deployment_profile = other.deployment_profile;
         }
         if other.log_format.is_some() {
             self.log_format = other.log_format;
@@ -382,6 +403,8 @@ impl PartialConfig {
             data_dir: value_from_env(environment, "O3K_DATA_DIR"),
             database_backend: value_from_env(environment, "O3K_DATABASE_BACKEND"),
             database_url: value_from_env(environment, "O3K_DATABASE_URL"),
+            deployment_profile: value_from_env(environment, "O3K_DEPLOYMENT_PROFILE")
+                .or_else(|| value_from_env(environment, "O3K_DEPLOYMENT_MODE")),
             log_format: value_from_env(environment, "O3K_LOG_FORMAT"),
             log_filter: value_from_env(environment, "O3K_LOG_FILTER"),
             provider: value_from_env(environment, "O3K_PROVIDER"),
@@ -432,6 +455,9 @@ impl PartialConfig {
                     result.database_backend = Some(value("--database-backend")?)
                 }
                 "--database-url" => result.database_url = Some(value("--database-url")?),
+                "--deployment-profile" | "--deployment-mode" => {
+                    result.deployment_profile = Some(value(option)?)
+                }
                 "--log-format" => result.log_format = Some(value("--log-format")?),
                 "--log-filter" => result.log_filter = Some(value("--log-filter")?),
                 "--provider" => result.provider = Some(value("--provider")?),
@@ -549,7 +575,7 @@ impl PartialConfig {
                 || self
                     .compute_authorized_agents
                     .as_deref()
-                    .is_none_or(|value| value.trim().is_empty()))
+                    .is_none_or(|agents| agents.trim().is_empty()))
         {
             return Err(ConfigError::MissingAgentConfiguration);
         }
@@ -612,6 +638,18 @@ impl PartialConfig {
             return Err(ConfigError::IncompleteComputeTls);
         }
 
+        let deployment_profile = match self
+            .deployment_profile
+            .as_deref()
+            .unwrap_or("standalone")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "standalone" | "systemd" | "local" | "" => DeploymentProfile::Standalone,
+            "kubernetes" | "k8s" => DeploymentProfile::Kubernetes,
+            _ => return Err(ConfigError::InvalidDeploymentProfile),
+        };
+
         let database_backend = match self
             .database_backend
             .as_deref()
@@ -632,11 +670,18 @@ impl PartialConfig {
             return Err(ConfigError::MissingDatabaseUrl);
         }
 
+        if deployment_profile == DeploymentProfile::Kubernetes
+            && database_backend != DatabaseBackend::Postgres
+        {
+            return Err(ConfigError::KubernetesRequiresPostgres);
+        }
+
         Ok(Config {
             config_path,
             listen_addr,
             data_dir,
             database_backend,
+            deployment_profile,
             database_url: self.database_url.map(Secret),
             log_format,
             log_filter,
@@ -667,7 +712,7 @@ fn value_from_env(environment: &[(String, String)], name: &str) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError, DatabaseBackend, LogFormat, Provider};
+    use super::{Config, ConfigError, DatabaseBackend, DeploymentProfile, LogFormat, Provider};
     use std::{fs, path::PathBuf};
 
     fn env(values: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -847,6 +892,37 @@ mod tests {
         assert_eq!(url.expose(), "postgres://o3k:secret-password@127.0.0.1/o3k");
         assert_eq!(url.to_string(), "<redacted>");
         assert!(!format!("{config:?}").contains("secret-password"));
+        Ok(())
+    }
+
+    #[test]
+    fn kubernetes_deployment_profile_rejects_sqlite() {
+        let result = Config::from_sources(
+            [
+                "o3kd".to_owned(),
+                "--deployment-profile=kubernetes".to_owned(),
+            ],
+            Vec::new(),
+        );
+        assert!(matches!(
+            result,
+            Err(ConfigError::KubernetesRequiresPostgres)
+        ));
+    }
+
+    #[test]
+    fn kubernetes_deployment_profile_accepts_postgres() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::from_sources(
+            [
+                "o3kd".to_owned(),
+                "--deployment-profile=kubernetes".to_owned(),
+                "--database-backend=postgres".to_owned(),
+                "--database-url=postgres://o3k:pass@127.0.0.1/o3k".to_owned(),
+            ],
+            Vec::new(),
+        )?;
+        assert_eq!(config.deployment_profile, DeploymentProfile::Kubernetes);
+        assert_eq!(config.database_backend, DatabaseBackend::Postgres);
         Ok(())
     }
 }
