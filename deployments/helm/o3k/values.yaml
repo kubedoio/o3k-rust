@@ -3,8 +3,13 @@
 # Note: Privileged compute hypervisor execution (o3k-compute) runs outside Kubernetes.
 
 # Single-controller control-plane replica count.
-# For P6, replicaCount MUST be 1. Multi-controller HA is not supported in P6.
+# Default is 1. replicaCount > 1 requires multiController.enabled=true and PostgreSQL persistence.
 replicaCount: 1
+
+# Multi-controller coordination configuration.
+# Explicit opt-in required for replicaCount > 1.
+multiController:
+  enabled: false
 
 image:
   repository: ghcr.io/kubedoio/o3kd

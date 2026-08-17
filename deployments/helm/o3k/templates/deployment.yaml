@@ -1,3 +1,6 @@
+{{- if and (gt (int .Values.replicaCount) 1) (not .Values.multiController.enabled) -}}
+{{- fail "O3K replicaCount > 1 strictly requires multiController.enabled=true" -}}
+{{- end -}}
 {{- if and (ne .Values.database.backend "postgres") (ne .Values.database.backend "postgresql") -}}
 {{- fail "O3K strictly requires PostgreSQL persistence in the Kubernetes deployment profile (SQLite is rejected)" -}}
 {{- end -}}

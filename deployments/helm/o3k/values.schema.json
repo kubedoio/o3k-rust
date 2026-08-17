@@ -10,6 +10,14 @@
       "maximum": 10,
       "description": "Replica count for O3K control plane (default 1; multi-controller supported with PostgreSQL)"
     },
+    "multiController": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
     "database": {
       "type": "object",
       "required": ["backend", "existingSecret", "urlKey"],
