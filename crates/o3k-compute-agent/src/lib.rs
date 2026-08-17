@@ -7259,7 +7259,12 @@ mod tests {
             "Agent stream on Controller A must receive the command"
         );
 
-        // Now simulate expired takeover: Controller B takes over lease with fence 2
+        // Now simulate expired takeover: stop A's background renewal, let lease expire, and B takes over with fence 2
+        if let Some(conn) = registry_a.connections.read().await.get(agent_id) {
+            if let Some(abort) = &conn.renewal_abort {
+                abort.notify_waiters();
+            }
+        }
         let work_key = format!("agent:{}", agent_id);
         // Renew with 1s TTL and wait 1.5s for expiry in SQLite
         let _ = coord
