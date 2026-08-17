@@ -7,12 +7,18 @@ helm lint deployments/helm/o3k/
 echo "==> Testing default Helm template..."
 helm template test-release deployments/helm/o3k/ > /dev/null
 
-echo "==> Testing negative validation: replicaCount > 1 must be rejected..."
-if helm template test-release deployments/helm/o3k/ --set replicaCount=2 2>/dev/null; then
-    echo "ERROR: helm template accepted replicaCount=2, but single-controller invariant requires replicaCount=1" >&2
+echo "==> Testing multi-controller validation: replicaCount=3 is supported with postgres..."
+OUT_3=$(helm template test-release deployments/helm/o3k/ --set replicaCount=3)
+echo "$OUT_3" | grep -q "replicas: 3"
+echo "$OUT_3" | grep -q "type: RollingUpdate"
+echo "    PASS: replicaCount=3 rendered with RollingUpdate strategy"
+
+echo "==> Testing negative validation: replicaCount=0 must be rejected..."
+if helm template test-release deployments/helm/o3k/ --set replicaCount=0 2>/dev/null; then
+    echo "ERROR: helm template accepted replicaCount=0, but minimum is 1" >&2
     exit 1
 fi
-echo "    PASS: replicaCount > 1 correctly rejected"
+echo "    PASS: replicaCount=0 correctly rejected"
 
 echo "==> Testing negative validation: database.backend=sqlite must be rejected..."
 if helm template test-release deployments/helm/o3k/ --set database.backend=sqlite 2>/dev/null; then
