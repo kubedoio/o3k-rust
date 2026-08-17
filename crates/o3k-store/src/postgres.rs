@@ -2622,14 +2622,12 @@ impl PlacementRepository for PostgresStore {
     ) -> Result<PlacementProviderRecord, StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
-        let provider_id = Uuid::now_v7().to_string();
         let row = sqlx::query(
             "INSERT INTO placement_providers (id, node_id, state, generation)
-             VALUES ($1, $2, 'ready', 1)
-             ON CONFLICT (node_id) DO UPDATE SET state = 'ready'
+             VALUES ($1, $1, 'Enabled', 1)
+             ON CONFLICT (node_id) DO UPDATE SET state = 'Enabled'
              RETURNING id, node_id, state, generation",
         )
-        .bind(&provider_id)
         .bind(node_id)
         .fetch_one(&mut *tx)
         .await
@@ -2668,14 +2666,12 @@ impl PlacementRepository for PostgresStore {
     ) -> Result<PlacementProviderRecord, StoreError> {
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
 
-        let provider_id = Uuid::now_v7().to_string();
         let row = sqlx::query(
             "INSERT INTO placement_providers (id, node_id, state, generation)
-             VALUES ($1, $2, $3, 1)
+             VALUES ($1, $1, $2, 1)
              ON CONFLICT (node_id) DO UPDATE SET state = EXCLUDED.state
              RETURNING id, node_id, state, generation",
         )
-        .bind(&provider_id)
         .bind(node_id)
         .bind(state)
         .fetch_one(&mut *tx)

@@ -532,10 +532,10 @@ start_service() {
       --inh-caps=+net_admin,+net_bind_service,+net_raw \
       --ambient-caps=+net_admin,+net_bind_service,+net_raw -- \
       nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
-      "$env_file" "$binary" "$log_file" &
+      "$env_file" "$binary" "$log_file" >/dev/null 2>&1 &
   else
     sudo -n -u "$account" -- nohup bash -c 'set -a; . "$1"; set +a; exec "$2" >>"$3" 2>&1' _ \
-      "$env_file" "$binary" "$log_file" &
+      "$env_file" "$binary" "$log_file" >/dev/null 2>&1 &
   fi
   supervisor=$!
   child=
