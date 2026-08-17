@@ -135,6 +135,11 @@ pub struct ComputeService {
     config_drive_cleaner: Option<o3k_config_drive::ConfigDriveStore>,
     authorizer: Arc<dyn Authorizer>,
     audit_sink: Arc<dyn AuditSink>,
+    coordination: Option<(
+        Arc<dyn o3k_store::CoordinationRepository>,
+        o3k_store::ControllerId,
+        o3k_store::ControllerEpoch,
+    )>,
 }
 
 #[derive(Clone)]
@@ -402,7 +407,19 @@ impl ComputeService {
             config_drive_cleaner: None,
             authorizer: Arc::new(StaticAuthorizer::standard()),
             audit_sink: Arc::new(NoopAuditSink),
+            coordination: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_coordination(
+        mut self,
+        coordination: Arc<dyn o3k_store::CoordinationRepository>,
+        controller_id: o3k_store::ControllerId,
+        controller_epoch: o3k_store::ControllerEpoch,
+    ) -> Self {
+        self.coordination = Some((coordination, controller_id, controller_epoch));
+        self
     }
 
     #[must_use]
@@ -756,7 +773,43 @@ impl ComputeService {
             interval.tick().await;
             loop {
                 interval.tick().await;
-                if let Err(error) = service.attachment_orchestrator().reconcile().await {
+                if let Some((coordination, controller_id, controller_epoch)) = &service.coordination
+                {
+                    let work_key = "reconcile:volume_attachments";
+                    match coordination
+                        .acquire_work_lease(
+                            work_key,
+                            "reconciler",
+                            controller_id,
+                            controller_epoch,
+                            Duration::from_secs(15),
+                        )
+                        .await
+                    {
+                        Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                            if let Err(error) = service.attachment_orchestrator().reconcile().await
+                            {
+                                tracing::warn!(%error, "attachment reconcile pass failed");
+                            }
+                            let _ = coordination
+                                .release_work_lease(
+                                    work_key,
+                                    controller_id,
+                                    controller_epoch,
+                                    lease.fencing_token,
+                                )
+                                .await;
+                        }
+                        Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                            tracing::debug!(
+                                "attachment reconcile is currently leased by another controller; skipping"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to acquire attachment reconcile lease");
+                        }
+                    }
+                } else if let Err(error) = service.attachment_orchestrator().reconcile().await {
                     tracing::warn!(%error, "attachment reconcile pass failed");
                 }
             }
@@ -803,7 +856,46 @@ impl ComputeService {
             .list_resources_by_kind("compute_instance")
             .await?;
         for resource in resources {
-            self.drive_create_convergence(&resource).await;
+            if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+                let work_key = format!("convergence:create:{}", resource.id);
+                match coordination
+                    .acquire_work_lease(
+                        &work_key,
+                        "convergence",
+                        controller_id,
+                        controller_epoch,
+                        Duration::from_secs(15),
+                    )
+                    .await
+                {
+                    Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                        self.drive_create_convergence(&resource).await;
+                        let _ = coordination
+                            .release_work_lease(
+                                &work_key,
+                                controller_id,
+                                controller_epoch,
+                                lease.fencing_token,
+                            )
+                            .await;
+                    }
+                    Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                        tracing::debug!(
+                            resource_id = %resource.id,
+                            "create convergence is currently leased by another controller; skipping"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            resource_id = %resource.id,
+                            %error,
+                            "failed to acquire create convergence lease; skipping"
+                        );
+                    }
+                }
+            } else {
+                self.drive_create_convergence(&resource).await;
+            }
         }
         // Issue #88: an operation can reach a terminal state while its
         // artifact handshake rows are still `offered`/`receiving` (an agent
@@ -875,9 +967,53 @@ impl ComputeService {
             if !re_drive {
                 continue;
             }
-            // Best-effort: an error is a warning, never an aborted pass; the
-            // next sweep tick re-drives the operation.
-            if let Err(error) = self.journal.reconcile_lifecycle_once(operation.id).await {
+            if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+                let work_key = format!("operation:{}", operation.id);
+                match coordination
+                    .acquire_work_lease(
+                        &work_key,
+                        "operation",
+                        controller_id,
+                        controller_epoch,
+                        Duration::from_secs(15),
+                    )
+                    .await
+                {
+                    Ok(o3k_store::LeaseAcquireOutcome::Acquired { lease }) => {
+                        if let Err(error) =
+                            self.journal.reconcile_lifecycle_once(operation.id).await
+                        {
+                            tracing::warn!(
+                                operation_id = %operation.id,
+                                resource_id = %operation.resource_id,
+                                error = %error,
+                                "server lifecycle convergence pass failed; server state is unchanged"
+                            );
+                        }
+                        let _ = coordination
+                            .release_work_lease(
+                                &work_key,
+                                controller_id,
+                                controller_epoch,
+                                lease.fencing_token,
+                            )
+                            .await;
+                    }
+                    Ok(o3k_store::LeaseAcquireOutcome::Busy { .. }) => {
+                        tracing::debug!(
+                            operation_id = %operation.id,
+                            "lifecycle operation is currently leased by another controller; skipping"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            operation_id = %operation.id,
+                            %error,
+                            "failed to acquire lifecycle operation lease; skipping"
+                        );
+                    }
+                }
+            } else if let Err(error) = self.journal.reconcile_lifecycle_once(operation.id).await {
                 tracing::warn!(
                     operation_id = %operation.id,
                     resource_id = %operation.resource_id,
@@ -8605,6 +8741,95 @@ mod tests {
 
         let _ = std::fs::remove_file(&database_path);
         let _ = std::fs::remove_dir_all(&placement_path);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_controller_reconciler_leases_mutating_work_and_skips_busy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+
+        let ctrl_a = o3k_store::ControllerId::new("ctrl-a");
+        let epoch_a = o3k_store::ControllerEpoch::new("epoch-a");
+        let ctrl_b = o3k_store::ControllerId::new("ctrl-b");
+        let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
+
+        let provider = Arc::new(FakeComputeProvider::new());
+        let service = ComputeService::new(store.clone(), provider.clone()).with_coordination(
+            coord.clone(),
+            ctrl_a.clone(),
+            epoch_a.clone(),
+        );
+
+        // 1. When Controller B holds the attachment reconciler lease, Controller A skips
+        let busy_lease = coord
+            .acquire_work_lease(
+                "reconcile:volume_attachments",
+                "volume_attachment_reconciler",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        assert!(matches!(
+            busy_lease,
+            o3k_store::LeaseAcquireOutcome::Acquired { .. }
+        ));
+
+        // Controller A spawns reconciler task and skips leased work without panic
+        let handle = service.spawn_attachment_reconciler(1);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        handle.abort();
+
+        // 2. When Controller B holds create convergence for an instance, Controller A skips
+        let instance_id = Uuid::new_v4();
+        let create_key = format!("convergence:create:{}", instance_id);
+        let busy_create = coord
+            .acquire_work_lease(
+                &create_key,
+                "create_convergence",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        assert!(matches!(
+            busy_create,
+            o3k_store::LeaseAcquireOutcome::Acquired { .. }
+        ));
+
+        // Controller A runs create convergence sweep and skips without error
+        let sweep_create_res = service.drive_all_create_convergence().await;
+        assert!(
+            sweep_create_res.is_ok(),
+            "Controller A must skip leased create convergence"
+        );
+
+        // 3. When Controller B holds lifecycle convergence for an operation, Controller A skips
+        let op_id = Uuid::new_v4();
+        let op_key = format!("operation:{}", op_id);
+        let busy_op = coord
+            .acquire_work_lease(
+                &op_key,
+                "operation",
+                &ctrl_b,
+                &epoch_b,
+                std::time::Duration::from_secs(30),
+            )
+            .await?;
+        assert!(matches!(
+            busy_op,
+            o3k_store::LeaseAcquireOutcome::Acquired { .. }
+        ));
+
+        // Controller A runs lifecycle sweep and skips without error
+        let sweep_op_res = service.drive_all_lifecycle_convergence().await;
+        assert!(
+            sweep_op_res.is_ok(),
+            "Controller A must skip leased operation convergence"
+        );
 
         Ok(())
     }
