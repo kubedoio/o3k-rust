@@ -126,6 +126,8 @@ jobs:
         run: bash tests/upgrade-process.sh
       - name: Test Helm chart lint and template validation
         run: bash tests/helm-lint-and-template.sh
+      - name: Test Kubernetes deployment version consistency
+        run: bash tests/kubernetes-version-consistency.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Install pinned cargo-nextest

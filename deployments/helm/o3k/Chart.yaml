@@ -2,8 +2,10 @@ apiVersion: v2
 name: o3k
 description: O3K Cloud Operating System Control Plane (Single-Controller)
 type: application
+# Chart version represents the packaging release version, independent of appVersion.
 version: 0.1.0
-appVersion: "0.2.0-alpha.1"
+# appVersion represents the exact O3K Cloud Kernel application version and must match Cargo workspace version.
+appVersion: "0.4.0-alpha.1"
 keywords:
   - openstack
   - cloud-os

@@ -28,6 +28,7 @@ assert "run: bash tests/packaging-bundle.sh" in text
 assert "run: bash tests/doctor-process.sh" in text
 assert "run: bash tests/upgrade-process.sh" in text
 assert "run: bash tests/helm-lint-and-template.sh" in text
+assert "run: bash tests/kubernetes-version-consistency.sh" in text
 assert "run: sudo bash tests/installer-negative.sh" in text
 # The installer-negative matrix skip is vacuous on any non-24.04 runner:
 # the dedicated job must stay pinned to ubuntu-24.04.

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLUSTER_NAME="o3k-testlab"
 NAMESPACE="o3k-system"
-IMAGE_TAG="0.2.0-alpha.1"
+IMAGE_TAG="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('${ROOT_DIR}/Cargo.toml').read_text(encoding='utf-8'))['workspace']['package']['version'])")"
 IMAGE_NAME="ghcr.io/kubedoio/o3kd:${IMAGE_TAG}"
 
 cleanup() {
@@ -105,10 +106,8 @@ kubectl create secret generic o3k-bootstrap-auth \
 
 # 6. Install O3K Helm chart
 echo "==> 6. Installing O3K Control Plane via Helm..."
-helm upgrade --install o3k deployments/helm/o3k/ \
+helm upgrade --install o3k "${ROOT_DIR}/deployments/helm/o3k/" \
     --namespace "${NAMESPACE}" \
-    --set image.repository="ghcr.io/kubedoio/o3kd" \
-    --set image.tag="${IMAGE_TAG}" \
     --set image.pullPolicy="Never" \
     --set config.provider="fake" \
     --set persistence.size="1Gi" \
