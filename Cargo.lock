@@ -1085,6 +1085,7 @@ version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "o3k-cinder",
+ "o3k-compute-agent",
  "o3k-config-drive",
  "o3k-domain",
  "o3k-kernel",
@@ -1097,6 +1098,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tonic",
  "tracing",
  "uuid",
 ]

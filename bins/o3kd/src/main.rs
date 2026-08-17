@@ -514,6 +514,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
     };
+    compute_service = compute_service.with_coordination(
+        coordination_store.clone(),
+        controller_id.clone(),
+        controller_epoch.clone(),
+    );
     if agent_control_enabled {
         compute_service = compute_service
             .with_scheduler(scheduler)

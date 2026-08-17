@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hyper_util::rt::TokioIo;
 use o3k_provider::AgentEvent as ProviderAgentEvent;
-use o3k_provider_contract::compute_proto as proto;
-use prost::Message;
+pub use o3k_provider_contract::compute_proto as proto;
+pub use prost::Message;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     pki_types::{
@@ -310,7 +310,9 @@ pub fn parse_authorized_agents(value: &str) -> Result<Vec<AuthorizedAgent>, Agen
 #[derive(Clone)]
 struct AgentConnection {
     epoch: String,
+    fencing_token: u64,
     sender: mpsc::Sender<Result<proto::ControlResponse, Status>>,
+    renewal_abort: Option<Arc<Notify>>,
 }
 
 #[derive(Clone)]
@@ -437,7 +439,15 @@ impl NodeRegistry {
         self
     }
 
-    pub(crate) async fn attach_connection(
+    pub async fn abort_stream_renewal(&self, agent_id: &str) {
+        if let Some(conn) = self.connections.read().await.get(agent_id)
+            && let Some(abort) = &conn.renewal_abort
+        {
+            abort.notify_waiters();
+        }
+    }
+
+    pub async fn attach_connection(
         &self,
         agent_id: &str,
         agent_epoch: &str,
@@ -453,7 +463,12 @@ impl NodeRegistry {
         if node.agent_epoch != agent_epoch {
             return Err(Status::permission_denied("agent epoch is fenced"));
         }
-        if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+        let (fencing_token, renewal_abort) = if let Some((
+            coordination,
+            controller_id,
+            controller_epoch,
+        )) = &self.coordination
+        {
             let work_key = format!("agent:{}", agent_id);
             let outcome = coordination
                 .acquire_work_lease(
@@ -474,6 +489,54 @@ impl NodeRegistry {
                         fencing_token = %lease.fencing_token,
                         "acquired agent stream lease"
                     );
+                    let abort_notify = Arc::new(Notify::new());
+                    let renew_coord = coordination.clone();
+                    let renew_ctrl_id = controller_id.clone();
+                    let renew_ctrl_epoch = controller_epoch.clone();
+                    let renew_fence = lease.fencing_token;
+                    let renew_work_key = work_key.clone();
+                    let renew_abort = abort_notify.clone();
+                    let renew_agent_id = agent_id.to_owned();
+                    let renew_epoch = agent_epoch.to_owned();
+                    let registry_conns = self.connections.clone();
+
+                    tokio::spawn(async move {
+                        let mut interval = tokio::time::interval(Duration::from_secs(5));
+                        interval.tick().await;
+                        loop {
+                            tokio::select! {
+                                _ = renew_abort.notified() => {
+                                    tracing::debug!(agent_id = %renew_agent_id, "stream lease renewal task aborted");
+                                    break;
+                                }
+                                _ = interval.tick() => {
+                                    match renew_coord.renew_work_lease(&renew_work_key, &renew_ctrl_id, &renew_ctrl_epoch, renew_fence, Duration::from_secs(15)).await {
+                                        Ok(true) => {
+                                            tracing::trace!(agent_id = %renew_agent_id, "stream lease renewed");
+                                        }
+                                        Ok(false) => {
+                                            tracing::warn!(agent_id = %renew_agent_id, "stream lease renewal rejected (fenced/lost); detaching connection");
+                                            let mut conns = registry_conns.write().await;
+                                            if conns.get(&renew_agent_id).is_some_and(|c| c.epoch == renew_epoch) {
+                                                conns.remove(&renew_agent_id);
+                                            }
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(agent_id = %renew_agent_id, error = %e, "stream lease renewal DB error; detaching connection");
+                                            let mut conns = registry_conns.write().await;
+                                            if conns.get(&renew_agent_id).is_some_and(|c| c.epoch == renew_epoch) {
+                                                conns.remove(&renew_agent_id);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    (lease.fencing_token, Some(abort_notify))
                 }
                 o3k_store::LeaseAcquireOutcome::Busy {
                     owner_controller_id,
@@ -484,28 +547,44 @@ impl NodeRegistry {
                         agent_id = %agent_id,
                         owner_controller_id = %owner_controller_id,
                         fencing_token = %fencing_token,
-                        "agent stream lease is currently owned by another controller"
+                        "agent stream lease is currently owned by another controller; rejecting connection"
                     );
+                    return Err(Status::permission_denied(
+                        "agent stream lease is owned by another controller",
+                    ));
                 }
             }
-        }
+        } else {
+            (0, None)
+        };
         self.connections.write().await.insert(
             agent_id.to_owned(),
             AgentConnection {
                 epoch: agent_epoch.to_owned(),
+                fencing_token,
                 sender,
+                renewal_abort,
             },
         );
         Ok(())
     }
 
     async fn detach_connection(&self, agent_id: &str, agent_epoch: &str) {
-        let mut connections = self.connections.write().await;
-        if connections
-            .get(agent_id)
-            .is_some_and(|connection| connection.epoch == agent_epoch)
+        let removed = {
+            let mut connections = self.connections.write().await;
+            if connections
+                .get(agent_id)
+                .is_some_and(|connection| connection.epoch == agent_epoch)
+            {
+                connections.remove(agent_id)
+            } else {
+                None
+            }
+        };
+        if let Some(conn) = removed
+            && let Some(abort) = conn.renewal_abort
         {
-            connections.remove(agent_id);
+            abort.notify_one();
         }
         if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
             let work_key = format!("agent:{}", agent_id);
@@ -576,16 +655,39 @@ impl NodeRegistry {
                 "agent is unavailable or not enabled".to_owned(),
             ));
         }
-        let sender = self
-            .connections
-            .read()
-            .await
-            .get(&command.agent_id)
-            .filter(|connection| connection.epoch == command.agent_epoch)
-            .map(|connection| connection.sender.clone())
-            .ok_or_else(|| {
-                AgentError::Protocol("agent control stream is unavailable".to_owned())
-            })?;
+        let (sender, expected_fence) = {
+            let connections = self.connections.read().await;
+            let connection = connections
+                .get(&command.agent_id)
+                .filter(|connection| connection.epoch == command.agent_epoch)
+                .ok_or_else(|| {
+                    AgentError::Protocol("agent control stream is unavailable".to_owned())
+                })?;
+            (connection.sender.clone(), connection.fencing_token)
+        };
+
+        // FENCE CHECK IMMEDIATELY BEFORE DISPATCH:
+        if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+            let work_key = format!("agent:{}", command.agent_id);
+            let lease_opt = coordination
+                .inspect_work_lease(&work_key)
+                .await
+                .map_err(|e| AgentError::Protocol(format!("failed to verify stream lease: {e}")))?;
+            let Some(lease) = lease_opt else {
+                return Err(AgentError::Protocol(
+                    "agent stream lease expired or lost".to_owned(),
+                ));
+            };
+            if lease.owner_controller_id != *controller_id
+                || lease.owner_controller_epoch != *controller_epoch
+                || (expected_fence > 0 && lease.fencing_token != expected_fence)
+            {
+                return Err(AgentError::Protocol(
+                    "agent stream lease is fenced or owned by another controller".to_owned(),
+                ));
+            }
+        }
+
         sender
             .send(Ok(proto::ControlResponse {
                 body: Some(proto::control_response::Body::Command(command)),
@@ -7090,6 +7192,126 @@ mod tests {
         let unchanged = store.get_artifact_transfer("transfer-1").await?;
         assert_eq!(unchanged.state, ArtifactTransferState::Receiving);
         assert_eq!(unchanged.contiguous_bytes, 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multi_controller_agent_stream_busy_rejection_and_dispatch_fencing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let store = Arc::new(o3k_store::O3kStore::connect_sqlite_memory().await?);
+        let coord: Arc<dyn o3k_store::CoordinationRepository> = store.clone();
+
+        let ctrl_a = o3k_store::ControllerId::new("ctrl-a");
+        let epoch_a = o3k_store::ControllerEpoch::new("epoch-a");
+        let ctrl_b = o3k_store::ControllerId::new("ctrl-b");
+        let epoch_b = o3k_store::ControllerEpoch::new("epoch-b");
+
+        let agent_id = "test-agent-1";
+        let agent_epoch = "agent-epoch-1";
+
+        let registry_a = NodeRegistry::default().with_coordination(
+            coord.clone(),
+            ctrl_a.clone(),
+            epoch_a.clone(),
+        );
+        let registry_b = NodeRegistry::default().with_coordination(
+            coord.clone(),
+            ctrl_b.clone(),
+            epoch_b.clone(),
+        );
+
+        // Register agent on both registries
+        registry_a
+            .register(&register(agent_id, agent_epoch))
+            .await?;
+        registry_b
+            .register(&register(agent_id, agent_epoch))
+            .await?;
+
+        let (tx_a, mut rx_a) = mpsc::channel(16);
+        let (tx_b, _rx_b) = mpsc::channel(16);
+
+        // Controller A attaches successfully
+        let attach_a = registry_a
+            .attach_connection(agent_id, agent_epoch, tx_a)
+            .await;
+        assert!(attach_a.is_ok(), "Controller A must acquire stream lease");
+
+        // Controller B attempts attach and gets Busy -> PermissionDenied
+        let attach_b = registry_b
+            .attach_connection(agent_id, agent_epoch, tx_b)
+            .await;
+        match attach_b {
+            Err(e) => assert_eq!(e.code(), tonic::Code::PermissionDenied),
+            Ok(_) => {
+                return Err(
+                    "Controller B must be rejected when stream is owned by Controller A".into(),
+                );
+            }
+        }
+
+        // Controller A can dispatch command
+        let mut spec = valid_create_spec();
+        spec.agent_id = agent_id.to_owned();
+        spec.agent_epoch = agent_epoch.to_owned();
+        let command = build_create_command(spec)?;
+
+        let dispatch_a = registry_a.dispatch_command(command.clone()).await;
+        assert!(
+            dispatch_a.is_ok(),
+            "Controller A must be able to dispatch with valid lease"
+        );
+        let received = rx_a.try_recv();
+        assert!(
+            received.is_ok(),
+            "Agent stream on Controller A must receive the command"
+        );
+
+        // Now simulate expired takeover: stop A's background renewal, let lease expire, and B takes over with fence 2
+        registry_a.abort_stream_renewal(agent_id).await;
+        let work_key = format!("agent:{}", agent_id);
+        // Renew with 1s TTL and wait 2.2s for expiry in SQLite
+        let _ = coord
+            .renew_work_lease(&work_key, &ctrl_a, &epoch_a, 1, Duration::from_secs(1))
+            .await;
+        tokio::time::sleep(Duration::from_millis(2200)).await;
+
+        let takeover = coord
+            .acquire_work_lease(
+                &work_key,
+                "agent_stream",
+                &ctrl_b,
+                &epoch_b,
+                Duration::from_secs(15),
+            )
+            .await?;
+        match takeover {
+            o3k_store::LeaseAcquireOutcome::Acquired { lease } => {
+                assert_eq!(lease.fencing_token, 2);
+            }
+            _ => {
+                return Err(
+                    "Controller B must acquire expired lease with incremented fence".into(),
+                );
+            }
+        }
+
+        // Stale Controller A attempts dispatch -> strictly rejected and sends ZERO commands
+        let mut spec_stale = valid_create_spec();
+        spec_stale.idempotency_key = "cmd-stale-2".to_owned();
+        spec_stale.agent_id = agent_id.to_owned();
+        spec_stale.agent_epoch = agent_epoch.to_owned();
+        let command_stale = build_create_command(spec_stale)?;
+
+        let dispatch_stale = registry_a.dispatch_command(command_stale).await;
+        assert!(
+            dispatch_stale.is_err(),
+            "Controller A dispatch must fail when lease is stolen/fenced"
+        );
+        assert!(
+            rx_a.try_recv().is_err(),
+            "No command must be dispatched over stale socket"
+        );
         Ok(())
     }
 }
