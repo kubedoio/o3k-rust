@@ -7,8 +7,8 @@
     "replicaCount": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 1,
-      "description": "Replica count for single-controller O3K control plane (strictly 1 for P6)"
+      "maximum": 10,
+      "description": "Replica count for O3K control plane (default 1; multi-controller supported with PostgreSQL)"
     },
     "database": {
       "type": "object",

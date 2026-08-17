@@ -326,6 +326,13 @@ pub struct NodeRegistry {
     /// agent control is enabled; a `None` store keeps the transport primitive
     /// functional without durable record-keeping.
     store: Option<Arc<dyn o3k_store::ComputeRepository>>,
+    /// Optional coordination repository and controller identity used to lease
+    /// stream ownership across multi-controller deployments.
+    coordination: Option<(
+        Arc<dyn o3k_store::CoordinationRepository>,
+        o3k_store::ControllerId,
+        o3k_store::ControllerEpoch,
+    )>,
     /// Fired on every successful registration so the inventory publisher can
     /// sync the freshly registered agent's capacity immediately instead of
     /// waiting for its next periodic tick (issue #606).
@@ -349,6 +356,7 @@ impl Default for NodeRegistry {
             artifact_transfer_slots: Arc::new(RwLock::new(HashMap::new())),
             events,
             store: None,
+            coordination: None,
             registration_notify: Arc::new(Notify::new()),
         }
     }
@@ -417,6 +425,18 @@ impl NodeRegistry {
             .map_err(|_| AgentError::Protocol("agent command record already exists".to_owned()))
     }
 
+    /// Attaches coordination store and controller credentials.
+    #[must_use]
+    pub fn with_coordination(
+        mut self,
+        coordination: Arc<dyn o3k_store::CoordinationRepository>,
+        controller_id: o3k_store::ControllerId,
+        controller_epoch: o3k_store::ControllerEpoch,
+    ) -> Self {
+        self.coordination = Some((coordination, controller_id, controller_epoch));
+        self
+    }
+
     pub(crate) async fn attach_connection(
         &self,
         agent_id: &str,
@@ -432,6 +452,42 @@ impl NodeRegistry {
             .ok_or_else(|| Status::unauthenticated("agent is not registered"))?;
         if node.agent_epoch != agent_epoch {
             return Err(Status::permission_denied("agent epoch is fenced"));
+        }
+        if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+            let work_key = format!("agent:{}", agent_id);
+            let outcome = coordination
+                .acquire_work_lease(
+                    &work_key,
+                    "agent_stream",
+                    controller_id,
+                    controller_epoch,
+                    Duration::from_secs(15),
+                )
+                .await
+                .map_err(|e| {
+                    Status::internal(format!("failed to acquire agent stream lease: {e}"))
+                })?;
+            match outcome {
+                o3k_store::LeaseAcquireOutcome::Acquired { lease } => {
+                    tracing::info!(
+                        agent_id = %agent_id,
+                        fencing_token = %lease.fencing_token,
+                        "acquired agent stream lease"
+                    );
+                }
+                o3k_store::LeaseAcquireOutcome::Busy {
+                    owner_controller_id,
+                    fencing_token,
+                    ..
+                } => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        owner_controller_id = %owner_controller_id,
+                        fencing_token = %fencing_token,
+                        "agent stream lease is currently owned by another controller"
+                    );
+                }
+            }
         }
         self.connections.write().await.insert(
             agent_id.to_owned(),
@@ -450,6 +506,22 @@ impl NodeRegistry {
             .is_some_and(|connection| connection.epoch == agent_epoch)
         {
             connections.remove(agent_id);
+        }
+        if let Some((coordination, controller_id, controller_epoch)) = &self.coordination {
+            let work_key = format!("agent:{}", agent_id);
+            if let Ok(Some(lease)) = coordination.inspect_work_lease(&work_key).await
+                && lease.owner_controller_id == *controller_id
+                && lease.owner_controller_epoch == *controller_epoch
+            {
+                let _ = coordination
+                    .release_work_lease(
+                        &work_key,
+                        controller_id,
+                        controller_epoch,
+                        lease.fencing_token,
+                    )
+                    .await;
+            }
         }
     }
 

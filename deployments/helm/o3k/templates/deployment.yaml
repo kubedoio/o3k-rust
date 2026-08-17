@@ -1,6 +1,3 @@
-{{- if gt (int .Values.replicaCount) 1 -}}
-{{- fail "O3K does not support replicaCount > 1 in P6 (multi-controller HA requires leader leases and durable work fencing planned for P7)" -}}
-{{- end -}}
 {{- if and (ne .Values.database.backend "postgres") (ne .Values.database.backend "postgresql") -}}
 {{- fail "O3K strictly requires PostgreSQL persistence in the Kubernetes deployment profile (SQLite is rejected)" -}}
 {{- end -}}
@@ -12,8 +9,16 @@ metadata:
     {{- include "o3k.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if eq (int .Values.replicaCount) 1 }}
   strategy:
     type: Recreate
+  {{- else }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  {{- end }}
   selector:
     matchLabels:
       {{- include "o3k.selectorLabels" . | nindent 6 }}
@@ -51,6 +56,10 @@ spec:
             - configMapRef:
                 name: {{ include "o3k.fullname" . }}-config
           env:
+            - name: O3K_CONTROLLER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: O3K_DATABASE_BACKEND
               value: "postgres"
             - name: O3K_DATABASE_URL

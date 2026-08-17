@@ -428,7 +428,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // o3k-api persists dispatched console commands through
     // `registry.persist_pending_command`, which requires this store to be
     // wired before the registry is shared.
-    let registry = o3k_compute_agent::NodeRegistry::default().with_store(store.clone());
+    let registry = o3k_compute_agent::NodeRegistry::default()
+        .with_store(store.clone())
+        .with_coordination(
+            coordination_store.clone(),
+            controller_id.clone(),
+            controller_epoch.clone(),
+        );
     // The console-log consumer keeps its own durable liveness handle: the
     // `store` arc itself is moved into the compute service below.
     let console_store: Arc<dyn o3k_store::DurableStore> = store.clone();
