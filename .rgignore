@@ -1,0 +1,31 @@
+# Search/context exclusions for coding agents and ripgrep.
+# Keep this focused on generated/local artifacts; source and normative docs stay searchable.
+
+target/
+coverage/
+artifacts/
+
+# Local agent/tool state
+.opencode/
+.kimi/
+.codex/
+.agents/
+.gstack/
+.worktrees/
+.sccache/
+
+# Generated test/evidence output
+tests/tempest-evidence/tempest-workspace/
+tests/tempest-evidence/tempest.log
+tests/tempest-evidence/tempest-results.xml
+tests/tempest-evidence/tempest-cinder-summary.json
+tests/tempest-evidence/tempest-preflight-result.json
+tests/tempest-evidence/pipeline-*.xml
+tests/tempest-evidence/pipeline-*.json
+
+# Noisy local artifacts
+*.log
+*.tmp
+*.bak
+*.profraw
+.DS_Store
