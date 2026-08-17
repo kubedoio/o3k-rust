@@ -8,7 +8,7 @@ use crate::output::{Check, OverallStatus, Report, now_utc_rfc3339};
 /// at the start of the run.
 pub async fn run_all(ctx: &Context) -> Report {
     let timestamp = now_utc_rfc3339();
-    let mut checks: Vec<Check> = Vec::with_capacity(34);
+    let mut checks: Vec<Check> = Vec::with_capacity(36);
     checks.push(crate::checks::host::check(ctx).await);
     checks.push(crate::checks::host::check_kvm_device(ctx).await);
     checks.push(crate::checks::host::check_disk_space(ctx).await);
@@ -16,6 +16,8 @@ pub async fn run_all(ctx: &Context) -> Report {
     checks.push(crate::checks::services::check_compute_unit(ctx).await);
     checks.push(crate::checks::control::check_healthz(ctx).await);
     checks.push(crate::checks::control::check_readyz(ctx).await);
+    checks.push(crate::checks::control::check_controller_session(ctx).await);
+    checks.push(crate::checks::control::check_work_fencing(ctx).await);
     checks.push(crate::checks::database::check_accessible(ctx).await);
     checks.push(crate::checks::database::check_integrity(ctx).await);
     checks.push(crate::checks::database::check_wal_mode(ctx).await);
@@ -130,7 +132,7 @@ mod tests {
             true,
         );
         let report = run_all(&ctx).await;
-        assert_eq!(report.checks.len(), 34);
+        assert_eq!(report.checks.len(), 36);
         assert_eq!(report.overall_status, OverallStatus::Healthy);
         for check in &report.checks {
             assert_eq!(
@@ -163,7 +165,7 @@ mod tests {
         ctx.o3kd_env
             .insert("O3K_BOOTSTRAP_PASSWORD".to_owned(), "secret".to_owned());
         let report = run_all(&ctx).await;
-        assert_eq!(report.checks.len(), 34);
+        assert_eq!(report.checks.len(), 36);
         assert_eq!(report.overall_status, OverallStatus::Healthy);
         for check in &report.checks {
             assert_ne!(
@@ -254,7 +256,7 @@ mod tests {
                 return;
             }
         };
-        assert_eq!(checks.len(), 34);
+        assert_eq!(checks.len(), 36);
         for check_value in checks {
             let Some(check) = require_object(check_value, "check") else {
                 return;

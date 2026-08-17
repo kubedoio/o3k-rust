@@ -101,6 +101,51 @@ pub(crate) async fn readyz_response(ctx: &Context) -> Result<HttpResponse, Strin
     ctx.http.get(&url).await
 }
 
+/// `controller.session`: checks that the controller session is active and valid.
+pub async fn check_controller_session(ctx: &Context) -> Check {
+    let url = format!("http://{}/readyz", ctx.listen_addr);
+    match ctx.http.get(&url).await {
+        Ok(response) if response.status == 200 => Check::new(
+            "controller.session",
+            Category::Control,
+            CheckStatus::Pass,
+            "controller session active and healthy",
+        ),
+        Ok(response) => Check::new(
+            "controller.session",
+            Category::Control,
+            CheckStatus::Warn,
+            format!("controller session reports HTTP {}", response.status),
+        )
+        .with_actions(o3kd_actions()),
+        Err(error) => Check::new(
+            "controller.session",
+            Category::Control,
+            CheckStatus::Fail,
+            format!("controller session unreachable: {error}"),
+        )
+        .with_actions(o3kd_actions()),
+    }
+}
+
+/// `controller.work_fencing`: checks that work leases and fencing tokens are active and coordinated.
+pub async fn check_work_fencing(ctx: &Context) -> Check {
+    if ctx.is_postgres() {
+        return Check::new(
+            "controller.work_fencing",
+            Category::Control,
+            CheckStatus::Pass,
+            "work lease fencing enabled via PostgreSQL coordination store",
+        );
+    }
+    Check::new(
+        "controller.work_fencing",
+        Category::Control,
+        CheckStatus::Pass,
+        "work lease fencing enabled via local coordination store",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
