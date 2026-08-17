@@ -28,4 +28,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 o3k-cinder = { path = "../o3k-cinder" }
+o3k-compute-agent = { path = "../o3k-compute-agent" }
 tokio.workspace = true
+tonic.workspace = true

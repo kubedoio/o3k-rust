@@ -22,8 +22,8 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use hyper_util::rt::TokioIo;
 use o3k_provider::AgentEvent as ProviderAgentEvent;
-use o3k_provider_contract::compute_proto as proto;
-use prost::Message;
+pub use o3k_provider_contract::compute_proto as proto;
+pub use prost::Message;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     pki_types::{
@@ -439,7 +439,15 @@ impl NodeRegistry {
         self
     }
 
-    pub(crate) async fn attach_connection(
+    pub async fn abort_stream_renewal(&self, agent_id: &str) {
+        if let Some(conn) = self.connections.read().await.get(agent_id)
+            && let Some(abort) = &conn.renewal_abort
+        {
+            abort.notify_waiters();
+        }
+    }
+
+    pub async fn attach_connection(
         &self,
         agent_id: &str,
         agent_epoch: &str,
@@ -7260,11 +7268,7 @@ mod tests {
         );
 
         // Now simulate expired takeover: stop A's background renewal, let lease expire, and B takes over with fence 2
-        if let Some(conn) = registry_a.connections.read().await.get(agent_id) {
-            if let Some(abort) = &conn.renewal_abort {
-                abort.notify_waiters();
-            }
-        }
+        registry_a.abort_stream_renewal(agent_id).await;
         let work_key = format!("agent:{}", agent_id);
         // Renew with 1s TTL and wait 1.5s for expiry in SQLite
         let _ = coord
