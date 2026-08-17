@@ -407,3 +407,43 @@ paths/artifacts inspected, reuse status, and Apache-2.0 attribution handling.
 - no release/database/edge/cross-cloud/future-service/footprint claim exceeds
   evidence;
 - reviewer can understand the change without reconstructing agent reasoning.
+
+## Agent Context and Token Efficiency
+
+The mandatory reading and evidence rules above remain authoritative, but agents must avoid turning them into repeated full-repository discovery. Planning may explore broadly enough to establish the correct architecture and normative inputs; execution starts from the bounded plan.
+
+### Search and reading discipline
+
+- Prefer `rg`, `git grep`, targeted directory listings, symbol search, and bounded file reads over recursive `find`, `ls -R`, or broad source dumps.
+- Respect `.gitignore` and `.rgignore`. Never search `target/`, generated Tempest workspaces/results, coverage/artifacts, worktrees, caches, or local agent-tool state unless the assigned issue explicitly requires those artifacts.
+- Normative ADRs/specs/contracts and compatibility profiles must remain searchable. Read the mandatory sources required by the issue, then carry their relevant constraints into the plan instead of repeatedly reopening every document during execution.
+- Do not re-read unchanged files merely to recover context. Re-open the smallest relevant section or inspect `git diff` after edits.
+- Do not dump full Cargo/test/Tempest/runner logs into model context. Capture noisy output and inspect the first actionable failures, selected matches, or a bounded tail.
+- Run expensive repository-discovery commands such as broad `cargo metadata`, dependency trees, or workspace-wide searches once per planning phase unless the workspace actually changes.
+
+### Planner/executor handoff
+
+The **Required agent plan** must additionally make execution scope explicit:
+
+- affected Cargo package(s) and binaries;
+- exact files/symbols expected to change;
+- normative documents already consulted and the constraints they impose;
+- smallest tests/checks that can falsify the implementation;
+- conditions that justify widening scope.
+
+An implementation agent must begin from this handoff. It must not independently rescan all O3K crates, ADRs, specs, and compatibility material when the planning agent has already identified the relevant subset. Expand scope only when code, contract, or test evidence demonstrates that the plan was incomplete.
+
+### Validation ladder
+
+O3K has a large workspace. During implementation, prefer package-level feedback before the mandatory completion gate:
+
+```bash
+# Examples; substitute the affected package(s).
+cargo check -p <affected-package>
+cargo test -p <affected-package> --all-features
+cargo clippy -p <affected-package> --all-targets --all-features -- -D warnings
+```
+
+For a cross-crate change, validate the smallest affected dependency/consumer set first. Run process, compatibility, provider, Tempest, or real-host evidence only when the issue's evidence tier requires those boundaries.
+
+Before completion, still run every command in **Commands required before completion** plus the issue-specific evidence commands. Context/token efficiency changes the order and repetition of validation; it never relaxes the definition of done, authority order, mandatory reading, clean-implementation rules, or evidence requirements.
