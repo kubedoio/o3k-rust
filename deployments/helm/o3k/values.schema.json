@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "O3K Helm Values Schema",
+  "type": "object",
+  "required": ["replicaCount", "database", "persistence"],
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1,
+      "description": "Replica count for single-controller O3K control plane (strictly 1 for P6)"
+    },
+    "database": {
+      "type": "object",
+      "required": ["backend", "existingSecret", "urlKey"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["postgres", "postgresql"],
+          "description": "Database backend (PostgreSQL is required in Kubernetes profile; SQLite is rejected)"
+        },
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of Kubernetes Secret holding database credentials"
+        },
+        "urlKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["enabled", "size", "mountPath"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(Gi|Mi|Ti)$"
+        },
+        "mountPath": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

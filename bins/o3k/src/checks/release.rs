@@ -8,6 +8,14 @@ use crate::output::{Category, Check, CheckStatus};
 /// `release.version`: `<prefix>/share/o3k/release-manifest.json` must exist
 /// and carry a non-empty `version` string.
 pub async fn check_version(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.version",
+            Category::Release,
+            CheckStatus::Pass,
+            format!("o3k binary version {}", env!("CARGO_PKG_VERSION")),
+        );
+    }
     for prefix in &ctx.prefix_candidates {
         let manifest = prefix.join("share/o3k/release-manifest.json");
         if !ctx.exec.is_regular_file(&manifest) {
@@ -74,6 +82,14 @@ pub async fn check_version(ctx: &Context) -> Check {
 /// carry the `o3k-installed-v1 prefix=<prefix>` header and every recorded
 /// relative path must exist.
 pub async fn check_ownership_manifest(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.ownership_manifest",
+            Category::Release,
+            CheckStatus::NotApplicable,
+            "installer ownership manifest is not applicable for OCI/Kubernetes deployment",
+        );
+    }
     let mut checked_any = false;
     let mut findings = Vec::new();
     for prefix in &ctx.prefix_candidates {
@@ -152,6 +168,14 @@ pub async fn check_ownership_manifest(ctx: &Context) -> Check {
 /// SHA-256 in `<prefix>/share/o3k/SHA256SUMS`. A missing reference is a
 /// WARN; a mismatching digest is a FAIL.
 pub async fn check_binary_hashes(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.binary_hashes",
+            Category::Release,
+            CheckStatus::NotApplicable,
+            "systemd binary hash manifest is not applicable for OCI/Kubernetes deployment",
+        );
+    }
     let binaries: Vec<&str> = if ctx.libvirt_profile {
         vec!["o3kd", "o3k", "o3k-compute"]
     } else {
@@ -275,6 +299,14 @@ pub async fn check_binary_hashes(ctx: &Context) -> Check {
 /// the installed SHA256SUMS and all reference entries declare the same
 /// release version (a mixed-version install is a FAIL).
 pub async fn check_binary_set_consistent(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.binary_set_consistent",
+            Category::Release,
+            CheckStatus::NotApplicable,
+            "systemd binary set check is not applicable for OCI/Kubernetes deployment",
+        );
+    }
     let binaries: Vec<&str> = if ctx.libvirt_profile {
         vec!["o3kd", "o3k", "o3k-compute"]
     } else {
@@ -408,6 +440,14 @@ pub async fn check_binary_set_consistent(ctx: &Context) -> Check {
 /// O3K-created backup record, WARN when absent on an otherwise healthy
 /// install (doctor never repairs, never creates backups).
 pub async fn check_backup_available(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.backup_available",
+            Category::Release,
+            CheckStatus::NotApplicable,
+            "systemd upgrade backup check is not applicable for OCI/Kubernetes deployment",
+        );
+    }
     let backup_dir = std::env::var("O3K_UPGRADE_BACKUP_DIR")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -472,6 +512,14 @@ pub async fn check_backup_available(ctx: &Context) -> Check {
 /// phase is COMMITTED; WARN (upgrade incomplete) with the exact safe next
 /// command when an in-progress or FAILED_UPGRADE state exists.
 pub async fn check_upgrade_state(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "release.upgrade_state",
+            Category::Release,
+            CheckStatus::NotApplicable,
+            "systemd upgrade state check is not applicable for OCI/Kubernetes deployment",
+        );
+    }
     let state_file = std::env::var("O3K_UPGRADE_STATE_FILE")
         .ok()
         .filter(|value| !value.trim().is_empty())

@@ -97,6 +97,14 @@ pub async fn check(ctx: &Context) -> Check {
 /// `host.kvm_device`: `/dev/kvm` must exist as a character device for nested
 /// virtualization.
 pub async fn check_kvm_device(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "host.kvm_device",
+            Category::Host,
+            CheckStatus::NotApplicable,
+            "local /dev/kvm check is not applicable for Kubernetes control plane; compute agents run on external hypervisors",
+        );
+    }
     let kvm = Path::new("/dev/kvm");
     if ctx.exec.is_char_device(kvm) {
         return Check::new(

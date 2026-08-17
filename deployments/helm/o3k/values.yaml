@@ -1,0 +1,144 @@
+# Default values for o3k Helm chart.
+# This chart deploys the O3K Cloud Operating System control-plane daemon (o3kd).
+# Note: Privileged compute hypervisor execution (o3k-compute) runs outside Kubernetes.
+
+# Single-controller control-plane replica count.
+# For P6, replicaCount MUST be 1. Multi-controller HA is not supported in P6.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/kubedoio/o3kd
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+# Database configuration.
+# PostgreSQL 16 is the required production persistence backend.
+# SQLite is explicitly rejected in the Kubernetes deployment profile.
+database:
+  backend: postgres
+  # Reference to an existing Kubernetes Secret containing the database connection URL.
+  existingSecret: o3k-database
+  urlKey: database-url
+
+# Durable artifact storage (images, config-drive ISOs, control-plane artifacts).
+# Must survive pod rescheduling and restart.
+persistence:
+  enabled: true
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  storageClassName: ""
+  existingClaim: ""
+  mountPath: /var/lib/o3k
+  # Set to true to retain the PVC when Helm release is uninstalled.
+  retain: true
+
+# Mutual TLS configuration for external compute agents (o3k-compute).
+tls:
+  enabled: false
+  # Secret containing server.pem, server-key.pem, ca.pem
+  existingSecret: o3k-control-tls
+  serverCertKey: server.pem
+  serverKeyKey: server-key.pem
+  clientCaKey: ca.pem
+  # Authorized agent fingerprints formatted as "agent_id=fingerprint"
+  authorizedAgents: ""
+
+# Bootstrap credentials / secret signing keys.
+auth:
+  existingSecret: ""
+  bootstrapPasswordKey: bootstrap-password
+  tokenSigningKeyKey: token-signing-key
+
+# Service definitions
+service:
+  # Public OpenStack-compatible REST API (Keystone, Glance, Nova, Neutron, Placement)
+  api:
+    type: ClusterIP
+    port: 5000
+    targetPort: 8080
+    nodePort: null
+  # gRPC compute control endpoint for external o3k-compute hypervisor agents
+  compute:
+    type: NodePort
+    port: 18443
+    targetPort: 18443
+    nodePort: null
+
+# Configuration settings passed as environment variables to o3kd
+config:
+  logLevel: info
+  logFormat: json
+  provider: agent
+  publicCatalogUrl: ""
+
+# Health and readiness probes
+probes:
+  liveness:
+    httpGet:
+      path: /healthz
+      port: 8080
+    initialDelaySeconds: 2
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    httpGet:
+      path: /readyz
+      port: 8080
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# Graceful termination period in seconds.
+terminationGracePeriodSeconds: 30
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Optional minimal NetworkPolicy
+networkPolicy:
+  enabled: false
+  ingress:
+    # Allow OpenStack API from anywhere
+    apiCidrs: []
+    # Allow compute control from anywhere / external nodes
+    computeCidrs: []

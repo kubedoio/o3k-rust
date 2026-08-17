@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "o3k.fullname" . }}-api
+  labels:
+    {{- include "o3k.labels" . | nindent 4 }}
+    app.kubernetes.io/subcomponent: openstack-api
+spec:
+  type: {{ .Values.service.api.type }}
+  ports:
+    - port: {{ .Values.service.api.port }}
+      targetPort: {{ .Values.service.api.targetPort }}
+      protocol: TCP
+      name: http-api
+      {{- if and (eq .Values.service.api.type "NodePort") .Values.service.api.nodePort }}
+      nodePort: {{ .Values.service.api.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "o3k.selectorLabels" . | nindent 4 }}

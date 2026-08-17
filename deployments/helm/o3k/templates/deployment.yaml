@@ -1,0 +1,128 @@
+{{- if gt (int .Values.replicaCount) 1 -}}
+{{- fail "O3K does not support replicaCount > 1 in P6 (multi-controller HA requires leader leases and durable work fencing planned for P7)" -}}
+{{- end -}}
+{{- if and (ne .Values.database.backend "postgres") (ne .Values.database.backend "postgresql") -}}
+{{- fail "O3K strictly requires PostgreSQL persistence in the Kubernetes deployment profile (SQLite is rejected)" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "o3k.fullname" . }}
+  labels:
+    {{- include "o3k.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "o3k.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "o3k.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "o3k.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: o3kd
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http-api
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc-compute
+              containerPort: 18443
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "o3k.fullname" . }}-config
+          env:
+            - name: O3K_DATABASE_BACKEND
+              value: "postgres"
+            - name: O3K_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.urlKey }}
+            {{- if .Values.tls.enabled }}
+            - name: O3K_COMPUTE_SERVER_CERTIFICATE
+              value: "/etc/o3k/tls/{{ .Values.tls.serverCertKey }}"
+            - name: O3K_COMPUTE_SERVER_PRIVATE_KEY
+              value: "/etc/o3k/tls/{{ .Values.tls.serverKeyKey }}"
+            - name: O3K_COMPUTE_CLIENT_CA
+              value: "/etc/o3k/tls/{{ .Values.tls.clientCaKey }}"
+            {{- if .Values.tls.authorizedAgents }}
+            - name: O3K_COMPUTE_AUTHORIZED_AGENTS
+              value: {{ .Values.tls.authorizedAgents | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.auth.existingSecret }}
+            - name: O3K_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.bootstrapPasswordKey }}
+            - name: O3K_TOKEN_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.tokenSigningKeyKey }}
+            {{- end }}
+          {{- with .Values.probes.liveness }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.probes.readiness }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: /etc/o3k/tls
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "o3k.fullname" .)) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tls.existingSecret }}
+            defaultMode: 0400
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

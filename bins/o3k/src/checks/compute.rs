@@ -19,6 +19,14 @@ const REQUIRED_RESOURCE_CLASSES: [&str; 3] = ["VCPU", "MEMORY_MB", "DISK_GB"];
 /// signal — durable placement rows and o3kd's own readyz both stay
 /// healthy after the agent dies and cannot detect a stopped agent.
 pub async fn check_agent_registered(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "compute.agent_registered",
+            Category::Compute,
+            CheckStatus::NotApplicable,
+            "local compute agent check is not applicable for Kubernetes control plane; compute agents run on external hypervisors",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("compute.agent_registered", Category::Compute);
     }
@@ -99,6 +107,14 @@ pub async fn check_agent_registered(ctx: &Context) -> Check {
 /// write under the new epoch). UUIDv7 epoch strings compare
 /// lexicographically in time order.
 pub async fn check_agent_epoch(ctx: &Context) -> Check {
+    if ctx.is_kubernetes() {
+        return Check::new(
+            "compute.agent_epoch",
+            Category::Compute,
+            CheckStatus::NotApplicable,
+            "local compute agent epoch check is not applicable for Kubernetes control plane; compute agents run on external hypervisors",
+        );
+    }
     if not_libvirt_profile(ctx) {
         return profile_not_applicable("compute.agent_epoch", Category::Compute);
     }
