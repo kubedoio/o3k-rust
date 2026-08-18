@@ -4,13 +4,14 @@
 //! realization consumes [`PublicAddressBinding`] and owns only its node-local
 //! DNAT/SNAT mutation.
 
-use o3k_domain::Ipv4Prefix;
+use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, ErrorKind, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -60,6 +61,12 @@ pub enum PublicAddressError {
     CorruptState,
     #[error("public allocation storage failed: {0}")]
     Storage(#[from] io::Error),
+    #[error("public binding has no accepted private endpoint address")]
+    MissingEndpoint,
+    #[error("public provider found foreign nftables state")]
+    ForeignProviderState,
+    #[error("public provider command failed")]
+    ProviderCommandFailed,
 }
 
 pub struct PublicAddressAllocator {
@@ -286,10 +293,283 @@ impl Drop for FileLock {
     }
 }
 
+/// Node-local DNAT/SNAT realization for already-authorized public bindings.
+/// The allocator remains the control-plane authority; this provider owns only
+/// its marked nftables table and cannot choose a different address.
+pub struct PublicAddressRealizer {
+    root: PathBuf,
+    uplink: String,
+    command: Arc<dyn PublicCommand>,
+    owned: bool,
+}
+
+trait PublicCommand: Send + Sync {
+    fn output(&self, args: &[&str]) -> io::Result<(bool, String)>;
+    fn run(&self, args: &[&str]) -> io::Result<bool>;
+}
+
+struct SystemPublicCommand;
+
+impl PublicCommand for SystemPublicCommand {
+    fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
+        let output = std::process::Command::new("nft").args(args).output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
+    }
+
+    fn run(&self, args: &[&str]) -> io::Result<bool> {
+        Ok(std::process::Command::new("nft")
+            .args(args)
+            .status()?
+            .success())
+    }
+}
+
+const PUBLIC_TABLE: &str = "o3k_public";
+const PUBLIC_MARKER: &str = "o3k-p9-public";
+
+impl PublicAddressRealizer {
+    pub fn open(root: impl Into<PathBuf>, uplink: String) -> Result<Self, PublicAddressError> {
+        if uplink.is_empty() || uplink.len() > 15 {
+            return Err(PublicAddressError::InvalidPool);
+        }
+        let root = root.into();
+        fs::create_dir_all(&root)?;
+        Ok(Self {
+            root,
+            uplink,
+            command: Arc::new(SystemPublicCommand),
+            owned: false,
+        })
+    }
+
+    #[cfg(test)]
+    fn with_command(
+        root: impl Into<PathBuf>,
+        uplink: String,
+        command: Arc<dyn PublicCommand>,
+    ) -> Result<Self, PublicAddressError> {
+        let mut provider = Self::open(root, uplink)?;
+        provider.command = command;
+        Ok(provider)
+    }
+
+    pub fn apply(&mut self, intents: &[NetworkPlanIntent]) -> Result<(), PublicAddressError> {
+        let endpoint_addresses: std::collections::HashMap<Uuid, Ipv4Addr> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                NetworkPlanIntent::AddressAssignment {
+                    endpoint_id,
+                    address,
+                    ..
+                } => Some((*endpoint_id, *address)),
+                _ => None,
+            })
+            .collect();
+        let bindings: Vec<(&Uuid, &Ipv4Addr)> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                NetworkPlanIntent::PublicAddressBinding(binding) => {
+                    Some((&binding.endpoint_id, &binding.public_address))
+                }
+                _ => None,
+            })
+            .collect();
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        for (endpoint_id, _) in &bindings {
+            if !endpoint_addresses.contains_key(endpoint_id) {
+                return Err(PublicAddressError::MissingEndpoint);
+            }
+        }
+        self.ensure_foreign_safe()?;
+        let table_args = [
+            "add",
+            "table",
+            "ip",
+            PUBLIC_TABLE,
+            "{",
+            "comment",
+            PUBLIC_MARKER,
+            "}",
+        ];
+        if !self
+            .command
+            .run(&table_args)
+            .map_err(PublicAddressError::Storage)?
+            && !self.owned
+        {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
+        let prerouting = [
+            "add",
+            "chain",
+            "ip",
+            PUBLIC_TABLE,
+            "prerouting",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "prerouting",
+            "priority",
+            "-100",
+            ";",
+            "policy",
+            "accept",
+            "}",
+        ];
+        let postrouting = [
+            "add",
+            "chain",
+            "ip",
+            PUBLIC_TABLE,
+            "postrouting",
+            "{",
+            "type",
+            "nat",
+            "hook",
+            "postrouting",
+            "priority",
+            "100",
+            ";",
+            "policy",
+            "accept",
+            "}",
+        ];
+        let _ = self.command.run(&prerouting);
+        let _ = self.command.run(&postrouting);
+        for (endpoint_id, public_address) in bindings {
+            let private_address = endpoint_addresses[endpoint_id].to_string();
+            let public_address = public_address.to_string();
+            let uplink = format!("\"{}\"", self.uplink);
+            let comment = format!("{}:{}", PUBLIC_MARKER, endpoint_id);
+            if !self
+                .command
+                .run(&[
+                    "add",
+                    "rule",
+                    "ip",
+                    PUBLIC_TABLE,
+                    "prerouting",
+                    "iifname",
+                    &uplink,
+                    "ip",
+                    "daddr",
+                    &public_address,
+                    "dnat",
+                    "to",
+                    &private_address,
+                    "comment",
+                    &comment,
+                ])
+                .map_err(PublicAddressError::Storage)?
+                || !self
+                    .command
+                    .run(&[
+                        "add",
+                        "rule",
+                        "ip",
+                        PUBLIC_TABLE,
+                        "postrouting",
+                        "ip",
+                        "saddr",
+                        &private_address,
+                        "oifname",
+                        &uplink,
+                        "snat",
+                        "to",
+                        &public_address,
+                        "comment",
+                        &comment,
+                    ])
+                    .map_err(PublicAddressError::Storage)?
+            {
+                return Err(PublicAddressError::ProviderCommandFailed);
+            }
+        }
+        fs::write(self.root.join("ownership"), PUBLIC_MARKER)?;
+        self.owned = true;
+        Ok(())
+    }
+
+    pub fn observe(&self) -> Result<bool, PublicAddressError> {
+        let (success, output) = self
+            .command
+            .output(&["list", "table", "ip", PUBLIC_TABLE])
+            .map_err(PublicAddressError::Storage)?;
+        Ok(success && output.contains(PUBLIC_MARKER))
+    }
+
+    pub fn remove(&mut self) -> Result<(), PublicAddressError> {
+        if !self.owned && !self.root.join("ownership").exists() {
+            return Ok(());
+        }
+        let (success, output) = self
+            .command
+            .output(&["list", "table", "ip", PUBLIC_TABLE])
+            .map_err(PublicAddressError::Storage)?;
+        if !success {
+            return Ok(());
+        }
+        if !output.contains(PUBLIC_MARKER) {
+            return Err(PublicAddressError::ForeignProviderState);
+        }
+        if !self
+            .command
+            .run(&["delete", "table", "ip", PUBLIC_TABLE])
+            .map_err(PublicAddressError::Storage)?
+        {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
+        let _ = fs::remove_file(self.root.join("ownership"));
+        self.owned = false;
+        Ok(())
+    }
+
+    fn ensure_foreign_safe(&self) -> Result<(), PublicAddressError> {
+        let (success, output) = self
+            .command
+            .output(&["list", "table", "ip", PUBLIC_TABLE])
+            .map_err(PublicAddressError::Storage)?;
+        if success && !output.contains(PUBLIC_MARKER) {
+            return Err(PublicAddressError::ForeignProviderState);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct FakePublicCommand {
+        calls: Mutex<Vec<Vec<String>>>,
+        listing: String,
+    }
+
+    impl PublicCommand for FakePublicCommand {
+        fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            Ok((!self.listing.is_empty(), self.listing.clone()))
+        }
+
+        fn run(&self, args: &[&str]) -> io::Result<bool> {
+            self.calls
+                .lock()
+                .expect("calls")
+                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            Ok(true)
+        }
+    }
 
     fn allocator() -> PublicAddressAllocator {
         PublicAddressAllocator::open(
@@ -363,5 +643,67 @@ mod tests {
         allocator
             .release("project-a", binding.allocation_id)
             .expect("release");
+    }
+
+    fn public_intents(endpoint_id: Uuid) -> Vec<NetworkPlanIntent> {
+        vec![NetworkPlanIntent::PublicAddressBinding(
+            o3k_domain::PublicAddressBindingIntent {
+                id: Uuid::from_u128(3),
+                project_id: "project-a".to_owned(),
+                public_address: Ipv4Addr::new(198, 51, 100, 2),
+                endpoint_id,
+                generation: 1,
+            },
+        )]
+    }
+
+    #[test]
+    fn public_realization_rejects_missing_endpoint_before_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        assert!(matches!(
+            provider.apply(&public_intents(Uuid::from_u128(9))),
+            Err(PublicAddressError::MissingEndpoint)
+        ));
+        assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn public_realization_never_adopts_foreign_table() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: "table ip o3k_public { comment foreign; }".to_owned(),
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(9);
+        let intents = public_intents(endpoint);
+        let intents = [
+            NetworkPlanIntent::AddressAssignment {
+                endpoint_id: endpoint,
+                address: Ipv4Addr::new(10, 0, 0, 2),
+                generation: 1,
+            },
+            intents[0].clone(),
+        ];
+        assert!(matches!(
+            provider.apply(&intents),
+            Err(PublicAddressError::ForeignProviderState)
+        ));
+        assert_eq!(command.calls.lock().expect("calls").len(), 1);
     }
 }

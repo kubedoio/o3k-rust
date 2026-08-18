@@ -32,6 +32,7 @@ pub use execution::{
 };
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
+    PublicAddressRealizer,
 };
 pub use routed::{LinuxRoutedProvider, RoutedExternalConfig, RoutedNetworkError};
 

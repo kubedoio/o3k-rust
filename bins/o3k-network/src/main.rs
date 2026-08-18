@@ -5,7 +5,7 @@ use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
     FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider, NetworkAgentIdentity,
     NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan,
-    PolicyEndpoint, RoutedExternalConfig, StatefulPolicyProvider,
+    PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig, StatefulPolicyProvider,
 };
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
@@ -72,10 +72,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(root) => Some(StatefulPolicyProvider::open(root)?),
         Err(_) => None,
     };
+    let public = match env::var("O3K_NETWORK_PUBLIC_ROOT") {
+        Ok(root) => Some(PublicAddressRealizer::open(
+            root,
+            required("O3K_NETWORK_UPLINK")?,
+        )?),
+        Err(_) => None,
+    };
     let realizer = CompositeRealizer {
         flat,
         routed,
         policy,
+        public,
     };
     let service = agent::NetworkAgentService::new(executor, realizer);
     let tls = ServerTlsConfig::new()
@@ -95,6 +103,7 @@ struct CompositeRealizer {
     flat: FlatNetworkRealizer,
     routed: Option<LinuxRoutedProvider>,
     policy: Option<StatefulPolicyProvider>,
+    public: Option<PublicAddressRealizer>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -105,10 +114,14 @@ enum CompositeRealizerError {
     Routed(#[from] o3k_network::RoutedNetworkError),
     #[error("policy realization failed: {0}")]
     Policy(#[from] o3k_network::PolicyNetworkError),
+    #[error("public address realization failed: {0}")]
+    Public(#[from] o3k_network::PublicAddressError),
     #[error("routed intents require O3K_NETWORK_EXTERNAL_REALM_ID configuration")]
     RoutedNotConfigured,
     #[error("policy intents require O3K_NETWORK_POLICY_ROOT configuration")]
     PolicyNotConfigured,
+    #[error("public bindings require O3K_NETWORK_PUBLIC_ROOT configuration")]
+    PublicNotConfigured,
 }
 
 impl NetworkPlanRealizer for CompositeRealizer {
@@ -129,6 +142,12 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .as_mut()
                 .ok_or(CompositeRealizerError::PolicyNotConfigured)?
                 .apply(&plan.intents, &policy_endpoints(plan))?;
+        }
+        if plan.intents.iter().any(is_public_intent) {
+            self.public
+                .as_mut()
+                .ok_or(CompositeRealizerError::PublicNotConfigured)?
+                .apply(&plan.intents)?;
         }
         Ok(())
     }
@@ -153,6 +172,13 @@ impl NetworkPlanRealizer for CompositeRealizer {
                 .ok_or(CompositeRealizerError::PolicyNotConfigured)
                 .and_then(|provider| provider.observe().map_err(Into::into));
         }
+        if plan.intents.iter().any(is_public_intent) {
+            return self
+                .public
+                .as_ref()
+                .ok_or(CompositeRealizerError::PublicNotConfigured)
+                .and_then(|provider| provider.observe().map_err(Into::into));
+        }
         Ok(true)
     }
 }
@@ -175,6 +201,10 @@ fn is_routed_intent(intent: &NetworkPlanIntent) -> bool {
 
 fn is_policy_intent(intent: &NetworkPlanIntent) -> bool {
     matches!(intent, NetworkPlanIntent::Policy(_))
+}
+
+fn is_public_intent(intent: &NetworkPlanIntent) -> bool {
+    matches!(intent, NetworkPlanIntent::PublicAddressBinding(_))
 }
 
 fn policy_endpoints(plan: &NodeNetworkPlan) -> Vec<PolicyEndpoint> {
