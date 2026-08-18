@@ -89,6 +89,8 @@ pub struct AppState {
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
     public_allocator: Option<Arc<PublicAddressAllocator>>,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: Option<o3k_network::NetworkControllerLease>,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
@@ -131,6 +133,17 @@ impl AppState {
     #[must_use]
     pub fn with_public_allocator(mut self, allocator: PublicAddressAllocator) -> Self {
         self.public_allocator = Some(Arc::new(allocator));
+        self
+    }
+
+    #[must_use]
+    pub fn with_network_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn o3k_network::NetworkPlanDispatcher>,
+        controller: o3k_network::NetworkControllerLease,
+    ) -> Self {
+        self.network_dispatcher = Some(dispatcher);
+        self.network_controller = Some(controller);
         self
     }
 

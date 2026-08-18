@@ -256,6 +256,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 node_id: host,
                 operation_id,
                 deadline_unix_ms,
+                public_address: None,
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let command_id = Uuid::new_v5(
@@ -374,6 +375,7 @@ impl DaemonCreateResolver {
                     node_id: agent_id,
                     operation_id: request.operation_id,
                     deadline_unix_ms,
+                    public_address: None,
                 })
                 .map_err(|_| ProviderError::InvalidRequest)?;
                 let command_id = Uuid::new_v5(
@@ -940,6 +942,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
+    }
+    if let Some(dispatcher) = network_dispatcher {
+        state = state.with_network_dispatcher(dispatcher, network_controller);
     }
     state.set_ready(compute_ready);
     let control_task = match (

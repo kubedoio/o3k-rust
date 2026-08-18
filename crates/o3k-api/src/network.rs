@@ -244,6 +244,12 @@ fn floating_ip_response(binding: PublicAddressBinding) -> FloatingIpResponse {
     }
 }
 
+fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
 fn public_error(error: PublicAddressError) -> axum::response::Response {
     let (status, title) = match error {
         PublicAddressError::NotFound => (StatusCode::NOT_FOUND, "Not Found"),
@@ -275,6 +281,114 @@ fn public_allocator(
             "floating IP service is not configured",
         )
     })
+}
+
+async fn dispatch_public_binding(
+    state: &AppState,
+    binding: &PublicAddressBinding,
+    action: o3k_network::NetworkPlanAction,
+) -> Result<(), axum::response::Response> {
+    let Some(dispatcher) = state.network_dispatcher.as_ref() else {
+        return Ok(());
+    };
+    let Some(controller) = state.network_controller.as_ref() else {
+        return Ok(());
+    };
+    let Some(endpoint_id) = binding.endpoint_id else {
+        return Ok(());
+    };
+    let network = network_service(state)?;
+    let port = network
+        .get_port_for_project(&binding.project_id, endpoint_id)
+        .await
+        .map_err(network_error)?;
+    let Some(host) = port.binding_host.as_deref() else {
+        return Ok(());
+    };
+    let Some(registry) = state.agent_registry.as_ref() else {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "network agent registry is not configured",
+        ));
+    };
+    let Some(agent) = registry.snapshot(host).await else {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "selected network agent is unavailable",
+        ));
+    };
+    let subnet_id = port.subnet_id.ok_or_else(|| {
+        keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "endpoint has no fixed subnet",
+        )
+    })?;
+    let subnet = network
+        .get_subnet_for_project(&binding.project_id, subnet_id)
+        .await
+        .map_err(network_error)?;
+    let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "o3k:network:public:{}:{}:{:?}",
+            binding.allocation_id, binding.generation, action
+        )
+        .as_bytes(),
+    );
+    let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+        endpoint_id,
+        realm_id: port.network_id,
+        project_id: &binding.project_id,
+        mac: &port.mac_address,
+        fixed_ip: port.fixed_ip,
+        subnet_cidr: &subnet.cidr,
+        node_id: host,
+        operation_id,
+        deadline_unix_ms,
+        public_address: Some(binding.public_address),
+    })
+    .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let command_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("o3k:network:public-command:{operation_id}").as_bytes(),
+    );
+    let status = dispatcher
+        .dispatch(o3k_network::NetworkPlanCommand {
+            command_id,
+            operation_id,
+            idempotency_key: format!(
+                "o3k:network:public:{}:{}:{:?}",
+                binding.allocation_id, binding.generation, action
+            ),
+            action,
+            target: o3k_network::NetworkAgentIdentity {
+                agent_id: agent.agent_id,
+                agent_epoch: agent.agent_epoch,
+            },
+            controller: controller.clone(),
+            deadline_unix_ms,
+            plan,
+        })
+        .await
+        .map_err(|error| {
+            keystone_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                error.to_string(),
+            )
+        })?;
+    if status != o3k_network::NetworkPlanStatus::Succeeded {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "public address realization requires observation",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn list_floating_ips(
@@ -346,6 +460,11 @@ pub(crate) async fn create_floating_ip(
             Ok(value) => value,
             Err(error) => return public_error(error),
         };
+        if let Err(response) =
+            dispatch_public_binding(&state, &binding, o3k_network::NetworkPlanAction::Apply).await
+        {
+            return response;
+        }
     }
     (
         StatusCode::CREATED,
@@ -413,9 +532,31 @@ pub(crate) async fn update_floating_ip(
             {
                 return public_error(PublicAddressError::MissingEndpoint);
             }
-            allocator.associate(project_id, id, port_id)
+            let binding = match allocator.associate(project_id, id, port_id) {
+                Ok(value) => value,
+                Err(error) => return public_error(error),
+            };
+            if let Err(response) =
+                dispatch_public_binding(&state, &binding, o3k_network::NetworkPlanAction::Apply)
+                    .await
+            {
+                return response;
+            }
+            Ok(binding)
         }
-        None => allocator.disassociate(project_id, id),
+        None => {
+            let binding = match allocator.get(project_id, id) {
+                Ok(value) => value,
+                Err(error) => return public_error(error),
+            };
+            if let Err(response) =
+                dispatch_public_binding(&state, &binding, o3k_network::NetworkPlanAction::Remove)
+                    .await
+            {
+                return response;
+            }
+            allocator.disassociate(project_id, id)
+        }
     };
     match result {
         Ok(value) => Json(FloatingIpEnvelope {
@@ -439,7 +580,17 @@ pub(crate) async fn delete_floating_ip(
         Ok(value) => value,
         Err(response) => return response,
     };
-    match allocator.release(auth.effective_scope().id().as_str(), id) {
+    let project_id = auth.effective_scope().id().as_str();
+    let binding = match allocator.get(project_id, id) {
+        Ok(value) => value,
+        Err(error) => return public_error(error),
+    };
+    if let Err(response) =
+        dispatch_public_binding(&state, &binding, o3k_network::NetworkPlanAction::Remove).await
+    {
+        return response;
+    }
+    match allocator.release(project_id, id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => public_error(error),
     }

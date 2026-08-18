@@ -3362,6 +3362,7 @@ pub struct AttachmentPlanInput<'a> {
     pub node_id: &'a str,
     pub operation_id: Uuid,
     pub deadline_unix_ms: u64,
+    pub public_address: Option<std::net::Ipv4Addr>,
 }
 
 pub fn compile_attachment_plan(
@@ -3377,6 +3378,7 @@ pub fn compile_attachment_plan(
         node_id,
         operation_id,
         deadline_unix_ms,
+        public_address,
     } = input;
     let (network, prefix_len) = subnet_cidr
         .split_once('/')
@@ -3410,16 +3412,29 @@ pub fn compile_attachment_plan(
         routes: Vec::new(),
         gateways: Vec::new(),
         egress: Vec::new(),
-        public_addresses: Vec::new(),
+        public_addresses: public_address
+            .map(|public_address| {
+                vec![o3k_domain::PublicAddressBindingIntent {
+                    id: endpoint_id,
+                    project_id: project_id.to_owned(),
+                    public_address,
+                    endpoint_id,
+                    generation: 1,
+                }]
+            })
+            .unwrap_or_default(),
         policies: Vec::new(),
         state: o3k_domain::NetworkIntentState::Requested,
     };
-    let capabilities = [
+    let mut capabilities: HashSet<NetworkCapability> = [
         NetworkCapability::Ipv4,
         NetworkCapability::EndpointAttachment,
     ]
     .into_iter()
     .collect();
+    if public_address.is_some() {
+        capabilities.insert(NetworkCapability::PublicAddressRealization);
+    }
     compile_node_network_plan(
         &intent,
         node_id,
