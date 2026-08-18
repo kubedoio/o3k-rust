@@ -23,7 +23,7 @@ use uuid::Uuid;
 pub mod execution;
 pub use execution::{
     NetworkAgentIdentity, NetworkControllerLease, NetworkExecutionError, NetworkPlanCommand,
-    NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission, journal_path,
+    NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus, PlanAdmission, journal_path,
 };
 
 /// Poll interval while waiting for a freshly created TAP address to settle.

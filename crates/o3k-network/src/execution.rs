@@ -53,10 +53,10 @@ struct AcceptedPlan {
     command_id: Uuid,
     operation_id: Uuid,
     idempotency_key: String,
-    plan_id: Uuid,
-    fingerprint_sha256: String,
+    plan: NodeNetworkPlan,
     target: NetworkAgentIdentity,
     controller: NetworkControllerLease,
+    status: NetworkPlanStatus,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -68,6 +68,15 @@ struct Journal {
 pub enum PlanAdmission {
     Accepted,
     Replayed,
+    RequiresObservation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkPlanStatus {
+    Accepted,
+    Applying,
+    Succeeded,
+    Unknown,
 }
 
 #[derive(Debug, Error)]
@@ -86,6 +95,10 @@ pub enum NetworkExecutionError {
     DeadlineExpired,
     #[error("network plan identity was replayed with a different payload")]
     ConflictingReplay,
+    #[error("network mutation outcome is unknown and requires observation")]
+    MutationOutcomeUnknown,
+    #[error("network command is not present in the durable journal")]
+    UnknownCommand,
 }
 
 /// Durable admission boundary for a node-local network executor.
@@ -131,25 +144,46 @@ impl NetworkPlanExecutor {
             .iter()
             .find(|existing| existing.command_id == command.command_id)
         {
-            if existing.fingerprint_sha256 == command.fingerprint()
+            if existing.plan.fingerprint_sha256 == command.fingerprint()
                 && existing.operation_id == command.operation_id
                 && existing.idempotency_key == command.idempotency_key
-                && existing.plan_id == command.plan.plan_id
+                && existing.plan.plan_id == command.plan.plan_id
                 && existing.target == command.target
                 && existing.controller == command.controller
             {
-                return Ok(PlanAdmission::Replayed);
+                return Ok(match existing.status {
+                    NetworkPlanStatus::Accepted | NetworkPlanStatus::Applying => {
+                        PlanAdmission::RequiresObservation
+                    }
+                    NetworkPlanStatus::Succeeded | NetworkPlanStatus::Unknown => {
+                        PlanAdmission::Replayed
+                    }
+                });
             }
             return Err(NetworkExecutionError::ConflictingReplay);
+        }
+        if journal.plans.iter().any(|existing| {
+            existing.operation_id == command.operation_id
+                && existing.plan.plan_id == command.plan.plan_id
+        }) {
+            return Err(NetworkExecutionError::ConflictingReplay);
+        }
+        if command.plan.operation_id != command.operation_id
+            || command.plan.deadline_unix_ms != command.deadline_unix_ms
+        {
+            return Err(NetworkExecutionError::InvalidCommand);
+        }
+        if command.deadline_unix_ms < now_unix_ms {
+            return Err(NetworkExecutionError::DeadlineExpired);
         }
         journal.plans.push(AcceptedPlan {
             command_id: command.command_id,
             operation_id: command.operation_id,
             idempotency_key: command.idempotency_key.clone(),
-            plan_id: command.plan.plan_id,
-            fingerprint_sha256: command.fingerprint().to_owned(),
+            plan: command.plan.clone(),
             target: command.target.clone(),
             controller: command.controller.clone(),
+            status: NetworkPlanStatus::Accepted,
         });
         self.store(&journal)?;
         Ok(PlanAdmission::Accepted)
@@ -167,10 +201,81 @@ impl NetworkPlanExecutor {
             .any(|plan| plan.command_id == command_id))
     }
 
-    fn validate(
+    pub fn execute<R: NetworkPlanRealizer>(
         &self,
         command: &NetworkPlanCommand,
         now_unix_ms: u64,
+        realizer: &mut R,
+    ) -> Result<PlanAdmission, NetworkExecutionError> {
+        let admission = self.admit(command, now_unix_ms)?;
+        if admission != PlanAdmission::Accepted {
+            return Ok(admission);
+        }
+        self.set_status(command.command_id, NetworkPlanStatus::Applying)?;
+        match realizer.realize(&command.plan) {
+            Ok(()) => {
+                self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
+                Ok(PlanAdmission::Accepted)
+            }
+            Err(_) => {
+                self.set_status(command.command_id, NetworkPlanStatus::Unknown)?;
+                Err(NetworkExecutionError::MutationOutcomeUnknown)
+            }
+        }
+    }
+
+    pub fn reconcile<R: NetworkPlanRealizer>(
+        &self,
+        command_id: Uuid,
+        realizer: &mut R,
+    ) -> Result<NetworkPlanStatus, NetworkExecutionError> {
+        let _guard = self
+            .journal_lock
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        let mut journal = self.load()?;
+        let status = {
+            let record = journal
+                .plans
+                .iter_mut()
+                .find(|plan| plan.command_id == command_id)
+                .ok_or(NetworkExecutionError::UnknownCommand)?;
+            if record.status == NetworkPlanStatus::Succeeded {
+                return Ok(record.status);
+            }
+            record.status = match realizer.observe(&record.plan) {
+                Ok(true) => NetworkPlanStatus::Succeeded,
+                Ok(false) | Err(_) => NetworkPlanStatus::Unknown,
+            };
+            record.status
+        };
+        self.store(&journal)?;
+        Ok(status)
+    }
+
+    fn set_status(
+        &self,
+        command_id: Uuid,
+        status: NetworkPlanStatus,
+    ) -> Result<(), NetworkExecutionError> {
+        let _guard = self
+            .journal_lock
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        let mut journal = self.load()?;
+        let record = journal
+            .plans
+            .iter_mut()
+            .find(|plan| plan.command_id == command_id)
+            .ok_or(NetworkExecutionError::UnknownCommand)?;
+        record.status = status;
+        self.store(&journal)
+    }
+
+    fn validate(
+        &self,
+        command: &NetworkPlanCommand,
+        _now_unix_ms: u64,
     ) -> Result<(), NetworkExecutionError> {
         if command.idempotency_key.trim().is_empty()
             || command.target.agent_id.trim().is_empty()
@@ -194,9 +299,6 @@ impl NetworkPlanExecutor {
         }
         if command.controller != self.lease {
             return Err(NetworkExecutionError::StaleControllerLease);
-        }
-        if command.deadline_unix_ms < now_unix_ms {
-            return Err(NetworkExecutionError::DeadlineExpired);
         }
         Ok(())
     }
@@ -237,6 +339,10 @@ pub trait NetworkPlanRealizer {
     type Error;
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error>;
+
+    fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
 }
 
 pub fn journal_path(root: &Path) -> PathBuf {
@@ -304,14 +410,21 @@ mod tests {
         ]
         .into_iter()
         .collect::<HashSet<_>>();
-        compile_node_network_plan(&intent, "node-a", Uuid::from_u128(4), 1, &capabilities, &[])
-            .expect("plan")
+        compile_node_network_plan(
+            &intent,
+            "node-a",
+            Uuid::from_u128(4),
+            100,
+            &capabilities,
+            &[],
+        )
+        .expect("plan")
     }
 
     fn command() -> NetworkPlanCommand {
         NetworkPlanCommand {
             command_id: Uuid::from_u128(10),
-            operation_id: Uuid::from_u128(11),
+            operation_id: Uuid::from_u128(4),
             idempotency_key: "idempotency-1".into(),
             target: NetworkAgentIdentity {
                 agent_id: "node-a".into(),
@@ -327,6 +440,25 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingRealizer {
+        calls: usize,
+        observed: bool,
+    }
+
+    impl NetworkPlanRealizer for RecordingRealizer {
+        type Error = &'static str;
+
+        fn realize(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.calls += 1;
+            Ok(())
+        }
+
+        fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+            Ok(self.observed)
+        }
+    }
+
     #[test]
     fn equivalent_command_replays_after_executor_restart() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -334,7 +466,12 @@ mod tests {
         let command = command();
         let executor =
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
-        assert_eq!(executor.admit(&command, 1)?, PlanAdmission::Accepted);
+        let mut realizer = RecordingRealizer::default();
+        assert_eq!(
+            executor.execute(&command, 1, &mut realizer)?,
+            PlanAdmission::Accepted
+        );
+        assert_eq!(realizer.calls, 1);
         drop(executor);
         let restarted =
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
@@ -379,6 +516,48 @@ mod tests {
             Err(NetworkExecutionError::DeadlineExpired)
         ));
         assert!(!executor.accepted(command.command_id)?);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn failed_realization_is_unknown_until_observation_resolves_it()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct FailingRealizer {
+            observed: bool,
+        }
+
+        impl NetworkPlanRealizer for FailingRealizer {
+            type Error = &'static str;
+
+            fn realize(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+                Err("transport interrupted")
+            }
+
+            fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+                Ok(self.observed)
+            }
+        }
+
+        let root = tempfile_path("unknown");
+        let command = command();
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = FailingRealizer { observed: false };
+        assert!(matches!(
+            executor.execute(&command, 1, &mut realizer),
+            Err(NetworkExecutionError::MutationOutcomeUnknown)
+        ));
+        assert_eq!(
+            executor.admit(&command, 2)?,
+            PlanAdmission::Replayed,
+            "a duplicate must not mutate while the outcome is unknown"
+        );
+        realizer.observed = true;
+        assert_eq!(
+            executor.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Succeeded
+        );
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
