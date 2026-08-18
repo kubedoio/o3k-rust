@@ -84,10 +84,12 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
             last_usable: "198.51.100.6".parse()?,
         },
     )?;
+    let external_realm_id = uuid::Uuid::now_v7();
     let state = o3k_api::AppState::new()
         .with_identity(identity)
         .with_network(network)
-        .with_public_allocator(allocator);
+        .with_public_allocator(allocator)
+        .with_network_external_realm(external_realm_id);
     let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let token_response = o3k_api::router_with_state(state.clone())
         .oneshot(
@@ -104,9 +106,38 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
         .ok_or("token missing")?
         .to_str()?
         .to_owned();
-    let request_body = serde_json::json!({
+    let wrong_network = serde_json::json!({
         "floatingip": {
             "floating_network_id": network_record.id,
+            "port_id": port.id
+        }
+    });
+    let rejected = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "floating-wrong-network")
+                .body(Body::from(wrong_network.to_string()))?,
+        )
+        .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let empty = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    let empty: Value =
+        serde_json::from_slice(&axum::body::to_bytes(empty.into_body(), 4096).await?)?;
+    assert_eq!(empty["floatingips"].as_array().map(Vec::len), Some(0));
+    let request_body = serde_json::json!({
+        "floatingip": {
+            "floating_network_id": external_realm_id,
             "port_id": port.id
         }
     });
@@ -243,6 +274,7 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
 
     let dispatcher = RecordingNetworkDispatcher::default();
     let commands = dispatcher.commands.clone();
+    let external_realm_id = uuid::Uuid::now_v7();
     let allocator = PublicAddressAllocator::open(
         root.join("public"),
         PublicAddressPool {
@@ -255,6 +287,7 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
         .with_identity(identity)
         .with_network(network)
         .with_public_allocator(allocator)
+        .with_network_external_realm(external_realm_id)
         .with_network_dispatcher(
             Arc::new(dispatcher),
             o3k_network::NetworkControllerLease {
@@ -282,7 +315,7 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
         .to_owned();
     let request_body = serde_json::json!({
         "floatingip": {
-            "floating_network_id": network_record.id,
+            "floating_network_id": external_realm_id,
             "port_id": port.id
         }
     });

@@ -433,7 +433,16 @@ pub(crate) async fn create_floating_ip(
             "invalid floating IP request",
         );
     };
-    let _ = body.floatingip.floating_network_id;
+    let Some(external_realm_id) = state.network_external_realm_id else {
+        return keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "floating IP external network is not configured",
+        );
+    };
+    if body.floatingip.floating_network_id != Some(external_realm_id) {
+        return public_error(PublicAddressError::InvalidPool);
+    }
     let operation_id = headers
         .get("x-openstack-request-id")
         .and_then(|value| value.to_str().ok())
