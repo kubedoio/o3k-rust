@@ -3342,9 +3342,93 @@ pub enum NetworkPlanError {
     InvalidAddressPool,
     #[error("network intent has an invalid policy")]
     InvalidPolicy,
+    #[error("network intent has an invalid IPv4 prefix")]
+    InvalidPrefix,
 }
 
 pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
+
+/// Compile the currently supported flat attachment projection into the same
+/// canonical per-node plan used by routed providers. This helper is kept in
+/// the network application boundary so callers cannot construct a wire-only
+/// payload that bypasses plan validation.
+pub struct AttachmentPlanInput<'a> {
+    pub endpoint_id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: &'a str,
+    pub mac: &'a str,
+    pub fixed_ip: std::net::Ipv4Addr,
+    pub subnet_cidr: &'a str,
+    pub node_id: &'a str,
+    pub operation_id: Uuid,
+    pub deadline_unix_ms: u64,
+}
+
+pub fn compile_attachment_plan(
+    input: AttachmentPlanInput<'_>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    let AttachmentPlanInput {
+        endpoint_id,
+        realm_id,
+        project_id,
+        mac,
+        fixed_ip,
+        subnet_cidr,
+        node_id,
+        operation_id,
+        deadline_unix_ms,
+    } = input;
+    let (network, prefix_len) = subnet_cidr
+        .split_once('/')
+        .ok_or(NetworkPlanError::InvalidPrefix)?;
+    let network = network
+        .parse()
+        .map_err(|_| NetworkPlanError::InvalidPrefix)?;
+    let prefix_len = prefix_len
+        .parse::<u8>()
+        .map_err(|_| NetworkPlanError::InvalidPrefix)?;
+    let prefix =
+        o3k_domain::Ipv4Prefix::new(network, prefix_len).ok_or(NetworkPlanError::InvalidPrefix)?;
+    let intent = NetworkIntent {
+        id: endpoint_id,
+        generation: 1,
+        project_id: project_id.to_owned(),
+        realm: AddressRealm {
+            id: realm_id,
+            project_id: project_id.to_owned(),
+            prefix,
+            overlapping_prefixes: false,
+        },
+        address_pools: Vec::new(),
+        endpoints: vec![o3k_domain::EndpointIntent {
+            id: endpoint_id,
+            project_id: project_id.to_owned(),
+            mac: mac.to_owned(),
+            fixed_ip,
+            generation: 1,
+        }],
+        routes: Vec::new(),
+        gateways: Vec::new(),
+        egress: Vec::new(),
+        public_addresses: Vec::new(),
+        policies: Vec::new(),
+        state: o3k_domain::NetworkIntentState::Requested,
+    };
+    let capabilities = [
+        NetworkCapability::Ipv4,
+        NetworkCapability::EndpointAttachment,
+    ]
+    .into_iter()
+    .collect();
+    compile_node_network_plan(
+        &intent,
+        node_id,
+        operation_id,
+        deadline_unix_ms,
+        &capabilities,
+        &[],
+    )
+}
 
 /// Compiles one canonical intent into a stable semantic node plan. The
 /// `realms` slice represents existing routed realms in the selected profile;

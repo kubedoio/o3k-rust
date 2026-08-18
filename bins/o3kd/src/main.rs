@@ -17,6 +17,113 @@ struct DaemonCreateResolver {
     image: o3k_image::ImageService,
     network: o3k_network::NetworkService,
     config_drive: o3k_config_drive::ConfigDriveStore,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: o3k_network::NetworkControllerLease,
+}
+
+/// Composition-root adapter for the bounded node-local network transport.
+/// The network application remains transport-independent; this adapter only
+/// maps its typed command envelope to the versioned mTLS wire protocol.
+#[derive(Clone)]
+struct NetworkAgentDispatcher {
+    endpoint: String,
+    server_name: String,
+    ca_certificate: PathBuf,
+    client_certificate: PathBuf,
+    client_key: PathBuf,
+}
+
+fn network_dispatcher_from_env()
+-> Result<Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>, Box<dyn std::error::Error>> {
+    let names = [
+        "O3K_NETWORK_AGENT_ENDPOINT",
+        "O3K_NETWORK_AGENT_SERVER_NAME",
+        "O3K_NETWORK_AGENT_CA",
+        "O3K_NETWORK_AGENT_CLIENT_CERT",
+        "O3K_NETWORK_AGENT_CLIENT_KEY",
+    ];
+    let values = names
+        .iter()
+        .map(|name| std::env::var(name).ok())
+        .collect::<Vec<_>>();
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if values.iter().any(Option::is_none) {
+        return Err("all O3K_NETWORK_AGENT_* transport variables are required".into());
+    }
+    let [
+        endpoint,
+        server_name,
+        ca_certificate,
+        client_certificate,
+        client_key,
+    ] = values
+        .try_into()
+        .map_err(|_| "invalid network agent transport configuration")?;
+    Ok(Some(Arc::new(NetworkAgentDispatcher {
+        endpoint: endpoint.ok_or("missing network agent endpoint")?,
+        server_name: server_name.ok_or("missing network agent server name")?,
+        ca_certificate: PathBuf::from(ca_certificate.ok_or("missing network agent CA")?),
+        client_certificate: PathBuf::from(
+            client_certificate.ok_or("missing network agent client certificate")?,
+        ),
+        client_key: PathBuf::from(client_key.ok_or("missing network agent client key")?),
+    })))
+}
+
+#[async_trait]
+impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
+    async fn dispatch(
+        &self,
+        command: o3k_network::NetworkPlanCommand,
+    ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+        let client = o3k_network_protocol::NetworkAgentClient::connect(
+            &self.endpoint,
+            &self.server_name,
+            &self.ca_certificate,
+            &self.client_certificate,
+            &self.client_key,
+        )
+        .await
+        .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+        let command_id = command.command_id.to_string();
+        let result = client
+            .execute(
+                o3k_network_protocol::proto::Register {
+                    agent_id: command.target.agent_id.clone(),
+                    agent_epoch: command.target.agent_epoch.clone(),
+                },
+                o3k_network_protocol::proto::NetworkCommand {
+                    command_id,
+                    operation_id: command.operation_id.to_string(),
+                    idempotency_key: command.idempotency_key,
+                    agent_id: command.target.agent_id,
+                    agent_epoch: command.target.agent_epoch,
+                    controller_id: command.controller.controller_id,
+                    controller_epoch: command.controller.controller_epoch,
+                    fencing_token: command.controller.fencing_token,
+                    deadline_unix_ms: command.deadline_unix_ms,
+                    plan_json: serde_json::to_string(&command.plan).map_err(|error| {
+                        o3k_network::NetworkDispatchError::Rejected(error.to_string())
+                    })?,
+                    remove: matches!(command.action, o3k_network::NetworkPlanAction::Remove),
+                },
+            )
+            .await
+            .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+        match result.status.as_str() {
+            "succeeded" | "replayed" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
+            "unknown" | "requires_observation" => Ok(o3k_network::NetworkPlanStatus::Unknown),
+            other => Err(o3k_network::NetworkDispatchError::Rejected(
+                if result.error_code.is_empty() {
+                    other.to_owned()
+                } else {
+                    result.error_code
+                },
+            )),
+        }
+    }
 }
 
 fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
@@ -28,6 +135,12 @@ fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 /// Projects terminal compute outcomes into the durable port binding state of
@@ -116,6 +229,7 @@ impl DaemonCreateResolver {
         &self,
         request: &CreateInstanceRequest,
         agent_id: &str,
+        agent_epoch: &str,
     ) -> Result<
         (
             Vec<o3k_compute_agent::NetworkAttachmentSpec>,
@@ -152,6 +266,60 @@ impl DaemonCreateResolver {
                     o3k_network::NetworkError::Conflict => ProviderError::Conflict,
                     _ => ProviderError::InvalidRequest,
                 })?;
+            if let Some(dispatcher) = &self.network_dispatcher {
+                let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+                let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+                    endpoint_id: port.id,
+                    realm_id: port.network_id,
+                    project_id: &request.project_id,
+                    mac: &port.mac_address,
+                    fixed_ip: port.fixed_ip,
+                    subnet_cidr: &subnet.cidr,
+                    node_id: agent_id,
+                    operation_id: request.operation_id,
+                    deadline_unix_ms,
+                })
+                .map_err(|_| ProviderError::InvalidRequest)?;
+                let command_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "o3k:network:apply:{}:{}:{}",
+                        request.operation_id, port.id, plan.fingerprint_sha256
+                    )
+                    .as_bytes(),
+                );
+                let status = dispatcher
+                    .dispatch(o3k_network::NetworkPlanCommand {
+                        command_id,
+                        operation_id: request.operation_id,
+                        idempotency_key: format!("{}:network:{}", request.idempotency_key, port.id),
+                        action: o3k_network::NetworkPlanAction::Apply,
+                        target: o3k_network::NetworkAgentIdentity {
+                            agent_id: agent_id.to_owned(),
+                            agent_epoch: agent_epoch.to_owned(),
+                        },
+                        controller: self.network_controller.clone(),
+                        deadline_unix_ms,
+                        plan,
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        o3k_network::NetworkDispatchError::Unavailable
+                        | o3k_network::NetworkDispatchError::Transport(_) => {
+                            ProviderError::UnknownOutcome {
+                                operation_id: request.operation_id,
+                            }
+                        }
+                        o3k_network::NetworkDispatchError::Rejected(_) => {
+                            ProviderError::InvalidRequest
+                        }
+                    })?;
+                if status == o3k_network::NetworkPlanStatus::Unknown {
+                    return Err(ProviderError::UnknownOutcome {
+                        operation_id: request.operation_id,
+                    });
+                }
+            }
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
             attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
@@ -225,8 +393,9 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         let image = self.resolve_image(request).await?;
-        let (network_attachments, network_data) =
-            self.resolve_network(request, &agent.agent_id).await?;
+        let (network_attachments, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
         let (iso, _) = self.materialize_config_drive(request, network_data)?;
         let flavor_id = (!request.flavor_id.trim().is_empty())
             .then(|| request.flavor_id.clone())
@@ -268,7 +437,9 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
         }
-        let (_, network_data) = self.resolve_network(request, &agent.agent_id).await?;
+        let (_, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
         let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
         if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
             return Err(ProviderError::Conflict);
@@ -365,7 +536,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_id = o3k_store::ControllerId::new(
         std::env::var("O3K_CONTROLLER_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
     );
-    let controller_epoch = o3k_store::ControllerEpoch::random();
+    let controller_epoch = std::env::var("O3K_CONTROLLER_EPOCH")
+        .map(o3k_store::ControllerEpoch::new)
+        .unwrap_or_else(|_| o3k_store::ControllerEpoch::random());
     let session = o3k_store::ControllerSession {
         controller_id: controller_id.clone(),
         controller_epoch: controller_epoch.clone(),
@@ -461,6 +634,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
+    let network_dispatcher = network_dispatcher_from_env()?;
+    let network_controller = o3k_network::NetworkControllerLease {
+        controller_id: controller_id.to_string(),
+        controller_epoch: controller_epoch.to_string(),
+        fencing_token: std::env::var("O3K_NETWORK_FENCING_TOKEN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1),
+    };
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
@@ -469,6 +651,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             image: image_service.clone(),
             network: network_service.clone(),
             config_drive: config_drive_store.clone(),
+            network_dispatcher: network_dispatcher.clone(),
+            network_controller: network_controller.clone(),
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -1190,6 +1374,12 @@ mod tests {
             image,
             network: network.clone(),
             config_drive,
+            network_dispatcher: None,
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "test-epoch".to_owned(),
+                fencing_token: 1,
+            },
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1226,7 +1416,9 @@ mod tests {
             config_drive: None,
             idempotency_key: "test".to_owned(),
         };
-        let (attachments, _) = resolver.resolve_network(&request, "compute-1").await?;
+        let (attachments, _) = resolver
+            .resolve_network(&request, "compute-1", "epoch-1")
+            .await?;
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].port_id, port.id.to_string());
         let bound = network.get_port_for_project("project-a", port.id).await?;
@@ -1264,7 +1456,9 @@ mod tests {
             config_drive: None,
             idempotency_key: "test".to_owned(),
         };
-        let failed = resolver.resolve_network(&unresolved, "compute-1").await;
+        let failed = resolver
+            .resolve_network(&unresolved, "compute-1", "epoch-1")
+            .await;
         assert!(failed.is_err());
         let after = network
             .get_port_for_project("project-a", unresolved_port.id)

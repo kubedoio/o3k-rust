@@ -1402,6 +1402,7 @@ dependencies = [
  "o3k-identity",
  "o3k-image",
  "o3k-network",
+ "o3k-network-protocol",
  "o3k-placement",
  "o3k-provider",
  "o3k-provider-contract",
