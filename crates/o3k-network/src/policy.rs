@@ -153,17 +153,21 @@ impl StatefulPolicyProvider {
         {
             return Ok(());
         }
-        self.ensure_foreign_safe()?;
+        let table_exists = self.ensure_foreign_safe()?;
+        if table_exists && self.ownership.is_none() {
+            return Err(PolicyNetworkError::ForeignState);
+        }
         // Persist the exact accepted scope before mutation so an interrupted
         // replacement is recoverable and never mistaken for no state.
         store_state(&self.root.join(STATE_FILE), &ownership)?;
         self.ownership = Some(ownership);
-        if self
-            .command
-            .run(&["delete", "table", "ip", TABLE])
-            .map_err(PolicyNetworkError::Storage)?
+        if table_exists
+            && !self
+                .command
+                .run(&["delete", "table", "ip", TABLE])
+                .map_err(PolicyNetworkError::Storage)?
         {
-            // The table was owned and is now intentionally replaced.
+            return Err(PolicyNetworkError::CommandFailed);
         }
         if !self
             .command
@@ -276,31 +280,31 @@ impl StatefulPolicyProvider {
     }
 
     pub fn remove(&mut self) -> Result<(), PolicyNetworkError> {
-        let Some(_) = self.ownership.take() else {
+        let Some(ownership) = self.ownership.take() else {
             return Ok(());
         };
         let (success, output) = self
             .command
             .output(&["list", "table", "ip", TABLE])
             .map_err(PolicyNetworkError::Storage)?;
-        if !success {
-            return Ok(());
-        }
-        if !output.contains(MARKER) {
+        if success && !output.contains(MARKER) {
+            self.ownership = Some(ownership);
             return Err(PolicyNetworkError::ForeignState);
         }
-        if !self
-            .command
-            .run(&["delete", "table", "ip", TABLE])
-            .map_err(PolicyNetworkError::Storage)?
+        if success
+            && !self
+                .command
+                .run(&["delete", "table", "ip", TABLE])
+                .map_err(PolicyNetworkError::Storage)?
         {
+            self.ownership = Some(ownership);
             return Err(PolicyNetworkError::CommandFailed);
         }
         let _ = fs::remove_file(self.root.join(STATE_FILE));
         Ok(())
     }
 
-    fn ensure_foreign_safe(&self) -> Result<(), PolicyNetworkError> {
+    fn ensure_foreign_safe(&self) -> Result<bool, PolicyNetworkError> {
         let (success, output) = self
             .command
             .output(&["list", "table", "ip", TABLE])
@@ -308,7 +312,7 @@ impl StatefulPolicyProvider {
         if success && !output.contains(MARKER) {
             return Err(PolicyNetworkError::ForeignState);
         }
-        Ok(())
+        Ok(success)
     }
 }
 
@@ -433,5 +437,33 @@ mod tests {
             Err(PolicyNetworkError::ForeignState)
         ));
         assert_eq!(command.calls.lock().expect("calls").len(), 1);
+    }
+
+    #[test]
+    fn cleanup_reaps_durable_policy_state_when_table_is_already_absent() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(1);
+        provider
+            .apply(
+                &[policy(endpoint)],
+                &[PolicyEndpoint {
+                    endpoint_id: endpoint,
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }],
+            )
+            .expect("policy apply");
+        assert!(root.join(STATE_FILE).exists());
+
+        provider.remove().expect("policy cleanup");
+        assert!(!root.join(STATE_FILE).exists());
     }
 }
