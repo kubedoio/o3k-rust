@@ -18,11 +18,11 @@ use crate::{
     ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
-    quota::QuotaRepository,
+    LeaseAcquireOutcome, NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate,
+    OperationRecord, OperationState, PlacementAllocationRecord, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
+    ProviderReference, ResourceRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    VolumeAttachmentRepository, quota::QuotaRepository,
 };
 use o3k_kernel::{
     LimitKey, LimitValue, OwnershipScope, ReservationState, ResourceAmount, ScopeId, ScopeKind,
@@ -1016,6 +1016,136 @@ pub async fn test_image_repository<S: StoreUnderTest>(store: Arc<S>) {
 
 pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
     let proj = format!("proj-{}", Uuid::now_v7());
+    let other_proj = format!("proj-{}", Uuid::now_v7());
+
+    let realm_id = Uuid::now_v7();
+    let endpoint_id = Uuid::now_v7();
+    let operation_id = format!("p9-address-op-{}", Uuid::now_v7());
+    let allocation = store
+        .allocate_network_address(
+            &realm_id,
+            &proj,
+            &endpoint_id,
+            &operation_id,
+            "192.0.2.0/30",
+        )
+        .await
+        .expect("allocate_network_address");
+    assert_eq!(allocation.address, Ipv4Addr::new(192, 0, 2, 1));
+    let retry = store
+        .allocate_network_address(
+            &realm_id,
+            &proj,
+            &endpoint_id,
+            &operation_id,
+            "192.0.2.0/30",
+        )
+        .await
+        .expect("idempotent address allocation");
+    assert_eq!(retry, allocation);
+    assert!(matches!(
+        store
+            .allocate_network_address(
+                &realm_id,
+                &other_proj,
+                &Uuid::now_v7(),
+                &operation_id,
+                "192.0.2.0/30",
+            )
+            .await,
+        Err(StoreError::NetworkAddressConflict)
+    ));
+    store
+        .release_network_address(&proj, &endpoint_id)
+        .await
+        .expect("release_network_address");
+    let concurrent_realm = Uuid::now_v7();
+    let concurrent_endpoint_a = Uuid::now_v7();
+    let concurrent_endpoint_b = Uuid::now_v7();
+    let concurrent_operation_a = format!("p9-address-op-a-{}", Uuid::now_v7());
+    let concurrent_operation_b = format!("p9-address-op-b-{}", Uuid::now_v7());
+    let (first, second) = tokio::join!(
+        store.allocate_network_address(
+            &concurrent_realm,
+            &proj,
+            &concurrent_endpoint_a,
+            &concurrent_operation_a,
+            "198.51.100.0/29",
+        ),
+        store.allocate_network_address(
+            &concurrent_realm,
+            &proj,
+            &concurrent_endpoint_b,
+            &concurrent_operation_b,
+            "198.51.100.0/29",
+        )
+    );
+    let first = first.expect("first concurrent allocation");
+    let second = second.expect("second concurrent allocation");
+    assert_ne!(first.address, second.address);
+
+    let intent = NetworkIntentRecord {
+        id: Uuid::now_v7(),
+        project_id: proj.clone(),
+        generation: 1,
+        payload: r#"{"id":"p9-intent","generation":1}"#.to_owned(),
+        plan_fingerprint_sha256: Some("abc123".to_owned()),
+        status: "requested".to_owned(),
+    };
+    store
+        .insert_network_intent(&intent)
+        .await
+        .expect("insert_network_intent");
+    store
+        .insert_network_intent(&intent)
+        .await
+        .expect("idempotent network intent retry");
+    let mut conflicting_intent = intent.clone();
+    conflicting_intent.payload = r#"{"id":"p9-intent","generation":99}"#.to_owned();
+    assert!(matches!(
+        store.insert_network_intent(&conflicting_intent).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    assert!(
+        store
+            .get_network_intent(&other_proj, &intent.id)
+            .await
+            .expect("cross-project intent lookup")
+            .is_none()
+    );
+    let updated_intent = store
+        .update_network_intent(
+            &proj,
+            &intent.id,
+            1,
+            r#"{"id":"p9-intent","generation":2}"#,
+            Some("def456"),
+            "active",
+        )
+        .await
+        .expect("update_network_intent");
+    assert_eq!(updated_intent.generation, 2);
+    assert_eq!(updated_intent.status, "active");
+    assert!(matches!(
+        store
+            .update_network_intent(&proj, &intent.id, 2, "invalid-status", None, "bogus")
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store
+            .update_network_intent(&proj, &intent.id, 2, "backwards", None, "requested")
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store
+            .update_network_intent(&proj, &intent.id, 1, "stale", None, "error")
+            .await,
+        Err(StoreError::StaleGeneration)
+    ));
+    assert_eq!(store.list_network_intents(&proj).await.unwrap().len(), 1);
+
     let net_id = Uuid::now_v7();
 
     let net = NetworkRecord {

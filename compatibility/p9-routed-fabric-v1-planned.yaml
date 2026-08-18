@@ -1,0 +1,104 @@
+# P9 compatibility records are traceability artifacts only. They are not
+# included by compatibility/openstack-targets.yaml and must not be advertised
+# until their operation-level implementation and evidence gates pass.
+schema_version: 1
+profile: p9-routed-fabric-v1
+status: planned
+advertised: false
+source: https://docs.openstack.org/api-ref/network/v2/
+operations:
+  - id: neutron-router-create
+    service: network
+    method: POST
+    path: /v2.0/routers
+    resource_type: network:network_intent
+    action: network:CreateNetworkIntent
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: planned
+    response_contract: planned
+    error_contract: planned
+    state_transition: planned
+    dependencies: [network_intent_store, authorization]
+    provider_capability: [routing]
+    evidence: [domain_store_planner]
+    known_deviations: [not_implemented, not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-router-interface-add
+    service: network
+    method: PUT
+    path: /v2.0/routers/{router_id}/add_router_interface
+    resource_type: network:network_intent
+    action: network:UpdateNetworkIntent
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: planned
+    response_contract: planned
+    error_contract: planned
+    state_transition: planned
+    dependencies: [network_intent_store, authorization]
+    provider_capability: [routing]
+    evidence: [domain_store_planner]
+    known_deviations: [not_implemented, not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-floatingip-create
+    service: network
+    method: POST
+    path: /v2.0/floatingips
+    resource_type: network:address_allocation
+    action: network:AllocateAddress
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: planned
+    response_contract: planned
+    error_contract: planned
+    state_transition: planned
+    dependencies: [address_allocation_store, authorization, network_quota]
+    provider_capability: [public_address_realization]
+    evidence: [domain_store_planner]
+    known_deviations: [not_implemented, not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-floatingip-associate
+    service: network
+    method: PUT
+    path: /v2.0/floatingips/{floatingip_id}
+    resource_type: network:address_allocation
+    action: network:UpdateNetworkIntent
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: planned
+    response_contract: planned
+    error_contract: planned
+    state_transition: planned
+    dependencies: [network_intent_store, address_allocation_store, authorization]
+    provider_capability: [public_address_realization]
+    evidence: [domain_store_planner]
+    known_deviations: [not_implemented, not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-security-group-create
+    service: network
+    method: POST
+    path: /v2.0/security-groups
+    resource_type: network:network_intent
+    action: network:CreateNetworkIntent
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: planned
+    response_contract: planned
+    error_contract: planned
+    state_transition: planned
+    dependencies: [network_intent_store, authorization, policy_capability]
+    provider_capability: [stateful_policy]
+    evidence: [domain_store_planner]
+    known_deviations: [not_implemented, not_advertised]
+    status: planned
+    supported: false

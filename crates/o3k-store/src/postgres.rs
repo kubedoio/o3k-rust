@@ -18,11 +18,12 @@ use crate::{
     ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
-    PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord, StoreError,
-    SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository, quota::QuotaRepository,
+    NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
+    ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
+    PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
+    PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
+    ProviderReference, ResourceRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    VolumeAttachmentRepository, quota::QuotaRepository,
 };
 
 #[derive(Clone, Debug)]
@@ -2201,6 +2202,216 @@ fn parse_pg_image(row: &PgRow) -> Result<ImageMetadataRecord, StoreError> {
 
 #[async_trait]
 impl NetworkRepository for PostgresStore {
+    async fn allocate_network_address(
+        &self,
+        realm_id: &Uuid,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        operation_id: &str,
+        prefix: &str,
+    ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        let (network, prefix_len) = parse_pg_ipv4_prefix(prefix)?;
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(realm_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        let existing = sqlx::query(
+            "SELECT realm_id, project_id, endpoint_id, operation_id, address::text AS address
+             FROM network_address_allocations WHERE endpoint_id = $1 OR operation_id = $2
+             FOR UPDATE",
+        )
+        .bind(endpoint_id.to_string())
+        .bind(operation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        if let Some(row) = existing {
+            let allocation = parse_pg_network_allocation(&row)?;
+            if allocation.realm_id == *realm_id
+                && allocation.project_id == project_id
+                && allocation.endpoint_id == *endpoint_id
+                && allocation.operation_id == operation_id
+            {
+                tx.commit().await.map_err(StoreError::Database)?;
+                return Ok(allocation);
+            }
+            return Err(StoreError::NetworkAddressConflict);
+        }
+        let occupied = sqlx::query(
+            "SELECT address::text AS address FROM network_address_allocations WHERE realm_id = $1",
+        )
+        .bind(realm_id.to_string())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?;
+        let occupied: std::collections::HashSet<std::net::Ipv4Addr> = occupied
+            .iter()
+            .filter_map(|row| {
+                row.get::<String, _>("address")
+                    .split('/')
+                    .next()
+                    .and_then(|value| value.parse().ok())
+            })
+            .collect();
+        let (first, last) = allocation_bounds(network, prefix_len);
+        let address = (first..=last)
+            .map(std::net::Ipv4Addr::from)
+            .find(|candidate| !occupied.contains(candidate))
+            .ok_or(StoreError::NetworkAddressExhausted)?;
+        sqlx::query(
+            "INSERT INTO network_address_allocations (realm_id, project_id, endpoint_id, operation_id, address)
+             VALUES ($1, $2, $3, $4, $5::inet)",
+        )
+        .bind(realm_id.to_string())
+        .bind(project_id)
+        .bind(endpoint_id.to_string())
+        .bind(operation_id)
+        .bind(address.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Database(database) if database.is_unique_violation() => {
+                StoreError::NetworkAddressConflict
+            }
+            other => StoreError::Database(other),
+        })?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(NetworkAddressAllocationRecord {
+            realm_id: *realm_id,
+            project_id: project_id.to_owned(),
+            endpoint_id: *endpoint_id,
+            operation_id: operation_id.to_owned(),
+            address,
+        })
+    }
+
+    async fn release_network_address(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "DELETE FROM network_address_allocations WHERE project_id = $1 AND endpoint_id = $2",
+        )
+        .bind(project_id)
+        .bind(endpoint_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+        validate_network_intent(intent)?;
+        let generation = i64::try_from(intent.generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
+        })?;
+        let result = sqlx::query(
+            "INSERT INTO network_intents (id, project_id, generation, payload, plan_fingerprint_sha256, status)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(intent.id.to_string())
+        .bind(&intent.project_id)
+        .bind(generation)
+        .bind(&intent.payload)
+        .bind(&intent.plan_fingerprint_sha256)
+        .bind(&intent.status)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                match self
+                    .get_network_intent(&intent.project_id, &intent.id)
+                    .await?
+                {
+                    Some(existing) if existing == *intent => Ok(()),
+                    _ => Err(StoreError::ResourceAlreadyExists),
+                }
+            }
+            Err(error) => Err(map_pg_error(error)),
+        }
+    }
+
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE project_id = $1 ORDER BY id",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(parse_pg_network_intent).collect()
+    }
+
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(parse_pg_network_intent).transpose()
+    }
+
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        crate::validate_network_intent_update(project_id, payload, status)?;
+        let existing = self
+            .get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkIntentNotFound)?;
+        crate::validate_network_intent_transition(&existing.status, status)?;
+        let expected = i64::try_from(expected_generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
+        })?;
+        let result = sqlx::query(
+            "UPDATE network_intents
+             SET generation = generation + 1, payload = $1, plan_fingerprint_sha256 = $2, status = $3, updated_at = NOW()
+             WHERE id = $4 AND project_id = $5 AND generation = $6",
+        )
+        .bind(payload)
+        .bind(plan_fingerprint_sha256)
+        .bind(status)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(expected)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_network_intent(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::NetworkIntentNotFound),
+            };
+        }
+        self.get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "updated network intent disappeared".to_owned(),
+            ))
+    }
+
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
         let id_str = network.id.to_string();
         sqlx::query(
@@ -2498,6 +2709,33 @@ impl NetworkRepository for PostgresStore {
     }
 }
 
+fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+    if intent.project_id.is_empty() || intent.payload.is_empty() || intent.status.is_empty() {
+        return Err(StoreError::Corrupt(
+            "network intent has empty required field".to_owned(),
+        ));
+    }
+    if intent.generation == 0 {
+        return Err(StoreError::Corrupt(
+            "network intent generation must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_pg_network_intent(row: &PgRow) -> Result<NetworkIntentRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(NetworkIntentRecord {
+        id: parse_uuid(&row.get::<String, _>("id"))?,
+        project_id: row.get("project_id"),
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative network intent generation".to_owned()))?,
+        payload: row.get("payload"),
+        plan_fingerprint_sha256: row.get("plan_fingerprint_sha256"),
+        status: row.get("status"),
+    })
+}
+
 fn parse_pg_network(row: &PgRow) -> Result<NetworkRecord, StoreError> {
     let id_str: String = row.get("id");
     let id = parse_uuid(&id_str)?;
@@ -2506,6 +2744,52 @@ fn parse_pg_network(row: &PgRow) -> Result<NetworkRecord, StoreError> {
         name: row.get("name"),
         project_id: row.get("project_id"),
         status: row.get("status"),
+    })
+}
+
+fn parse_pg_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {
+    let (address, length) = value
+        .split_once('/')
+        .ok_or_else(|| StoreError::Corrupt("network prefix is missing length".to_owned()))?;
+    let address = address
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|_| StoreError::Corrupt("network prefix has invalid address".to_owned()))?;
+    let prefix_len = length
+        .parse::<u8>()
+        .map_err(|_| StoreError::Corrupt("network prefix has invalid length".to_owned()))?;
+    if prefix_len > 30 {
+        return Err(StoreError::Corrupt(
+            "network allocation prefix must leave usable addresses".to_owned(),
+        ));
+    }
+    let mask = u32::MAX << (32 - prefix_len);
+    let network = u32::from(address) & mask;
+    if network != u32::from(address) {
+        return Err(StoreError::Corrupt(
+            "network prefix is not canonical".to_owned(),
+        ));
+    }
+    Ok((network, prefix_len))
+}
+
+fn allocation_bounds(network: u32, prefix_len: u8) -> (u32, u32) {
+    let size = 1u32 << (32 - prefix_len);
+    (network + 1, network + size - 2)
+}
+
+fn parse_pg_network_allocation(row: &PgRow) -> Result<NetworkAddressAllocationRecord, StoreError> {
+    Ok(NetworkAddressAllocationRecord {
+        realm_id: parse_uuid(&row.get::<String, _>("realm_id"))?,
+        project_id: row.get("project_id"),
+        endpoint_id: parse_uuid(&row.get::<String, _>("endpoint_id"))?,
+        operation_id: row.get("operation_id"),
+        address: row
+            .get::<String, _>("address")
+            .split('/')
+            .next()
+            .ok_or_else(|| StoreError::Corrupt("invalid allocated network address".to_owned()))?
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid allocated network address".to_owned()))?,
     })
 }
 
