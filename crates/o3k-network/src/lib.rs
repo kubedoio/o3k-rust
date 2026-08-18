@@ -8,6 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use o3k_domain::{AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
     LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
@@ -39,6 +40,135 @@ const TAP_ADDRESS_STABILIZE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct HostNetworkConfig {
     pub bridge_name: String,
     pub uplink: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod p9_plan_tests {
+    use super::*;
+    use o3k_domain::{
+        EndpointIntent, Ipv4Prefix, NetworkPlanIntent, PolicyAction, PolicyIntent, RouteIntent,
+    };
+    use std::net::Ipv4Addr;
+
+    fn prefix(value: &str, length: u8) -> Ipv4Prefix {
+        Ipv4Prefix::new(value.parse().expect("test address"), length).expect("test prefix")
+    }
+
+    fn capabilities() -> HashSet<NetworkCapability> {
+        [
+            NetworkCapability::Ipv4,
+            NetworkCapability::EndpointAttachment,
+            NetworkCapability::Routing,
+            NetworkCapability::StatefulPolicy,
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    fn intent() -> NetworkIntent {
+        let id = Uuid::from_u128(1);
+        NetworkIntent {
+            id,
+            project_id: "project-a".to_owned(),
+            realm: AddressRealm {
+                id: Uuid::from_u128(2),
+                project_id: "project-a".to_owned(),
+                prefix: prefix("10.0.0.0", 24),
+                overlapping_prefixes: false,
+            },
+            endpoints: vec![EndpointIntent {
+                id: Uuid::from_u128(3),
+                project_id: "project-a".to_owned(),
+                mac: "02:00:00:00:00:03".to_owned(),
+                fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+                generation: 4,
+            }],
+            routes: vec![RouteIntent {
+                destination: prefix("0.0.0.0", 0),
+                next_hop: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            }],
+            policies: vec![PolicyIntent {
+                endpoint_id: Uuid::from_u128(3),
+                direction: "egress".to_owned(),
+                protocol: "tcp".to_owned(),
+                source: None,
+                destination: Some(prefix("0.0.0.0", 0)),
+                action: PolicyAction::Allow,
+            }],
+            generation: 5,
+        }
+    }
+
+    #[test]
+    fn prefixes_are_canonical_and_overlap_is_explicit() {
+        assert!(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 1), 24).is_none());
+        let broad = prefix("10.0.0.0", 16);
+        let narrow = prefix("10.0.1.0", 24);
+        assert!(broad.overlaps(narrow));
+        assert!(!prefix("10.1.0.0", 16).overlaps(narrow));
+    }
+
+    #[test]
+    fn plan_fingerprint_is_deterministic_and_semantic() {
+        let value = intent();
+        let operation = Uuid::from_u128(6);
+        let first = compile_node_network_plan(&value, "node-a", operation, &capabilities(), &[])
+            .expect("plan");
+        let second = compile_node_network_plan(&value, "node-a", operation, &capabilities(), &[])
+            .expect("plan");
+        assert_eq!(first, second);
+        assert_eq!(first.plan_id, value.id);
+        assert!(
+            first
+                .intents
+                .iter()
+                .any(|item| matches!(item, NetworkPlanIntent::EndpointAttachment { .. }))
+        );
+        assert_eq!(first.fingerprint_sha256.len(), 64);
+    }
+
+    #[test]
+    fn plan_rejects_overlap_before_provider_mutation() {
+        let existing = AddressRealm {
+            id: Uuid::from_u128(7),
+            project_id: "project-b".to_owned(),
+            prefix: prefix("10.0.0.0", 16),
+            overlapping_prefixes: false,
+        };
+        assert_eq!(
+            compile_node_network_plan(
+                &intent(),
+                "node-a",
+                Uuid::from_u128(6),
+                &capabilities(),
+                &[existing],
+            ),
+            Err(NetworkPlanError::OverlappingRealm)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_unsupported_capability_before_mutation() {
+        let mut missing = capabilities();
+        missing.remove(&NetworkCapability::Routing);
+        assert_eq!(
+            compile_node_network_plan(&intent(), "node-a", Uuid::from_u128(6), &missing, &[],),
+            Err(NetworkPlanError::UnsupportedCapability(
+                NetworkCapability::Routing
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_rejects_cross_project_endpoint() {
+        let mut value = intent();
+        value.endpoints[0].project_id = "project-b".to_owned();
+        assert_eq!(
+            compile_node_network_plan(&value, "node-a", Uuid::from_u128(6), &capabilities(), &[],),
+            Err(NetworkPlanError::AddressOutsideRealm)
+        );
+    }
 }
 
 /// The address that O3K is allowed to add to its managed bridge.
@@ -2883,6 +3013,117 @@ fn interface_identity(output: &str) -> Option<String> {
 }
 
 pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
+
+/// A deterministic, provider-independent compilation of canonical network
+/// intent. It contains semantic intents only; host commands and provider
+/// handles belong behind the execution boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeNetworkPlan {
+    pub plan_id: Uuid,
+    pub node_id: String,
+    pub operation_id: Uuid,
+    pub resource_generations: BTreeMap<Uuid, u64>,
+    pub intents: Vec<NetworkPlanIntent>,
+    pub fingerprint_sha256: String,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum NetworkPlanError {
+    #[error("network realm prefix overlaps an existing routed realm")]
+    OverlappingRealm,
+    #[error("network intent is outside its address realm")]
+    AddressOutsideRealm,
+    #[error("network intent requires unsupported capability {0:?}")]
+    UnsupportedCapability(NetworkCapability),
+    #[error("network intent has a conflicting endpoint identity")]
+    ConflictingEndpoint,
+    #[error("network plan serialization failed")]
+    Serialization,
+}
+
+/// Compiles one canonical intent into a stable semantic node plan. The
+/// `realms` slice represents existing routed realms in the selected profile;
+/// P9 rejects overlap before any provider mutation.
+pub fn compile_node_network_plan(
+    intent: &NetworkIntent,
+    node_id: &str,
+    operation_id: Uuid,
+    capabilities: &HashSet<NetworkCapability>,
+    realms: &[AddressRealm],
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if !intent.realm.overlapping_prefixes
+        && realms.iter().any(|realm| {
+            realm.id != intent.realm.id
+                && !realm.overlapping_prefixes
+                && realm.prefix.overlaps(intent.realm.prefix)
+        })
+    {
+        return Err(NetworkPlanError::OverlappingRealm);
+    }
+    require_capability(capabilities, NetworkCapability::Ipv4)?;
+    require_capability(capabilities, NetworkCapability::EndpointAttachment)?;
+    if !intent.routes.is_empty() {
+        require_capability(capabilities, NetworkCapability::Routing)?;
+    }
+    if !intent.policies.is_empty() {
+        require_capability(capabilities, NetworkCapability::StatefulPolicy)?;
+    }
+
+    let mut generations = BTreeMap::new();
+    let mut intents =
+        Vec::with_capacity(intent.endpoints.len() + intent.routes.len() + intent.policies.len());
+    for endpoint in &intent.endpoints {
+        if endpoint.project_id != intent.project_id
+            || !intent.realm.prefix.contains(endpoint.fixed_ip)
+        {
+            return Err(NetworkPlanError::AddressOutsideRealm);
+        }
+        if generations
+            .insert(endpoint.id, endpoint.generation)
+            .is_some()
+        {
+            return Err(NetworkPlanError::ConflictingEndpoint);
+        }
+        intents.push(NetworkPlanIntent::EndpointAttachment {
+            endpoint_id: endpoint.id,
+            mac: endpoint.mac.clone(),
+            fixed_ip: endpoint.fixed_ip,
+            generation: endpoint.generation,
+        });
+    }
+    intents.extend(intent.routes.iter().cloned().map(NetworkPlanIntent::Route));
+    intents.extend(
+        intent
+            .policies
+            .iter()
+            .cloned()
+            .map(NetworkPlanIntent::Policy),
+    );
+    intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+
+    let unsigned = (&intent.id, node_id, &operation_id, &generations, &intents);
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| NetworkPlanError::Serialization)?;
+    use sha2::{Digest, Sha256};
+    let fingerprint_sha256 = format!("{:x}", Sha256::digest(bytes));
+    Ok(NodeNetworkPlan {
+        plan_id: intent.id,
+        node_id: node_id.to_owned(),
+        operation_id,
+        resource_generations: generations,
+        intents,
+        fingerprint_sha256,
+    })
+}
+
+fn require_capability(
+    capabilities: &HashSet<NetworkCapability>,
+    capability: NetworkCapability,
+) -> Result<(), NetworkPlanError> {
+    capabilities
+        .contains(&capability)
+        .then_some(())
+        .ok_or(NetworkPlanError::UnsupportedCapability(capability))
+}
 
 /// Canonical binding state of a port on its selected host.
 ///

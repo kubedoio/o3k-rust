@@ -1,3 +1,10 @@
+mod network;
+
+pub use network::{
+    AddressRealm, EndpointIntent, Ipv4Prefix, NetworkCapability, NetworkIntent, NetworkPlanIntent,
+    PolicyAction, PolicyIntent, RouteIntent,
+};
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
