@@ -157,7 +157,7 @@ impl NetworkPlanRealizer for CompositeRealizer {
             self.public
                 .as_mut()
                 .ok_or(CompositeRealizerError::PublicNotConfigured)?
-                .remove()?;
+                .remove_for_plan(&plan.intents)?;
         }
         if plan.intents.iter().any(is_policy_intent) {
             self.policy
