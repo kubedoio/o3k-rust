@@ -25,7 +25,7 @@ const CHAIN: &str = "forward";
 const MARKER: &str = "o3k-p9-policy";
 const STATE_FILE: &str = "policy.json";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyEndpoint {
     pub endpoint_id: Uuid,
     pub address: Ipv4Addr,
@@ -35,6 +35,10 @@ pub struct PolicyEndpoint {
 struct Ownership {
     fingerprint: String,
     endpoint_ids: Vec<Uuid>,
+    #[serde(default)]
+    policies: Vec<PolicyIntent>,
+    #[serde(default)]
+    endpoints: Vec<PolicyEndpoint>,
 }
 
 trait PolicyCommand: Send + Sync {
@@ -114,30 +118,73 @@ impl StatefulPolicyProvider {
         intents: &[NetworkPlanIntent],
         endpoints: &[PolicyEndpoint],
     ) -> Result<(), PolicyNetworkError> {
-        let policies: Vec<&PolicyIntent> = intents
+        let policies: Vec<PolicyIntent> = intents
             .iter()
             .filter_map(|intent| match intent {
-                NetworkPlanIntent::Policy(policy) => Some(policy),
+                NetworkPlanIntent::Policy(policy) => Some(policy.clone()),
                 _ => None,
             })
             .collect();
-        let addresses: std::collections::HashMap<Uuid, Ipv4Addr> = endpoints
+        let current_addresses: std::collections::HashMap<Uuid, Ipv4Addr> = endpoints
             .iter()
             .map(|endpoint| (endpoint.endpoint_id, endpoint.address))
             .collect();
         for policy in &policies {
-            if !addresses.contains_key(&policy.endpoint_id) {
+            if !current_addresses.contains_key(&policy.endpoint_id) {
                 return Err(PolicyNetworkError::UnknownEndpoint);
             }
             validate_policy(policy)?;
         }
-        let fingerprint = fingerprint(&policies);
+        let current_endpoint_ids: std::collections::HashSet<Uuid> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.endpoint_id)
+            .collect();
+        let mut all_policies: Vec<PolicyIntent> = self
+            .ownership
+            .as_ref()
+            .map(|ownership| {
+                ownership
+                    .policies
+                    .iter()
+                    .filter(|policy| !current_endpoint_ids.contains(&policy.endpoint_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        all_policies.extend(policies);
+        let mut all_endpoints = self
+            .ownership
+            .as_ref()
+            .map(|ownership| ownership.endpoints.clone())
+            .unwrap_or_default();
+        for endpoint in endpoints {
+            if let Some(existing) = all_endpoints
+                .iter_mut()
+                .find(|existing| existing.endpoint_id == endpoint.endpoint_id)
+            {
+                *existing = endpoint.clone();
+            } else {
+                all_endpoints.push(endpoint.clone());
+            }
+        }
+        let addresses: std::collections::HashMap<Uuid, Ipv4Addr> = all_endpoints
+            .iter()
+            .map(|endpoint| (endpoint.endpoint_id, endpoint.address))
+            .collect();
+        for policy in &all_policies {
+            if !addresses.contains_key(&policy.endpoint_id) {
+                return Err(PolicyNetworkError::UnknownEndpoint);
+            }
+        }
+        let fingerprint = fingerprint(&all_policies);
         let ownership = Ownership {
             fingerprint,
-            endpoint_ids: endpoints
+            endpoint_ids: all_endpoints
                 .iter()
                 .map(|endpoint| endpoint.endpoint_id)
                 .collect(),
+            policies: all_policies,
+            endpoints: all_endpoints,
         };
         if self
             .ownership
@@ -153,7 +200,7 @@ impl StatefulPolicyProvider {
         // Persist the exact accepted scope before mutation so an interrupted
         // replacement is recoverable and never mistaken for no state.
         store_state(&self.root.join(STATE_FILE), &ownership)?;
-        self.ownership = Some(ownership);
+        self.ownership = Some(ownership.clone());
         if table_exists
             && !self
                 .command
@@ -210,7 +257,7 @@ impl StatefulPolicyProvider {
         {
             return Err(PolicyNetworkError::CommandFailed);
         }
-        for (index, policy) in policies.iter().enumerate() {
+        for (index, policy) in ownership.policies.iter().enumerate() {
             let endpoint_address = addresses[&policy.endpoint_id];
             let mut args = vec!["add", "rule", "ip", TABLE, CHAIN];
             let endpoint_value = endpoint_address.to_string();
@@ -304,6 +351,35 @@ impl StatefulPolicyProvider {
         Ok(())
     }
 
+    pub fn remove_for_plan(
+        &mut self,
+        intents: &[NetworkPlanIntent],
+        endpoints: &[PolicyEndpoint],
+    ) -> Result<(), PolicyNetworkError> {
+        let targets: std::collections::HashSet<Uuid> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                NetworkPlanIntent::Policy(policy) => Some(policy.endpoint_id),
+                _ => None,
+            })
+            .chain(endpoints.iter().map(|endpoint| endpoint.endpoint_id))
+            .collect();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        let Some(ownership) = &self.ownership else {
+            return Ok(());
+        };
+        if ownership
+            .policies
+            .iter()
+            .all(|policy| targets.contains(&policy.endpoint_id))
+        {
+            return self.remove();
+        }
+        self.apply(&[], endpoints)
+    }
+
     fn ensure_foreign_safe(&self) -> Result<bool, PolicyNetworkError> {
         let (success, output) = self
             .command
@@ -347,7 +423,7 @@ fn protocol_name(protocol: NetworkProtocol) -> Option<&'static str> {
     }
 }
 
-fn fingerprint(policies: &[&PolicyIntent]) -> String {
+fn fingerprint(policies: &[PolicyIntent]) -> String {
     format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(policies).unwrap_or_default())
@@ -476,6 +552,51 @@ mod tests {
             Err(PolicyNetworkError::ForeignState)
         ));
         assert_eq!(command.calls.lock().expect("calls").len(), 1);
+    }
+
+    #[test]
+    fn policy_realization_preserves_unrelated_endpoint_rules() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let first_endpoint = PolicyEndpoint {
+            endpoint_id: first,
+            address: Ipv4Addr::new(10, 0, 0, 2),
+        };
+        let second_endpoint = PolicyEndpoint {
+            endpoint_id: second,
+            address: Ipv4Addr::new(10, 0, 0, 3),
+        };
+        provider
+            .apply(&[policy(first)], std::slice::from_ref(&first_endpoint))
+            .expect("first policy");
+        provider
+            .apply(&[policy(second)], std::slice::from_ref(&second_endpoint))
+            .expect("second policy");
+        assert_eq!(
+            provider
+                .ownership
+                .as_ref()
+                .expect("ownership")
+                .policies
+                .len(),
+            2
+        );
+        provider
+            .remove_for_plan(&[policy(first)], std::slice::from_ref(&first_endpoint))
+            .expect("remove first policy");
+        let ownership = provider.ownership.as_ref().expect("remaining ownership");
+        assert_eq!(ownership.policies.len(), 1);
+        assert_eq!(ownership.policies[0].endpoint_id, second);
     }
 
     #[test]
