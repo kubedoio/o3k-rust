@@ -60,10 +60,14 @@ PY
 
 cleanup() {
     set +e
-    [[ -n "$guest_server_pid" ]] && kill "$guest_server_pid" 2>/dev/null
-    [[ -n "$external_server_pid" ]] && kill "$external_server_pid" 2>/dev/null
-    [[ -n "$guest_pid" ]] && kill "$guest_pid" 2>/dev/null
-    [[ -n "$external_pid" ]] && kill "$external_pid" 2>/dev/null
+    [[ -n "$guest_server_pid" ]] && kill -- -"$guest_server_pid" 2>/dev/null
+    [[ -n "$external_server_pid" ]] && kill -- -"$external_server_pid" 2>/dev/null
+    [[ -n "$guest_pid" ]] && kill -- -"$guest_pid" 2>/dev/null
+    [[ -n "$external_pid" ]] && kill -- -"$external_pid" 2>/dev/null
+    [[ -n "$guest_server_pid" ]] && wait "$guest_server_pid" 2>/dev/null
+    [[ -n "$external_server_pid" ]] && wait "$external_server_pid" 2>/dev/null
+    [[ -n "$guest_pid" ]] && wait "$guest_pid" 2>/dev/null
+    [[ -n "$external_pid" ]] && wait "$external_pid" 2>/dev/null
     nft delete table ip "$table_name" 2>/dev/null
     ip link del "$router_guest" 2>/dev/null
     ip link del "$router_external" 2>/dev/null
@@ -76,9 +80,9 @@ fail() {
     exit 1
 }
 
-unshare -n --fork --pid --mount-proc sleep 120 &
+setsid unshare -n sleep 120 &
 guest_pid=$!
-unshare -n --fork --pid --mount-proc sleep 120 &
+setsid unshare -n sleep 120 &
 external_pid=$!
 sleep 0.1
 
@@ -130,14 +134,14 @@ table ip $table_name {
 }
 EOF
 
-ns "$external_pid" python3 -m http.server 8081 --bind 198.51.100.2 \
+setsid nsenter -t "$external_pid" -n -- python3 -m http.server 8081 --bind 198.51.100.2 \
     >/dev/null 2>&1 &
 external_server_pid=$!
 sleep 0.2
 ns "$guest_pid" curl --fail --silent --show-error --max-time 3 \
     http://198.51.100.2:8081/ >/dev/null || fail egress_or_snat
 
-ns "$guest_pid" python3 -m http.server 8080 --bind 10.0.0.2 \
+setsid nsenter -t "$guest_pid" -n -- python3 -m http.server 8080 --bind 10.0.0.2 \
     >/dev/null 2>&1 &
 guest_server_pid=$!
 sleep 0.2
@@ -155,5 +159,18 @@ fi
 nft list table ip "$table_name" >/dev/null || fail owned_table_missing
 cleanup
 trap - EXIT
+if nft list table ip "$table_name" >/dev/null 2>&1; then
+    write_result failed owned_nft_table_remains
+    exit 1
+fi
+if ip link show "$router_guest" >/dev/null 2>&1 \
+    || ip link show "$router_external" >/dev/null 2>&1; then
+    write_result failed owned_router_link_remains
+    exit 1
+fi
+if kill -0 "$guest_pid" 2>/dev/null || kill -0 "$external_pid" 2>/dev/null; then
+    write_result failed isolated_namespace_process_remains
+    exit 1
+fi
 write_result passed isolated_linux_packet_path_only
 echo "P9 isolated packet path passed (real VM gate remains unverified)"
