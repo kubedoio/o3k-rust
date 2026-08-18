@@ -104,6 +104,7 @@ struct Journal {
 pub enum PlanAdmission {
     Accepted,
     Replayed,
+    ReplayedUnknown,
     RequiresObservation,
 }
 
@@ -192,9 +193,8 @@ impl NetworkPlanExecutor {
                     NetworkPlanStatus::Accepted | NetworkPlanStatus::Applying => {
                         PlanAdmission::RequiresObservation
                     }
-                    NetworkPlanStatus::Succeeded | NetworkPlanStatus::Unknown => {
-                        PlanAdmission::Replayed
-                    }
+                    NetworkPlanStatus::Succeeded => PlanAdmission::Replayed,
+                    NetworkPlanStatus::Unknown => PlanAdmission::ReplayedUnknown,
                 });
             }
             return Err(NetworkExecutionError::ConflictingReplay);
@@ -835,7 +835,7 @@ mod tests {
         ));
         assert_eq!(
             executor.admit(&command, 2)?,
-            PlanAdmission::Replayed,
+            PlanAdmission::ReplayedUnknown,
             "a duplicate must not mutate while the outcome is unknown"
         );
         realizer.observed = true;

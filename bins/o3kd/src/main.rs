@@ -114,7 +114,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
             .await
             .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
         match result.status.as_str() {
-            "succeeded" | "replayed" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
+            "succeeded" | "replayed" | "recovered" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
             "unknown" | "requires_observation" => Ok(o3k_network::NetworkPlanStatus::Unknown),
             other => Err(o3k_network::NetworkDispatchError::Rejected(
                 if result.error_code.is_empty() {

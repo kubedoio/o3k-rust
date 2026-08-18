@@ -147,7 +147,14 @@ where
         let (status, replayed) = match admission {
             PlanAdmission::Accepted => ("succeeded", false),
             PlanAdmission::Replayed => ("replayed", true),
-            PlanAdmission::RequiresObservation => ("requires_observation", true),
+            PlanAdmission::ReplayedUnknown | PlanAdmission::RequiresObservation => {
+                match executor.reconcile(command_id, realizer) {
+                    Ok(o3k_network::NetworkPlanStatus::Succeeded) => ("recovered", true),
+                    Ok(o3k_network::NetworkPlanStatus::Unknown) | Err(_) => ("unknown", true),
+                    Ok(o3k_network::NetworkPlanStatus::Accepted)
+                    | Ok(o3k_network::NetworkPlanStatus::Applying) => ("unknown", true),
+                }
+            }
         };
         Ok(CommandResult {
             command_id: command.command_id.clone(),
@@ -235,6 +242,10 @@ fn error_code(error: &NetworkAgentError) -> &'static str {
 mod tests {
     use super::*;
     use prost::Message;
+    use std::{
+        collections::BTreeMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     struct NoopRealizer;
 
@@ -247,6 +258,27 @@ mod tests {
 
         fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
             Ok(())
+        }
+    }
+
+    struct ObservingRealizer {
+        observations: Arc<AtomicUsize>,
+    }
+
+    impl NetworkPlanRealizer for ObservingRealizer {
+        type Error = &'static str;
+
+        fn realize(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            Err("recovery must not repeat host mutation")
+        }
+
+        fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            Err("recovery must not repeat host mutation")
+        }
+
+        fn observe(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<bool, Self::Error> {
+            self.observations.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
         }
     }
 
@@ -300,6 +332,85 @@ mod tests {
             result,
             Err(NetworkAgentError::Malformed("stale agent identity"))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn replayed_accepted_command_observes_and_recovers_without_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-network-agent-{}", Uuid::now_v7()));
+        let agent = NetworkAgentIdentity {
+            agent_id: "agent-a".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+        };
+        let controller = NetworkControllerLease {
+            controller_id: "controller".to_owned(),
+            controller_epoch: "epoch-1".to_owned(),
+            fencing_token: 1,
+        };
+        let operation_id = Uuid::now_v7();
+        let deadline_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as u64
+            + 60_000;
+        let plan = o3k_network::NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::now_v7(),
+            node_id: agent.agent_id.clone(),
+            operation_id,
+            deadline_unix_ms,
+            resource_generations: BTreeMap::new(),
+            intents: Vec::new(),
+            fingerprint_sha256: "0".repeat(64),
+        };
+        let command = NetworkPlanCommand {
+            command_id: Uuid::now_v7(),
+            operation_id,
+            idempotency_key: "network-recovery".to_owned(),
+            action: NetworkPlanAction::Apply,
+            target: agent.clone(),
+            controller: controller.clone(),
+            deadline_unix_ms,
+            plan: plan.clone(),
+        };
+        let executor =
+            NetworkPlanExecutor::open(&root, agent.clone(), controller.clone()).expect("executor");
+        executor
+            .admit(&command, deadline_unix_ms - 1)
+            .expect("accepted journal entry");
+        drop(executor);
+
+        let observations = Arc::new(AtomicUsize::new(0));
+        let service = NetworkAgentService::new(
+            NetworkPlanExecutor::open(&root, agent.clone(), controller.clone()).expect("restart"),
+            ObservingRealizer {
+                observations: Arc::clone(&observations),
+            },
+        );
+        service
+            .register(&proto::Register {
+                agent_id: agent.agent_id.clone(),
+                agent_epoch: agent.agent_epoch.clone(),
+            })
+            .expect("registration");
+        let result = service
+            .execute(&proto::NetworkCommand {
+                command_id: command.command_id.to_string(),
+                operation_id: operation_id.to_string(),
+                idempotency_key: command.idempotency_key,
+                agent_id: agent.agent_id,
+                agent_epoch: agent.agent_epoch,
+                controller_id: controller.controller_id,
+                controller_epoch: controller.controller_epoch,
+                fencing_token: controller.fencing_token,
+                deadline_unix_ms,
+                plan_json: serde_json::to_string(&plan).expect("plan json"),
+                remove: false,
+            })
+            .expect("recovery result");
+        assert_eq!(result.status, "recovered");
+        assert!(result.replayed);
+        assert_eq!(observations.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 }
