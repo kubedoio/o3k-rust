@@ -552,7 +552,11 @@ mod tests {
     fn supervisor_is_nonblocking_restartable_and_owned() -> Result<(), DhcpError> {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = std::env::temp_dir().join(format!("o3k-dhcp-supervisor-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "o3k-dhcp-supervisor-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
         fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
         let binary = root.join("fake-dnsmasq.sh");
         fs::write(&binary, "#!/bin/sh\ntrap 'exit 0' TERM INT HUP\nsleep 30\n")
