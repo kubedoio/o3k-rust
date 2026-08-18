@@ -5,7 +5,11 @@
 //! Admission is journaled before a provider is called so a reconnect can
 //! replay the accepted identity instead of issuing a second mutation.
 
-use crate::NodeNetworkPlan;
+use crate::{
+    GatewaySpec, HostNetworkConfig, HostNetworkError, HostNetworkManager, NodeNetworkPlan, TapSpec,
+};
+use o3k_dhcp::{Binding as DhcpBinding, DhcpConfig, DhcpError, DhcpService, DnsmasqSupervisor};
+use o3k_domain::NetworkPlanIntent;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
@@ -342,6 +346,141 @@ pub trait NetworkPlanRealizer {
 
     fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
         Ok(false)
+    }
+}
+
+/// The Slice 2 flat-network realization. It owns only the bridge, TAPs and
+/// DHCP process recorded under the supplied execution roots. Routed/NAT/policy
+/// intents are deliberately rejected here until their Linux provider slice is
+/// activated, so a flat agent cannot silently broaden its capability claim.
+pub struct FlatNetworkRealizer {
+    network: HostNetworkManager,
+    dhcp: DhcpService,
+    dnsmasq_binary: PathBuf,
+    supervisor: Option<DnsmasqSupervisor>,
+}
+
+#[derive(Debug, Error)]
+pub enum FlatNetworkError {
+    #[error("flat network host realization failed: {0}")]
+    Host(#[from] HostNetworkError),
+    #[error("flat network DHCP realization failed: {0}")]
+    Dhcp(#[from] DhcpError),
+    #[error("flat network plan contains an unsupported routed intent")]
+    UnsupportedIntent,
+    #[error("flat network plan has no address realm")]
+    MissingRealm,
+    #[error("flat network observation found an unresolved owned endpoint")]
+    MissingEndpoint,
+}
+
+impl FlatNetworkRealizer {
+    pub fn open(
+        network: HostNetworkConfig,
+        network_ownership_root: impl Into<PathBuf>,
+        dhcp_root: impl Into<PathBuf>,
+        dnsmasq_binary: impl Into<PathBuf>,
+    ) -> Result<Self, FlatNetworkError> {
+        Ok(Self {
+            network: HostNetworkManager::with_ownership_root(network, network_ownership_root)?,
+            dhcp: DhcpService::open(dhcp_root)?,
+            dnsmasq_binary: dnsmasq_binary.into(),
+            supervisor: None,
+        })
+    }
+
+    fn unsupported(intent: &NetworkPlanIntent) -> bool {
+        matches!(
+            intent,
+            NetworkPlanIntent::Route(_)
+                | NetworkPlanIntent::Gateway(_)
+                | NetworkPlanIntent::Egress(_)
+                | NetworkPlanIntent::PublicAddressBinding(_)
+                | NetworkPlanIntent::Policy(_)
+        )
+    }
+}
+
+impl NetworkPlanRealizer for FlatNetworkRealizer {
+    type Error = FlatNetworkError;
+
+    fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if plan.intents.iter().any(Self::unsupported) {
+            return Err(FlatNetworkError::UnsupportedIntent);
+        }
+        let (prefix, gateway) = plan
+            .intents
+            .iter()
+            .find_map(|intent| match intent {
+                NetworkPlanIntent::AddressRealm {
+                    prefix, gateway, ..
+                } => Some((prefix, *gateway)),
+                _ => None,
+            })
+            .ok_or(FlatNetworkError::MissingRealm)?;
+        self.network.ensure_bridge()?;
+        self.network.ensure_gateway(GatewaySpec {
+            address: gateway,
+            prefix_len: prefix.prefix_len,
+        })?;
+        self.dhcp.configure(DhcpConfig {
+            subnet: format!("{}/{}", prefix.network, prefix.prefix_len),
+            gateway,
+            dns: Vec::new(),
+            interface: self
+                .network
+                .bridge_name()
+                .ok_or(FlatNetworkError::MissingRealm)?,
+            lease_seconds: 3600,
+        })?;
+        for intent in &plan.intents {
+            if let NetworkPlanIntent::EndpointAttachment {
+                endpoint_id,
+                mac,
+                fixed_ip,
+                ..
+            } = intent
+            {
+                let endpoint_id = endpoint_id.to_string();
+                self.network.ensure_tap(&TapSpec {
+                    instance_id: plan.plan_id.to_string(),
+                    port_id: endpoint_id.clone(),
+                    mac: mac.clone(),
+                })?;
+                self.dhcp.upsert_binding(DhcpBinding {
+                    port_id: endpoint_id,
+                    mac: mac.clone(),
+                    address: *fixed_ip,
+                })?;
+            }
+        }
+        match self.supervisor.as_mut() {
+            Some(supervisor) => self.dhcp.reload(supervisor)?,
+            None => self.supervisor = Some(self.dhcp.start(&self.dnsmasq_binary)?),
+        }
+        Ok(())
+    }
+
+    fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        for intent in &plan.intents {
+            if let NetworkPlanIntent::EndpointAttachment { endpoint_id, .. } = intent {
+                let spec = TapSpec {
+                    instance_id: plan.plan_id.to_string(),
+                    port_id: endpoint_id.to_string(),
+                    mac: match intent {
+                        NetworkPlanIntent::EndpointAttachment { mac, .. } => mac.clone(),
+                        _ => unreachable!(),
+                    },
+                };
+                self.network
+                    .resolve_owned_tap(&spec)
+                    .map_err(FlatNetworkError::Host)?;
+                if self.dhcp.binding(&endpoint_id.to_string()).is_none() {
+                    return Err(FlatNetworkError::MissingEndpoint);
+                }
+            }
+        }
+        Ok(true)
     }
 }
 

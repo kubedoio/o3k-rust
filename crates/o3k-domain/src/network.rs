@@ -217,6 +217,11 @@ pub enum NetworkCapability {
 /// Provider-independent intent carried by a node plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkPlanIntent {
+    AddressRealm {
+        realm_id: Uuid,
+        prefix: Ipv4Prefix,
+        gateway: Ipv4Addr,
+    },
     EndpointAttachment {
         endpoint_id: Uuid,
         mac: String,

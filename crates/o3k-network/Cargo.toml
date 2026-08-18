@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+o3k-dhcp = { path = "../o3k-dhcp" }
 o3k-domain = { path = "../o3k-domain" }
 o3k-kernel = { path = "../o3k-kernel" }
 o3k-store = { path = "../o3k-store" }

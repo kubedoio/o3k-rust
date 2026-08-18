@@ -22,8 +22,9 @@ use uuid::Uuid;
 
 pub mod execution;
 pub use execution::{
-    NetworkAgentIdentity, NetworkControllerLease, NetworkExecutionError, NetworkPlanCommand,
-    NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus, PlanAdmission, journal_path,
+    FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
+    NetworkExecutionError, NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer,
+    NetworkPlanStatus, PlanAdmission, journal_path,
 };
 
 /// Poll interval while waiting for a freshly created TAP address to settle.
@@ -2715,6 +2716,11 @@ impl HostNetworkManager {
             .and_then(|store| store.lock().ok().map(|guard| guard.path.clone()))
     }
 
+    /// Returns the configured bridge identity for bounded execution adapters.
+    pub fn bridge_name(&self) -> Option<String> {
+        Some(self.config.bridge_name.clone())
+    }
+
     fn bridge_is_owned_output(&self, output: &NetworkCommandOutput) -> bool {
         let Some(identity) = interface_identity(&output.stdout) else {
             return false;
@@ -3392,6 +3398,16 @@ pub fn compile_node_network_plan(
     }
     let mut intents =
         Vec::with_capacity(intent.endpoints.len() + intent.routes.len() + intent.policies.len());
+    let gateway = intent
+        .address_pools
+        .iter()
+        .find_map(|pool| pool.gateway)
+        .unwrap_or_else(|| Ipv4Addr::from(u32::from(intent.realm.prefix.network) + 1));
+    intents.push(NetworkPlanIntent::AddressRealm {
+        realm_id: intent.realm.id,
+        prefix: intent.realm.prefix,
+        gateway,
+    });
     for endpoint in &intent.endpoints {
         if endpoint.project_id != intent.project_id
             || !intent.realm.prefix.contains(endpoint.fixed_ip)
