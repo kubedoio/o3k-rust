@@ -285,6 +285,12 @@ mod transport_tests {
     #[tokio::test]
     async fn m_tls_client_dispatches_a_fenced_plan_to_the_executor()
     -> Result<(), Box<dyn std::error::Error>> {
+        // The workspace also uses rustls through sqlx and tonic.  Those
+        // integrations do not guarantee that a process-level provider has
+        // been selected before this binary-only test constructs TLS state.
+        // Install the explicitly configured provider so the test is
+        // independent of test ordering.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let root = std::env::temp_dir().join(format!("o3k-network-transport-{}", Uuid::now_v7()));
