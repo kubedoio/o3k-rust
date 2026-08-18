@@ -163,7 +163,7 @@ impl NetworkPlanRealizer for CompositeRealizer {
             self.policy
                 .as_mut()
                 .ok_or(CompositeRealizerError::PolicyNotConfigured)?
-                .remove()?;
+                .remove_for_plan(&plan.intents, &policy_endpoints(plan))?;
         }
         if plan.intents.iter().any(is_routed_intent) {
             self.routed
