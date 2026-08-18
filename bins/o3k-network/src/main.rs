@@ -254,3 +254,116 @@ fn policy_endpoints(plan: &NodeNetworkPlan) -> Vec<PolicyEndpoint> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod transport_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use uuid::Uuid;
+
+    struct NoopRealizer;
+
+    impl NetworkPlanRealizer for NoopRealizer {
+        type Error = std::convert::Infallible;
+
+        fn realize(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn remove(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/o3k-compute-agent/tests/fixtures")
+            .join(name)
+    }
+
+    #[tokio::test]
+    async fn m_tls_client_dispatches_a_fenced_plan_to_the_executor()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let root = std::env::temp_dir().join(format!("o3k-network-transport-{}", Uuid::now_v7()));
+        let executor = NetworkPlanExecutor::open(
+            &root,
+            NetworkAgentIdentity {
+                agent_id: "agent-transport".to_owned(),
+                agent_epoch: "epoch-1".to_owned(),
+            },
+            NetworkControllerLease {
+                controller_id: "controller-transport".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+        )?;
+        let service = agent::NetworkAgentService::new(executor, NoopRealizer);
+        let tls = ServerTlsConfig::new()
+            .identity(Identity::from_pem(
+                fs::read(fixture("server-chain.pem"))?,
+                fs::read(fixture("server-key.pem"))?,
+            ))
+            .client_ca_root(Certificate::from_pem(fs::read(fixture("ca.pem"))?));
+        let server_task = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(tls)
+                .expect("tls")
+                .add_service(NetworkAgentServer::new(service))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+        });
+        let operation_id = Uuid::now_v7();
+        let deadline_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_millis() as u64
+            + 60_000;
+        let plan = NodeNetworkPlan {
+            schema_version: 1,
+            plan_id: Uuid::now_v7(),
+            node_id: "agent-transport".to_owned(),
+            operation_id,
+            deadline_unix_ms,
+            resource_generations: BTreeMap::new(),
+            intents: Vec::new(),
+            fingerprint_sha256: "0".repeat(64),
+        };
+        let client = o3k_network_protocol::NetworkAgentClient::connect(
+            &format!("https://{address}"),
+            "o3k-control-plane",
+            fixture("ca.pem"),
+            fixture("agent-chain.pem"),
+            fixture("agent-key-pkcs8.pem"),
+        )
+        .await?;
+        let result = client
+            .execute(
+                agent::proto::Register {
+                    agent_id: "agent-transport".to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                },
+                agent::proto::NetworkCommand {
+                    command_id: Uuid::now_v7().to_string(),
+                    operation_id: operation_id.to_string(),
+                    idempotency_key: "transport-test".to_owned(),
+                    agent_id: "agent-transport".to_owned(),
+                    agent_epoch: "epoch-1".to_owned(),
+                    controller_id: "controller-transport".to_owned(),
+                    controller_epoch: "epoch-1".to_owned(),
+                    fencing_token: 1,
+                    deadline_unix_ms,
+                    plan_json: serde_json::to_string(&plan)?,
+                    remove: false,
+                },
+            )
+            .await?;
+        assert_eq!(result.status, "succeeded");
+        assert!(!result.replayed);
+        server_task.abort();
+        let _ = server_task.await;
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+}
