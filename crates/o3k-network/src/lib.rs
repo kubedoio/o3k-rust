@@ -21,11 +21,15 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod public;
 pub mod routed;
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
     NetworkExecutionError, NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer,
     NetworkPlanStatus, PlanAdmission, journal_path,
+};
+pub use public::{
+    PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
 };
 pub use routed::{LinuxRoutedProvider, RoutedExternalConfig, RoutedNetworkError};
 
