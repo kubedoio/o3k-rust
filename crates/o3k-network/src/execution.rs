@@ -1,9 +1,9 @@
 //! The node-local network execution boundary.
 //!
-//! This module deliberately stops at plan admission.  The control plane owns
-//! the semantic [`NodeNetworkPlan`]; a network provider owns host mutation.
-//! Admission is journaled before a provider is called so a reconnect can
-//! replay the accepted identity instead of issuing a second mutation.
+//! The control plane owns the semantic [`NodeNetworkPlan`]; a network provider
+//! owns host mutation behind [`NetworkPlanRealizer`]. Admission and mutation
+//! outcomes are journaled so a reconnect can replay accepted identity and
+//! observe an interrupted provider call instead of issuing a blind duplicate.
 
 use crate::{
     GatewaySpec, HostNetworkConfig, HostNetworkError, HostNetworkManager, NodeNetworkPlan, TapSpec,
