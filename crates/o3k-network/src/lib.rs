@@ -21,7 +21,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod policy;
 pub mod public;
+pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
