@@ -265,6 +265,7 @@ impl LinuxRoutedProvider {
             .run("ip", &["route", "del", &route, "dev", &ownership.bridge])
             .map_err(RoutedNetworkError::Storage)?
         {
+            self.ownership = Some(ownership);
             return Err(RoutedNetworkError::CommandFailed);
         }
         if ownership.forwarding_enabled_by_o3k
@@ -432,6 +433,7 @@ mod tests {
     struct FakeCommand {
         calls: Mutex<Vec<(String, Vec<String>)>>,
         table_output: Mutex<(bool, String)>,
+        fail_route_delete: Mutex<bool>,
     }
 
     impl FakeCommand {
@@ -439,6 +441,7 @@ mod tests {
             Self {
                 calls: Mutex::new(Vec::new()),
                 table_output: Mutex::new((table_output.0, table_output.1.to_owned())),
+                fail_route_delete: Mutex::new(false),
             }
         }
     }
@@ -463,6 +466,12 @@ mod tests {
                 program.to_owned(),
                 args.iter().map(|arg| (*arg).to_owned()).collect(),
             ));
+            if program == "ip"
+                && args.starts_with(&["route", "del"])
+                && *self.fail_route_delete.lock().expect("route failure")
+            {
+                return Ok(false);
+            }
             Ok(true)
         }
     }
@@ -594,6 +603,29 @@ mod tests {
                 .iter()
                 .any(|call| { call.0 == "sysctl" && call.1 == ["-w", "net.ipv4.ip_forward=0"] })
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn route_delete_failure_keeps_owned_state_retryable() {
+        let root = std::env::temp_dir().join(format!("o3k-routed-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand::new((false, "")));
+        let mut provider = LinuxRoutedProvider::with_command(
+            config(),
+            &root,
+            Arc::clone(&command) as Arc<dyn RoutedCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(&intents(true, Uuid::from_u128(9)))
+            .expect("routed apply");
+        *command.fail_route_delete.lock().expect("route failure") = true;
+        assert!(matches!(
+            provider.remove(),
+            Err(RoutedNetworkError::CommandFailed)
+        ));
+        *command.fail_route_delete.lock().expect("route failure") = false;
+        provider.remove().expect("retry cleanup");
         let _ = fs::remove_dir_all(root);
     }
 }
