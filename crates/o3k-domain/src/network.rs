@@ -76,6 +76,33 @@ pub struct NetworkIntent {
     pub routes: Vec<RouteIntent>,
     pub policies: Vec<PolicyIntent>,
     pub generation: u64,
+    pub state: NetworkIntentState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkIntentState {
+    Requested,
+    Active,
+    Deleting,
+    Error,
+}
+
+impl NetworkIntentState {
+    pub fn transition(self, next: Self) -> Result<Self, &'static str> {
+        let valid = matches!(
+            (self, next),
+            (Self::Requested, Self::Active)
+                | (Self::Requested, Self::Deleting)
+                | (Self::Requested, Self::Error)
+                | (Self::Active, Self::Deleting)
+                | (Self::Active, Self::Error)
+                | (Self::Deleting, Self::Error)
+        );
+        valid
+            .then_some(next)
+            .ok_or("invalid network intent transition")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

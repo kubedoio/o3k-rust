@@ -164,6 +164,15 @@ pub struct NetworkIntentRecord {
     pub status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkAddressAllocationRecord {
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub endpoint_id: Uuid,
+    pub operation_id: String,
+    pub address: Ipv4Addr,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacementInventoryRecord {
     pub resource_class: String,
@@ -576,6 +585,10 @@ pub enum StoreError {
     NetworkInUse,
     #[error("network intent not found")]
     NetworkIntentNotFound,
+    #[error("network address pool is exhausted")]
+    NetworkAddressExhausted,
+    #[error("network address allocation conflict")]
+    NetworkAddressConflict,
     #[error("placement provider not found")]
     PlacementProviderNotFound,
     #[error("placement provider generation is stale")]
@@ -949,6 +962,19 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
 pub trait NetworkRepository: Send + Sync + QuotaRepository {
+    async fn allocate_network_address(
+        &self,
+        realm_id: &Uuid,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        operation_id: &str,
+        prefix: &str,
+    ) -> Result<NetworkAddressAllocationRecord, StoreError>;
+    async fn release_network_address(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError>;
     async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError>;
     async fn list_network_intents(
         &self,
@@ -2286,6 +2312,112 @@ impl SqliteStore {
         } else {
             Ok(())
         }
+    }
+
+    pub async fn allocate_network_address(
+        &self,
+        realm_id: &Uuid,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        operation_id: &str,
+        prefix: &str,
+    ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        let (network, prefix_len) = parse_ipv4_prefix(prefix)?;
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+
+        let existing = sqlx::query(
+            "SELECT realm_id, project_id, endpoint_id, operation_id, address
+             FROM network_address_allocations WHERE endpoint_id = ? OR operation_id = ?",
+        )
+        .bind(endpoint_id.to_string())
+        .bind(operation_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(StoreError::Database)?;
+        if let Some(row) = existing {
+            let existing_realm: String = row.get("realm_id");
+            let existing_project: String = row.get("project_id");
+            let existing_endpoint: String = row.get("endpoint_id");
+            let existing_operation: String = row.get("operation_id");
+            if existing_realm == realm_id.to_string()
+                && existing_project == project_id
+                && existing_endpoint == endpoint_id.to_string()
+                && existing_operation == operation_id
+            {
+                let allocation = network_allocation_from_row(&row)?;
+                sqlx::query("COMMIT")
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(StoreError::Database)?;
+                return Ok(allocation);
+            }
+            let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+            return Err(StoreError::NetworkAddressConflict);
+        }
+
+        let occupied =
+            sqlx::query("SELECT address FROM network_address_allocations WHERE realm_id = ?")
+                .bind(realm_id.to_string())
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(StoreError::Database)?;
+        let occupied: std::collections::HashSet<Ipv4Addr> = occupied
+            .iter()
+            .filter_map(|row| row.get::<String, _>("address").parse().ok())
+            .collect();
+        let (first, last) = allocation_bounds(network, prefix_len);
+        let address = (first..=last)
+            .map(Ipv4Addr::from)
+            .find(|candidate| !occupied.contains(candidate))
+            .ok_or(StoreError::NetworkAddressExhausted)?;
+        sqlx::query(
+            "INSERT INTO network_address_allocations (realm_id, project_id, endpoint_id, operation_id, address)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(realm_id.to_string())
+        .bind(project_id)
+        .bind(endpoint_id.to_string())
+        .bind(operation_id)
+        .bind(address.to_string())
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Database(database) if database.is_unique_violation() => {
+                StoreError::NetworkAddressConflict
+            }
+            other => StoreError::Database(other),
+        })?;
+        sqlx::query("COMMIT")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
+        Ok(NetworkAddressAllocationRecord {
+            realm_id: *realm_id,
+            project_id: project_id.to_owned(),
+            endpoint_id: *endpoint_id,
+            operation_id: operation_id.to_owned(),
+            address,
+        })
+    }
+
+    pub async fn release_network_address(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "DELETE FROM network_address_allocations WHERE project_id = ? AND endpoint_id = ?",
+        )
+        .bind(project_id)
+        .bind(endpoint_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        Ok(())
     }
 
     pub async fn insert_network_intent(
@@ -3753,6 +3885,53 @@ fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreErro
     Ok(())
 }
 
+fn parse_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {
+    let (address, length) = value
+        .split_once('/')
+        .ok_or_else(|| StoreError::Corrupt("network prefix is missing length".to_owned()))?;
+    let address = address
+        .parse::<Ipv4Addr>()
+        .map_err(|_| StoreError::Corrupt("network prefix has invalid address".to_owned()))?;
+    let prefix_len = length
+        .parse::<u8>()
+        .map_err(|_| StoreError::Corrupt("network prefix has invalid length".to_owned()))?;
+    if prefix_len > 30 {
+        return Err(StoreError::Corrupt(
+            "network allocation prefix must leave usable addresses".to_owned(),
+        ));
+    }
+    let mask = u32::MAX << (32 - prefix_len);
+    let network = u32::from(address) & mask;
+    if network != u32::from(address) {
+        return Err(StoreError::Corrupt(
+            "network prefix is not canonical".to_owned(),
+        ));
+    }
+    Ok((network, prefix_len))
+}
+
+fn allocation_bounds(network: u32, prefix_len: u8) -> (u32, u32) {
+    let size = 1u32 << (32 - prefix_len);
+    (network + 1, network + size - 2)
+}
+
+fn network_allocation_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<NetworkAddressAllocationRecord, StoreError> {
+    Ok(NetworkAddressAllocationRecord {
+        realm_id: Uuid::parse_str(row.get::<&str, _>("realm_id"))
+            .map_err(StoreError::InvalidUuid)?,
+        project_id: row.get("project_id"),
+        endpoint_id: Uuid::parse_str(row.get::<&str, _>("endpoint_id"))
+            .map_err(StoreError::InvalidUuid)?,
+        operation_id: row.get("operation_id"),
+        address: row
+            .get::<String, _>("address")
+            .parse()
+            .map_err(|_| StoreError::Corrupt("invalid allocated network address".to_owned()))?,
+    })
+}
+
 fn network_intent_from_row(
     row: &sqlx::sqlite::SqliteRow,
 ) -> Result<NetworkIntentRecord, StoreError> {
@@ -5148,6 +5327,26 @@ impl ImageRepository for SqliteStore {
 
 #[async_trait]
 impl NetworkRepository for SqliteStore {
+    async fn allocate_network_address(
+        &self,
+        realm_id: &Uuid,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        operation_id: &str,
+        prefix: &str,
+    ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        self.allocate_network_address(realm_id, project_id, endpoint_id, operation_id, prefix)
+            .await
+    }
+
+    async fn release_network_address(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.release_network_address(project_id, endpoint_id).await
+    }
+
     async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
         self.insert_network_intent(intent).await
     }

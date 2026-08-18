@@ -42,6 +42,62 @@ pub struct HostNetworkConfig {
     pub uplink: Option<String>,
 }
 
+/// Stable shared vocabulary for the P9 control-plane boundary. These values
+/// are used by authorization, quota, audit, and compatibility projections;
+/// provider-native names never become part of this vocabulary.
+pub struct NetworkVocabulary;
+
+impl NetworkVocabulary {
+    pub fn actions() -> Vec<ActionId> {
+        [
+            "CreateNetworkIntent",
+            "ReadNetworkIntent",
+            "UpdateNetworkIntent",
+            "DeleteNetworkIntent",
+            "AllocateAddress",
+            "ReleaseAddress",
+        ]
+        .into_iter()
+        .map(|action| ActionId::new_unchecked("network", action))
+        .collect()
+    }
+
+    pub fn resources() -> Vec<ResourceType> {
+        ["network_intent", "endpoint", "address_allocation"]
+            .into_iter()
+            .map(|name| ResourceType::new_unchecked("network", name))
+            .collect()
+    }
+
+    pub fn quota_keys() -> Vec<LimitKey> {
+        ["networks", "ports", "address_allocations"]
+            .into_iter()
+            .map(|name| LimitKey::new_unchecked(ServiceNamespace::network(), name.to_owned()))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod vocabulary_tests {
+    use super::NetworkVocabulary;
+
+    #[test]
+    fn p9_vocabulary_is_typed_and_stable() {
+        assert_eq!(NetworkVocabulary::actions().len(), 6);
+        assert_eq!(NetworkVocabulary::resources().len(), 3);
+        assert_eq!(NetworkVocabulary::quota_keys().len(), 3);
+        assert_eq!(
+            NetworkVocabulary::actions()[0].to_string(),
+            "network:CreateNetworkIntent"
+        );
+        assert_eq!(
+            NetworkVocabulary::resources()[0].to_string(),
+            "network:network_intent"
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod p9_plan_tests {
@@ -97,6 +153,7 @@ mod p9_plan_tests {
                 action: PolicyAction::Allow,
             }],
             generation: 5,
+            state: o3k_domain::NetworkIntentState::Requested,
         }
     }
 

@@ -1018,6 +1018,72 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
     let proj = format!("proj-{}", Uuid::now_v7());
     let other_proj = format!("proj-{}", Uuid::now_v7());
 
+    let realm_id = Uuid::now_v7();
+    let endpoint_id = Uuid::now_v7();
+    let operation_id = format!("p9-address-op-{}", Uuid::now_v7());
+    let allocation = store
+        .allocate_network_address(
+            &realm_id,
+            &proj,
+            &endpoint_id,
+            &operation_id,
+            "192.0.2.0/30",
+        )
+        .await
+        .expect("allocate_network_address");
+    assert_eq!(allocation.address, Ipv4Addr::new(192, 0, 2, 1));
+    let retry = store
+        .allocate_network_address(
+            &realm_id,
+            &proj,
+            &endpoint_id,
+            &operation_id,
+            "192.0.2.0/30",
+        )
+        .await
+        .expect("idempotent address allocation");
+    assert_eq!(retry, allocation);
+    assert!(matches!(
+        store
+            .allocate_network_address(
+                &realm_id,
+                &other_proj,
+                &Uuid::now_v7(),
+                &operation_id,
+                "192.0.2.0/30",
+            )
+            .await,
+        Err(StoreError::NetworkAddressConflict)
+    ));
+    store
+        .release_network_address(&proj, &endpoint_id)
+        .await
+        .expect("release_network_address");
+    let concurrent_realm = Uuid::now_v7();
+    let concurrent_endpoint_a = Uuid::now_v7();
+    let concurrent_endpoint_b = Uuid::now_v7();
+    let concurrent_operation_a = format!("p9-address-op-a-{}", Uuid::now_v7());
+    let concurrent_operation_b = format!("p9-address-op-b-{}", Uuid::now_v7());
+    let (first, second) = tokio::join!(
+        store.allocate_network_address(
+            &concurrent_realm,
+            &proj,
+            &concurrent_endpoint_a,
+            &concurrent_operation_a,
+            "198.51.100.0/29",
+        ),
+        store.allocate_network_address(
+            &concurrent_realm,
+            &proj,
+            &concurrent_endpoint_b,
+            &concurrent_operation_b,
+            "198.51.100.0/29",
+        )
+    );
+    let first = first.expect("first concurrent allocation");
+    let second = second.expect("second concurrent allocation");
+    assert_ne!(first.address, second.address);
+
     let intent = NetworkIntentRecord {
         id: Uuid::now_v7(),
         project_id: proj.clone(),
