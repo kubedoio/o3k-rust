@@ -13,9 +13,7 @@ use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
-pub mod proto {
-    tonic::include_proto!("o3k.network.v1");
-}
+pub use o3k_network_protocol::proto;
 
 use proto::{
     CommandResult, ControlRequest, ControlResponse, ProtocolError, RegisterAck,

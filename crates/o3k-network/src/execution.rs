@@ -20,6 +20,27 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Control-plane port for the bounded node-local network transport. The
+/// application crate owns the command semantics; an adapter supplies the
+/// authenticated wire delivery.
+#[async_trait::async_trait]
+pub trait NetworkPlanDispatcher: Send + Sync {
+    async fn dispatch(
+        &self,
+        command: NetworkPlanCommand,
+    ) -> Result<NetworkPlanStatus, NetworkDispatchError>;
+}
+
+#[derive(Debug, Error)]
+pub enum NetworkDispatchError {
+    #[error("network plan transport is unavailable")]
+    Unavailable,
+    #[error("network plan was rejected: {0}")]
+    Rejected(String),
+    #[error("network plan transport failed: {0}")]
+    Transport(String),
+}
+
 const JOURNAL_FILE: &str = "accepted-network-plans.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

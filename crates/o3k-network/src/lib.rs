@@ -27,8 +27,9 @@ pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
 pub mod routed;
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
-    NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand, NetworkPlanExecutor,
-    NetworkPlanRealizer, NetworkPlanStatus, PlanAdmission, journal_path,
+    NetworkDispatchError, NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand,
+    NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
+    PlanAdmission, journal_path,
 };
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
