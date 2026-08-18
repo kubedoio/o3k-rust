@@ -2322,6 +2322,11 @@ impl SqliteStore {
         operation_id: &str,
         prefix: &str,
     ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        if project_id.trim().is_empty() || operation_id.trim().is_empty() {
+            return Err(StoreError::Corrupt(
+                "network address allocation has empty identity".to_owned(),
+            ));
+        }
         let (network, prefix_len) = parse_ipv4_prefix(prefix)?;
         let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
         sqlx::query("BEGIN IMMEDIATE")
@@ -2367,8 +2372,12 @@ impl SqliteStore {
                 .map_err(StoreError::Database)?;
         let occupied: std::collections::HashSet<Ipv4Addr> = occupied
             .iter()
-            .filter_map(|row| row.get::<String, _>("address").parse().ok())
-            .collect();
+            .map(|row| {
+                row.get::<String, _>("address").parse().map_err(|_| {
+                    StoreError::Corrupt("invalid allocated network address".to_owned())
+                })
+            })
+            .collect::<Result<_, StoreError>>()?;
         let (first, last) = allocation_bounds(network, prefix_len);
         let address = (first..=last)
             .map(Ipv4Addr::from)
@@ -3941,7 +3950,7 @@ fn parse_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {
     let prefix_len = length
         .parse::<u8>()
         .map_err(|_| StoreError::Corrupt("network prefix has invalid length".to_owned()))?;
-    if prefix_len > 30 {
+    if !(1..=30).contains(&prefix_len) {
         return Err(StoreError::Corrupt(
             "network allocation prefix must leave usable addresses".to_owned(),
         ));
@@ -8727,6 +8736,36 @@ mod tests {
             .await?;
         drop(reopened);
         fs::remove_file(&path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn network_address_allocation_rejects_unsafe_prefix_and_empty_identity()
+    -> Result<(), Box<dyn Error>> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let realm_id = Uuid::now_v7();
+        let endpoint_id = Uuid::now_v7();
+        let prefix_error = store
+            .allocate_network_address(
+                &realm_id,
+                "project-a",
+                &endpoint_id,
+                "operation-a",
+                "0.0.0.0/0",
+            )
+            .await;
+        assert!(matches!(prefix_error, Err(StoreError::Corrupt(_))));
+
+        let identity_error = store
+            .allocate_network_address(
+                &realm_id,
+                " ",
+                &endpoint_id,
+                "operation-a",
+                "198.51.100.0/30",
+            )
+            .await;
+        assert!(matches!(identity_error, Err(StoreError::Corrupt(_))));
         Ok(())
     }
 

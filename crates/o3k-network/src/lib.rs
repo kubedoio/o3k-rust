@@ -10,6 +10,7 @@ use std::{
 
 use o3k_domain::{
     AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
+    PolicyDirection,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -435,6 +436,63 @@ mod p9_plan_tests {
                 &[],
             ),
             Err(NetworkPlanError::InvalidAddressPool)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_duplicate_endpoint_addresses_and_macs() {
+        let mut duplicate_address = intent();
+        duplicate_address.endpoints.push(EndpointIntent {
+            id: Uuid::from_u128(99),
+            project_id: duplicate_address.project_id.clone(),
+            mac: "02:00:00:00:00:99".to_owned(),
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+            generation: 1,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &duplicate_address,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
+        );
+
+        let mut duplicate_mac = intent();
+        duplicate_mac.endpoints.push(EndpointIntent {
+            id: Uuid::from_u128(99),
+            project_id: duplicate_mac.project_id.clone(),
+            mac: duplicate_mac.endpoints[0].mac.clone(),
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 99),
+            generation: 1,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &duplicate_mac,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
+        );
+
+        let mut invalid_mac = intent();
+        invalid_mac.endpoints[0].mac = "not-a-mac".to_owned();
+        assert_eq!(
+            compile_node_network_plan(
+                &invalid_mac,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
         );
     }
 
@@ -3490,6 +3548,18 @@ pub fn compile_node_network_plan(
     }
 
     let mut generations = BTreeMap::new();
+    let mut endpoint_addresses = HashSet::new();
+    let mut endpoint_macs = HashSet::new();
+    let gateway = intent
+        .address_pools
+        .iter()
+        .find_map(|pool| pool.gateway)
+        .or_else(|| {
+            u32::from(intent.realm.prefix.network)
+                .checked_add(1)
+                .map(Ipv4Addr::from)
+        })
+        .ok_or(NetworkPlanError::InvalidAddressPool)?;
     for pool in &intent.address_pools {
         if pool.project_id != intent.project_id
             || pool.realm_id != intent.realm.id
@@ -3497,6 +3567,11 @@ pub fn compile_node_network_plan(
             || !intent.realm.prefix.contains(pool.prefix.network)
             || !pool.prefix.contains(pool.first_usable)
             || !pool.prefix.contains(pool.last_usable)
+            || pool.first_usable == pool.prefix.network
+            || pool.last_usable == pool.prefix.network
+            || broadcast_address(pool.prefix).is_some_and(|broadcast| {
+                pool.first_usable == broadcast || pool.last_usable == broadcast
+            })
             || u32::from(pool.first_usable) > u32::from(pool.last_usable)
             || pool
                 .gateway
@@ -3507,11 +3582,6 @@ pub fn compile_node_network_plan(
     }
     let mut intents =
         Vec::with_capacity(intent.endpoints.len() + intent.routes.len() + intent.policies.len());
-    let gateway = intent
-        .address_pools
-        .iter()
-        .find_map(|pool| pool.gateway)
-        .unwrap_or_else(|| Ipv4Addr::from(u32::from(intent.realm.prefix.network) + 1));
     intents.push(NetworkPlanIntent::AddressRealm {
         realm_id: intent.realm.id,
         prefix: intent.realm.prefix,
@@ -3520,18 +3590,28 @@ pub fn compile_node_network_plan(
     for endpoint in &intent.endpoints {
         if endpoint.project_id != intent.project_id
             || !intent.realm.prefix.contains(endpoint.fixed_ip)
+            || endpoint.fixed_ip == intent.realm.prefix.network
+            || broadcast_address(intent.realm.prefix)
+                .is_some_and(|broadcast| endpoint.fixed_ip == broadcast)
         {
             return Err(NetworkPlanError::AddressOutsideRealm);
+        }
+        let canonical_mac = endpoint.mac.to_ascii_lowercase();
+        if !valid_mac(&canonical_mac) {
+            return Err(NetworkPlanError::ConflictingEndpoint);
         }
         if generations
             .insert(endpoint.id, endpoint.generation)
             .is_some()
+            || !endpoint_addresses.insert(endpoint.fixed_ip)
+            || !endpoint_macs.insert(canonical_mac.clone())
+            || endpoint.fixed_ip == gateway
         {
             return Err(NetworkPlanError::ConflictingEndpoint);
         }
         intents.push(NetworkPlanIntent::EndpointAttachment {
             endpoint_id: endpoint.id,
-            mac: endpoint.mac.clone(),
+            mac: canonical_mac,
             fixed_ip: endpoint.fixed_ip,
             generation: endpoint.generation,
         });
@@ -3542,8 +3622,12 @@ pub fn compile_node_network_plan(
         });
     }
     let endpoint_ids: HashSet<Uuid> = generations.keys().copied().collect();
+    let mut public_addresses = HashSet::new();
     for binding in &intent.public_addresses {
-        if binding.project_id != intent.project_id || !endpoint_ids.contains(&binding.endpoint_id) {
+        if binding.project_id != intent.project_id
+            || !endpoint_ids.contains(&binding.endpoint_id)
+            || !public_addresses.insert(binding.public_address)
+        {
             return Err(NetworkPlanError::OwnershipViolation);
         }
     }
@@ -3556,6 +3640,9 @@ pub fn compile_node_network_plan(
                     NetworkProtocol::Any | NetworkProtocol::Icmp
                 )
             })
+            || (matches!(policy.direction, PolicyDirection::Ingress)
+                && policy.destination.is_some())
+            || (matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some())
         {
             return Err(NetworkPlanError::InvalidPolicy);
         }
@@ -3630,6 +3717,21 @@ pub fn validate_plan_replay(
         return Err(NetworkPlanError::ConflictingPlan);
     }
     Ok(())
+}
+
+fn broadcast_address(prefix: o3k_domain::Ipv4Prefix) -> Option<Ipv4Addr> {
+    let host_bits = 32u32.saturating_sub(u32::from(prefix.prefix_len));
+    let size = 1u64.checked_shl(host_bits)?;
+    let value = u64::from(u32::from(prefix.network)) + size - 1;
+    u32::try_from(value).ok().map(Ipv4Addr::from)
+}
+
+fn valid_mac(value: &str) -> bool {
+    value.len() == 17
+        && value.split(':').count() == 6
+        && value
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn require_capability(

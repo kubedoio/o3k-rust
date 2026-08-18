@@ -2210,6 +2210,11 @@ impl NetworkRepository for PostgresStore {
         operation_id: &str,
         prefix: &str,
     ) -> Result<NetworkAddressAllocationRecord, StoreError> {
+        if project_id.trim().is_empty() || operation_id.trim().is_empty() {
+            return Err(StoreError::Corrupt(
+                "network address allocation has empty identity".to_owned(),
+            ));
+        }
         let (network, prefix_len) = parse_pg_ipv4_prefix(prefix)?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
@@ -2248,13 +2253,19 @@ impl NetworkRepository for PostgresStore {
         .map_err(StoreError::Database)?;
         let occupied: std::collections::HashSet<std::net::Ipv4Addr> = occupied
             .iter()
-            .filter_map(|row| {
+            .map(|row| {
                 row.get::<String, _>("address")
                     .split('/')
                     .next()
-                    .and_then(|value| value.parse().ok())
+                    .ok_or_else(|| {
+                        StoreError::Corrupt("invalid allocated network address".to_owned())
+                    })?
+                    .parse()
+                    .map_err(|_| {
+                        StoreError::Corrupt("invalid allocated network address".to_owned())
+                    })
             })
-            .collect();
+            .collect::<Result<_, StoreError>>()?;
         let (first, last) = allocation_bounds(network, prefix_len);
         let address = (first..=last)
             .map(std::net::Ipv4Addr::from)
@@ -2757,7 +2768,7 @@ fn parse_pg_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {
     let prefix_len = length
         .parse::<u8>()
         .map_err(|_| StoreError::Corrupt("network prefix has invalid length".to_owned()))?;
-    if prefix_len > 30 {
+    if !(1..=30).contains(&prefix_len) {
         return Err(StoreError::Corrupt(
             "network allocation prefix must leave usable addresses".to_owned(),
         ));
