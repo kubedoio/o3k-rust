@@ -152,6 +152,31 @@ impl NetworkPlanRealizer for CompositeRealizer {
         Ok(())
     }
 
+    fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if plan.intents.iter().any(is_public_intent) {
+            self.public
+                .as_mut()
+                .ok_or(CompositeRealizerError::PublicNotConfigured)?
+                .remove()?;
+        }
+        if plan.intents.iter().any(is_policy_intent) {
+            self.policy
+                .as_mut()
+                .ok_or(CompositeRealizerError::PolicyNotConfigured)?
+                .remove()?;
+        }
+        if plan.intents.iter().any(is_routed_intent) {
+            self.routed
+                .as_mut()
+                .ok_or(CompositeRealizerError::RoutedNotConfigured)?
+                .remove()?;
+        }
+        let mut flat_plan = plan.clone();
+        flat_plan.intents.retain(is_flat_intent);
+        self.flat.remove(&flat_plan)?;
+        Ok(())
+    }
+
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);

@@ -1,8 +1,8 @@
 //! Transport boundary for the node-local network executor.
 
 use o3k_network::{
-    NetworkAgentIdentity, NetworkControllerLease, NetworkExecutionError, NetworkPlanCommand,
-    NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission,
+    NetworkAgentIdentity, NetworkControllerLease, NetworkExecutionError, NetworkPlanAction,
+    NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission,
 };
 use std::{
     sync::{Arc, Mutex},
@@ -101,6 +101,11 @@ where
             command_id,
             operation_id,
             idempotency_key: command.idempotency_key.clone(),
+            action: if command.remove {
+                NetworkPlanAction::Remove
+            } else {
+                NetworkPlanAction::Apply
+            },
             target: NetworkAgentIdentity {
                 agent_id: command.agent_id.clone(),
                 agent_epoch: command.agent_epoch.clone(),
@@ -241,6 +246,10 @@ mod tests {
         fn realize(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
             Ok(())
         }
+
+        fn remove(&mut self, _plan: &o3k_network::NodeNetworkPlan) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -252,6 +261,7 @@ mod tests {
                 controller_id: "controller".to_owned(),
                 controller_epoch: "epoch".to_owned(),
                 fencing_token: 7,
+                remove: true,
                 ..Default::default()
             })),
         };
@@ -264,6 +274,7 @@ mod tests {
         assert_eq!(command.controller_id, "controller");
         assert_eq!(command.controller_epoch, "epoch");
         assert_eq!(command.fencing_token, 7);
+        assert!(command.remove);
     }
 
     #[test]

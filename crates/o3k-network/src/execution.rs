@@ -35,11 +35,20 @@ pub struct NetworkControllerLease {
     pub fencing_token: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkPlanAction {
+    #[default]
+    Apply,
+    Remove,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPlanCommand {
     pub command_id: Uuid,
     pub operation_id: Uuid,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub action: NetworkPlanAction,
     pub target: NetworkAgentIdentity,
     pub controller: NetworkControllerLease,
     pub deadline_unix_ms: u64,
@@ -57,6 +66,8 @@ struct AcceptedPlan {
     command_id: Uuid,
     operation_id: Uuid,
     idempotency_key: String,
+    #[serde(default)]
+    action: NetworkPlanAction,
     plan: NodeNetworkPlan,
     target: NetworkAgentIdentity,
     controller: NetworkControllerLease,
@@ -151,6 +162,7 @@ impl NetworkPlanExecutor {
             if existing.plan.fingerprint_sha256 == command.fingerprint()
                 && existing.operation_id == command.operation_id
                 && existing.idempotency_key == command.idempotency_key
+                && existing.action == command.action
                 && existing.plan.plan_id == command.plan.plan_id
                 && existing.target == command.target
                 && existing.controller == command.controller
@@ -184,6 +196,7 @@ impl NetworkPlanExecutor {
             command_id: command.command_id,
             operation_id: command.operation_id,
             idempotency_key: command.idempotency_key.clone(),
+            action: command.action,
             plan: command.plan.clone(),
             target: command.target.clone(),
             controller: command.controller.clone(),
@@ -257,7 +270,11 @@ impl NetworkPlanExecutor {
             return Ok(admission);
         }
         self.set_status(command.command_id, NetworkPlanStatus::Applying)?;
-        match realizer.realize(&command.plan) {
+        let result = match command.action {
+            NetworkPlanAction::Apply => realizer.realize(&command.plan),
+            NetworkPlanAction::Remove => realizer.remove(&command.plan),
+        };
+        match result {
             Ok(()) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
                 Ok(PlanAdmission::Accepted)
@@ -288,7 +305,11 @@ impl NetworkPlanExecutor {
             if record.status == NetworkPlanStatus::Succeeded {
                 return Ok(record.status);
             }
-            record.status = match realizer.observe(&record.plan) {
+            let observed = match record.action {
+                NetworkPlanAction::Apply => realizer.observe(&record.plan),
+                NetworkPlanAction::Remove => realizer.observe_removed(&record.plan),
+            };
+            record.status = match observed {
                 Ok(true) => NetworkPlanStatus::Succeeded,
                 Ok(false) | Err(_) => NetworkPlanStatus::Unknown,
             };
@@ -385,8 +406,14 @@ pub trait NetworkPlanRealizer {
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error>;
 
+    fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error>;
+
     fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
         Ok(false)
+    }
+
+    fn observe_removed(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        self.observe(plan).map(|present| !present)
     }
 }
 
@@ -502,6 +529,28 @@ impl NetworkPlanRealizer for FlatNetworkRealizer {
         Ok(())
     }
 
+    fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        for intent in &plan.intents {
+            if let NetworkPlanIntent::EndpointAttachment {
+                endpoint_id, mac, ..
+            } = intent
+            {
+                self.dhcp.remove_binding(&endpoint_id.to_string())?;
+                self.network.delete_tap(&TapSpec {
+                    instance_id: plan.plan_id.to_string(),
+                    port_id: endpoint_id.to_string(),
+                    mac: mac.clone(),
+                })?;
+            }
+        }
+        if let Some(supervisor) = self.supervisor.as_mut() {
+            supervisor.stop()?;
+            self.supervisor = None;
+        }
+        self.network.cleanup_if_unused()?;
+        Ok(())
+    }
+
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
         for intent in &plan.intents {
             if let NetworkPlanIntent::EndpointAttachment { endpoint_id, .. } = intent {
@@ -606,6 +655,7 @@ mod tests {
             command_id: Uuid::from_u128(10),
             operation_id: Uuid::from_u128(4),
             idempotency_key: "idempotency-1".into(),
+            action: NetworkPlanAction::Apply,
             target: NetworkAgentIdentity {
                 agent_id: "node-a".into(),
                 agent_epoch: "epoch-1".into(),
@@ -634,6 +684,11 @@ mod tests {
             Ok(())
         }
 
+        fn remove(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+            self.calls += 1;
+            Ok(())
+        }
+
         fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
             Ok(self.observed)
         }
@@ -657,6 +712,31 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         assert_eq!(restarted.admit(&command, 2)?, PlanAdmission::Replayed);
         assert!(restarted.accepted(command.command_id)?);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_action_calls_cleanup_and_reconciles_absence() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempfile_path("remove-action");
+        let mut command = command();
+        command.action = NetworkPlanAction::Remove;
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = RecordingRealizer {
+            calls: 0,
+            observed: false,
+        };
+        assert_eq!(
+            executor.execute(&command, 1, &mut realizer)?,
+            PlanAdmission::Accepted
+        );
+        assert_eq!(realizer.calls, 1);
+        assert_eq!(
+            executor.reconcile(command.command_id, &mut realizer)?,
+            NetworkPlanStatus::Succeeded
+        );
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
@@ -714,6 +794,10 @@ mod tests {
                 Err("transport interrupted")
             }
 
+            fn remove(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+                Err("transport interrupted")
+            }
+
             fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
                 Ok(self.observed)
             }
@@ -753,6 +837,10 @@ mod tests {
             type Error = &'static str;
 
             fn realize(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+                Err("interrupted")
+            }
+
+            fn remove(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
                 Err("interrupted")
             }
 

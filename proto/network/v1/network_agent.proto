@@ -46,6 +46,7 @@ message NetworkCommand {
   uint64 fencing_token = 8;
   uint64 deadline_unix_ms = 9;
   string plan_json = 10;
+  bool remove = 11;
 }
 
 message CommandResult {
