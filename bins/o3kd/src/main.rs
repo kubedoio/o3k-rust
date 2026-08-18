@@ -149,6 +149,9 @@ fn unix_time_millis() -> u64 {
 #[derive(Clone)]
 struct NetworkBindingProjector {
     network: o3k_network::NetworkService,
+    registry: Arc<dyn o3k_provider::AgentNodeRegistry>,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: o3k_network::NetworkControllerLease,
 }
 
 #[async_trait]
@@ -189,6 +192,72 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 format!("invalid port id {port_id:?}: {error}"),
             )
         })?;
+        let port = self
+            .network
+            .get_port_for_project(project_id, port_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let (Some(dispatcher), Some(host)) = (
+            self.network_dispatcher.as_ref(),
+            port.binding_host.as_deref(),
+        ) {
+            let agent = self
+                .registry
+                .snapshot(host)
+                .await
+                .ok_or_else(|| std::io::Error::other("network agent snapshot unavailable"))?;
+            let subnet_id = port
+                .subnet_id
+                .ok_or_else(|| std::io::Error::other("bound port has no subnet"))?;
+            let subnet = self
+                .network
+                .get_subnet_for_project(project_id, subnet_id)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:network:remove:{project_id}:{port_id}").as_bytes(),
+            );
+            let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+                endpoint_id: port.id,
+                realm_id: port.network_id,
+                project_id,
+                mac: &port.mac_address,
+                fixed_ip: port.fixed_ip,
+                subnet_cidr: &subnet.cidr,
+                node_id: host,
+                operation_id,
+                deadline_unix_ms,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let command_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:network:remove-command:{operation_id}").as_bytes(),
+            );
+            let status = dispatcher
+                .dispatch(o3k_network::NetworkPlanCommand {
+                    command_id,
+                    operation_id,
+                    idempotency_key: format!("o3k:network:remove:{project_id}:{port_id}"),
+                    action: o3k_network::NetworkPlanAction::Remove,
+                    target: o3k_network::NetworkAgentIdentity {
+                        agent_id: agent.agent_id,
+                        agent_epoch: agent.agent_epoch,
+                    },
+                    controller: self.network_controller.clone(),
+                    deadline_unix_ms,
+                    plan,
+                })
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if status != o3k_network::NetworkPlanStatus::Succeeded {
+                return Err(std::io::Error::other(
+                    "network removal requires observation before unbinding",
+                )
+                .into());
+            }
+        }
         self.network
             .unbind_port(project_id, port_id)
             .await
@@ -667,6 +736,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_binding_projector(Arc::new(NetworkBindingProjector {
             network: network_service.clone(),
+            registry: Arc::new(registry.clone()),
+            network_dispatcher: network_dispatcher.clone(),
+            network_controller: network_controller.clone(),
         }))
         .with_config_drive_cleaner(config_drive_store.clone())
     } else {
@@ -1486,6 +1558,13 @@ mod tests {
             o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
         let projector = NetworkBindingProjector {
             network: network.clone(),
+            registry: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            network_dispatcher: None,
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "test-epoch".to_owned(),
+                fencing_token: 1,
+            },
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
