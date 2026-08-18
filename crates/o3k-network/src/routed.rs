@@ -257,7 +257,27 @@ impl LinuxRoutedProvider {
         }
         if !self
             .command
-            .run("nft", &["add", "chain", "ip", TABLE, CHAIN])
+            .run(
+                "nft",
+                &[
+                    "add",
+                    "chain",
+                    "ip",
+                    TABLE,
+                    CHAIN,
+                    "{",
+                    "type",
+                    "nat",
+                    "hook",
+                    "postrouting",
+                    "priority",
+                    "100",
+                    ";",
+                    "policy",
+                    "accept",
+                    "}",
+                ],
+            )
             .map_err(RoutedNetworkError::Storage)?
         {
             // A chain that already exists is acceptable only in the marked
