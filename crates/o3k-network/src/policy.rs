@@ -126,17 +126,10 @@ impl StatefulPolicyProvider {
             .map(|endpoint| (endpoint.endpoint_id, endpoint.address))
             .collect();
         for policy in &policies {
-            if !addresses.contains_key(&policy.endpoint_id)
-                || policy.ports.is_some_and(|ports| {
-                    ports.start > ports.end
-                        || matches!(
-                            policy.protocol,
-                            NetworkProtocol::Any | NetworkProtocol::Icmp
-                        )
-                })
-            {
+            if !addresses.contains_key(&policy.endpoint_id) {
                 return Err(PolicyNetworkError::UnknownEndpoint);
             }
+            validate_policy(policy)?;
         }
         let fingerprint = fingerprint(&policies);
         let ownership = Ownership {
@@ -247,7 +240,14 @@ impl StatefulPolicyProvider {
             if let Some(protocol) = protocol {
                 args.push(protocol);
                 if let Some(port) = port.as_deref() {
-                    args.extend([if protocol == "tcp" { "dport" } else { "sport" }, port]);
+                    args.extend([
+                        if matches!(policy.direction, PolicyDirection::Ingress) {
+                            "dport"
+                        } else {
+                            "sport"
+                        },
+                        port,
+                    ]);
                 }
             }
             args.push(if policy.action == PolicyAction::Allow {
@@ -314,6 +314,28 @@ impl StatefulPolicyProvider {
         }
         Ok(success)
     }
+}
+
+fn validate_policy(policy: &PolicyIntent) -> Result<(), PolicyNetworkError> {
+    if policy.ports.is_some_and(|ports| ports.start > ports.end)
+        || policy.ports.is_some_and(|_| {
+            matches!(
+                policy.protocol,
+                NetworkProtocol::Any | NetworkProtocol::Icmp
+            )
+        })
+    {
+        return Err(PolicyNetworkError::InvalidRule);
+    }
+    // The endpoint address is the destination of ingress and the source of
+    // egress. Accepting the opposite endpoint-side prefix would produce an
+    // ambiguous nft rule, so reject it before any host mutation.
+    if matches!(policy.direction, PolicyDirection::Ingress) && policy.destination.is_some()
+        || matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some()
+    {
+        return Err(PolicyNetworkError::InvalidRule);
+    }
+    Ok(())
 }
 
 fn protocol_name(protocol: NetworkProtocol) -> Option<&'static str> {
@@ -394,6 +416,23 @@ mod tests {
         })
     }
 
+    fn policy_with(
+        endpoint_id: Uuid,
+        direction: PolicyDirection,
+        protocol: NetworkProtocol,
+        ports: Option<o3k_domain::PortRange>,
+    ) -> NetworkPlanIntent {
+        NetworkPlanIntent::Policy(PolicyIntent {
+            endpoint_id,
+            direction,
+            protocol,
+            ports,
+            source: None,
+            destination: None,
+            action: PolicyAction::Allow,
+        })
+    }
+
     #[test]
     fn unknown_endpoint_is_rejected_before_host_mutation() {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
@@ -437,6 +476,88 @@ mod tests {
             Err(PolicyNetworkError::ForeignState)
         ));
         assert_eq!(command.calls.lock().expect("calls").len(), 1);
+    }
+
+    #[test]
+    fn invalid_port_rule_is_rejected_before_host_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(1);
+        assert!(matches!(
+            provider.apply(
+                &[policy_with(
+                    endpoint,
+                    PolicyDirection::Ingress,
+                    NetworkProtocol::Icmp,
+                    Some(o3k_domain::PortRange { start: 1, end: 1 }),
+                )],
+                &[PolicyEndpoint {
+                    endpoint_id: endpoint,
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }]
+            ),
+            Err(PolicyNetworkError::InvalidRule)
+        ));
+        assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
+    fn ingress_ports_target_destination_and_egress_ports_target_source() {
+        let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+        });
+        let mut provider = StatefulPolicyProvider::with_command(
+            &root,
+            Arc::clone(&command) as Arc<dyn PolicyCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(1);
+        provider
+            .apply(
+                &[
+                    policy_with(
+                        endpoint,
+                        PolicyDirection::Ingress,
+                        NetworkProtocol::Tcp,
+                        Some(o3k_domain::PortRange { start: 22, end: 22 }),
+                    ),
+                    policy_with(
+                        endpoint,
+                        PolicyDirection::Egress,
+                        NetworkProtocol::Tcp,
+                        Some(o3k_domain::PortRange {
+                            start: 443,
+                            end: 443,
+                        }),
+                    ),
+                ],
+                &[PolicyEndpoint {
+                    endpoint_id: endpoint,
+                    address: Ipv4Addr::new(10, 0, 0, 2),
+                }],
+            )
+            .expect("policy apply");
+        let calls = command.calls.lock().expect("calls");
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call.windows(2).any(|pair| pair == ["dport", "22-22"]) })
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call.windows(2).any(|pair| pair == ["sport", "443-443"]) })
+        );
     }
 
     #[test]
