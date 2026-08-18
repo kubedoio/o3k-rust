@@ -1,8 +1,8 @@
 //! Durable, project-scoped public IPv4 allocation and association.
 //!
-//! This is canonical allocation state, not nftables state. A later provider
-//! realization consumes [`PublicAddressBinding`] and owns only its node-local
-//! DNAT/SNAT mutation.
+//! This is canonical allocation state, not host networking state. A later
+//! provider realization consumes the public binding and owns only its
+//! node-local uplink address plus DNAT/SNAT mutation.
 
 use o3k_domain::{Ipv4Prefix, NetworkPlanIntent};
 use serde::{Deserialize, Serialize};
@@ -294,9 +294,10 @@ impl Drop for FileLock {
     }
 }
 
-/// Node-local DNAT/SNAT realization for already-authorized public bindings.
-/// The allocator remains the control-plane authority; this provider owns only
-/// its marked nftables table and cannot choose a different address.
+/// Node-local public-address and DNAT/SNAT realization for already-authorized
+/// public bindings. The allocator remains the control-plane authority; this
+/// provider owns only exact recorded uplink addresses and its marked nftables
+/// table and cannot choose a different address.
 pub struct PublicAddressRealizer {
     root: PathBuf,
     uplink: String,
