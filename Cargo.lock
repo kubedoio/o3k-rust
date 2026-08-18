@@ -1271,6 +1271,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "o3k-network-bin"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "o3k-network",
+ "prost",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "o3k-placement"
 version = "0.4.0-alpha.1"
 dependencies = [

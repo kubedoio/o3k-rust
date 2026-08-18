@@ -193,6 +193,14 @@ impl NetworkPlanExecutor {
         Ok(PlanAdmission::Accepted)
     }
 
+    pub fn agent_id(&self) -> &str {
+        &self.agent.agent_id
+    }
+
+    pub fn agent_epoch(&self) -> &str {
+        &self.agent.agent_epoch
+    }
+
     pub fn accepted(&self, command_id: Uuid) -> Result<bool, NetworkExecutionError> {
         let _guard = self
             .journal_lock
