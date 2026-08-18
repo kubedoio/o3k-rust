@@ -1,9 +1,10 @@
 use axum::body::Body;
 use http::{HeaderValue, Method, Request, StatusCode, header};
 use o3k_compute::ComputeService;
+use o3k_domain::Ipv4Prefix;
 use o3k_identity::testkit::test_service;
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
-use o3k_network::NetworkService;
+use o3k_network::{NetworkService, PublicAddressAllocator, PublicAddressPool};
 use o3k_provider::{FailureInjection, FakeComputeProvider};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -17,6 +18,149 @@ async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error:
     let bytes = axum::body::to_bytes(response.into_body(), 1024).await?;
     let body: Value = serde_json::from_slice(&bytes)?;
     assert_eq!(body, serde_json::json!({"status": "ok"}));
+    Ok(())
+}
+
+#[tokio::test]
+async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root =
+        std::path::PathBuf::from(format!("/tmp/o3k-api-floating-ip-{}", uuid::Uuid::now_v7()));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let network = NetworkService::open(root.join("network"), store.clone()).await?;
+    let network_record = network
+        .create_network_for_project(project_id, "private".to_owned())
+        .await?;
+    network
+        .create_subnet_for_project(
+            project_id,
+            network_record.id,
+            "private-subnet".to_owned(),
+            "10.0.0.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let port = network
+        .create_port_for_project(project_id, network_record.id, "vm".to_owned())
+        .await?;
+    let prefix = Ipv4Prefix::new("198.51.100.0".parse()?, 29).ok_or("invalid pool")?;
+    let allocator = PublicAddressAllocator::open(
+        root.join("public"),
+        PublicAddressPool {
+            prefix,
+            first_usable: "198.51.100.2".parse()?,
+            last_usable: "198.51.100.6".parse()?,
+        },
+    )?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(network)
+        .with_public_allocator(allocator);
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let token_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("token missing")?
+        .to_str()?
+        .to_owned();
+    let request_body = serde_json::json!({
+        "floatingip": {
+            "floating_network_id": network_record.id,
+            "port_id": port.id
+        }
+    });
+    let response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "floating-create-1")
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: Value =
+        serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 4096).await?)?;
+    let id = created["floatingip"]["id"].as_str().ok_or("id missing")?;
+    assert_eq!(created["floatingip"]["port_id"], port.id.to_string());
+
+    let replay = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "floating-create-1")
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(replay.status(), StatusCode::CREATED);
+    let replayed: Value =
+        serde_json::from_slice(&axum::body::to_bytes(replay.into_body(), 4096).await?)?;
+    assert_eq!(replayed["floatingip"]["id"], id);
+
+    let listed = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed: Value =
+        serde_json::from_slice(&axum::body::to_bytes(listed.into_body(), 4096).await?)?;
+    assert_eq!(listed["floatingips"].as_array().map(Vec::len), Some(1));
+
+    let still_associated = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/floatingips/{id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(still_associated.status(), StatusCode::CONFLICT);
+
+    let disassociated = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/v2.0/floatingips/{id}"))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"floatingip":{}}"#))?,
+        )
+        .await?;
+    assert_eq!(disassociated.status(), StatusCode::OK);
+    let deleted = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!("/v2.0/floatingips/{id}"))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     Ok(())
 }
 

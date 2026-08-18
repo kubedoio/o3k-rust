@@ -143,6 +143,33 @@ fn unix_time_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+fn public_allocator_from_env(
+    data_dir: &std::path::Path,
+) -> Result<Option<o3k_network::PublicAddressAllocator>, Box<dyn std::error::Error>> {
+    let cidr = std::env::var("O3K_PUBLIC_POOL_CIDR").ok();
+    let first = std::env::var("O3K_PUBLIC_POOL_FIRST").ok();
+    let last = std::env::var("O3K_PUBLIC_POOL_LAST").ok();
+    if cidr.is_none() && first.is_none() && last.is_none() {
+        return Ok(None);
+    }
+    let cidr = cidr.ok_or("O3K_PUBLIC_POOL_CIDR is required")?;
+    let first = first.ok_or("O3K_PUBLIC_POOL_FIRST is required")?.parse()?;
+    let last = last.ok_or("O3K_PUBLIC_POOL_LAST is required")?.parse()?;
+    let (network, prefix_len) = cidr
+        .split_once('/')
+        .ok_or("O3K_PUBLIC_POOL_CIDR must be IPv4/prefix-length")?;
+    let prefix = o3k_domain::Ipv4Prefix::new(network.parse()?, prefix_len.parse()?)
+        .ok_or("O3K_PUBLIC_POOL_CIDR is invalid")?;
+    Ok(Some(o3k_network::PublicAddressAllocator::open(
+        data_dir.join("public-addresses"),
+        o3k_network::PublicAddressPool {
+            prefix,
+            first_usable: first,
+            last_usable: last,
+        },
+    )?))
+}
+
 /// Projects terminal compute outcomes into the durable port binding state of
 /// the network control plane. Wired only for the agent provider profile,
 /// where the resolver records binding intent at create dispatch.
@@ -704,6 +731,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
     let network_dispatcher = network_dispatcher_from_env()?;
+    let public_allocator = public_allocator_from_env(&config.data_dir)?;
     let network_controller = o3k_network::NetworkControllerLease {
         controller_id: controller_id.to_string(),
         controller_epoch: controller_epoch.to_string(),
@@ -892,7 +920,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
-    let state = if let Some(identity) = identity {
+    let mut state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
             .with_image(image_service)
@@ -910,6 +938,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
+    if let Some(allocator) = public_allocator {
+        state = state.with_public_allocator(allocator);
+    }
     state.set_ready(compute_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),

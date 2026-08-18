@@ -27,6 +27,7 @@ use o3k_console::ConsoleService;
 use o3k_identity::TokenService;
 use o3k_image::ImageService;
 use o3k_network::NetworkService;
+use o3k_network::PublicAddressAllocator;
 use serde::Serialize;
 
 mod auth;
@@ -49,9 +50,10 @@ use crate::{
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::microversion_middleware,
     network::{
-        create_network, create_port, create_subnet, delete_network, delete_port, delete_subnet,
-        list_extensions, list_networks, list_ports, list_subnets, show_network, show_port,
-        show_subnet,
+        create_floating_ip, create_network, create_port, create_subnet, delete_floating_ip,
+        delete_network, delete_port, delete_subnet, list_extensions, list_floating_ips,
+        list_networks, list_ports, list_subnets, show_floating_ip, show_network, show_port,
+        show_subnet, update_floating_ip,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -86,6 +88,7 @@ pub struct AppState {
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
+    public_allocator: Option<Arc<PublicAddressAllocator>>,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
@@ -122,6 +125,12 @@ impl AppState {
     #[must_use]
     pub fn with_network(mut self, service: NetworkService) -> Self {
         self.network = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
+    pub fn with_public_allocator(mut self, allocator: PublicAddressAllocator) -> Self {
+        self.public_allocator = Some(Arc::new(allocator));
         self
     }
 
@@ -198,6 +207,16 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
+        .route(
+            "/v2.0/floatingips",
+            get(list_floating_ips).post(create_floating_ip),
+        )
+        .route(
+            "/v2.0/floatingips/{id}",
+            get(show_floating_ip)
+                .put(update_floating_ip)
+                .delete(delete_floating_ip),
+        )
         .route(
             "/v2.1/{project_id}/flavors",
             get(list_flavors).post(create_flavor),

@@ -9,7 +9,11 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use o3k_network::{NetworkError, NetworkRecord, NetworkService, PortRecord, SubnetRecord};
+use o3k_network::{
+    NetworkError, NetworkRecord, NetworkService, PortRecord, PublicAddressAllocator,
+    PublicAddressBinding, PublicAddressError, SubnetRecord,
+};
+use uuid::Uuid;
 
 use crate::{AppState, auth::require_auth_context, error::keystone_error};
 
@@ -192,6 +196,252 @@ pub(crate) fn network_error(error: NetworkError) -> axum::response::Response {
             "Internal Server Error",
             "network storage is unavailable",
         ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct FloatingIpRequestBody {
+    floatingip: FloatingIpRequest,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct FloatingIpRequest {
+    #[serde(default)]
+    floating_network_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    port_id: Option<uuid::Uuid>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct FloatingIpEnvelope {
+    floatingip: FloatingIpResponse,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct FloatingIpList {
+    floatingips: Vec<FloatingIpResponse>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct FloatingIpResponse {
+    id: String,
+    project_id: String,
+    floating_ip_address: Ipv4Addr,
+    port_id: Option<String>,
+    status: &'static str,
+}
+
+fn floating_ip_response(binding: PublicAddressBinding) -> FloatingIpResponse {
+    FloatingIpResponse {
+        id: binding.allocation_id.to_string(),
+        project_id: binding.project_id,
+        floating_ip_address: binding.public_address,
+        port_id: binding.endpoint_id.map(|id| id.to_string()),
+        // Allocation/association is control-plane state only. Host realization
+        // is a separate execution operation, so this projection must not claim
+        // ACTIVE before an agent observation exists.
+        status: "DOWN",
+    }
+}
+
+fn public_error(error: PublicAddressError) -> axum::response::Response {
+    let (status, title) = match error {
+        PublicAddressError::NotFound => (StatusCode::NOT_FOUND, "Not Found"),
+        PublicAddressError::NotOwner
+        | PublicAddressError::AssociationConflict
+        | PublicAddressError::InUse
+        | PublicAddressError::Exhausted => (StatusCode::CONFLICT, "Conflict"),
+        PublicAddressError::InvalidPool | PublicAddressError::MissingEndpoint => {
+            (StatusCode::BAD_REQUEST, "Bad Request")
+        }
+        PublicAddressError::CorruptState
+        | PublicAddressError::Storage(_)
+        | PublicAddressError::ForeignProviderState
+        | PublicAddressError::ProviderCommandFailed => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+        }
+    };
+    keystone_error(status, title, "floating IP operation failed")
+}
+
+#[allow(clippy::result_large_err)]
+fn public_allocator(
+    state: &AppState,
+) -> Result<&Arc<PublicAddressAllocator>, axum::response::Response> {
+    state.public_allocator.as_ref().ok_or_else(|| {
+        keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "floating IP service is not configured",
+        )
+    })
+}
+
+pub(crate) async fn list_floating_ips(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let allocator = match public_allocator(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match allocator.list(auth.effective_scope().id().as_str()) {
+        Ok(values) => Json(FloatingIpList {
+            floatingips: values.into_iter().map(floating_ip_response).collect(),
+        })
+        .into_response(),
+        Err(error) => public_error(error),
+    }
+}
+
+pub(crate) async fn create_floating_ip(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<FloatingIpRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let allocator = match public_allocator(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid floating IP request",
+        );
+    };
+    let _ = body.floatingip.floating_network_id;
+    let operation_id = headers
+        .get("x-openstack-request-id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+    let project_id = auth.effective_scope().id().as_str();
+    let mut binding = match allocator.allocate(project_id, &operation_id) {
+        Ok(value) => value,
+        Err(error) => return public_error(error),
+    };
+    if let Some(port_id) = body.floatingip.port_id {
+        let service = match network_service(&state) {
+            Ok(value) => value,
+            Err(response) => return response,
+        };
+        if service
+            .get_port_for_project(project_id, port_id)
+            .await
+            .is_err()
+        {
+            return public_error(PublicAddressError::MissingEndpoint);
+        }
+        binding = match allocator.associate(project_id, binding.allocation_id, port_id) {
+            Ok(value) => value,
+            Err(error) => return public_error(error),
+        };
+    }
+    (
+        StatusCode::CREATED,
+        Json(FloatingIpEnvelope {
+            floatingip: floating_ip_response(binding),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn show_floating_ip(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let allocator = match public_allocator(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match allocator.get(auth.effective_scope().id().as_str(), id) {
+        Ok(value) => Json(FloatingIpEnvelope {
+            floatingip: floating_ip_response(value),
+        })
+        .into_response(),
+        Err(error) => public_error(error),
+    }
+}
+
+pub(crate) async fn update_floating_ip(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    request: Result<Json<FloatingIpRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let allocator = match public_allocator(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid floating IP request",
+        );
+    };
+    let project_id = auth.effective_scope().id().as_str();
+    let result = match body.floatingip.port_id {
+        Some(port_id) => {
+            let service = match network_service(&state) {
+                Ok(value) => value,
+                Err(response) => return response,
+            };
+            if service
+                .get_port_for_project(project_id, port_id)
+                .await
+                .is_err()
+            {
+                return public_error(PublicAddressError::MissingEndpoint);
+            }
+            allocator.associate(project_id, id, port_id)
+        }
+        None => allocator.disassociate(project_id, id),
+    };
+    match result {
+        Ok(value) => Json(FloatingIpEnvelope {
+            floatingip: floating_ip_response(value),
+        })
+        .into_response(),
+        Err(error) => public_error(error),
+    }
+}
+
+pub(crate) async fn delete_floating_ip(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let allocator = match public_allocator(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match allocator.release(auth.effective_scope().id().as_str(), id) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => public_error(error),
     }
 }
 

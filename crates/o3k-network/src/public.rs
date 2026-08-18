@@ -227,6 +227,18 @@ impl PublicAddressAllocator {
             .ok_or(PublicAddressError::NotFound)
     }
 
+    pub fn list(&self, project_id: &str) -> Result<Vec<PublicAddressBinding>, PublicAddressError> {
+        if project_id.trim().is_empty() {
+            return Err(PublicAddressError::NotOwner);
+        }
+        Ok(self
+            .load()?
+            .allocations
+            .into_iter()
+            .filter(|allocation| allocation.project_id == project_id)
+            .collect())
+    }
+
     fn load(&self) -> Result<State, PublicAddressError> {
         match fs::read(self.root.join(STATE_FILE)) {
             Ok(bytes) => {
