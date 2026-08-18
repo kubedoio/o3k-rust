@@ -20,6 +20,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod execution;
+pub use execution::{
+    NetworkAgentIdentity, NetworkControllerLease, NetworkExecutionError, NetworkPlanCommand,
+    NetworkPlanExecutor, NetworkPlanRealizer, PlanAdmission, journal_path,
+};
+
 /// Poll interval while waiting for a freshly created TAP address to settle.
 #[cfg(not(test))]
 const TAP_ADDRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
