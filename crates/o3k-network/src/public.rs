@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 const STATE_FILE: &str = "public-addresses.json";
 const LOCK_FILE: &str = "public-addresses.lock";
+const OWNED_ADDRESS_FILE: &str = "owned-addresses.json";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicAddressPool {
@@ -301,26 +302,27 @@ pub struct PublicAddressRealizer {
     uplink: String,
     command: Arc<dyn PublicCommand>,
     owned: bool,
+    owned_addresses: Vec<Ipv4Addr>,
 }
 
 trait PublicCommand: Send + Sync {
-    fn output(&self, args: &[&str]) -> io::Result<(bool, String)>;
-    fn run(&self, args: &[&str]) -> io::Result<bool>;
+    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
 }
 
 struct SystemPublicCommand;
 
 impl PublicCommand for SystemPublicCommand {
-    fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
-        let output = std::process::Command::new("nft").args(args).output()?;
+    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+        let output = std::process::Command::new(program).args(args).output()?;
         Ok((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
         ))
     }
 
-    fn run(&self, args: &[&str]) -> io::Result<bool> {
-        Ok(std::process::Command::new("nft")
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
+        Ok(std::process::Command::new(program)
             .args(args)
             .status()?
             .success())
@@ -338,11 +340,13 @@ impl PublicAddressRealizer {
         let root = root.into();
         fs::create_dir_all(&root)?;
         let owned = root.join("ownership").exists();
+        let owned_addresses = load_owned_addresses(&root.join(OWNED_ADDRESS_FILE))?;
         Ok(Self {
             root,
             uplink,
             command: Arc::new(SystemPublicCommand),
             owned,
+            owned_addresses,
         })
     }
 
@@ -386,14 +390,45 @@ impl PublicAddressRealizer {
                 return Err(PublicAddressError::MissingEndpoint);
             }
         }
-        self.ensure_foreign_safe()?;
+        let table_exists = self.ensure_foreign_safe()?;
+        if table_exists && !self.owned {
+            return Err(PublicAddressError::ForeignProviderState);
+        }
+        let mut desired_addresses: Vec<Ipv4Addr> =
+            bindings.iter().map(|(_, address)| **address).collect();
+        desired_addresses.sort_unstable();
+        desired_addresses.dedup();
+        let (success, interface_addresses) = self
+            .command
+            .output("ip", &["-4", "addr", "show", "dev", &self.uplink])
+            .map_err(PublicAddressError::Storage)?;
+        if !success {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
+        for address in &desired_addresses {
+            if address_present(&interface_addresses, *address)
+                && !self.owned_addresses.contains(address)
+            {
+                return Err(PublicAddressError::ForeignProviderState);
+            }
+        }
+        // Establish the provider ownership marker before the first host
+        // mutation so a crash during address or nft realization remains
+        // discoverable by restart cleanup.
+        fs::write(self.root.join("ownership"), PUBLIC_MARKER)?;
+        self.owned = true;
+        // Record accepted ownership before adding addresses. An interrupted
+        // add remains recoverable as owned state and is verified again during
+        // cleanup before any delete is issued.
+        store_owned_addresses(&self.root.join(OWNED_ADDRESS_FILE), &desired_addresses)?;
+        self.owned_addresses = desired_addresses.clone();
         // Replays rebuild only the provider's own marked table. This avoids
         // duplicate DNAT/SNAT rules after reconnect while never touching a
         // table that failed the ownership marker check above.
-        if self.owned
+        if table_exists
             && !self
                 .command
-                .run(&["delete", "table", "ip", PUBLIC_TABLE])
+                .run("nft", &["delete", "table", "ip", PUBLIC_TABLE])
                 .map_err(PublicAddressError::Storage)?
         {
             return Err(PublicAddressError::ProviderCommandFailed);
@@ -410,9 +445,8 @@ impl PublicAddressRealizer {
         ];
         if !self
             .command
-            .run(&table_args)
+            .run("nft", &table_args)
             .map_err(PublicAddressError::Storage)?
-            && !self.owned
         {
             return Err(PublicAddressError::ProviderCommandFailed);
         }
@@ -452,8 +486,21 @@ impl PublicAddressRealizer {
             "accept",
             "}",
         ];
-        let _ = self.command.run(&prerouting);
-        let _ = self.command.run(&postrouting);
+        for address in &desired_addresses {
+            if !address_present(&interface_addresses, *address)
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &["addr", "add", &format!("{address}/32"), "dev", &self.uplink],
+                    )
+                    .map_err(PublicAddressError::Storage)?
+            {
+                return Err(PublicAddressError::ProviderCommandFailed);
+            }
+        }
+        let _ = self.command.run("nft", &prerouting);
+        let _ = self.command.run("nft", &postrouting);
         for (endpoint_id, public_address) in bindings {
             let private_address = endpoint_addresses[endpoint_id].to_string();
             let public_address = public_address.to_string();
@@ -461,57 +508,61 @@ impl PublicAddressRealizer {
             let comment = format!("{}:{}", PUBLIC_MARKER, endpoint_id);
             if !self
                 .command
-                .run(&[
-                    "add",
-                    "rule",
-                    "ip",
-                    PUBLIC_TABLE,
-                    "prerouting",
-                    "iifname",
-                    &uplink,
-                    "ip",
-                    "daddr",
-                    &public_address,
-                    "dnat",
-                    "to",
-                    &private_address,
-                    "comment",
-                    &comment,
-                ])
-                .map_err(PublicAddressError::Storage)?
-                || !self
-                    .command
-                    .run(&[
+                .run(
+                    "nft",
+                    &[
                         "add",
                         "rule",
                         "ip",
                         PUBLIC_TABLE,
-                        "postrouting",
-                        "ip",
-                        "saddr",
-                        &private_address,
-                        "oifname",
+                        "prerouting",
+                        "iifname",
                         &uplink,
-                        "snat",
-                        "to",
+                        "ip",
+                        "daddr",
                         &public_address,
+                        "dnat",
+                        "to",
+                        &private_address,
                         "comment",
                         &comment,
-                    ])
+                    ],
+                )
+                .map_err(PublicAddressError::Storage)?
+                || !self
+                    .command
+                    .run(
+                        "nft",
+                        &[
+                            "add",
+                            "rule",
+                            "ip",
+                            PUBLIC_TABLE,
+                            "postrouting",
+                            "ip",
+                            "saddr",
+                            &private_address,
+                            "oifname",
+                            &uplink,
+                            "snat",
+                            "to",
+                            &public_address,
+                            "comment",
+                            &comment,
+                        ],
+                    )
                     .map_err(PublicAddressError::Storage)?
             {
                 return Err(PublicAddressError::ProviderCommandFailed);
             }
         }
-        fs::write(self.root.join("ownership"), PUBLIC_MARKER)?;
-        self.owned = true;
         Ok(())
     }
 
     pub fn observe(&self) -> Result<bool, PublicAddressError> {
         let (success, output) = self
             .command
-            .output(&["list", "table", "ip", PUBLIC_TABLE])
+            .output("nft", &["list", "table", "ip", PUBLIC_TABLE])
             .map_err(PublicAddressError::Storage)?;
         Ok(success && output.contains(PUBLIC_MARKER))
     }
@@ -522,36 +573,84 @@ impl PublicAddressRealizer {
         }
         let (success, output) = self
             .command
-            .output(&["list", "table", "ip", PUBLIC_TABLE])
-            .map_err(PublicAddressError::Storage)?;
-        if !success {
-            return Ok(());
-        }
-        if !output.contains(PUBLIC_MARKER) {
-            return Err(PublicAddressError::ForeignProviderState);
-        }
-        if !self
-            .command
-            .run(&["delete", "table", "ip", PUBLIC_TABLE])
-            .map_err(PublicAddressError::Storage)?
-        {
-            return Err(PublicAddressError::ProviderCommandFailed);
-        }
-        let _ = fs::remove_file(self.root.join("ownership"));
-        self.owned = false;
-        Ok(())
-    }
-
-    fn ensure_foreign_safe(&self) -> Result<(), PublicAddressError> {
-        let (success, output) = self
-            .command
-            .output(&["list", "table", "ip", PUBLIC_TABLE])
+            .output("nft", &["list", "table", "ip", PUBLIC_TABLE])
             .map_err(PublicAddressError::Storage)?;
         if success && !output.contains(PUBLIC_MARKER) {
             return Err(PublicAddressError::ForeignProviderState);
         }
+        if success
+            && !self
+                .command
+                .run("nft", &["delete", "table", "ip", PUBLIC_TABLE])
+                .map_err(PublicAddressError::Storage)?
+        {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
+        let (success, interface_addresses) = self
+            .command
+            .output("ip", &["-4", "addr", "show", "dev", &self.uplink])
+            .map_err(PublicAddressError::Storage)?;
+        if !success {
+            self.owned = true;
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
+        for address in &self.owned_addresses {
+            if address_present(&interface_addresses, *address)
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &["addr", "del", &format!("{address}/32"), "dev", &self.uplink],
+                    )
+                    .map_err(PublicAddressError::Storage)?
+            {
+                self.owned = true;
+                return Err(PublicAddressError::ProviderCommandFailed);
+            }
+        }
+        let _ = fs::remove_file(self.root.join("ownership"));
+        let _ = fs::remove_file(self.root.join(OWNED_ADDRESS_FILE));
+        self.owned = false;
+        self.owned_addresses.clear();
         Ok(())
     }
+
+    fn ensure_foreign_safe(&self) -> Result<bool, PublicAddressError> {
+        let (success, output) = self
+            .command
+            .output("nft", &["list", "table", "ip", PUBLIC_TABLE])
+            .map_err(PublicAddressError::Storage)?;
+        if success && !output.contains(PUBLIC_MARKER) {
+            return Err(PublicAddressError::ForeignProviderState);
+        }
+        Ok(success)
+    }
+}
+
+fn load_owned_addresses(path: &Path) -> Result<Vec<Ipv4Addr>, PublicAddressError> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| PublicAddressError::CorruptState),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn store_owned_addresses(path: &Path, addresses: &[Ipv4Addr]) -> Result<(), PublicAddressError> {
+    let bytes =
+        serde_json::to_vec_pretty(addresses).map_err(|_| PublicAddressError::CorruptState)?;
+    let temporary = path.with_extension("json.tmp");
+    let mut file = File::create(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
+fn address_present(output: &str, address: Ipv4Addr) -> bool {
+    output
+        .split_whitespace()
+        .filter_map(|token| token.split('/').next())
+        .any(|token| token == address.to_string())
 }
 
 #[cfg(test)]
@@ -563,22 +662,29 @@ mod tests {
     struct FakePublicCommand {
         calls: Mutex<Vec<Vec<String>>>,
         listing: String,
+        interface_listing: String,
     }
 
     impl PublicCommand for FakePublicCommand {
-        fn output(&self, args: &[&str]) -> io::Result<(bool, String)> {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-            Ok((!self.listing.is_empty(), self.listing.clone()))
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+            self.calls.lock().expect("calls").push(
+                std::iter::once(program.to_owned())
+                    .chain(args.iter().map(|arg| (*arg).to_owned()))
+                    .collect(),
+            );
+            if program == "nft" {
+                Ok((!self.listing.is_empty(), self.listing.clone()))
+            } else {
+                Ok((true, self.interface_listing.clone()))
+            }
         }
 
-        fn run(&self, args: &[&str]) -> io::Result<bool> {
-            self.calls
-                .lock()
-                .expect("calls")
-                .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
+            self.calls.lock().expect("calls").push(
+                std::iter::once(program.to_owned())
+                    .chain(args.iter().map(|arg| (*arg).to_owned()))
+                    .collect(),
+            );
             Ok(true)
         }
     }
@@ -675,6 +781,7 @@ mod tests {
         let command = Arc::new(FakePublicCommand {
             calls: Mutex::new(Vec::new()),
             listing: String::new(),
+            interface_listing: String::new(),
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
@@ -695,6 +802,7 @@ mod tests {
         let command = Arc::new(FakePublicCommand {
             calls: Mutex::new(Vec::new()),
             listing: "table ip o3k_public { comment foreign; }".to_owned(),
+            interface_listing: String::new(),
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
@@ -727,6 +835,7 @@ mod tests {
         let command = Arc::new(FakePublicCommand {
             calls: Mutex::new(Vec::new()),
             listing: format!("table ip {PUBLIC_TABLE} {{ comment {PUBLIC_MARKER}; }}"),
+            interface_listing: String::new(),
         });
         let endpoint = Uuid::from_u128(9);
         let mut provider = PublicAddressRealizer::with_command(
@@ -747,10 +856,11 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|call| call == &["delete", "table", "ip", PUBLIC_TABLE])
+                .any(|call| call == &["nft", "delete", "table", "ip", PUBLIC_TABLE])
         );
         assert!(calls.iter().any(|call| call
             == &[
+                "nft",
                 "add",
                 "table",
                 "ip",
@@ -760,5 +870,68 @@ mod tests {
                 PUBLIC_MARKER,
                 "}"
             ]));
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call == &["ip", "addr", "add", "198.51.100.2/32", "dev", "eth0"] })
+        );
+    }
+
+    #[test]
+    fn public_realization_never_adopts_foreign_uplink_address() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            interface_listing: "    inet 198.51.100.2/32 scope global eth0".to_owned(),
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(9);
+        let mut intents = vec![NetworkPlanIntent::AddressAssignment {
+            endpoint_id: endpoint,
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            generation: 1,
+        }];
+        intents.extend(public_intents(endpoint));
+
+        assert!(matches!(
+            provider.apply(&intents),
+            Err(PublicAddressError::ForeignProviderState)
+        ));
+        assert!(!root.join("ownership").exists());
+    }
+
+    #[test]
+    fn public_realization_cleanup_removes_only_durable_owned_addresses() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        fs::write(root.join("ownership"), PUBLIC_MARKER).expect("ownership");
+        let address = Ipv4Addr::new(198, 51, 100, 2);
+        store_owned_addresses(&root.join(OWNED_ADDRESS_FILE), &[address]).expect("addresses");
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: format!("table ip {PUBLIC_TABLE} {{ comment {PUBLIC_MARKER}; }}"),
+            interface_listing: format!("    inet {address}/32 scope global eth0"),
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+
+        provider.remove().expect("cleanup");
+        let calls = command.calls.lock().expect("calls");
+        assert!(
+            calls
+                .iter()
+                .any(|call| { call == &["ip", "addr", "del", "198.51.100.2/32", "dev", "eth0"] })
+        );
+        assert!(!root.join(OWNED_ADDRESS_FILE).exists());
     }
 }
