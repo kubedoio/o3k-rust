@@ -8651,6 +8651,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn network_address_allocation_survives_restart() -> Result<(), Box<dyn Error>> {
+        let path = PathBuf::from(format!(
+            "/tmp/o3k-network-address-restart-{}.sqlite",
+            Uuid::now_v7()
+        ));
+        let realm_id = Uuid::now_v7();
+        let endpoint_id = Uuid::now_v7();
+        let operation_id = format!("network-address-restart-{}", Uuid::now_v7());
+        let allocation = {
+            let store = SqliteStore::connect_file(&path).await?;
+            store
+                .allocate_network_address(
+                    &realm_id,
+                    "project-a",
+                    &endpoint_id,
+                    &operation_id,
+                    "203.0.113.0/30",
+                )
+                .await?
+        };
+        let reopened = SqliteStore::connect_file(&path).await?;
+        let replay = reopened
+            .allocate_network_address(
+                &realm_id,
+                "project-a",
+                &endpoint_id,
+                &operation_id,
+                "203.0.113.0/30",
+            )
+            .await?;
+        assert_eq!(replay, allocation);
+        reopened
+            .release_network_address("project-a", &endpoint_id)
+            .await?;
+        drop(reopened);
+        fs::remove_file(&path)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn corrupt_database_is_rejected_without_repair() -> Result<(), Box<dyn Error>> {
         let path = PathBuf::from(format!(
             "/tmp/o3k-store-corrupt-{}.sqlite",
