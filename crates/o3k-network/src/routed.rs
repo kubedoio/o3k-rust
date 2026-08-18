@@ -33,6 +33,8 @@ struct Ownership {
     prefix: Ipv4Prefix,
     uplink: String,
     bridge: String,
+    #[serde(default)]
+    forwarding_enabled_by_o3k: bool,
 }
 
 trait RoutedCommand: Send + Sync {
@@ -135,11 +137,31 @@ impl LinuxRoutedProvider {
         if *external_realm_id != self.config.external_realm_id || !nat {
             return Err(RoutedNetworkError::UnauthorizedExternalRealm);
         }
+        let (firewall_present, firewall_output) = self
+            .command
+            .output("nft", &["list", "table", "ip", TABLE])
+            .map_err(RoutedNetworkError::Storage)?;
+        if firewall_present && !firewall_output.contains(MARKER) {
+            return Err(RoutedNetworkError::ForeignFirewallState);
+        }
+        let forwarding_enabled_by_o3k = if let Some(existing) = &self.ownership {
+            existing.forwarding_enabled_by_o3k
+        } else {
+            let (success, output) = self
+                .command
+                .output("sysctl", &["-n", "net.ipv4.ip_forward"])
+                .map_err(RoutedNetworkError::Storage)?;
+            if !success {
+                return Err(RoutedNetworkError::CommandFailed);
+            }
+            output.trim() != "1"
+        };
         let ownership = Ownership {
             realm_id: self.config.external_realm_id,
             prefix,
             uplink: self.config.uplink.clone(),
             bridge: self.config.bridge.clone(),
+            forwarding_enabled_by_o3k,
         };
         if let Some(existing) = &self.ownership
             && existing != &ownership
@@ -151,6 +173,14 @@ impl LinuxRoutedProvider {
         // this bounded state instead of treating the mutation as nonexistent.
         store_ownership(&self.root.join("routed.json"), &ownership)?;
         self.ownership = Some(ownership.clone());
+        if ownership.forwarding_enabled_by_o3k
+            && !self
+                .command
+                .run("sysctl", &["-w", "net.ipv4.ip_forward=1"])
+                .map_err(RoutedNetworkError::Storage)?
+        {
+            return Err(RoutedNetworkError::CommandFailed);
+        }
         self.ensure_firewall(&ownership)?;
         if !self
             .command
@@ -198,7 +228,14 @@ impl LinuxRoutedProvider {
                 ],
             )
             .map_err(RoutedNetworkError::Storage)?;
-        Ok(success)
+        if !success {
+            return Ok(false);
+        }
+        let (success, output) = self
+            .command
+            .output("sysctl", &["-n", "net.ipv4.ip_forward"])
+            .map_err(RoutedNetworkError::Storage)?;
+        Ok(success && output.trim() == "1")
     }
 
     pub fn remove(&mut self) -> Result<(), RoutedNetworkError> {
@@ -209,17 +246,15 @@ impl LinuxRoutedProvider {
             .command
             .output("nft", &["list", "table", "ip", TABLE])
             .map_err(RoutedNetworkError::Storage)?;
-        if !success {
-            return Ok(());
-        }
-        if !output.contains(MARKER) {
+        if success && !output.contains(MARKER) {
             self.ownership = Some(ownership);
             return Err(RoutedNetworkError::ForeignFirewallState);
         }
-        if !self
-            .command
-            .run("nft", &["delete", "table", "ip", TABLE])
-            .map_err(RoutedNetworkError::Storage)?
+        if success
+            && !self
+                .command
+                .run("nft", &["delete", "table", "ip", TABLE])
+                .map_err(RoutedNetworkError::Storage)?
         {
             self.ownership = Some(ownership);
             return Err(RoutedNetworkError::CommandFailed);
@@ -230,6 +265,15 @@ impl LinuxRoutedProvider {
             .run("ip", &["route", "del", &route, "dev", &ownership.bridge])
             .map_err(RoutedNetworkError::Storage)?
         {
+            return Err(RoutedNetworkError::CommandFailed);
+        }
+        if ownership.forwarding_enabled_by_o3k
+            && !self
+                .command
+                .run("sysctl", &["-w", "net.ipv4.ip_forward=0"])
+                .map_err(RoutedNetworkError::Storage)?
+        {
+            self.ownership = Some(ownership);
             return Err(RoutedNetworkError::CommandFailed);
         }
         let _ = fs::remove_file(self.root.join("routed.json"));
@@ -408,6 +452,9 @@ mod tests {
             if args.starts_with(&["list", "table"]) {
                 return Ok(self.table_output.lock().expect("table").clone());
             }
+            if program == "sysctl" {
+                return Ok((true, "0\n".to_owned()));
+            }
             Ok((true, String::new()))
         }
 
@@ -514,6 +561,39 @@ mod tests {
                 .windows(3)
                 .any(|window| window == ["hook", "postrouting", "priority"])
         }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn forwarding_is_enabled_and_restored_as_owned_state() {
+        let root = std::env::temp_dir().join(format!("o3k-routed-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand::new((false, "")));
+        let mut provider = LinuxRoutedProvider::with_command(
+            config(),
+            &root,
+            Arc::clone(&command) as Arc<dyn RoutedCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(&intents(true, Uuid::from_u128(9)))
+            .expect("routed apply");
+        assert!(
+            command
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|call| { call.0 == "sysctl" && call.1 == ["-w", "net.ipv4.ip_forward=1"] })
+        );
+        provider.remove().expect("routed remove");
+        assert!(
+            command
+                .calls
+                .lock()
+                .expect("calls")
+                .iter()
+                .any(|call| { call.0 == "sysctl" && call.1 == ["-w", "net.ipv4.ip_forward=0"] })
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
