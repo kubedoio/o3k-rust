@@ -1,7 +1,8 @@
 # ADR-0168 — O3K Routed Fabric and node-local network execution
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-18
+Human-approval: Senol Colak, 2026-08-18
 Supersedes: none
 Superseded-by: none
 Affected-services: network, compute, kernel, api, store, governance, edge
@@ -18,10 +19,9 @@ Related decisions and specifications:
 - [SPEC-0026 — O3K Routed Fabric v1](../specs/SPEC-0026-o3k-routed-fabric-v1.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
-This is a high-risk architecture and privileged-execution proposal. It must not
-be treated as accepted merely because an agent authored it, CI passes, or an
-issue/PR is merged. Human maintainer approval is required before its status may
-become `Accepted`.
+This is a high-risk architecture and privileged-execution decision. Its
+acceptance records the human maintainer approval above; it does not claim that
+the runtime, privileged-host, or product evidence gates have passed.
 
 ## Context
 
@@ -445,17 +445,16 @@ failure bottleneck. Explicit gateway profiles may be added later when required.
 
 Before runtime implementation:
 
-1. human-review and accept/reject this ADR and SPEC-0026;
-2. keep current Neutron compatibility claims unchanged while the design is only
-   proposed;
-3. implement P9 under program issue #655 through coherent issue/PR slices;
-4. add exact action/resource/quota vocabulary and persistent schemas with the
+1. keep current Neutron compatibility claims unchanged until the corresponding
+   implementation and evidence gates pass;
+2. implement P9 under program issue #655 through coherent issue/PR slices;
+3. add exact action/resource/quota vocabulary and persistent schemas with the
    first implementation slice rather than inventing them in provider code;
-5. activate `o3k-network` through the accepted execution protocol with separate
+4. activate `o3k-network` through the accepted execution protocol with separate
    network capabilities/privilege documentation;
-6. prove egress, public-address, policy, restart/reconciliation, cleanup, and
+5. prove egress, public-address, policy, restart/reconciliation, cleanup, and
    foreign-state safety at the evidence tiers required by SPEC-0026;
-7. update compatibility manifests only after the corresponding operation gates
+6. update compatibility manifests only after the corresponding operation gates
    pass;
-8. defer cross-host WireGuard/BGP/overlay fabric realization to P11 or another
+7. defer cross-host WireGuard/BGP/overlay fabric realization to P11 or another
    explicitly accepted profile.

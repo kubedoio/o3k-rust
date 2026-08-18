@@ -1,6 +1,7 @@
 # SPEC-0026 — O3K Routed Fabric v1
 
-Status: Proposed
+Status: Accepted
+Human-approval: Senol Colak, 2026-08-18
 
 Related decisions and specifications:
 
@@ -15,9 +16,9 @@ Related decisions and specifications:
 
 Program tracker: [#655](https://github.com/kubedoio/o3k-rust/issues/655)
 
-This specification is proposed together with ADR-0168. Runtime P9 work must not
-start merely because this file exists. The high-risk networking architecture
-requires human acceptance first.
+This specification is accepted together with ADR-0168. Runtime P9 work remains
+issue- and evidence-gated; acceptance of this contract does not claim that any
+runtime, privileged-host, or product evidence gate has passed.
 
 ## Purpose
 
