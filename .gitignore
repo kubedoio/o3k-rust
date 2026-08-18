@@ -6,11 +6,17 @@
 .DS_Store
 .idea/
 .vscode/
-coverage/
-artifacts/
+/coverage/
+/artifacts/
 
-# Local opencode tooling (not part of the repository)
+# Local coding-agent/tooling state (not part of the repository)
 /.opencode/
+/.kimi/
+/.codex/
+/.agents/
+/.gstack/
+/.worktrees/
+/.sccache/
 
 # Real-host gate evidence artifacts (regenerated per run)
 /cinder-chap-compute-result.json
