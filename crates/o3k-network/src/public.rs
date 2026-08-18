@@ -512,8 +512,17 @@ impl PublicAddressRealizer {
                 return Err(PublicAddressError::ProviderCommandFailed);
             }
         }
-        let _ = self.command.run("nft", &prerouting);
-        let _ = self.command.run("nft", &postrouting);
+        if !self
+            .command
+            .run("nft", &prerouting)
+            .map_err(PublicAddressError::Storage)?
+            || !self
+                .command
+                .run("nft", &postrouting)
+                .map_err(PublicAddressError::Storage)?
+        {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
         for (endpoint_id, public_address) in bindings {
             let private_address = endpoint_addresses[endpoint_id].to_string();
             let public_address = public_address.to_string();
@@ -676,6 +685,7 @@ mod tests {
         calls: Mutex<Vec<Vec<String>>>,
         listing: String,
         interface_listing: String,
+        fail_on: Option<String>,
     }
 
     impl PublicCommand for FakePublicCommand {
@@ -693,11 +703,17 @@ mod tests {
         }
 
         fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
-            self.calls.lock().expect("calls").push(
-                std::iter::once(program.to_owned())
-                    .chain(args.iter().map(|arg| (*arg).to_owned()))
-                    .collect(),
-            );
+            let call = std::iter::once(program.to_owned())
+                .chain(args.iter().map(|arg| (*arg).to_owned()))
+                .collect::<Vec<_>>();
+            let should_fail = self
+                .fail_on
+                .as_ref()
+                .is_some_and(|needle| call.iter().any(|value| value == needle));
+            self.calls.lock().expect("calls").push(call);
+            if should_fail {
+                return Ok(false);
+            }
             Ok(true)
         }
     }
@@ -795,6 +811,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             listing: String::new(),
             interface_listing: String::new(),
+            fail_on: None,
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
@@ -816,6 +833,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             listing: "table ip o3k_public { comment foreign; }".to_owned(),
             interface_listing: String::new(),
+            fail_on: None,
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
@@ -849,6 +867,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             listing: format!("table ip {PUBLIC_TABLE} {{ comment {PUBLIC_MARKER}; }}"),
             interface_listing: String::new(),
+            fail_on: None,
         });
         let endpoint = Uuid::from_u128(9);
         let mut provider = PublicAddressRealizer::with_command(
@@ -891,12 +910,43 @@ mod tests {
     }
 
     #[test]
+    fn public_realization_fails_when_nat_chain_creation_fails() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            interface_listing: String::new(),
+            fail_on: Some("prerouting".to_owned()),
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(9);
+        let mut intents = vec![NetworkPlanIntent::AddressAssignment {
+            endpoint_id: endpoint,
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            generation: 1,
+        }];
+        intents.extend(public_intents(endpoint));
+
+        assert!(matches!(
+            provider.apply(&intents),
+            Err(PublicAddressError::ProviderCommandFailed)
+        ));
+        assert!(root.join("ownership").exists());
+    }
+
+    #[test]
     fn public_realization_never_adopts_foreign_uplink_address() {
         let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
         let command = Arc::new(FakePublicCommand {
             calls: Mutex::new(Vec::new()),
             listing: String::new(),
             interface_listing: "    inet 198.51.100.2/32 scope global eth0".to_owned(),
+            fail_on: None,
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
@@ -930,6 +980,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             listing: format!("table ip {PUBLIC_TABLE} {{ comment {PUBLIC_MARKER}; }}"),
             interface_listing: format!("    inet {address}/32 scope global eth0"),
+            fail_on: None,
         });
         let mut provider = PublicAddressRealizer::with_command(
             &root,
