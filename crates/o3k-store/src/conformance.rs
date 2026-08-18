@@ -1096,8 +1096,14 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
         .insert_network_intent(&intent)
         .await
         .expect("insert_network_intent");
+    store
+        .insert_network_intent(&intent)
+        .await
+        .expect("idempotent network intent retry");
+    let mut conflicting_intent = intent.clone();
+    conflicting_intent.payload = r#"{"id":"p9-intent","generation":99}"#.to_owned();
     assert!(matches!(
-        store.insert_network_intent(&intent).await,
+        store.insert_network_intent(&conflicting_intent).await,
         Err(StoreError::ResourceAlreadyExists)
     ));
     assert!(

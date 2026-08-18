@@ -2443,7 +2443,13 @@ impl SqliteStore {
         match result {
             Ok(_) => Ok(()),
             Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-                Err(StoreError::ResourceAlreadyExists)
+                match self
+                    .get_network_intent(&intent.project_id, &intent.id)
+                    .await?
+                {
+                    Some(existing) if existing == *intent => Ok(()),
+                    _ => Err(StoreError::ResourceAlreadyExists),
+                }
             }
             Err(error) => Err(StoreError::Database(error)),
         }

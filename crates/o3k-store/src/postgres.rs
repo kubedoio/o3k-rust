@@ -2308,7 +2308,7 @@ impl NetworkRepository for PostgresStore {
         let generation = i64::try_from(intent.generation).map_err(|_| {
             StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
         })?;
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO network_intents (id, project_id, generation, payload, plan_fingerprint_sha256, status)
              VALUES ($1, $2, $3, $4, $5, $6)",
         )
@@ -2319,9 +2319,20 @@ impl NetworkRepository for PostgresStore {
         .bind(&intent.plan_fingerprint_sha256)
         .bind(&intent.status)
         .execute(&self.pool)
-        .await
-        .map_err(map_pg_error)?;
-        Ok(())
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                match self
+                    .get_network_intent(&intent.project_id, &intent.id)
+                    .await?
+                {
+                    Some(existing) if existing == *intent => Ok(()),
+                    _ => Err(StoreError::ResourceAlreadyExists),
+                }
+            }
+            Err(error) => Err(map_pg_error(error)),
+        }
     }
 
     async fn list_network_intents(
