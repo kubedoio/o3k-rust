@@ -6039,7 +6039,7 @@ mod tests {
     }
 
     #[test]
-    fn attachment_plan_can_carry_operator_owned_routed_egress() {
+    fn attachment_plan_can_carry_operator_owned_routed_egress() -> Result<(), NetworkPlanError> {
         let endpoint_id = Uuid::from_u128(11);
         let external_realm_id = Uuid::from_u128(12);
         let plan = compile_attachment_plan(AttachmentPlanInput {
@@ -6054,8 +6054,7 @@ mod tests {
             deadline_unix_ms: 1,
             public_address: None,
             external_realm_id: Some(external_realm_id),
-        })
-        .expect("plan");
+        })?;
         assert!(plan.intents.iter().any(|intent| matches!(
             intent,
             NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
@@ -6068,5 +6067,6 @@ mod tests {
             .intents
             .iter()
             .any(|intent| matches!(intent, NetworkPlanIntent::EndpointAttachment { endpoint_id: id, .. } if *id == endpoint_id)));
+        Ok(())
     }
 }
