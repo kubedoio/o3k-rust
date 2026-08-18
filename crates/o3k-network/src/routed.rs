@@ -494,4 +494,26 @@ mod tests {
         assert_eq!(command.calls.lock().expect("calls").len(), 1);
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn snat_chain_is_a_postrouting_nat_hook() {
+        let root = std::env::temp_dir().join(format!("o3k-routed-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand::new((false, "")));
+        let mut provider = LinuxRoutedProvider::with_command(
+            config(),
+            &root,
+            Arc::clone(&command) as Arc<dyn RoutedCommand>,
+        )
+        .expect("provider");
+        provider
+            .apply(&intents(true, Uuid::from_u128(9)))
+            .expect("routed apply");
+        let calls = command.calls.lock().expect("calls");
+        assert!(calls.iter().any(|call| {
+            call.1
+                .windows(3)
+                .any(|window| window == ["hook", "postrouting", "priority"])
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
 }
