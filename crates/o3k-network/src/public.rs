@@ -387,6 +387,17 @@ impl PublicAddressRealizer {
             }
         }
         self.ensure_foreign_safe()?;
+        // Replays rebuild only the provider's own marked table. This avoids
+        // duplicate DNAT/SNAT rules after reconnect while never touching a
+        // table that failed the ownership marker check above.
+        if self.owned
+            && !self
+                .command
+                .run(&["delete", "table", "ip", PUBLIC_TABLE])
+                .map_err(PublicAddressError::Storage)?
+        {
+            return Err(PublicAddressError::ProviderCommandFailed);
+        }
         let table_args = [
             "add",
             "table",
@@ -706,5 +717,48 @@ mod tests {
             Err(PublicAddressError::ForeignProviderState)
         ));
         assert_eq!(command.calls.lock().expect("calls").len(), 1);
+    }
+
+    #[test]
+    fn public_realization_rebuilds_owned_table_after_restart() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        fs::write(root.join("ownership"), PUBLIC_MARKER).expect("ownership");
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: format!("table ip {PUBLIC_TABLE} {{ comment {PUBLIC_MARKER}; }}"),
+        });
+        let endpoint = Uuid::from_u128(9);
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let mut intents = vec![NetworkPlanIntent::AddressAssignment {
+            endpoint_id: endpoint,
+            address: Ipv4Addr::new(10, 0, 0, 2),
+            generation: 1,
+        }];
+        intents.extend(public_intents(endpoint));
+
+        provider.apply(&intents).expect("rebuild");
+        let calls = command.calls.lock().expect("calls");
+        assert!(
+            calls
+                .iter()
+                .any(|call| call == &["delete", "table", "ip", PUBLIC_TABLE])
+        );
+        assert!(calls.iter().any(|call| call
+            == &[
+                "add",
+                "table",
+                "ip",
+                PUBLIC_TABLE,
+                "{",
+                "comment",
+                PUBLIC_MARKER,
+                "}"
+            ]));
     }
 }
