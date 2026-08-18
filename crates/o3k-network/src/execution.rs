@@ -213,6 +213,39 @@ impl NetworkPlanExecutor {
             .any(|plan| plan.command_id == command_id))
     }
 
+    /// Returns durable mutations that are not yet terminally succeeded. A
+    /// restarted agent uses this inventory to observe before attempting any
+    /// retry, including when the controller lease has been taken over.
+    pub fn pending(&self) -> Result<Vec<(Uuid, NetworkPlanStatus)>, NetworkExecutionError> {
+        let _guard = self
+            .journal_lock
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        Ok(self
+            .load()?
+            .plans
+            .into_iter()
+            .filter(|plan| plan.status != NetworkPlanStatus::Succeeded)
+            .map(|plan| (plan.command_id, plan.status))
+            .collect())
+    }
+
+    /// Observes every pending mutation after restart. No provider mutation is
+    /// issued by this method; an unresolved observation remains `Unknown`.
+    pub fn reconcile_pending<R: NetworkPlanRealizer>(
+        &self,
+        realizer: &mut R,
+    ) -> Result<Vec<(Uuid, NetworkPlanStatus)>, NetworkExecutionError> {
+        let pending = self.pending()?;
+        pending
+            .into_iter()
+            .map(|(command_id, _)| {
+                self.reconcile(command_id, realizer)
+                    .map(|status| (command_id, status))
+            })
+            .collect()
+    }
+
     pub fn execute<R: NetworkPlanRealizer>(
         &self,
         command: &NetworkPlanCommand,
@@ -705,6 +738,51 @@ mod tests {
             executor.reconcile(command.command_id, &mut realizer)?,
             NetworkPlanStatus::Succeeded
         );
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn restarted_executor_reconciles_pending_state_after_lease_takeover()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct InterruptedRealizer {
+            observed: bool,
+        }
+
+        impl NetworkPlanRealizer for InterruptedRealizer {
+            type Error = &'static str;
+
+            fn realize(&mut self, _plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+                Err("interrupted")
+            }
+
+            fn observe(&mut self, _plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+                Ok(self.observed)
+            }
+        }
+
+        let root = tempfile_path("takeover");
+        let command = command();
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = InterruptedRealizer { observed: false };
+        assert!(matches!(
+            executor.execute(&command, 1, &mut realizer),
+            Err(NetworkExecutionError::MutationOutcomeUnknown)
+        ));
+        drop(executor);
+        let mut takeover = command.controller.clone();
+        takeover.controller_epoch = "epoch-2".to_owned();
+        takeover.fencing_token = 8;
+        let restarted = NetworkPlanExecutor::open(&root, command.target, takeover)?;
+        assert_eq!(restarted.pending()?.len(), 1);
+        realizer.observed = true;
+        let recovered = restarted.reconcile_pending(&mut realizer)?;
+        assert_eq!(
+            recovered,
+            vec![(command.command_id, NetworkPlanStatus::Succeeded)]
+        );
+        assert!(restarted.pending()?.is_empty());
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

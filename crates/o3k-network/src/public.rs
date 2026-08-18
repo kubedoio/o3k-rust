@@ -337,11 +337,12 @@ impl PublicAddressRealizer {
         }
         let root = root.into();
         fs::create_dir_all(&root)?;
+        let owned = root.join("ownership").exists();
         Ok(Self {
             root,
             uplink,
             command: Arc::new(SystemPublicCommand),
-            owned: false,
+            owned,
         })
     }
 
