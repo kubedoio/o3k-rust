@@ -18,8 +18,8 @@ use crate::{
     ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
-    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
+    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository,
     PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord, StoreError,
     SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository, quota::QuotaRepository,
@@ -2201,6 +2201,103 @@ fn parse_pg_image(row: &PgRow) -> Result<ImageMetadataRecord, StoreError> {
 
 #[async_trait]
 impl NetworkRepository for PostgresStore {
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+        validate_network_intent(intent)?;
+        let generation = i64::try_from(intent.generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
+        })?;
+        sqlx::query(
+            "INSERT INTO network_intents (id, project_id, generation, payload, plan_fingerprint_sha256, status)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(intent.id.to_string())
+        .bind(&intent.project_id)
+        .bind(generation)
+        .bind(&intent.payload)
+        .bind(&intent.plan_fingerprint_sha256)
+        .bind(&intent.status)
+        .execute(&self.pool)
+        .await
+        .map_err(map_pg_error)?;
+        Ok(())
+    }
+
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE project_id = $1 ORDER BY id",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(parse_pg_network_intent).collect()
+    }
+
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE id = $1 AND project_id = $2",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(parse_pg_network_intent).transpose()
+    }
+
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        if payload.is_empty() || status.is_empty() {
+            return Err(StoreError::Corrupt(
+                "network intent has empty payload or status".to_owned(),
+            ));
+        }
+        let expected = i64::try_from(expected_generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
+        })?;
+        let result = sqlx::query(
+            "UPDATE network_intents
+             SET generation = generation + 1, payload = $1, plan_fingerprint_sha256 = $2, status = $3, updated_at = NOW()
+             WHERE id = $4 AND project_id = $5 AND generation = $6",
+        )
+        .bind(payload)
+        .bind(plan_fingerprint_sha256)
+        .bind(status)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(expected)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_network_intent(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::NetworkIntentNotFound),
+            };
+        }
+        self.get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "updated network intent disappeared".to_owned(),
+            ))
+    }
+
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
         let id_str = network.id.to_string();
         sqlx::query(
@@ -2496,6 +2593,33 @@ impl NetworkRepository for PostgresStore {
             .await?
             .ok_or(StoreError::NetworkNotFound)
     }
+}
+
+fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+    if intent.project_id.is_empty() || intent.payload.is_empty() || intent.status.is_empty() {
+        return Err(StoreError::Corrupt(
+            "network intent has empty required field".to_owned(),
+        ));
+    }
+    if intent.generation == 0 {
+        return Err(StoreError::Corrupt(
+            "network intent generation must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_pg_network_intent(row: &PgRow) -> Result<NetworkIntentRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(NetworkIntentRecord {
+        id: parse_uuid(&row.get::<String, _>("id"))?,
+        project_id: row.get("project_id"),
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative network intent generation".to_owned()))?,
+        payload: row.get("payload"),
+        plan_fingerprint_sha256: row.get("plan_fingerprint_sha256"),
+        status: row.get("status"),
+    })
 }
 
 fn parse_pg_network(row: &PgRow) -> Result<NetworkRecord, StoreError> {

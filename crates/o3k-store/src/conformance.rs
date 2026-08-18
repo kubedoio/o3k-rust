@@ -18,11 +18,11 @@ use crate::{
     ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
-    LeaseAcquireOutcome, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
-    PlacementRepository, PlacementResourceRecord, PortRecord, ProviderReference, ResourceRecord,
-    StoreError, SubnetRecord, VolumeAttachmentRecord, VolumeAttachmentRepository,
-    quota::QuotaRepository,
+    LeaseAcquireOutcome, NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate,
+    OperationRecord, OperationState, PlacementAllocationRecord, PlacementIntentRecord,
+    PlacementInventoryRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
+    ProviderReference, ResourceRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    VolumeAttachmentRepository, quota::QuotaRepository,
 };
 use o3k_kernel::{
     LimitKey, LimitValue, OwnershipScope, ReservationState, ResourceAmount, ScopeId, ScopeKind,
@@ -1016,6 +1016,52 @@ pub async fn test_image_repository<S: StoreUnderTest>(store: Arc<S>) {
 
 pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
     let proj = format!("proj-{}", Uuid::now_v7());
+    let other_proj = format!("proj-{}", Uuid::now_v7());
+
+    let intent = NetworkIntentRecord {
+        id: Uuid::now_v7(),
+        project_id: proj.clone(),
+        generation: 1,
+        payload: r#"{"id":"p9-intent","generation":1}"#.to_owned(),
+        plan_fingerprint_sha256: Some("abc123".to_owned()),
+        status: "requested".to_owned(),
+    };
+    store
+        .insert_network_intent(&intent)
+        .await
+        .expect("insert_network_intent");
+    assert!(matches!(
+        store.insert_network_intent(&intent).await,
+        Err(StoreError::ResourceAlreadyExists)
+    ));
+    assert!(
+        store
+            .get_network_intent(&other_proj, &intent.id)
+            .await
+            .expect("cross-project intent lookup")
+            .is_none()
+    );
+    let updated_intent = store
+        .update_network_intent(
+            &proj,
+            &intent.id,
+            1,
+            r#"{"id":"p9-intent","generation":2}"#,
+            Some("def456"),
+            "active",
+        )
+        .await
+        .expect("update_network_intent");
+    assert_eq!(updated_intent.generation, 2);
+    assert_eq!(updated_intent.status, "active");
+    assert!(matches!(
+        store
+            .update_network_intent(&proj, &intent.id, 1, "stale", None, "error")
+            .await,
+        Err(StoreError::StaleGeneration)
+    ));
+    assert_eq!(store.list_network_intents(&proj).await.unwrap().len(), 1);
+
     let net_id = Uuid::now_v7();
 
     let net = NetworkRecord {

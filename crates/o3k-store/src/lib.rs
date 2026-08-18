@@ -151,6 +151,19 @@ pub struct PortRecord {
     pub binding_state: Option<String>,
 }
 
+/// Durable projection of canonical P9 network intent. The payload is the
+/// canonical domain representation; the store deliberately does not know
+/// about provider commands or host networking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkIntentRecord {
+    pub id: Uuid,
+    pub project_id: String,
+    pub generation: u64,
+    pub payload: String,
+    pub plan_fingerprint_sha256: Option<String>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacementInventoryRecord {
     pub resource_class: String,
@@ -561,6 +574,8 @@ pub enum StoreError {
     NetworkNotFound,
     #[error("network resource is still in use")]
     NetworkInUse,
+    #[error("network intent not found")]
+    NetworkIntentNotFound,
     #[error("placement provider not found")]
     PlacementProviderNotFound,
     #[error("placement provider generation is stale")]
@@ -934,6 +949,25 @@ pub trait ImageRepository: Send + Sync + QuotaRepository {
 /// the concrete `SqliteStore` adapter.
 #[async_trait]
 pub trait NetworkRepository: Send + Sync + QuotaRepository {
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError>;
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError>;
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError>;
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError>;
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError>;
     async fn list_networks(&self, project_id: &str) -> Result<Vec<NetworkRecord>, StoreError>;
     async fn get_network(
@@ -2252,6 +2286,111 @@ impl SqliteStore {
         } else {
             Ok(())
         }
+    }
+
+    pub async fn insert_network_intent(
+        &self,
+        intent: &NetworkIntentRecord,
+    ) -> Result<(), StoreError> {
+        validate_network_intent(intent)?;
+        let generation = i64::try_from(intent.generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds SQLite range".to_owned())
+        })?;
+        let result = sqlx::query(
+            "INSERT INTO network_intents (id, project_id, generation, payload, plan_fingerprint_sha256, status)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(intent.id.to_string())
+        .bind(&intent.project_id)
+        .bind(generation)
+        .bind(&intent.payload)
+        .bind(&intent.plan_fingerprint_sha256)
+        .bind(&intent.status)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                Err(StoreError::ResourceAlreadyExists)
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
+    pub async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE project_id = ? ORDER BY id",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        rows.iter().map(network_intent_from_row).collect()
+    }
+
+    pub async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, generation, payload, plan_fingerprint_sha256, status
+             FROM network_intents WHERE id = ? AND project_id = ?",
+        )
+        .bind(id.to_string())
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        row.as_ref().map(network_intent_from_row).transpose()
+    }
+
+    pub async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        if payload.is_empty() || status.is_empty() {
+            return Err(StoreError::Corrupt(
+                "network intent has empty payload or status".to_owned(),
+            ));
+        }
+        let expected = i64::try_from(expected_generation).map_err(|_| {
+            StoreError::Corrupt("network intent generation exceeds SQLite range".to_owned())
+        })?;
+        let result = sqlx::query(
+            "UPDATE network_intents
+             SET generation = generation + 1, payload = ?, plan_fingerprint_sha256 = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+             WHERE id = ? AND project_id = ? AND generation = ?",
+        )
+        .bind(payload)
+        .bind(plan_fingerprint_sha256)
+        .bind(status)
+        .bind(id.to_string())
+        .bind(project_id)
+        .bind(expected)
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            return match self.get_network_intent(project_id, id).await? {
+                Some(_) => Err(StoreError::StaleGeneration),
+                None => Err(StoreError::NetworkIntentNotFound),
+            };
+        }
+        self.get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::Corrupt(
+                "updated network intent disappeared".to_owned(),
+            ))
     }
 
     pub async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
@@ -3596,6 +3735,35 @@ fn network_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkRecord, Stor
         id: parse_uuid(row.get("id"))?,
         name: row.get("name"),
         project_id: row.get("project_id"),
+        status: row.get("status"),
+    })
+}
+
+fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+    if intent.project_id.is_empty() || intent.payload.is_empty() || intent.status.is_empty() {
+        return Err(StoreError::Corrupt(
+            "network intent has empty required field".to_owned(),
+        ));
+    }
+    if intent.generation == 0 {
+        return Err(StoreError::Corrupt(
+            "network intent generation must be positive".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn network_intent_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<NetworkIntentRecord, StoreError> {
+    let generation: i64 = row.get("generation");
+    Ok(NetworkIntentRecord {
+        id: Uuid::parse_str(row.get::<&str, _>("id")).map_err(StoreError::InvalidUuid)?,
+        project_id: row.get("project_id"),
+        generation: u64::try_from(generation)
+            .map_err(|_| StoreError::Corrupt("negative network intent generation".to_owned()))?,
+        payload: row.get("payload"),
+        plan_fingerprint_sha256: row.get("plan_fingerprint_sha256"),
         status: row.get("status"),
     })
 }
@@ -4980,6 +5148,45 @@ impl ImageRepository for SqliteStore {
 
 #[async_trait]
 impl NetworkRepository for SqliteStore {
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+        self.insert_network_intent(intent).await
+    }
+
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        self.list_network_intents(project_id).await
+    }
+
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        self.get_network_intent(project_id, id).await
+    }
+
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        self.update_network_intent(
+            project_id,
+            id,
+            expected_generation,
+            payload,
+            plan_fingerprint_sha256,
+            status,
+        )
+        .await
+    }
+
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
         self.insert_network(network).await
     }

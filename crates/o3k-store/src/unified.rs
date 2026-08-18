@@ -15,8 +15,8 @@ use crate::{
     ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository,
     KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
     KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkRecord,
-    NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, ResourceRecord, SqliteStore, StoreError, SubnetRecord,
@@ -950,6 +950,69 @@ impl ImageRepository for O3kStore {
 
 #[async_trait]
 impl NetworkRepository for O3kStore {
+    async fn insert_network_intent(&self, intent: &NetworkIntentRecord) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_network_intent(intent).await,
+            Self::Postgres(s) => s.insert_network_intent(intent).await,
+        }
+    }
+
+    async fn list_network_intents(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<NetworkIntentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_network_intents(project_id).await,
+            Self::Postgres(s) => s.list_network_intents(project_id).await,
+        }
+    }
+
+    async fn get_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<NetworkIntentRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_network_intent(project_id, id).await,
+            Self::Postgres(s) => s.get_network_intent(project_id, id).await,
+        }
+    }
+
+    async fn update_network_intent(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        expected_generation: u64,
+        payload: &str,
+        plan_fingerprint_sha256: Option<&str>,
+        status: &str,
+    ) -> Result<NetworkIntentRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_network_intent(
+                    project_id,
+                    id,
+                    expected_generation,
+                    payload,
+                    plan_fingerprint_sha256,
+                    status,
+                )
+                .await
+            }
+            Self::Postgres(s) => {
+                s.update_network_intent(
+                    project_id,
+                    id,
+                    expected_generation,
+                    payload,
+                    plan_fingerprint_sha256,
+                    status,
+                )
+                .await
+            }
+        }
+    }
+
     async fn insert_network(&self, network: &NetworkRecord) -> Result<(), StoreError> {
         match self {
             Self::Sqlite(s) => s.insert_network(network).await,
