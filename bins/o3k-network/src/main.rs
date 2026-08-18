@@ -1,9 +1,11 @@
 mod agent;
 
 use agent::proto::network_agent_server::NetworkAgentServer;
+use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
-    FlatNetworkRealizer, HostNetworkConfig, NetworkAgentIdentity, NetworkControllerLease,
-    NetworkPlanExecutor,
+    FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider, NetworkAgentIdentity,
+    NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan,
+    RoutedExternalConfig,
 };
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
@@ -46,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fencing_token,
         },
     )?;
-    let realizer = FlatNetworkRealizer::open(
+    let flat = FlatNetworkRealizer::open(
         HostNetworkConfig {
             bridge_name,
             uplink,
@@ -55,6 +57,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dhcp_root,
         dnsmasq,
     )?;
+    let routed = match env::var("O3K_NETWORK_EXTERNAL_REALM_ID") {
+        Ok(realm) => Some(LinuxRoutedProvider::open(
+            RoutedExternalConfig {
+                external_realm_id: realm.parse()?,
+                uplink: required("O3K_NETWORK_UPLINK")?,
+                bridge: required("O3K_NETWORK_BRIDGE")?,
+            },
+            PathBuf::from(required("O3K_NETWORK_ROUTED_ROOT")?),
+        )?),
+        Err(_) => None,
+    };
+    let realizer = CompositeRealizer { flat, routed };
     let service = agent::NetworkAgentService::new(executor, realizer);
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(server_cert, server_key))
@@ -67,4 +81,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .serve_with_incoming(TcpListenerStream::new(listener))
         .await?;
     Ok(())
+}
+
+struct CompositeRealizer {
+    flat: FlatNetworkRealizer,
+    routed: Option<LinuxRoutedProvider>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CompositeRealizerError {
+    #[error("flat realization failed: {0}")]
+    Flat(#[from] o3k_network::FlatNetworkError),
+    #[error("routed realization failed: {0}")]
+    Routed(#[from] o3k_network::RoutedNetworkError),
+    #[error("routed intents require O3K_NETWORK_EXTERNAL_REALM_ID configuration")]
+    RoutedNotConfigured,
+}
+
+impl NetworkPlanRealizer for CompositeRealizer {
+    type Error = CompositeRealizerError;
+
+    fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        let mut flat_plan = plan.clone();
+        flat_plan.intents.retain(is_flat_intent);
+        self.flat.realize(&flat_plan)?;
+        if plan.intents.iter().any(is_routed_intent) {
+            self.routed
+                .as_mut()
+                .ok_or(CompositeRealizerError::RoutedNotConfigured)?
+                .apply(&plan.intents)?;
+        }
+        Ok(())
+    }
+
+    fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        let mut flat_plan = plan.clone();
+        flat_plan.intents.retain(is_flat_intent);
+        if !self.flat.observe(&flat_plan)? {
+            return Ok(false);
+        }
+        if plan.intents.iter().any(is_routed_intent) {
+            return self
+                .routed
+                .as_ref()
+                .ok_or(CompositeRealizerError::RoutedNotConfigured)
+                .and_then(|provider| provider.observe().map_err(Into::into));
+        }
+        Ok(true)
+    }
+}
+
+fn is_flat_intent(intent: &NetworkPlanIntent) -> bool {
+    matches!(
+        intent,
+        NetworkPlanIntent::AddressRealm { .. }
+            | NetworkPlanIntent::EndpointAttachment { .. }
+            | NetworkPlanIntent::AddressAssignment { .. }
+    )
+}
+
+fn is_routed_intent(intent: &NetworkPlanIntent) -> bool {
+    matches!(
+        intent,
+        NetworkPlanIntent::Route(_) | NetworkPlanIntent::Gateway(_) | NetworkPlanIntent::Egress(_)
+    )
 }

@@ -1274,6 +1274,7 @@ dependencies = [
 name = "o3k-network-bin"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "o3k-domain",
  "o3k-network",
  "prost",
  "rustls",

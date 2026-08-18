@@ -271,6 +271,13 @@ impl LinuxRoutedProvider {
             }
         }
         let source = prefix_string(ownership.prefix);
+        let (_, chain) = self
+            .command
+            .output("nft", &["list", "chain", "ip", TABLE, CHAIN])
+            .map_err(RoutedNetworkError::Storage)?;
+        if chain.contains(MARKER) && chain.contains(&source) && chain.contains(&ownership.uplink) {
+            return Ok(());
+        }
         if !self
             .command
             .run(
