@@ -2496,11 +2496,12 @@ impl SqliteStore {
         plan_fingerprint_sha256: Option<&str>,
         status: &str,
     ) -> Result<NetworkIntentRecord, StoreError> {
-        if payload.is_empty() || status.is_empty() {
-            return Err(StoreError::Corrupt(
-                "network intent has empty payload or status".to_owned(),
-            ));
-        }
+        validate_network_intent_update(project_id, payload, status)?;
+        let existing = self
+            .get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkIntentNotFound)?;
+        validate_network_intent_transition(&existing.status, status)?;
         let expected = i64::try_from(expected_generation).map_err(|_| {
             StoreError::Corrupt("network intent generation exceeds SQLite range".to_owned())
         })?;
@@ -3878,17 +3879,56 @@ fn network_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<NetworkRecord, Stor
 }
 
 fn validate_network_intent(intent: &NetworkIntentRecord) -> Result<(), StoreError> {
-    if intent.project_id.is_empty() || intent.payload.is_empty() || intent.status.is_empty() {
+    if intent.project_id.is_empty() {
         return Err(StoreError::Corrupt(
-            "network intent has empty required field".to_owned(),
+            "network intent has empty project".to_owned(),
         ));
     }
+    validate_network_intent_update(&intent.project_id, &intent.payload, &intent.status)?;
     if intent.generation == 0 {
         return Err(StoreError::Corrupt(
             "network intent generation must be positive".to_owned(),
         ));
     }
     Ok(())
+}
+
+pub(crate) fn validate_network_intent_update(
+    project_id: &str,
+    payload: &str,
+    status: &str,
+) -> Result<(), StoreError> {
+    if project_id.is_empty() || payload.is_empty() {
+        return Err(StoreError::Corrupt(
+            "network intent has empty required field".to_owned(),
+        ));
+    }
+    if !matches!(status, "requested" | "active" | "deleting" | "error") {
+        return Err(StoreError::Corrupt(
+            "network intent has invalid lifecycle status".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_network_intent_transition(
+    current: &str,
+    next: &str,
+) -> Result<(), StoreError> {
+    let valid = current == next
+        || matches!(
+            (current, next),
+            ("requested", "active" | "deleting" | "error")
+                | ("active", "deleting" | "error")
+                | ("deleting", "error")
+        );
+    if valid {
+        Ok(())
+    } else {
+        Err(StoreError::Corrupt(
+            "network intent lifecycle transition is invalid".to_owned(),
+        ))
+    }
 }
 
 fn parse_ipv4_prefix(value: &str) -> Result<(u32, u8), StoreError> {

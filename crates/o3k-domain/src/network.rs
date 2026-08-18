@@ -165,11 +165,32 @@ pub enum PolicyAction {
     Deny,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PolicyDirection {
+    Ingress,
+    Egress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NetworkProtocol {
+    Any,
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortRange {
+    pub start: u16,
+    pub end: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyIntent {
     pub endpoint_id: Uuid,
-    pub direction: String,
-    pub protocol: String,
+    pub direction: PolicyDirection,
+    pub protocol: NetworkProtocol,
+    pub ports: Option<PortRange>,
     pub source: Option<Ipv4Prefix>,
     pub destination: Option<Ipv4Prefix>,
     pub action: PolicyAction,

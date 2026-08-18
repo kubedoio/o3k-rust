@@ -1128,6 +1128,18 @@ pub async fn test_network_repository<S: StoreUnderTest>(store: Arc<S>) {
     assert_eq!(updated_intent.status, "active");
     assert!(matches!(
         store
+            .update_network_intent(&proj, &intent.id, 2, "invalid-status", None, "bogus")
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store
+            .update_network_intent(&proj, &intent.id, 2, "backwards", None, "requested")
+            .await,
+        Err(StoreError::Corrupt(_))
+    ));
+    assert!(matches!(
+        store
             .update_network_intent(&proj, &intent.id, 1, "stale", None, "error")
             .await,
         Err(StoreError::StaleGeneration)

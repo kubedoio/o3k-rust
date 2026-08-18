@@ -8,7 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use o3k_domain::{AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent};
+use o3k_domain::{
+    AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
+};
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
     LimitKey, LimitValue, NoopAuditSink, OwnershipScope, ResourceAmount, ResourceId,
@@ -103,7 +105,8 @@ mod vocabulary_tests {
 mod p9_plan_tests {
     use super::*;
     use o3k_domain::{
-        EndpointIntent, Ipv4Prefix, NetworkPlanIntent, PolicyAction, PolicyIntent, RouteIntent,
+        EndpointIntent, Ipv4Prefix, NetworkPlanIntent, NetworkProtocol, PolicyAction,
+        PolicyDirection, PolicyIntent, PortRange, RouteIntent,
     };
     use std::net::Ipv4Addr;
 
@@ -150,8 +153,12 @@ mod p9_plan_tests {
             public_addresses: vec![],
             policies: vec![PolicyIntent {
                 endpoint_id: Uuid::from_u128(3),
-                direction: "egress".to_owned(),
-                protocol: "tcp".to_owned(),
+                direction: PolicyDirection::Egress,
+                protocol: NetworkProtocol::Tcp,
+                ports: Some(PortRange {
+                    start: 443,
+                    end: 443,
+                }),
                 source: None,
                 destination: Some(prefix("0.0.0.0", 0)),
                 action: PolicyAction::Allow,
@@ -182,6 +189,7 @@ mod p9_plan_tests {
                 .expect("plan");
         assert_eq!(first, second);
         assert_eq!(first.plan_id, value.id);
+        assert_eq!(first.schema_version, NODE_NETWORK_PLAN_SCHEMA_VERSION);
         assert!(
             first
                 .intents
@@ -313,6 +321,123 @@ mod p9_plan_tests {
                 &[],
             ),
             Err(NetworkPlanError::AddressOutsideRealm)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_cross_project_bindings_and_invalid_policies() {
+        let mut binding = intent();
+        binding
+            .public_addresses
+            .push(o3k_domain::PublicAddressBindingIntent {
+                id: Uuid::from_u128(9),
+                project_id: "project-b".to_owned(),
+                public_address: Ipv4Addr::new(198, 51, 100, 10),
+                endpoint_id: Uuid::from_u128(3),
+                generation: 1,
+            });
+        let mut provider_capabilities = capabilities();
+        provider_capabilities.insert(NetworkCapability::PublicAddressRealization);
+        assert_eq!(
+            compile_node_network_plan(
+                &binding,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &provider_capabilities,
+                &[],
+            ),
+            Err(NetworkPlanError::OwnershipViolation)
+        );
+
+        let mut policy = intent();
+        policy.policies[0].endpoint_id = Uuid::from_u128(99);
+        assert_eq!(
+            compile_node_network_plan(
+                &policy,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidPolicy)
+        );
+
+        let mut invalid_ports = intent();
+        invalid_ports.policies[0].ports = Some(PortRange {
+            start: 5000,
+            end: 80,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &invalid_ports,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidPolicy)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_foreign_realm_and_pool() {
+        let mut value = intent();
+        value.realm.project_id = "project-b".to_owned();
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::OwnershipViolation)
+        );
+
+        let mut value = intent();
+        value.address_pools.push(o3k_domain::AddressPool {
+            id: Uuid::from_u128(10),
+            realm_id: value.realm.id,
+            project_id: "project-a".to_owned(),
+            prefix: prefix("10.1.0.0", 24),
+            gateway: Some(Ipv4Addr::new(10, 1, 0, 1)),
+            first_usable: Ipv4Addr::new(10, 1, 0, 2),
+            last_usable: Ipv4Addr::new(10, 1, 0, 20),
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+    }
+
+    #[test]
+    fn equivalent_plan_replay_is_allowed_but_payload_conflict_is_rejected() {
+        let plan = compile_node_network_plan(
+            &intent(),
+            "node-a",
+            Uuid::from_u128(6),
+            123,
+            &capabilities(),
+            &[],
+        )
+        .expect("plan");
+        assert_eq!(validate_plan_replay(&plan, &plan), Ok(()));
+        let mut conflicting = plan.clone();
+        conflicting.fingerprint_sha256 = "conflicting".to_owned();
+        assert_eq!(
+            validate_plan_replay(&plan, &conflicting),
+            Err(NetworkPlanError::ConflictingPlan)
         );
     }
 }
@@ -3165,6 +3290,7 @@ pub use o3k_store::{NetworkRecord, PortRecord, SubnetRecord};
 /// handles belong behind the execution boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeNetworkPlan {
+    pub schema_version: u16,
     pub plan_id: Uuid,
     pub node_id: String,
     pub operation_id: Uuid,
@@ -3186,7 +3312,17 @@ pub enum NetworkPlanError {
     ConflictingEndpoint,
     #[error("network plan serialization failed")]
     Serialization,
+    #[error("network plan identity conflicts with an existing plan")]
+    ConflictingPlan,
+    #[error("network intent has invalid project ownership")]
+    OwnershipViolation,
+    #[error("network intent has an invalid address pool")]
+    InvalidAddressPool,
+    #[error("network intent has an invalid policy")]
+    InvalidPolicy,
 }
+
+pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
 
 /// Compiles one canonical intent into a stable semantic node plan. The
 /// `realms` slice represents existing routed realms in the selected profile;
@@ -3199,6 +3335,9 @@ pub fn compile_node_network_plan(
     capabilities: &HashSet<NetworkCapability>,
     realms: &[AddressRealm],
 ) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    if node_id.is_empty() || intent.realm.project_id != intent.project_id {
+        return Err(NetworkPlanError::OwnershipViolation);
+    }
     if !intent.realm.overlapping_prefixes
         && realms.iter().any(|realm| {
             realm.id != intent.realm.id
@@ -3230,6 +3369,21 @@ pub fn compile_node_network_plan(
     }
 
     let mut generations = BTreeMap::new();
+    for pool in &intent.address_pools {
+        if pool.project_id != intent.project_id
+            || pool.realm_id != intent.realm.id
+            || pool.prefix.prefix_len < intent.realm.prefix.prefix_len
+            || !intent.realm.prefix.contains(pool.prefix.network)
+            || !pool.prefix.contains(pool.first_usable)
+            || !pool.prefix.contains(pool.last_usable)
+            || u32::from(pool.first_usable) > u32::from(pool.last_usable)
+            || pool
+                .gateway
+                .is_some_and(|gateway| !pool.prefix.contains(gateway))
+        {
+            return Err(NetworkPlanError::InvalidAddressPool);
+        }
+    }
     let mut intents =
         Vec::with_capacity(intent.endpoints.len() + intent.routes.len() + intent.policies.len());
     for endpoint in &intent.endpoints {
@@ -3255,6 +3409,30 @@ pub fn compile_node_network_plan(
             address: endpoint.fixed_ip,
             generation: endpoint.generation,
         });
+    }
+    let endpoint_ids: HashSet<Uuid> = generations.keys().copied().collect();
+    for binding in &intent.public_addresses {
+        if binding.project_id != intent.project_id || !endpoint_ids.contains(&binding.endpoint_id) {
+            return Err(NetworkPlanError::OwnershipViolation);
+        }
+    }
+    for policy in &intent.policies {
+        if !endpoint_ids.contains(&policy.endpoint_id)
+            || policy.ports.is_some_and(|ports| ports.start > ports.end)
+            || policy.ports.is_some_and(|_| {
+                matches!(
+                    policy.protocol,
+                    NetworkProtocol::Any | NetworkProtocol::Icmp
+                )
+            })
+        {
+            return Err(NetworkPlanError::InvalidPolicy);
+        }
+    }
+    for gateway in &intent.gateways {
+        if !gateway.external && !intent.realm.prefix.contains(gateway.gateway) {
+            return Err(NetworkPlanError::AddressOutsideRealm);
+        }
     }
     intents.extend(intent.routes.iter().cloned().map(NetworkPlanIntent::Route));
     intents.extend(
@@ -3285,6 +3463,7 @@ pub fn compile_node_network_plan(
         &intent.id,
         node_id,
         &operation_id,
+        &NODE_NETWORK_PLAN_SCHEMA_VERSION,
         &deadline_unix_ms,
         &generations,
         &intents,
@@ -3293,6 +3472,7 @@ pub fn compile_node_network_plan(
     use sha2::{Digest, Sha256};
     let fingerprint_sha256 = format!("{:x}", Sha256::digest(bytes));
     Ok(NodeNetworkPlan {
+        schema_version: NODE_NETWORK_PLAN_SCHEMA_VERSION,
         plan_id: intent.id,
         node_id: node_id.to_owned(),
         operation_id,
@@ -3301,6 +3481,24 @@ pub fn compile_node_network_plan(
         intents,
         fingerprint_sha256,
     })
+}
+
+/// Accepts an equivalent replay and rejects a payload change for the same
+/// plan identity before an execution provider can mutate anything.
+pub fn validate_plan_replay(
+    existing: &NodeNetworkPlan,
+    candidate: &NodeNetworkPlan,
+) -> Result<(), NetworkPlanError> {
+    let same_identity = existing.plan_id == candidate.plan_id
+        && existing.node_id == candidate.node_id
+        && existing.operation_id == candidate.operation_id;
+    if same_identity
+        && (existing.schema_version != candidate.schema_version
+            || existing.fingerprint_sha256 != candidate.fingerprint_sha256)
+    {
+        return Err(NetworkPlanError::ConflictingPlan);
+    }
+    Ok(())
 }
 
 fn require_capability(

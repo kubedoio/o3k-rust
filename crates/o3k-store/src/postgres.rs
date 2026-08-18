@@ -2376,11 +2376,12 @@ impl NetworkRepository for PostgresStore {
         plan_fingerprint_sha256: Option<&str>,
         status: &str,
     ) -> Result<NetworkIntentRecord, StoreError> {
-        if payload.is_empty() || status.is_empty() {
-            return Err(StoreError::Corrupt(
-                "network intent has empty payload or status".to_owned(),
-            ));
-        }
+        crate::validate_network_intent_update(project_id, payload, status)?;
+        let existing = self
+            .get_network_intent(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkIntentNotFound)?;
+        crate::validate_network_intent_transition(&existing.status, status)?;
         let expected = i64::try_from(expected_generation).map_err(|_| {
             StoreError::Corrupt("network intent generation exceeds PostgreSQL range".to_owned())
         })?;
