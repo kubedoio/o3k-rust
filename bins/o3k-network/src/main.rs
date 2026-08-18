@@ -158,28 +158,29 @@ impl NetworkPlanRealizer for CompositeRealizer {
         if !self.flat.observe(&flat_plan)? {
             return Ok(false);
         }
+        let mut healthy = true;
         if plan.intents.iter().any(is_routed_intent) {
-            return self
+            healthy &= self
                 .routed
                 .as_ref()
                 .ok_or(CompositeRealizerError::RoutedNotConfigured)
-                .and_then(|provider| provider.observe().map_err(Into::into));
+                .and_then(|provider| provider.observe().map_err(Into::into))?;
         }
         if plan.intents.iter().any(is_policy_intent) {
-            return self
+            healthy &= self
                 .policy
                 .as_ref()
                 .ok_or(CompositeRealizerError::PolicyNotConfigured)
-                .and_then(|provider| provider.observe().map_err(Into::into));
+                .and_then(|provider| provider.observe().map_err(Into::into))?;
         }
         if plan.intents.iter().any(is_public_intent) {
-            return self
+            healthy &= self
                 .public
                 .as_ref()
                 .ok_or(CompositeRealizerError::PublicNotConfigured)
-                .and_then(|provider| provider.observe().map_err(Into::into));
+                .and_then(|provider| provider.observe().map_err(Into::into))?;
         }
-        Ok(true)
+        Ok(healthy)
     }
 }
 
