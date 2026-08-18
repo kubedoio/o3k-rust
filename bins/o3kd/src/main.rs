@@ -19,6 +19,7 @@ struct DaemonCreateResolver {
     config_drive: o3k_config_drive::ConfigDriveStore,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: o3k_network::NetworkControllerLease,
+    network_external_realm_id: Option<Uuid>,
 }
 
 /// Composition-root adapter for the bounded node-local network transport.
@@ -179,6 +180,7 @@ struct NetworkBindingProjector {
     registry: Arc<dyn o3k_provider::AgentNodeRegistry>,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: o3k_network::NetworkControllerLease,
+    network_external_realm_id: Option<Uuid>,
 }
 
 #[async_trait]
@@ -257,6 +259,7 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 operation_id,
                 deadline_unix_ms,
                 public_address: None,
+                external_realm_id: self.network_external_realm_id,
             })
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let command_id = Uuid::new_v5(
@@ -376,6 +379,7 @@ impl DaemonCreateResolver {
                     operation_id: request.operation_id,
                     deadline_unix_ms,
                     public_address: None,
+                    external_realm_id: self.network_external_realm_id,
                 })
                 .map_err(|_| ProviderError::InvalidRequest)?;
                 let command_id = Uuid::new_v5(
@@ -742,6 +746,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|value| value.parse().ok())
             .unwrap_or(1),
     };
+    let network_external_realm_id = std::env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
+        .ok()
+        .map(|value| Uuid::parse_str(&value))
+        .transpose()?;
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
@@ -752,6 +760,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_drive: config_drive_store.clone(),
             network_dispatcher: network_dispatcher.clone(),
             network_controller: network_controller.clone(),
+            network_external_realm_id,
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -769,6 +778,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             registry: Arc::new(registry.clone()),
             network_dispatcher: network_dispatcher.clone(),
             network_controller: network_controller.clone(),
+            network_external_realm_id,
         }))
         .with_config_drive_cleaner(config_drive_store.clone())
     } else {
@@ -942,6 +952,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
+    }
+    if let Some(realm_id) = network_external_realm_id {
+        state = state.with_network_external_realm(realm_id);
     }
     if let Some(dispatcher) = network_dispatcher {
         state = state.with_network_dispatcher(dispatcher, network_controller);
@@ -1488,6 +1501,7 @@ mod tests {
                 controller_epoch: "test-epoch".to_owned(),
                 fencing_token: 1,
             },
+            network_external_realm_id: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1601,6 +1615,7 @@ mod tests {
                 controller_epoch: "test-epoch".to_owned(),
                 fencing_token: 1,
             },
+            network_external_realm_id: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())

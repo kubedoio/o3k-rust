@@ -3421,6 +3421,7 @@ pub struct AttachmentPlanInput<'a> {
     pub operation_id: Uuid,
     pub deadline_unix_ms: u64,
     pub public_address: Option<std::net::Ipv4Addr>,
+    pub external_realm_id: Option<Uuid>,
 }
 
 pub fn compile_attachment_plan(
@@ -3437,6 +3438,7 @@ pub fn compile_attachment_plan(
         operation_id,
         deadline_unix_ms,
         public_address,
+        external_realm_id,
     } = input;
     let (network, prefix_len) = subnet_cidr
         .split_once('/')
@@ -3469,7 +3471,15 @@ pub fn compile_attachment_plan(
         }],
         routes: Vec::new(),
         gateways: Vec::new(),
-        egress: Vec::new(),
+        egress: external_realm_id
+            .map(|external_realm_id| {
+                vec![o3k_domain::EgressIntent {
+                    external_realm_id,
+                    enabled: true,
+                    nat: true,
+                }]
+            })
+            .unwrap_or_default(),
         public_addresses: public_address
             .map(|public_address| {
                 vec![o3k_domain::PublicAddressBindingIntent {
@@ -3492,6 +3502,10 @@ pub fn compile_attachment_plan(
     .collect();
     if public_address.is_some() {
         capabilities.insert(NetworkCapability::PublicAddressRealization);
+    }
+    if external_realm_id.is_some() {
+        capabilities.insert(NetworkCapability::Routing);
+        capabilities.insert(NetworkCapability::Nat);
     }
     compile_node_network_plan(
         &intent,
@@ -6022,5 +6036,37 @@ mod tests {
 
         let _ = fs::remove_dir_all(&path);
         Ok(())
+    }
+
+    #[test]
+    fn attachment_plan_can_carry_operator_owned_routed_egress() {
+        let endpoint_id = Uuid::from_u128(11);
+        let external_realm_id = Uuid::from_u128(12);
+        let plan = compile_attachment_plan(AttachmentPlanInput {
+            endpoint_id,
+            realm_id: Uuid::from_u128(13),
+            project_id: "project-a",
+            mac: "02:00:00:00:00:0b",
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 2),
+            subnet_cidr: "10.0.0.0/24",
+            node_id: "node-a",
+            operation_id: Uuid::from_u128(14),
+            deadline_unix_ms: 1,
+            public_address: None,
+            external_realm_id: Some(external_realm_id),
+        })
+        .expect("plan");
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
+                external_realm_id: id,
+                enabled: true,
+                nat: true,
+            }) if *id == external_realm_id
+        )));
+        assert!(plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, NetworkPlanIntent::EndpointAttachment { endpoint_id: id, .. } if *id == endpoint_id)));
     }
 }

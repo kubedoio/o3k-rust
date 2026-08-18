@@ -89,6 +89,7 @@ pub struct AppState {
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
     public_allocator: Option<Arc<PublicAddressAllocator>>,
+    network_external_realm_id: Option<uuid::Uuid>,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: Option<o3k_network::NetworkControllerLease>,
     compute: Option<Arc<ComputeService>>,
@@ -133,6 +134,12 @@ impl AppState {
     #[must_use]
     pub fn with_public_allocator(mut self, allocator: PublicAddressAllocator) -> Self {
         self.public_allocator = Some(Arc::new(allocator));
+        self
+    }
+
+    #[must_use]
+    pub fn with_network_external_realm(mut self, realm_id: uuid::Uuid) -> Self {
+        self.network_external_realm_id = Some(realm_id);
         self
     }
 

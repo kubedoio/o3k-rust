@@ -350,6 +350,7 @@ async fn dispatch_public_binding(
         operation_id,
         deadline_unix_ms,
         public_address: Some(binding.public_address),
+        external_realm_id: state.network_external_realm_id,
     })
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
     let command_id = Uuid::new_v5(
