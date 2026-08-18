@@ -29,6 +29,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 http.workspace = true
 o3k-cinder = { path = "../o3k-cinder" }
 o3k-identity = { path = "../o3k-identity" }

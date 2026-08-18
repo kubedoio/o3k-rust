@@ -4,10 +4,37 @@ use o3k_compute::ComputeService;
 use o3k_domain::Ipv4Prefix;
 use o3k_identity::testkit::test_service;
 use o3k_image::{DEFAULT_MAX_UPLOAD_BYTES, ImageService};
-use o3k_network::{NetworkService, PublicAddressAllocator, PublicAddressPool};
+use o3k_network::{
+    NetworkPlanAction, NetworkPlanCommand, NetworkPlanDispatcher, NetworkPlanStatus,
+    NetworkService, PublicAddressAllocator, PublicAddressPool,
+};
 use o3k_provider::{FailureInjection, FakeComputeProvider};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
+
+#[derive(Clone, Default)]
+struct RecordingNetworkDispatcher {
+    commands: Arc<Mutex<Vec<NetworkPlanCommand>>>,
+}
+
+#[async_trait::async_trait]
+impl NetworkPlanDispatcher for RecordingNetworkDispatcher {
+    async fn dispatch(
+        &self,
+        command: NetworkPlanCommand,
+    ) -> Result<NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+        self.commands
+            .lock()
+            .map_err(|_| {
+                o3k_network::NetworkDispatchError::Transport(
+                    "recording dispatcher lock poisoned".to_owned(),
+                )
+            })?
+            .push(command);
+        Ok(NetworkPlanStatus::Succeeded)
+    }
+}
 
 #[tokio::test]
 async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error::Error>> {
@@ -161,6 +188,132 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
         )
         .await?;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    Ok(())
+}
+
+#[tokio::test]
+async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-floating-dispatch-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let network = NetworkService::open(root.join("network"), store).await?;
+    let network_record = network
+        .create_network_for_project(project_id, "private".to_owned())
+        .await?;
+    network
+        .create_subnet_for_project(
+            project_id,
+            network_record.id,
+            "private-subnet".to_owned(),
+            "10.0.0.0/29".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let port = network
+        .create_port_for_project(project_id, network_record.id, "vm".to_owned())
+        .await?;
+    network
+        .record_binding_intent(project_id, port.id, "agent-network")
+        .await?;
+
+    let registry = o3k_compute_agent::NodeRegistry::default();
+    registry
+        .register(&o3k_provider_contract::compute_proto::RegisterRequest {
+            agent_id: "agent-network".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+            software_version: "test".to_owned(),
+            host_label: "network-host".to_owned(),
+            supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
+            capabilities: Some(o3k_provider_contract::compute_proto::Capabilities {
+                architecture: "x86_64".to_owned(),
+                agent_provider_name: "o3k-network".to_owned(),
+                agent_provider_version: "test".to_owned(),
+                ..Default::default()
+            }),
+        })
+        .await?;
+
+    let dispatcher = RecordingNetworkDispatcher::default();
+    let commands = dispatcher.commands.clone();
+    let allocator = PublicAddressAllocator::open(
+        root.join("public"),
+        PublicAddressPool {
+            prefix: Ipv4Prefix::new("198.51.100.0".parse()?, 29).ok_or("invalid pool")?,
+            first_usable: "198.51.100.2".parse()?,
+            last_usable: "198.51.100.6".parse()?,
+        },
+    )?;
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(network)
+        .with_public_allocator(allocator)
+        .with_network_dispatcher(
+            Arc::new(dispatcher),
+            o3k_network::NetworkControllerLease {
+                controller_id: "controller-test".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+        )
+        .with_agent_registry(registry);
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let token_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("token missing")?
+        .to_str()?
+        .to_owned();
+    let request_body = serde_json::json!({
+        "floatingip": {
+            "floating_network_id": network_record.id,
+            "port_id": port.id
+        }
+    });
+    let response = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "floating-dispatch-1")
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let commands = commands
+        .lock()
+        .map_err(|_| std::io::Error::other("recording dispatcher lock poisoned"))?;
+    assert_eq!(commands.len(), 1);
+    let command = &commands[0];
+    assert_eq!(command.action, NetworkPlanAction::Apply);
+    assert_eq!(command.target.agent_id, "agent-network");
+    assert_eq!(command.target.agent_epoch, "epoch-1");
+    assert!(command.plan.intents.iter().any(|intent| {
+        matches!(
+            intent,
+            o3k_domain::NetworkPlanIntent::PublicAddressBinding(binding)
+                if binding.endpoint_id == port.id
+        )
+    }));
     Ok(())
 }
 

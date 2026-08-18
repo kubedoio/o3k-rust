@@ -1016,6 +1016,7 @@ dependencies = [
 name = "o3k-api"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "axum",
  "http",
  "o3k-cinder",
