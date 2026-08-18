@@ -1,8 +1,9 @@
 mod network;
 
 pub use network::{
-    AddressRealm, EndpointIntent, Ipv4Prefix, NetworkCapability, NetworkIntent, NetworkIntentState,
-    NetworkPlanIntent, PolicyAction, PolicyIntent, RouteIntent,
+    AddressPool, AddressRealm, EgressIntent, EndpointIntent, GatewayIntent, Ipv4Prefix,
+    NetworkCapability, NetworkIntent, NetworkIntentState, NetworkPlanIntent, PolicyAction,
+    PolicyIntent, PublicAddressBindingIntent, RouteIntent,
 };
 
 use serde::{Deserialize, Serialize};

@@ -66,14 +66,30 @@ pub struct AddressRealm {
     pub overlapping_prefixes: bool,
 }
 
+/// A bounded, project-owned allocation range within an address realm.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressPool {
+    pub id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: String,
+    pub prefix: Ipv4Prefix,
+    pub gateway: Option<Ipv4Addr>,
+    pub first_usable: Ipv4Addr,
+    pub last_usable: Ipv4Addr,
+}
+
 /// Canonical desired network state owned by the control plane.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkIntent {
     pub id: Uuid,
     pub project_id: String,
     pub realm: AddressRealm,
+    pub address_pools: Vec<AddressPool>,
     pub endpoints: Vec<EndpointIntent>,
     pub routes: Vec<RouteIntent>,
+    pub gateways: Vec<GatewayIntent>,
+    pub egress: Vec<EgressIntent>,
+    pub public_addresses: Vec<PublicAddressBindingIntent>,
     pub policies: Vec<PolicyIntent>,
     pub generation: u64,
     pub state: NetworkIntentState,
@@ -120,6 +136,29 @@ pub struct RouteIntent {
     pub next_hop: Option<Ipv4Addr>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayIntent {
+    pub destination: Ipv4Prefix,
+    pub gateway: Ipv4Addr,
+    pub external: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EgressIntent {
+    pub external_realm_id: Uuid,
+    pub enabled: bool,
+    pub nat: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicAddressBindingIntent {
+    pub id: Uuid,
+    pub project_id: String,
+    pub public_address: Ipv4Addr,
+    pub endpoint_id: Uuid,
+    pub generation: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyAction {
     Allow,
@@ -142,11 +181,16 @@ pub struct PolicyIntent {
 pub enum NetworkCapability {
     EndpointAttachment,
     Ipv4,
+    Ipv6,
+    L2AdjacencyScope,
     Routing,
     StatefulPolicy,
     Nat,
     PublicAddressRealization,
     OverlappingAddressRealms,
+    EncapsulationModes,
+    QosFeatures,
+    RouteAdvertisementModes,
 }
 
 /// Provider-independent intent carried by a node plan.
@@ -158,6 +202,14 @@ pub enum NetworkPlanIntent {
         fixed_ip: Ipv4Addr,
         generation: u64,
     },
+    AddressAssignment {
+        endpoint_id: Uuid,
+        address: Ipv4Addr,
+        generation: u64,
+    },
     Route(RouteIntent),
+    Gateway(GatewayIntent),
+    Egress(EgressIntent),
+    PublicAddressBinding(PublicAddressBindingIntent),
     Policy(PolicyIntent),
 }

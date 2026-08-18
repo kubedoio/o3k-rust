@@ -133,6 +133,7 @@ mod p9_plan_tests {
                 prefix: prefix("10.0.0.0", 24),
                 overlapping_prefixes: false,
             },
+            address_pools: vec![],
             endpoints: vec![EndpointIntent {
                 id: Uuid::from_u128(3),
                 project_id: "project-a".to_owned(),
@@ -144,6 +145,9 @@ mod p9_plan_tests {
                 destination: prefix("0.0.0.0", 0),
                 next_hop: Some(Ipv4Addr::new(10, 0, 0, 1)),
             }],
+            gateways: vec![],
+            egress: vec![],
+            public_addresses: vec![],
             policies: vec![PolicyIntent {
                 endpoint_id: Uuid::from_u128(3),
                 direction: "egress".to_owned(),
@@ -170,10 +174,12 @@ mod p9_plan_tests {
     fn plan_fingerprint_is_deterministic_and_semantic() {
         let value = intent();
         let operation = Uuid::from_u128(6);
-        let first = compile_node_network_plan(&value, "node-a", operation, &capabilities(), &[])
-            .expect("plan");
-        let second = compile_node_network_plan(&value, "node-a", operation, &capabilities(), &[])
-            .expect("plan");
+        let first =
+            compile_node_network_plan(&value, "node-a", operation, 123, &capabilities(), &[])
+                .expect("plan");
+        let second =
+            compile_node_network_plan(&value, "node-a", operation, 123, &capabilities(), &[])
+                .expect("plan");
         assert_eq!(first, second);
         assert_eq!(first.plan_id, value.id);
         assert!(
@@ -198,6 +204,7 @@ mod p9_plan_tests {
                 &intent(),
                 "node-a",
                 Uuid::from_u128(6),
+                123,
                 &capabilities(),
                 &[existing],
             ),
@@ -210,9 +217,84 @@ mod p9_plan_tests {
         let mut missing = capabilities();
         missing.remove(&NetworkCapability::Routing);
         assert_eq!(
-            compile_node_network_plan(&intent(), "node-a", Uuid::from_u128(6), &missing, &[],),
+            compile_node_network_plan(&intent(), "node-a", Uuid::from_u128(6), 123, &missing, &[],),
             Err(NetworkPlanError::UnsupportedCapability(
                 NetworkCapability::Routing
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_carries_gateway_egress_public_binding_and_deadline() {
+        let mut value = intent();
+        value.gateways.push(o3k_domain::GatewayIntent {
+            destination: prefix("0.0.0.0", 0),
+            gateway: Ipv4Addr::new(10, 0, 0, 1),
+            external: true,
+        });
+        value.egress.push(o3k_domain::EgressIntent {
+            external_realm_id: Uuid::from_u128(8),
+            enabled: true,
+            nat: true,
+        });
+        value
+            .public_addresses
+            .push(o3k_domain::PublicAddressBindingIntent {
+                id: Uuid::from_u128(9),
+                project_id: "project-a".to_owned(),
+                public_address: Ipv4Addr::new(198, 51, 100, 10),
+                endpoint_id: Uuid::from_u128(3),
+                generation: 6,
+            });
+        let mut capabilities = capabilities();
+        capabilities.insert(NetworkCapability::Nat);
+        capabilities.insert(NetworkCapability::PublicAddressRealization);
+        let plan = compile_node_network_plan(
+            &value,
+            "node-a",
+            Uuid::from_u128(6),
+            456,
+            &capabilities,
+            &[],
+        )
+        .expect("plan");
+        assert_eq!(plan.deadline_unix_ms, 456);
+        assert!(
+            plan.intents
+                .iter()
+                .any(|item| matches!(item, NetworkPlanIntent::Gateway(_)))
+        );
+        assert!(
+            plan.intents
+                .iter()
+                .any(|item| matches!(item, NetworkPlanIntent::Egress(_)))
+        );
+        assert!(
+            plan.intents
+                .iter()
+                .any(|item| matches!(item, NetworkPlanIntent::PublicAddressBinding(_)))
+        );
+    }
+
+    #[test]
+    fn plan_rejects_nat_without_provider_capability() {
+        let mut value = intent();
+        value.egress.push(o3k_domain::EgressIntent {
+            external_realm_id: Uuid::from_u128(8),
+            enabled: true,
+            nat: true,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::UnsupportedCapability(
+                NetworkCapability::Nat
             ))
         );
     }
@@ -222,7 +304,14 @@ mod p9_plan_tests {
         let mut value = intent();
         value.endpoints[0].project_id = "project-b".to_owned();
         assert_eq!(
-            compile_node_network_plan(&value, "node-a", Uuid::from_u128(6), &capabilities(), &[],),
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
             Err(NetworkPlanError::AddressOutsideRealm)
         );
     }
@@ -3079,6 +3168,7 @@ pub struct NodeNetworkPlan {
     pub plan_id: Uuid,
     pub node_id: String,
     pub operation_id: Uuid,
+    pub deadline_unix_ms: u64,
     pub resource_generations: BTreeMap<Uuid, u64>,
     pub intents: Vec<NetworkPlanIntent>,
     pub fingerprint_sha256: String,
@@ -3105,6 +3195,7 @@ pub fn compile_node_network_plan(
     intent: &NetworkIntent,
     node_id: &str,
     operation_id: Uuid,
+    deadline_unix_ms: u64,
     capabilities: &HashSet<NetworkCapability>,
     realms: &[AddressRealm],
 ) -> Result<NodeNetworkPlan, NetworkPlanError> {
@@ -3121,6 +3212,18 @@ pub fn compile_node_network_plan(
     require_capability(capabilities, NetworkCapability::EndpointAttachment)?;
     if !intent.routes.is_empty() {
         require_capability(capabilities, NetworkCapability::Routing)?;
+    }
+    if !intent.gateways.is_empty() {
+        require_capability(capabilities, NetworkCapability::Routing)?;
+    }
+    if intent.egress.iter().any(|egress| egress.enabled) {
+        require_capability(capabilities, NetworkCapability::Routing)?;
+        if intent.egress.iter().any(|egress| egress.nat) {
+            require_capability(capabilities, NetworkCapability::Nat)?;
+        }
+    }
+    if !intent.public_addresses.is_empty() {
+        require_capability(capabilities, NetworkCapability::PublicAddressRealization)?;
     }
     if !intent.policies.is_empty() {
         require_capability(capabilities, NetworkCapability::StatefulPolicy)?;
@@ -3147,8 +3250,28 @@ pub fn compile_node_network_plan(
             fixed_ip: endpoint.fixed_ip,
             generation: endpoint.generation,
         });
+        intents.push(NetworkPlanIntent::AddressAssignment {
+            endpoint_id: endpoint.id,
+            address: endpoint.fixed_ip,
+            generation: endpoint.generation,
+        });
     }
     intents.extend(intent.routes.iter().cloned().map(NetworkPlanIntent::Route));
+    intents.extend(
+        intent
+            .gateways
+            .iter()
+            .cloned()
+            .map(NetworkPlanIntent::Gateway),
+    );
+    intents.extend(intent.egress.iter().cloned().map(NetworkPlanIntent::Egress));
+    intents.extend(
+        intent
+            .public_addresses
+            .iter()
+            .cloned()
+            .map(NetworkPlanIntent::PublicAddressBinding),
+    );
     intents.extend(
         intent
             .policies
@@ -3158,7 +3281,14 @@ pub fn compile_node_network_plan(
     );
     intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
 
-    let unsigned = (&intent.id, node_id, &operation_id, &generations, &intents);
+    let unsigned = (
+        &intent.id,
+        node_id,
+        &operation_id,
+        &deadline_unix_ms,
+        &generations,
+        &intents,
+    );
     let bytes = serde_json::to_vec(&unsigned).map_err(|_| NetworkPlanError::Serialization)?;
     use sha2::{Digest, Sha256};
     let fingerprint_sha256 = format!("{:x}", Sha256::digest(bytes));
@@ -3166,6 +3296,7 @@ pub fn compile_node_network_plan(
         plan_id: intent.id,
         node_id: node_id.to_owned(),
         operation_id,
+        deadline_unix_ms,
         resource_generations: generations,
         intents,
         fingerprint_sha256,
