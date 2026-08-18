@@ -86,6 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         public,
     };
     let service = agent::NetworkAgentService::new(executor, realizer);
+    let recovered = service.reconcile_pending()?;
+    info!(
+        pending = recovered.len(),
+        "reconciled pending network plans at startup"
+    );
     let tls = ServerTlsConfig::new()
         .identity(Identity::from_pem(server_cert, server_key))
         .client_ca_root(Certificate::from_pem(client_ca));

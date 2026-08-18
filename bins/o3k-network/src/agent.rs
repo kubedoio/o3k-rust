@@ -66,6 +66,19 @@ where
         }
     }
 
+    pub fn reconcile_pending(
+        &self,
+    ) -> Result<Vec<(Uuid, o3k_network::NetworkPlanStatus)>, NetworkExecutionError> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| NetworkExecutionError::CorruptJournal)?;
+        let Runtime {
+            executor, realizer, ..
+        } = &mut *runtime;
+        executor.reconcile_pending(realizer)
+    }
+
     fn register(&self, request: &proto::Register) -> Result<RegisterAck, NetworkAgentError> {
         let runtime = self
             .runtime
@@ -387,6 +400,13 @@ mod tests {
                 observations: Arc::clone(&observations),
             },
         );
+        assert_eq!(
+            service.reconcile_pending().expect("startup reconciliation"),
+            vec![(
+                command.command_id,
+                o3k_network::NetworkPlanStatus::Succeeded
+            )]
+        );
         service
             .register(&proto::Register {
                 agent_id: agent.agent_id.clone(),
@@ -408,7 +428,7 @@ mod tests {
                 remove: false,
             })
             .expect("recovery result");
-        assert_eq!(result.status, "recovered");
+        assert_eq!(result.status, "replayed");
         assert!(result.replayed);
         assert_eq!(observations.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(root);
