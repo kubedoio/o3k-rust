@@ -21,11 +21,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod routed;
 pub use execution::{
     FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
     NetworkExecutionError, NetworkPlanCommand, NetworkPlanExecutor, NetworkPlanRealizer,
     NetworkPlanStatus, PlanAdmission, journal_path,
 };
+pub use routed::{LinuxRoutedProvider, RoutedExternalConfig, RoutedNetworkError};
 
 /// Poll interval while waiting for a freshly created TAP address to settle.
 #[cfg(not(test))]
