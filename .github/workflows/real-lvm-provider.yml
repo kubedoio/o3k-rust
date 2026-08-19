@@ -63,7 +63,8 @@ jobs:
             O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}" \
             O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE}" \
             O3K_LVM_HOST_ID="${O3K_LVM_HOST_ID}" \
-            target/debug/examples/lvm-provider-smoke > target/lvm-provider-artifacts/lvm-provider-smoke.json
+            target/debug/examples/lvm-provider-smoke \
+            | tee target/lvm-provider-artifacts/lvm-provider-smoke.json >/dev/null
           python3 - target/lvm-provider-artifacts/lvm-provider-smoke.json "${GITHUB_SHA}" <<'PY'
           import json, sys
           path, source_commit = sys.argv[1:]
