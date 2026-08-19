@@ -780,7 +780,7 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         executor.admit(&command, 1)?;
         let mut conflict = command.clone();
-        conflict.plan.fingerprint_sha256.replace_range(..1, "0");
+        conflict.plan.fingerprint_sha256 = "0".repeat(64);
         assert!(matches!(
             executor.admit(&conflict, 1),
             Err(NetworkExecutionError::InvalidCommand)

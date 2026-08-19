@@ -219,6 +219,27 @@ mod p9_plan_tests {
     }
 
     #[test]
+    fn equivalent_retry_with_new_deadline_keeps_plan_fingerprint() {
+        let value = intent();
+        let operation = Uuid::from_u128(6);
+        let first =
+            compile_node_network_plan(&value, "node-a", operation, 123, &capabilities(), &[])
+                .expect("plan");
+        let retried =
+            compile_node_network_plan(&value, "node-a", operation, 456, &capabilities(), &[])
+                .expect("retried plan");
+        assert_eq!(first.fingerprint_sha256, retried.fingerprint_sha256);
+        assert_eq!(
+            canonical_plan_fingerprint(&first).expect("fingerprint"),
+            first.fingerprint_sha256
+        );
+        assert_eq!(
+            canonical_plan_fingerprint(&retried).expect("fingerprint"),
+            retried.fingerprint_sha256
+        );
+    }
+
+    #[test]
     fn plan_rejects_overlap_before_provider_mutation() {
         let existing = AddressRealm {
             id: Uuid::from_u128(7),
@@ -3790,7 +3811,6 @@ pub fn compile_node_network_plan(
         node_id,
         &operation_id,
         &NODE_NETWORK_PLAN_SCHEMA_VERSION,
-        &deadline_unix_ms,
         &generations,
         &intents,
     );
@@ -3838,7 +3858,6 @@ pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, Netw
         &plan.node_id,
         &plan.operation_id,
         &plan.schema_version,
-        &plan.deadline_unix_ms,
         &plan.resource_generations,
         &intents,
     );
