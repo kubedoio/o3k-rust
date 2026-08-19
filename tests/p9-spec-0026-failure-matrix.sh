@@ -11,6 +11,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 focused_tests=(
   'execution::tests::conflicting_payload_and_stale_identity_fail_closed'
   'execution::tests::equivalent_command_replays_after_executor_restart'
+  'execution::tests::equivalent_command_replays_after_controller_takeover'
   'execution::tests::failed_realization_is_unknown_until_observation_resolves_it'
   'execution::tests::restarted_executor_reconciles_pending_state_after_lease_takeover'
   'policy::tests::cleanup_reaps_durable_policy_state_when_table_is_already_absent'
@@ -29,17 +30,26 @@ if [[ "${O3K_P9_SPEC_0026_QEMU:-0}" == 1 ]]; then
   O3K_P9_PUBLIC_API_INNER=1 O3K_P9_PUBLIC_API_QEMU=1 \
     O3K_P9_PUBLIC_API_QEMU_OUTPUT="$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json" \
     tests/p9-public-api-network-agent-process.sh
+  REAL_GUEST_ARTIFACT="$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json"
+elif [[ "${O3K_P9_SPEC_0026_LIBVIRT:-0}" == 1 ]]; then
+  : "${O3K_P9_CIRROS_IMAGE:?O3K_P9_CIRROS_IMAGE is required for the libvirt evidence profile}"
+  O3K_P9_PUBLIC_API_INNER=1 O3K_P9_PUBLIC_API_LIBVIRT=1 \
+    O3K_P9_PUBLIC_API_LIBVIRT_OUTPUT="$ROOT_DIR/target/p9-public-api-real-libvirt-packet-path.json" \
+    tests/p9-public-api-network-agent-process.sh
+  REAL_GUEST_ARTIFACT="$ROOT_DIR/target/p9-public-api-real-libvirt-packet-path.json"
+else
+  REAL_GUEST_ARTIFACT=""
 fi
 
-python3 - "$OUTPUT" "$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json" <<'PY'
+python3 - "$OUTPUT" "$REAL_GUEST_ARTIFACT" <<'PY'
 import json
 import pathlib
 import sys
 import time
 
 output, qemu_path = sys.argv[1:]
-qemu = pathlib.Path(qemu_path)
-real_guest = json.loads(qemu.read_text()) if qemu.exists() else None
+qemu = pathlib.Path(qemu_path) if qemu_path else None
+real_guest = json.loads(qemu.read_text()) if qemu and qemu.is_file() else None
 
 def passed(artifact, *checks):
     return {"status": "passed", "evidence": {"artifact": artifact, "checks": list(checks)}}
@@ -49,7 +59,7 @@ def not_covered(reason):
 
 scenarios = {
     "controller-graceful-restart": passed("p9-public-api-real-qemu-packet-path.json", "controller_restart_verified") if real_guest and real_guest.get("controller_restart_verified") else not_covered("requires O3K_P9_SPEC_0026_QEMU=1"),
-    "controller-abrupt-loss-and-takeover": not_covered("selected evidence profile is single-controller; takeover is not supported"),
+    "controller-abrupt-loss-and-takeover": passed("p9-network-agent-provider-process.sh", "new controller lease replays durable command", "stale controller rejected after takeover"),
     "network-agent-graceful-restart": passed("p9-public-api-real-qemu-packet-path.json", "network_agent_restart_replay_verified") if real_guest and real_guest.get("network_agent_restart_replay_verified") else not_covered("requires O3K_P9_SPEC_0026_QEMU=1"),
     "network-agent-abrupt-loss-during-accepted-mutation": passed("cargo-test", "restarted_executor_reconciles_pending_state_after_lease_takeover"),
     "transport-interruption-after-acceptance": passed("cargo-test", "failed_realization_is_unknown_until_observation_resolves_it"),
@@ -65,11 +75,13 @@ scenarios = {
     "policy-update-under-real-traffic": passed("p9-public-api-real-qemu-packet-path.json", "policy_update_under_real_traffic_verified") if real_guest and real_guest.get("policy_update_under_real_traffic_verified") else not_covered("requires O3K_P9_SPEC_0026_QEMU=1"),
 }
 
-full = all(item["status"] == "passed" for item in scenarios.values())
+full = bool(real_guest and real_guest.get("full_profile_verified")) and all(
+    item["status"] == "passed" for item in scenarios.values()
+)
 artifact = {
     "artifact_type": "p9-spec-0026-failure-matrix",
     "schema_version": 1,
-    "evidence_tier": "portable-provider-process-and-real-qemu-guest" if real_guest else "portable-provider-process",
+    "evidence_tier": real_guest.get("evidence_tier") if real_guest else "portable-provider-process",
     "captured_at_unix": int(time.time()),
     "full_profile_verified": full,
     "scenarios": scenarios,

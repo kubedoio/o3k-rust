@@ -187,7 +187,6 @@ impl NetworkPlanExecutor {
                 && existing.action == command.action
                 && existing.plan.plan_id == command.plan.plan_id
                 && existing.target == command.target
-                && existing.controller == command.controller
             {
                 return Ok(match existing.status {
                     NetworkPlanStatus::Accepted | NetworkPlanStatus::Applying => {
@@ -753,7 +752,10 @@ mod tests {
         let command = command();
         let executor =
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
-        let mut realizer = RecordingRealizer::default();
+        let mut realizer = RecordingRealizer {
+            observed: true,
+            ..Default::default()
+        };
         assert_eq!(
             executor.execute(&command, 1, &mut realizer)?,
             PlanAdmission::Accepted
@@ -764,6 +766,40 @@ mod tests {
             NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
         assert_eq!(restarted.admit(&command, 2)?, PlanAdmission::Replayed);
         assert!(restarted.accepted(command.command_id)?);
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn equivalent_command_replays_after_controller_takeover()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile_path("controller-takeover-replay");
+        let command = command();
+        let first =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())?;
+        let mut realizer = RecordingRealizer {
+            observed: true,
+            ..Default::default()
+        };
+        assert_eq!(first.admit(&command, 1)?, PlanAdmission::Accepted);
+        drop(first);
+
+        let mut takeover = command.clone();
+        takeover.controller = NetworkControllerLease {
+            controller_id: "controller-b".into(),
+            controller_epoch: "epoch-2".into(),
+            fencing_token: 8,
+        };
+        let second =
+            NetworkPlanExecutor::open(&root, takeover.target.clone(), takeover.controller.clone())?;
+        assert_eq!(
+            second.admit(&takeover, 2)?,
+            PlanAdmission::RequiresObservation
+        );
+        assert_eq!(
+            second.reconcile(takeover.command_id, &mut realizer)?,
+            NetworkPlanStatus::Succeeded
+        );
         let _ = fs::remove_dir_all(root);
         Ok(())
     }

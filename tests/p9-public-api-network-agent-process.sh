@@ -378,10 +378,23 @@ PORT_MAC="$(printf '%s' "$PORT_JSON" | field port.mac_address)"
 SECURITY_GROUP_ID="$(json -X POST "$BASE/v2.0/security-groups" -H 'content-type: application/json' \
     --data '{"security_group":{"name":"p9-api-web","description":"bounded IPv4 policy"}}' \
     | field security_group.id)"
-json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
-    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"ingress\",\"protocol\":\"tcp\",\"port_range_min\":8080,\"port_range_max\":8080,\"remote_ip_prefix\":\"0.0.0.0/0\",\"ethertype\":\"IPv4\"}}" >/dev/null
-json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
-    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"port_range_min\":8081,\"port_range_max\":8081,\"remote_ip_prefix\":\"198.51.100.0/24\",\"ethertype\":\"IPv4\"}}" >/dev/null
+json "$BASE/v2.0/security-groups" | grep -Fq "$SECURITY_GROUP_ID"
+json "$BASE/v2.0/security-groups/$SECURITY_GROUP_ID" | grep -Fq "$SECURITY_GROUP_ID"
+json -X PUT "$BASE/v2.0/security-groups/$SECURITY_GROUP_ID" -H 'content-type: application/json' \
+    --data '{"security_group":{"name":"p9-api-web","description":"bounded IPv4 policy updated"}}' \
+    | grep -Fq 'bounded IPv4 policy updated'
+INGRESS_RULE_JSON="$(json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
+    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"ingress\",\"protocol\":\"tcp\",\"port_range_min\":8080,\"port_range_max\":8080,\"remote_ip_prefix\":\"0.0.0.0/0\",\"ethertype\":\"IPv4\"}}"
+)"
+INGRESS_RULE_ID="$(printf '%s' "$INGRESS_RULE_JSON" | field security_group_rule.id)"
+EGRESS_RULE_JSON="$(json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
+    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"port_range_min\":8081,\"port_range_max\":8081,\"remote_ip_prefix\":\"198.51.100.0/24\",\"ethertype\":\"IPv4\"}}"
+)"
+EGRESS_RULE_ID="$(printf '%s' "$EGRESS_RULE_JSON" | field security_group_rule.id)"
+json "$BASE/v2.0/security-group-rules?security_group_id=$SECURITY_GROUP_ID" \
+    | grep -Fq "$INGRESS_RULE_ID"
+json "$BASE/v2.0/security-group-rules/$EGRESS_RULE_ID" \
+    | grep -Fq "$EGRESS_RULE_ID"
 json -X PUT "$BASE/v2.0/ports/$PORT_ID" -H 'content-type: application/json' \
     --data "{\"port\":{\"security_groups\":[\"$SECURITY_GROUP_ID\"]}}" \
     | grep -Fq "$SECURITY_GROUP_ID"
@@ -703,6 +716,24 @@ elif [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
         echo "libvirt floating-IP ingress did not converge after network-agent restart" >&2
         exit 1
     }
+    ip link set "$UPLINK" down
+    if nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 2 \
+        "http://$FLOATING_ADDRESS:8080/" >/dev/null 2>&1; then
+        echo "libvirt external uplink outage did not interrupt public traffic" >&2
+        exit 1
+    fi
+    ip link set "$UPLINK" up
+    recovered=0
+    for _ in $(seq 1 80); do
+        if nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 2 \
+            "http://$FLOATING_ADDRESS:8080/" 2>/dev/null \
+            | grep -q o3k-public-api-libvirt-guest; then
+            recovered=1
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "$recovered" == 1 ]] || { echo "libvirt public traffic did not recover after uplink restoration" >&2; exit 1; }
     nft list chain ip o3k_policy forward 2>/dev/null \
         | grep -Eq 'counter packets [1-9][0-9]*.* drop'
 
@@ -814,13 +845,25 @@ if [[ "$FOREIGN_AFTER" != "$FOREIGN_SNAPSHOT" ]]; then
     exit 1
 fi
 
-if [[ "${O3K_P9_PUBLIC_API_QEMU:-}" == 1 ]]; then
-    OUTPUT_PATH="${O3K_P9_PUBLIC_API_QEMU_OUTPUT:-$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json}"
+if [[ "${O3K_P9_PUBLIC_API_QEMU:-}" == 1 || "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
+    if [[ "${O3K_P9_PUBLIC_API_QEMU:-}" == 1 ]]; then
+        OUTPUT_PATH="${O3K_P9_PUBLIC_API_QEMU_OUTPUT:-$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json}"
+        ARTIFACT_TYPE="p9-public-api-real-qemu-packet-path"
+        EVIDENCE_TIER="fake-control-plane-real-qemu-guest"
+        FULL_PROFILE_VERIFIED=false
+        GUEST_LABEL="real QEMU guest"
+    else
+        OUTPUT_PATH="${O3K_P9_PUBLIC_API_LIBVIRT_OUTPUT:-$ROOT_DIR/target/p9-public-api-real-libvirt-packet-path.json}"
+        ARTIFACT_TYPE="p9-public-api-real-libvirt-packet-path"
+        EVIDENCE_TIER="public-o3kd-api-real-libvirt-guest"
+        FULL_PROFILE_VERIFIED=true
+        GUEST_LABEL="real libvirt guest"
+    fi
     mkdir -p "$(dirname "$OUTPUT_PATH")"
     cat >"$OUTPUT_PATH" <<JSON
-{"artifact_type":"p9-public-api-real-qemu-packet-path","schema_version":1,"evidence_tier":"fake-control-plane-real-qemu-guest","full_profile_verified":false,"real_vm_verified":true,"public_api_lifecycle_verified":true,"fixed_ip_packet_path_verified":true,"routed_snat_verified":true,"public_dnat_verified":true,"stateful_policy_allow_verified":true,"stateful_policy_deny_verified":true,"security_group_projection_verified":true,"policy_update_under_real_traffic_verified":true,"external_unavailable_recovered_verified":true,"network_agent_restart_replay_verified":true,"controller_restart_verified":true,"owned_leaks":0,"owned_inconsistencies":0,"foreign_mutations":0,"source_revision":"$(git -C "$ROOT_DIR" rev-parse HEAD)"}
+{"artifact_type":"$ARTIFACT_TYPE","schema_version":1,"evidence_tier":"$EVIDENCE_TIER","full_profile_verified":$FULL_PROFILE_VERIFIED,"real_vm_verified":true,"public_api_lifecycle_verified":true,"fixed_ip_packet_path_verified":true,"routed_snat_verified":true,"public_dnat_verified":true,"stateful_policy_allow_verified":true,"stateful_policy_deny_verified":true,"security_group_projection_verified":true,"policy_update_under_real_traffic_verified":true,"external_unavailable_recovered_verified":true,"network_agent_restart_replay_verified":true,"controller_restart_verified":true,"owned_leaks":0,"owned_inconsistencies":0,"foreign_mutations":0,"source_revision":"$(git -C "$ROOT_DIR" rev-parse HEAD)"}
 JSON
-    echo "P9 public API -> real QEMU guest gate passed (fake control plane, routed/public/policy traffic, restart, cleanup)"
+    echo "P9 public API -> $GUEST_LABEL gate passed (routed/public/policy traffic, restart, recovery, cleanup)"
 else
     echo "P9 public API -> real network-agent process gate passed (policy pending, binding dispatch, cleanup)"
 fi

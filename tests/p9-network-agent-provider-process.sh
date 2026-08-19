@@ -37,7 +37,7 @@ cleanup() {
     nft delete table ip o3k_public 2>/dev/null
     nft delete table ip o3k_policy 2>/dev/null
     ip link del "$UPLINK" 2>/dev/null
-    rm -rf "$WORK_DIR"
+    [[ "${O3K_P9_KEEP_LOGS:-}" == 1 ]] || rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
 chmod 0755 "$DNSMASQ"
@@ -55,27 +55,32 @@ ns ip link set lo up
 ns ip link set "$EXT_PEER" up
 ns ip addr add 198.51.100.2/24 dev "$EXT_PEER"
 sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
-O3K_NETWORK_AGENT_ID=agent-provider \
-O3K_NETWORK_AGENT_EPOCH=epoch-1 \
-O3K_NETWORK_CONTROLLER_ID=controller-provider \
-O3K_NETWORK_CONTROLLER_EPOCH=epoch-1 \
-O3K_NETWORK_FENCING_TOKEN=7 \
-O3K_NETWORK_ROOT="$WORK_DIR/executor" \
-O3K_NETWORK_BRIDGE="$BRIDGE" \
-O3K_NETWORK_OWNERSHIP_ROOT="$WORK_DIR/ownership" \
-O3K_NETWORK_DHCP_ROOT="$WORK_DIR/dhcp" \
-O3K_NETWORK_DNSMASQ="$DNSMASQ" \
-O3K_NETWORK_EXTERNAL_REALM_ID="$EXTERNAL_REALM" \
-O3K_NETWORK_UPLINK="$UPLINK" \
-O3K_NETWORK_ROUTED_ROOT="$WORK_DIR/routed" \
-O3K_NETWORK_POLICY_ROOT="$WORK_DIR/policy" \
-O3K_NETWORK_PUBLIC_ROOT="$WORK_DIR/public" \
-O3K_NETWORK_LISTEN=127.0.0.1:19182 \
-O3K_NETWORK_TLS_CERT="$FIXTURES/server-chain.pem" \
-O3K_NETWORK_TLS_KEY="$FIXTURES/server-key.pem" \
-O3K_NETWORK_TLS_CLIENT_CA="$FIXTURES/ca.pem" \
-"$BIN" >"$WORK_DIR/agent.log" 2>&1 &
-AGENT_PID=$!
+CONTROLLER_EPOCH=epoch-1
+FENCING_TOKEN=7
+start_agent() {
+    O3K_NETWORK_AGENT_ID=agent-provider \
+    O3K_NETWORK_AGENT_EPOCH=epoch-1 \
+    O3K_NETWORK_CONTROLLER_ID=controller-provider \
+    O3K_NETWORK_CONTROLLER_EPOCH="$CONTROLLER_EPOCH" \
+    O3K_NETWORK_FENCING_TOKEN="$FENCING_TOKEN" \
+    O3K_NETWORK_ROOT="$WORK_DIR/executor" \
+    O3K_NETWORK_BRIDGE="$BRIDGE" \
+    O3K_NETWORK_OWNERSHIP_ROOT="$WORK_DIR/ownership" \
+    O3K_NETWORK_DHCP_ROOT="$WORK_DIR/dhcp" \
+    O3K_NETWORK_DNSMASQ="$DNSMASQ" \
+    O3K_NETWORK_EXTERNAL_REALM_ID="$EXTERNAL_REALM" \
+    O3K_NETWORK_UPLINK="$UPLINK" \
+    O3K_NETWORK_ROUTED_ROOT="$WORK_DIR/routed" \
+    O3K_NETWORK_POLICY_ROOT="$WORK_DIR/policy" \
+    O3K_NETWORK_PUBLIC_ROOT="$WORK_DIR/public" \
+    O3K_NETWORK_LISTEN=127.0.0.1:19182 \
+    O3K_NETWORK_TLS_CERT="$FIXTURES/server-chain.pem" \
+    O3K_NETWORK_TLS_KEY="$FIXTURES/server-key.pem" \
+    O3K_NETWORK_TLS_CLIENT_CA="$FIXTURES/ca.pem" \
+    "$BIN" >>"$WORK_DIR/agent.log" 2>&1 &
+    AGENT_PID=$!
+}
+start_agent
 cat >"$WORK_DIR/plan.json" <<JSON
 {"schema_version":1,"plan_id":"00000000-0000-0000-0000-000000000001","node_id":"agent-provider","operation_id":"00000000-0000-0000-0000-000000000002","deadline_unix_ms":4102444800000,"resource_generations":{"00000000-0000-0000-0000-000000000003":1},"intents":[{"AddressRealm":{"realm_id":"00000000-0000-0000-0000-000000000004","prefix":{"network":"10.0.0.0","prefix_len":24},"gateway":"10.0.0.1"}},{"EndpointAttachment":{"endpoint_id":"00000000-0000-0000-0000-000000000003","mac":"02:00:00:00:00:03","fixed_ip":"10.0.0.3","generation":1}},{"AddressAssignment":{"endpoint_id":"00000000-0000-0000-0000-000000000003","address":"10.0.0.3","generation":1}},{"Egress":{"external_realm_id":"$EXTERNAL_REALM","enabled":true,"nat":true}},{"PublicAddressBinding":{"id":"00000000-0000-0000-0000-000000000005","project_id":"project-a","public_address":"198.51.100.10","endpoint_id":"00000000-0000-0000-0000-000000000003","generation":1}},{"Policy":{"id":"00000000-0000-0000-0000-000000000007","endpoint_id":"00000000-0000-0000-0000-000000000003","direction":"Egress","protocol":"Tcp","ports":{"start":8082,"end":8082},"source":null,"destination":{"network":"198.51.100.0","prefix_len":24},"action":"Deny"}}],"fingerprint_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
 JSON
@@ -99,6 +104,7 @@ client_identity() {
 }
 client_epoch() { client_identity "$1" epoch-1 7 "${@:2}"; }
 client() { client_identity epoch-1 epoch-1 7 "$@"; }
+client_current() { client_identity epoch-1 "$CONTROLLER_EPOCH" "$FENCING_TOKEN" "$@"; }
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
     if result="$(client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-apply "$WORK_DIR/plan.json" 2>/dev/null)"; then
@@ -108,7 +114,33 @@ while ((SECONDS < deadline)); do
     sleep 0.2
 done
 [[ "${result:-}" == "succeeded false" ]] || { cat "$WORK_DIR/agent.log" >&2; exit 1; }
-if client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-conflict "$WORK_DIR/conflict.json" >/dev/null 2>&1; then
+
+# A replacement controller/agent lease must replay the durable command without
+# repeating host mutation.  The old lease remains fenced by the restarted
+# executor, while the equivalent command identity is recoverable.
+kill "$AGENT_PID"
+wait "$AGENT_PID" 2>/dev/null || true
+AGENT_PID=""
+CONTROLLER_EPOCH=epoch-2
+FENCING_TOKEN=8
+start_agent
+deadline=$((SECONDS + 20))
+while ((SECONDS < deadline)); do
+    if takeover_result="$(client_current 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-apply "$WORK_DIR/plan.json" 2>/dev/null)"; then
+        [[ "$takeover_result" == "replayed true" || "$takeover_result" == "recovered true" ]] && break
+    fi
+    sleep 0.2
+done
+[[ "${takeover_result:-}" == "replayed true" || "${takeover_result:-}" == "recovered true" ]] || {
+    echo "controller takeover did not replay the durable network command" >&2
+    cat "$WORK_DIR/agent.log" >&2
+    exit 1
+}
+if client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 stale-after-takeover "$WORK_DIR/plan.json" >/dev/null 2>&1; then
+    echo "stale controller command was accepted after takeover" >&2
+    exit 1
+fi
+if client_current 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-conflict "$WORK_DIR/conflict.json" >/dev/null 2>&1; then
     echo "conflicting replay was accepted" >&2
     exit 1
 fi
@@ -129,8 +161,8 @@ ip -4 addr show dev "$UPLINK" | grep -q '198.51.100.10/32'
 nft list table ip o3k_p9 >/dev/null
 nft list table ip o3k_public >/dev/null
 nft list table ip o3k_policy >/dev/null
-[[ "$(client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-apply "$WORK_DIR/plan.json")" == "replayed true" ]]
-[[ "$(client 00000000-0000-0000-0000-000000000011 00000000-0000-0000-0000-000000000005 provider-remove "$WORK_DIR/remove.json" remove)" == "succeeded false" ]]
+[[ "$(client_current 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-apply "$WORK_DIR/plan.json")" == "replayed true" ]]
+[[ "$(client_current 00000000-0000-0000-0000-000000000011 00000000-0000-0000-0000-000000000005 provider-remove "$WORK_DIR/remove.json" remove)" == "succeeded false" ]]
 deadline=$((SECONDS + 10))
 while { ip link show "$BRIDGE" >/dev/null 2>&1 || nft list table ip o3k_p9 >/dev/null 2>&1 || nft list table ip o3k_public >/dev/null 2>&1 || nft list table ip o3k_policy >/dev/null 2>&1; } && ((SECONDS < deadline)); do
     sleep 0.1
