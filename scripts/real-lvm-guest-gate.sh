@@ -144,7 +144,9 @@ domain_ip() {
 
 wait_for_guest() {
     local attempt host
-    for attempt in $(seq 1 60); do
+    # A cold KVM boot plus cloud-init can exceed two minutes on the protected
+    # runner while the guest is still progressing normally.
+    for attempt in $(seq 1 120); do
         host="$(domain_ip || true)"
         if [[ -n "${host}" ]]; then
             SSH_HOST="${host}"
