@@ -1,6 +1,9 @@
 # SPEC-0027 — Native persistent storage v1
 
-Status: Proposed
+Status: Accepted
+
+Decision-accepted: 2026-08-19
+Human-approval: Senol Colak (@senolcolak), Kubedo GmbH, issue comment #5339362254
 
 Related decision: [ADR-0169](../adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
 
@@ -18,10 +21,10 @@ Related normative sources:
 ## Purpose and gate
 
 This specification freezes the native O3K persistent-volume profile before
-implementation. It is not accepted until a human architecture/security review
-accepts ADR-0169 and this specification together. Until then, the existing
-external-Cinder profile and Nova attachment adapter remain unchanged and native
-volume operations remain unadvertised.
+implementation. Senol Colak’s human architecture/security approval is recorded
+in issue comment #5339362254. The existing external-Cinder profile and Nova
+attachment adapter remain separate, and native volume operations remain
+unadvertised until their operation-level evidence gates pass.
 
 ## Profile and authority
 
@@ -173,4 +176,7 @@ multi-host/edge storage, P12 native API, and external-Cinder replacement.
 
 ## Acceptance record
 
-Pending human architecture/security review of ADR-0169 and SPEC-0027.
+Accepted by Senol Colak (@senolcolak), Kubedo GmbH, on 2026-08-19 via issue
+comment #5339362254. The acceptance requires the mandatory Ceph RBD completion
+gate and does not waive any provider, security, compatibility, or real-guest
+evidence requirement.

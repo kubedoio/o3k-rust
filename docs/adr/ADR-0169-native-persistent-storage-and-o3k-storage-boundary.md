@@ -1,9 +1,9 @@
 # ADR-0169 — Native persistent storage and the `o3k-storage` boundary
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-19
-Decision-accepted: pending human architecture/security review
-Human-approval: pending
+Decision-accepted: 2026-08-19
+Human-approval: Senol Colak (@senolcolak), Kubedo GmbH, issue comment #5339362254, 2026-08-19
 Supersedes: none
 Superseded-by: none
 Affected-services: volume, compute, storage, placement, governance
@@ -22,7 +22,7 @@ This proposal is that decision. It is intentionally a gate: implementation of
 the native storage process and profile must not begin until a human maintainer
 accepts this ADR and SPEC-0027 in writing.
 
-## Decision proposed for acceptance
+## Decision
 
 ### 1. Native O3K Volume is a Cloud Kernel service domain
 
@@ -168,18 +168,21 @@ provider result, or successful API response alone is insufficient.
 
 ## Human acceptance record
 
-Before implementation begins, a human architecture/security reviewer must
-record one of:
+Human architecture/security acceptance is recorded as:
 
 ```text
 Decision: ACCEPT ADR-0169 and SPEC-0027 for P10 implementation
-Reviewer: <GitHub identity and organization>
-Date: <UTC date>
-Conditions: <none or explicit bounded conditions>
+Reviewer: Senol Colak (@senolcolak), Kubedo GmbH
+Date: 2026-08-19
+Conditions: Ceph RBD is mandatory for P10 completion after the LVM gates;
+  no runtime implementation before this acceptance (satisfied)
+Evidence: issue comment #5339362254
 ```
 
-Rejection or requested changes keep this ADR proposed and block activation of
-`o3k-storage`.
+The acceptance authorizes implementation and activation work subject to the
+provider, security, compatibility, and real-guest gates in this ADR and
+SPEC-0027. It does not authorize a P10 completion claim before those gates
+pass.
 
 ## Consequences
 
