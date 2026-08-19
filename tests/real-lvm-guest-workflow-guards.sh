@@ -27,6 +27,7 @@ required = (
     "scripts/lvm-testlab-profile.sh provision",
     "scripts/real-lvm-guest-gate.sh",
     "genisoimage",
+    "--preserve-env=PATH,CARGO_HOME",
     "scripts/lvm-testlab-profile.sh cleanup",
     "if: always()",
     "if-no-files-found: error",
