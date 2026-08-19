@@ -189,7 +189,8 @@ impl P11FabricBackend for InMemoryP11FabricBackend {
 mod tests {
     use super::*;
     use o3k_domain::{
-        AddressRealm, EndpointLocation, FabricHostIdentity, Ipv4Prefix, RealmEndpointDirectory,
+        AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
+        RealmEncapsulationBinding, RealmEndpointDirectory,
     };
     use std::net::Ipv4Addr;
 
@@ -232,6 +233,7 @@ mod tests {
             host_id: "node-a".to_owned(),
             public_key: "public-a".to_owned(),
             underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,
             underlay_mtu: 1500,
@@ -241,13 +243,21 @@ mod tests {
             host_id: "node-b".to_owned(),
             public_key: "public-b".to_owned(),
             underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,
             underlay_mtu: 1500,
             fabric_mtu: 1420,
         };
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(100),
+            realm_id: realm.id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: 101,
+            binding_generation: directory_generation,
+        };
         let fabric = directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1400)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
             .expect("fabric plan");
         let operation_id = Uuid::from_u128(directory_generation as u128 + 10);
         let mut plan = NodeNetworkPlan {

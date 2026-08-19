@@ -3,10 +3,11 @@ mod storage;
 
 pub use network::{
     AddressPool, AddressRealm, EgressIntent, EndpointDirectoryError, EndpointIntent,
-    EndpointLocation, FabricEndpointRoute, FabricHostIdentity, FabricPeer, GatewayIntent,
-    Ipv4Prefix, NamespacedRoutedFabricPlan, NeighborResolution, NetworkCapability, NetworkIntent,
-    NetworkIntentState, NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection,
-    PolicyIntent, PortRange, PublicAddressBindingIntent, RealmEndpointDirectory, RouteIntent,
+    EndpointLocation, FabricEndpointRoute, FabricHostIdentity, FabricPeer, FabricProviderKind,
+    GatewayIntent, Ipv4Prefix, NamespacedRoutedFabricPlan, NeighborResolution, NetworkCapability,
+    NetworkIntent, NetworkIntentState, NetworkPlanIntent, NetworkProtocol, PolicyAction,
+    PolicyDirection, PolicyIntent, PortRange, PublicAddressBindingIntent, RealmBindingError,
+    RealmEncapsulationBinding, RealmEncapsulationRegistry, RealmEndpointDirectory, RouteIntent,
     SecurityGroupBinding, SecurityGroupIntent, SecurityGroupRuleIntent, SecurityGroupState,
     realm_proxy_mac,
 };

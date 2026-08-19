@@ -170,6 +170,9 @@ pub struct FabricHostIdentity {
     pub host_id: String,
     pub public_key: String,
     pub underlay_endpoint: String,
+    /// Provider/operator transport address. This is never a tenant address
+    /// and is the only address used for shared WireGuard peer routing.
+    pub fabric_transport_ip: Ipv4Addr,
     pub provider_version: String,
     pub fabric_generation: u64,
     pub underlay_mtu: u16,
@@ -181,23 +184,145 @@ pub struct FabricHostIdentity {
 /// authority by itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricEndpointRoute {
+    pub realm_id: Uuid,
     pub destination: Ipv4Prefix,
     pub endpoint_id: Uuid,
     pub target_host: String,
+    pub target_fabric_transport_ip: Ipv4Addr,
     pub endpoint_generation: u64,
     pub placement_generation: u64,
+    pub realm_binding_generation: u64,
     pub fabric_generation: u64,
 }
 
-/// Provider-derived public peer state for the shared host fabric. Allowed
-/// destinations are endpoint routes, never tenant-owned WireGuard identity.
+/// Provider-derived public peer state for the shared host fabric. WireGuard
+/// routes only the unique provider transport address, never tenant endpoint
+/// prefixes. Realm and endpoint destinations are selected by Geneve-aware
+/// provider state above this transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricPeer {
     pub host_id: String,
     pub public_key: String,
     pub underlay_endpoint: String,
+    pub fabric_transport_ip: Ipv4Addr,
     pub fabric_generation: u64,
-    pub allowed_destinations: Vec<Ipv4Prefix>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FabricProviderKind {
+    Geneve,
+}
+
+/// Durable provider mapping that carries AddressRealm identity across hosts.
+/// The segment identifier is provider-native state; callers never supply it
+/// as tenant input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmEncapsulationBinding {
+    pub fabric_domain_id: Uuid,
+    pub realm_id: Uuid,
+    pub provider_kind: FabricProviderKind,
+    pub provider_segment_id: u32,
+    pub binding_generation: u64,
+}
+
+impl RealmEncapsulationBinding {
+    pub fn validate(&self) -> Result<(), RealmBindingError> {
+        if self.fabric_domain_id == Uuid::nil() || self.realm_id == Uuid::nil() {
+            return Err(RealmBindingError::InvalidIdentity);
+        }
+        if self.provider_segment_id == 0 || self.provider_segment_id > 0x000f_ffff {
+            return Err(RealmBindingError::InvalidSegment);
+        }
+        if self.binding_generation == 0 {
+            return Err(RealmBindingError::InvalidGeneration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum RealmBindingError {
+    #[error("realm encapsulation binding has an invalid identity")]
+    InvalidIdentity,
+    #[error("realm encapsulation provider segment is outside the Geneve VNI range")]
+    InvalidSegment,
+    #[error("realm encapsulation binding generation must be non-zero")]
+    InvalidGeneration,
+    #[error("realm encapsulation mapping conflicts with an active realm")]
+    RealmConflict,
+    #[error("realm encapsulation segment is already bound to another active realm")]
+    SegmentConflict,
+    #[error("realm encapsulation mapping is stale")]
+    StaleGeneration,
+    #[error("realm encapsulation state is not proven absent")]
+    StateNotProvenAbsent,
+}
+
+/// Small, serializable semantic registry for the durable realm-to-provider
+/// mapping. A persistence adapter must store this state before mutating
+/// Geneve objects; the registry itself never observes kernel state.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RealmEncapsulationRegistry {
+    pub bindings: Vec<RealmEncapsulationBinding>,
+}
+
+impl RealmEncapsulationRegistry {
+    pub fn ensure(
+        &mut self,
+        fabric_domain_id: Uuid,
+        realm_id: Uuid,
+        binding_generation: u64,
+    ) -> Result<RealmEncapsulationBinding, RealmBindingError> {
+        if fabric_domain_id == Uuid::nil() || realm_id == Uuid::nil() || binding_generation == 0 {
+            return Err(RealmBindingError::InvalidIdentity);
+        }
+        if let Some(binding) = self.bindings.iter_mut().find(|binding| {
+            binding.fabric_domain_id == fabric_domain_id && binding.realm_id == realm_id
+        }) {
+            if binding_generation < binding.binding_generation {
+                return Err(RealmBindingError::StaleGeneration);
+            }
+            binding.binding_generation = binding_generation;
+            return Ok(binding.clone());
+        }
+        let segment = (1..=0x000f_ffffu32)
+            .find(|segment| {
+                !self.bindings.iter().any(|binding| {
+                    binding.fabric_domain_id == fabric_domain_id
+                        && binding.provider_segment_id == *segment
+                })
+            })
+            .ok_or(RealmBindingError::SegmentConflict)?;
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id,
+            realm_id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: segment,
+            binding_generation,
+        };
+        binding.validate()?;
+        self.bindings.push(binding.clone());
+        self.bindings
+            .sort_by_key(|binding| (binding.fabric_domain_id, binding.realm_id));
+        Ok(binding)
+    }
+
+    pub fn release(
+        &mut self,
+        binding: &RealmEncapsulationBinding,
+        provider_state_absent: bool,
+    ) -> Result<(), RealmBindingError> {
+        binding.validate()?;
+        if !provider_state_absent {
+            return Err(RealmBindingError::StateNotProvenAbsent);
+        }
+        let Some(index) = self.bindings.iter().position(|current| current == binding) else {
+            return Err(RealmBindingError::RealmConflict);
+        };
+        self.bindings.remove(index);
+        Ok(())
+    }
 }
 
 /// Semantic P11 plan for one host and one AddressRealm. Provider realizers may
@@ -210,6 +335,7 @@ pub struct NamespacedRoutedFabricPlan {
     pub local_underlay_mtu: u16,
     pub local_fabric_mtu: u16,
     pub realm_id: Uuid,
+    pub encapsulation: RealmEncapsulationBinding,
     pub directory_generation: u64,
     pub directory: RealmEndpointDirectory,
     pub proxy_mac: String,
@@ -240,6 +366,10 @@ pub enum EndpointDirectoryError {
     MissingFabricIdentity,
     #[error("host fabric identity is duplicated or invalid")]
     InvalidFabricIdentity,
+    #[error("host fabric transport address is duplicated or invalid")]
+    InvalidFabricTransportAddress,
+    #[error("realm encapsulation binding is invalid or out of scope")]
+    InvalidRealmBinding,
     #[error("fabric plan has no local host identity")]
     MissingLocalFabricIdentity,
     #[error("fabric plan has an invalid or unsafe tenant MTU")]
@@ -337,16 +467,23 @@ impl RealmEndpointDirectory {
         &self,
         local_host: &str,
         host_identities: &[FabricHostIdentity],
+        binding: &RealmEncapsulationBinding,
     ) -> Result<Vec<FabricEndpointRoute>, EndpointDirectoryError> {
         if local_host.is_empty() {
             return Err(EndpointDirectoryError::InvalidIdentity);
         }
+        if binding.realm_id != self.realm_id || binding.validate().is_err() {
+            return Err(EndpointDirectoryError::InvalidRealmBinding);
+        }
         let mut hosts = std::collections::BTreeSet::new();
+        let mut transport_ips = std::collections::BTreeSet::new();
         for host in host_identities {
             if host.host_id.is_empty()
                 || host.public_key.is_empty()
                 || host.underlay_endpoint.is_empty()
                 || host.provider_version.is_empty()
+                || host.fabric_transport_ip.is_unspecified()
+                || host.fabric_transport_ip.is_loopback()
                 || host.fabric_generation == 0
                 || host.underlay_mtu == 0
                 || host.fabric_mtu == 0
@@ -354,6 +491,9 @@ impl RealmEndpointDirectory {
                 || !hosts.insert(host.host_id.as_str())
             {
                 return Err(EndpointDirectoryError::InvalidFabricIdentity);
+            }
+            if !transport_ips.insert(host.fabric_transport_ip) {
+                return Err(EndpointDirectoryError::InvalidFabricTransportAddress);
             }
         }
 
@@ -372,11 +512,14 @@ impl RealmEndpointDirectory {
                 return Err(EndpointDirectoryError::OutsideRealm);
             };
             routes.push(FabricEndpointRoute {
+                realm_id: self.realm_id,
                 destination,
                 endpoint_id: entry.endpoint_id,
                 target_host: entry.selected_host.clone(),
+                target_fabric_transport_ip: host.fabric_transport_ip,
                 endpoint_generation: entry.endpoint_generation,
                 placement_generation: entry.placement_generation,
+                realm_binding_generation: binding.binding_generation,
                 fabric_generation: host.fabric_generation,
             });
         }
@@ -393,6 +536,7 @@ impl RealmEndpointDirectory {
         local_identity: &FabricHostIdentity,
         host_identities: &[FabricHostIdentity],
         tenant_mtu: u16,
+        binding: &RealmEncapsulationBinding,
     ) -> Result<NamespacedRoutedFabricPlan, EndpointDirectoryError> {
         if local_identity.host_id.is_empty() {
             return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
@@ -412,27 +556,24 @@ impl RealmEndpointDirectory {
         {
             return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
         }
-        let routes = self.remote_routes(&local_identity.host_id, host_identities)?;
+        let routes = self.remote_routes(&local_identity.host_id, host_identities, binding)?;
         let mut peers = Vec::new();
         for identity in host_identities {
             if identity.host_id == local_identity.host_id {
                 continue;
             }
-            let mut allowed_destinations = routes
+            if !routes
                 .iter()
-                .filter(|route| route.target_host == identity.host_id)
-                .map(|route| route.destination)
-                .collect::<Vec<_>>();
-            if allowed_destinations.is_empty() {
+                .any(|route| route.target_host == identity.host_id)
+            {
                 continue;
             }
-            allowed_destinations.sort();
             peers.push(FabricPeer {
                 host_id: identity.host_id.clone(),
                 public_key: identity.public_key.clone(),
                 underlay_endpoint: identity.underlay_endpoint.clone(),
+                fabric_transport_ip: identity.fabric_transport_ip,
                 fabric_generation: identity.fabric_generation,
-                allowed_destinations,
             });
         }
         peers.sort_by_key(|peer| peer.host_id.clone());
@@ -442,6 +583,7 @@ impl RealmEndpointDirectory {
             local_underlay_mtu: local_identity.underlay_mtu,
             local_fabric_mtu: local_identity.fabric_mtu,
             realm_id: self.realm_id,
+            encapsulation: binding.clone(),
             directory_generation: self.directory_generation,
             directory: self.clone(),
             proxy_mac: self.proxy_mac.clone(),
@@ -648,12 +790,20 @@ mod endpoint_directory_tests {
             host_id: "host-07".to_owned(),
             public_key: "public-key-07".to_owned(),
             underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 7),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
             underlay_mtu: 1500,
             fabric_mtu: 1420,
         }];
-        let routes = directory.remote_routes("host-01", &identities);
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(100),
+            realm_id: directory.realm_id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: 101,
+            binding_generation: 1,
+        };
+        let routes = directory.remote_routes("host-01", &identities, &binding);
         assert!(routes.is_ok());
         let Some(routes) = routes.ok() else {
             return;
@@ -665,13 +815,13 @@ mod endpoint_directory_tests {
         assert_eq!(routes[0].fabric_generation, 9);
 
         assert_eq!(
-            directory.remote_routes("host-01", &[]),
+            directory.remote_routes("host-01", &[], &binding),
             Err(EndpointDirectoryError::MissingFabricIdentity)
         );
         let mut invalid = identities;
         invalid[0].fabric_mtu = 1501;
         assert_eq!(
-            directory.remote_routes("host-01", &invalid),
+            directory.remote_routes("host-01", &invalid, &binding),
             Err(EndpointDirectoryError::InvalidFabricIdentity)
         );
     }
@@ -695,6 +845,7 @@ mod endpoint_directory_tests {
             host_id: "host-01".to_owned(),
             public_key: "public-key-01".to_owned(),
             underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 8,
             underlay_mtu: 1500,
@@ -704,12 +855,20 @@ mod endpoint_directory_tests {
             host_id: "host-07".to_owned(),
             public_key: "public-key-07".to_owned(),
             underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 7),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
             underlay_mtu: 1500,
             fabric_mtu: 1420,
         };
-        let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400);
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(100),
+            realm_id: directory.realm_id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: 101,
+            binding_generation: 1,
+        };
+        let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding);
         assert!(plan.is_ok());
         let Some(plan) = plan.ok() else {
             return;
@@ -720,16 +879,120 @@ mod endpoint_directory_tests {
         assert_eq!(plan.routes.len(), 1);
         assert_eq!(plan.peers.len(), 1);
         assert_eq!(plan.peers[0].host_id, "host-07");
-        assert_eq!(plan.peers[0].allowed_destinations.len(), 1);
-        assert_eq!(plan.peers[0].allowed_destinations[0].prefix_len, 32);
         assert_eq!(
-            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1400),
+            plan.peers[0].fabric_transport_ip,
+            Ipv4Addr::new(198, 18, 0, 7)
+        );
+        assert_eq!(plan.routes[0].realm_id, directory.realm_id);
+        assert_eq!(plan.routes[0].realm_binding_generation, 1);
+        assert_eq!(
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1400, &binding),
             Err(EndpointDirectoryError::MissingFabricIdentity)
         );
         assert_eq!(
-            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1501),
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1501, &binding),
             Err(EndpointDirectoryError::InvalidMtu)
         );
+    }
+
+    #[test]
+    fn overlapping_realms_keep_route_identity_and_transport_identity_distinct() {
+        let realm_a = realm();
+        let realm_b = AddressRealm {
+            id: Uuid::from_u128(0x99),
+            project_id: "project-b".to_owned(),
+            ..realm_a.clone()
+        };
+        let endpoint_a = EndpointLocation {
+            endpoint_id: Uuid::from_u128(0xa1),
+            project_id: realm_a.project_id.clone(),
+            realm_id: realm_a.id,
+            fixed_ip: Ipv4Addr::new(10, 40, 1, 20),
+            mac: "02:00:00:00:10:20".to_owned(),
+            selected_host: "host-remote".to_owned(),
+            endpoint_generation: 1,
+            placement_generation: 1,
+        };
+        let endpoint_b = EndpointLocation {
+            endpoint_id: Uuid::from_u128(0xb1),
+            project_id: realm_b.project_id.clone(),
+            realm_id: realm_b.id,
+            fixed_ip: endpoint_a.fixed_ip,
+            mac: "02:00:00:00:20:20".to_owned(),
+            selected_host: endpoint_a.selected_host.clone(),
+            endpoint_generation: 1,
+            placement_generation: 1,
+        };
+        let directory_a = RealmEndpointDirectory::build(&realm_a, vec![endpoint_a], &[], 1)
+            .expect("realm A directory");
+        let directory_b = RealmEndpointDirectory::build(&realm_b, vec![endpoint_b], &[], 1)
+            .expect("realm B directory");
+        let local = FabricHostIdentity {
+            host_id: "host-local".to_owned(),
+            public_key: "public-local".to_owned(),
+            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+            provider_version: "geneve-wireguard-v2".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1400,
+        };
+        let remote = FabricHostIdentity {
+            host_id: "host-remote".to_owned(),
+            public_key: "public-remote".to_owned(),
+            underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
+            provider_version: "geneve-wireguard-v2".to_owned(),
+            fabric_generation: 1,
+            underlay_mtu: 1500,
+            fabric_mtu: 1400,
+        };
+        let mut registry = RealmEncapsulationRegistry::default();
+        let binding_a = registry
+            .ensure(Uuid::from_u128(0xfeed), realm_a.id, 1)
+            .expect("A binding");
+        let binding_b = registry
+            .ensure(Uuid::from_u128(0xfeed), realm_b.id, 1)
+            .expect("B binding");
+        assert_ne!(binding_a.provider_segment_id, binding_b.provider_segment_id);
+        let plan_a = directory_a
+            .compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1300, &binding_a)
+            .expect("A plan");
+        let plan_b = directory_b
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1300, &binding_b)
+            .expect("B plan");
+        assert_eq!(plan_a.routes[0].destination, plan_b.routes[0].destination);
+        assert_ne!(plan_a.routes[0].realm_id, plan_b.routes[0].realm_id);
+        assert_eq!(
+            plan_a.peers[0].fabric_transport_ip,
+            plan_b.peers[0].fabric_transport_ip
+        );
+        assert_ne!(
+            plan_a.encapsulation.provider_segment_id,
+            plan_b.encapsulation.provider_segment_id
+        );
+    }
+
+    #[test]
+    fn realm_binding_replay_and_release_are_fenced() {
+        let domain = Uuid::from_u128(0xbeef);
+        let realm_id = Uuid::from_u128(0x42);
+        let mut registry = RealmEncapsulationRegistry::default();
+        let first = registry.ensure(domain, realm_id, 4).expect("binding");
+        assert_eq!(registry.ensure(domain, realm_id, 4), Ok(first.clone()));
+        assert_eq!(
+            registry.ensure(domain, realm_id, 3),
+            Err(RealmBindingError::StaleGeneration)
+        );
+        assert_eq!(
+            registry.release(&first, false),
+            Err(RealmBindingError::StateNotProvenAbsent)
+        );
+        registry.release(&first, true).expect("release");
+        let next = registry
+            .ensure(domain, Uuid::from_u128(0x43), 1)
+            .expect("next binding");
+        assert_eq!(next.provider_segment_id, first.provider_segment_id);
     }
 }
 
