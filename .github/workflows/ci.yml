@@ -29,6 +29,11 @@ jobs:
             -o Acquire::https::Timeout=20
             -o DPkg::Lock::Timeout=120
           )
+          # Select the canonical mirror before the first network operation;
+          # waiting for a broken regional mirror makes the timeout fallback
+          # unreachable on runners with a ten-minute step limit.
+          sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
           if ! timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
             apt-get "${apt_options[@]}" update; then
             # GitHub-hosted runners occasionally receive an unhealthy regional
@@ -266,6 +271,8 @@ jobs:
         run: |
           set -euo pipefail
           apt_options=(-o Acquire::Retries=5 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
           if ! timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update; then
             sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
               /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
