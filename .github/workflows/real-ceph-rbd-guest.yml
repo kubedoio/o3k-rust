@@ -1,0 +1,166 @@
+name: Protected Ceph RBD real guest gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-real-ceph-rbd-guest
+  cancel-in-progress: false
+
+jobs:
+  ceph-rbd-real-guest:
+    name: Protected Ceph RBD persistence through real guest
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    environment: o3k-real-host-validation
+    timeout-minutes: 90
+    steps:
+      - name: Repair prior protected artifact ownership
+        run: |
+          set -euo pipefail
+          artifact_dir="${GITHUB_WORKSPACE}/target/ceph-rbd-real-guest-artifacts"
+          if test -e "${artifact_dir}"; then sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"; fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned
+      - name: Validate protected source and privileges
+        id: runner
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          sudo -n true
+          test -w "${GITHUB_WORKSPACE}"
+          run_slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
+          test -n "${run_slug}"
+          printf 'run_slug=%s\n' "${run_slug}" >>"${GITHUB_OUTPUT}"
+      - name: Ensure MicroCeph and guest tooling are available
+        run: |
+          set -euo pipefail
+          if ! command -v microceph >/dev/null 2>&1; then
+            sudo -n snap install microceph
+            sudo -n snap refresh --hold microceph
+          fi
+          command -v microceph
+          command -v microceph.ceph
+          command -v microceph.rbd
+          sudo -n modprobe rbd
+          if ! sudo -n microceph status >/dev/null 2>&1; then sudo -n microceph cluster bootstrap; fi
+          if ! sudo -n microceph status | grep -Eq '(^|[[:space:]])osd([,:]|[[:space:]]|$)'; then
+            sudo -n microceph disk add loop,4G,3
+          fi
+          sudo -n microceph.ceph -s >/dev/null
+          if ! command -v virt-install >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1; then
+            sudo -n timeout --foreground 900s apt-get update
+            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst genisoimage
+          fi
+          command -v virsh
+          command -v virt-install
+          command -v genisoimage
+          command -v qemu-img
+      - name: Prepare pinned disposable CirrOS guest and ephemeral SSH key
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          image="${RUNNER_TEMP}/o3k-ceph-cirros-${{ steps.runner.outputs.run_slug }}.img"
+          key="${RUNNER_TEMP}/o3k-ceph-guest-${{ steps.runner.outputs.run_slug }}.key"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 --proto '=https' --tlsv1.2 \
+            --output "${image}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image}" | sha256sum --check --strict --status
+          chmod 0644 "${image}"
+          ssh-keygen -q -t ed25519 -N '' -f "${key}"
+          chmod 0600 "${key}"
+          {
+            printf 'O3K_CEPH_GUEST_IMAGE_PATH=%s\n' "${image}"
+            printf 'O3K_CEPH_GUEST_SSH_PRIVATE_KEY=%s\n' "${key}"
+            printf 'O3K_CEPH_GUEST_SSH_USER=cirros\n'
+          } >>"${GITHUB_ENV}"
+      - name: Provision exact run-scoped MicroCeph RBD profile
+        env:
+          O3K_CEPH_RUN_ID: ${{ github.run_id }}
+          O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
+          O3K_CEPH_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+        run: >-
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE
+          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          bash scripts/microceph-testlab-profile.sh provision
+      - name: Build Ceph RBD provider helper
+        run: cargo build --locked -p o3k-storage --example ceph-rbd-provider-volume
+      - name: Run real Ceph RBD guest persistence and snapshot journey
+        env:
+          O3K_CEPH_RUN_ID: ${{ github.run_id }}
+          O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
+          O3K_CEPH_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
+          O3K_CEPH_CLIENT_ID: admin
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.client.admin.keyring
+          O3K_CEPH_CAPACITY_BYTES: '10737418240'
+          O3K_CEPH_VOLUME_SIZE_BYTES: '67108864'
+        run: >-
+          sudo -n --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CAPACITY_BYTES,O3K_CEPH_VOLUME_SIZE_BYTES,O3K_CEPH_GUEST_IMAGE_PATH,O3K_CEPH_GUEST_SSH_PRIVATE_KEY,O3K_CEPH_GUEST_SSH_USER
+          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          bash scripts/real-ceph-rbd-guest-gate.sh
+      - name: Clean up exact real guest resources
+        if: always()
+        env:
+          O3K_CEPH_RUN_ID: ${{ github.run_id }}
+          O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
+          O3K_CEPH_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
+          O3K_CEPH_CLIENT_ID: admin
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.client.admin.keyring
+          O3K_CEPH_CAPACITY_BYTES: '10737418240'
+          O3K_CEPH_VOLUME_SIZE_BYTES: '67108864'
+        run: >-
+          sudo -n --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CAPACITY_BYTES,O3K_CEPH_VOLUME_SIZE_BYTES,O3K_CEPH_GUEST_IMAGE_PATH,O3K_CEPH_GUEST_SSH_PRIVATE_KEY,O3K_CEPH_GUEST_SSH_USER
+          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          bash scripts/real-ceph-rbd-guest-gate.sh cleanup
+      - name: Tear down exact run-scoped MicroCeph RBD profile
+        if: always()
+        env:
+          O3K_CEPH_RUN_ID: ${{ github.run_id }}
+          O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
+          O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+        run: >-
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE
+          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          bash scripts/microceph-testlab-profile.sh cleanup
+      - name: Verify exact MicroCeph profile state is gone
+        if: always()
+        run: test ! -e "/var/lib/o3k-ceph-testlab/${{ steps.runner.outputs.run_slug }}"
+      - name: Repair real guest evidence ownership
+        if: always()
+        run: sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}/target/ceph-rbd-real-guest-artifacts"
+      - name: Upload redacted real guest evidence
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: ceph-rbd-real-guest-evidence
+          if-no-files-found: error
+          path: target/ceph-rbd-real-guest-artifacts/ceph-rbd-real-guest-result.json
+      - name: Remove exact disposable guest inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${O3K_CEPH_GUEST_IMAGE_PATH:-}" in
+            "${RUNNER_TEMP}/o3k-ceph-cirros-${{ steps.runner.outputs.run_slug }}.img") rm -f -- "${O3K_CEPH_GUEST_IMAGE_PATH}" ;;
+            "") ;;
+            *) exit 1 ;;
+          esac
+          case "${O3K_CEPH_GUEST_SSH_PRIVATE_KEY:-}" in
+            "${RUNNER_TEMP}/o3k-ceph-guest-${{ steps.runner.outputs.run_slug }}.key") rm -f -- "${O3K_CEPH_GUEST_SSH_PRIVATE_KEY}" "${O3K_CEPH_GUEST_SSH_PRIVATE_KEY}.pub" ;;
+            "") ;;
+            *) exit 1 ;;
+          esac
