@@ -39,6 +39,7 @@ REALM=00000000-0000-0000-0000-000000000004
 ENDPOINT=00000000-0000-0000-0000-000000000003
 BASE_OP=00000000-0000-0000-0000-000000000002
 POLICY_OP=00000000-0000-0000-0000-000000000006
+POLICY_ID=00000000-0000-0000-0000-000000000007
 REMOVE_OP=00000000-0000-0000-0000-000000000005
 TAP_SUFFIX="$(printf '%s' "$ENDPOINT" | sha256sum | cut -c1-8)"
 TAP="o3ktap-$TAP_SUFFIX"
@@ -154,7 +155,7 @@ cat >"$WORK_DIR/base.json" <<JSON
 JSON
 "$FINGERPRINT" "$WORK_DIR/base.json" >"$WORK_DIR/base.signed.json"
 mv "$WORK_DIR/base.signed.json" "$WORK_DIR/base.json"
-sed "s/\"operation_id\":\"$BASE_OP\"/\"operation_id\":\"$POLICY_OP\"/; s/\"intents\":\[/\"intents\":[{\"Policy\":{\"endpoint_id\":\"$ENDPOINT\",\"direction\":\"Egress\",\"protocol\":\"Tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"source\":null,\"destination\":{\"network\":\"198.51.100.0\",\"prefix_len\":24},\"action\":\"Deny\"}},/" "$WORK_DIR/base.json" >"$WORK_DIR/policy.json"
+sed "s/\"operation_id\":\"$BASE_OP\"/\"operation_id\":\"$POLICY_OP\"/; s/\"intents\":\[/\"intents\":[{\"Policy\":{\"id\":\"$POLICY_ID\",\"endpoint_id\":\"$ENDPOINT\",\"direction\":\"Egress\",\"protocol\":\"Tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"source\":null,\"destination\":{\"network\":\"198.51.100.0\",\"prefix_len\":24},\"action\":\"Deny\"}},/" "$WORK_DIR/base.json" >"$WORK_DIR/policy.json"
 "$FINGERPRINT" "$WORK_DIR/policy.json" >"$WORK_DIR/policy.signed.json"
 mv "$WORK_DIR/policy.signed.json" "$WORK_DIR/policy.json"
 sed "s/\"operation_id\":\"$POLICY_OP\"/\"operation_id\":\"$REMOVE_OP\"/" "$WORK_DIR/policy.json" >"$WORK_DIR/remove.json"
