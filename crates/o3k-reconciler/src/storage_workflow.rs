@@ -158,12 +158,14 @@ where
         intent.validate()?;
         self.fence.assert_current(intent.controller_epoch).await?;
         let fingerprint = intent.fingerprint()?;
-        if let Ok(existing) = self
+        match self
             .store
             .get_agent_command_by_idempotency_key(&intent.idempotency_key)
             .await
         {
-            return self.replay_existing(&existing, &fingerprint).await;
+            Ok(existing) => return self.replay_existing(&existing, &fingerprint).await,
+            Err(StoreError::OperationNotFound) => {}
+            Err(error) => return Err(StorageWorkflowError::Store(error)),
         }
 
         let record = self
@@ -188,8 +190,8 @@ where
             return Err(StorageWorkflowError::InvalidIntent);
         }
 
-        let operation_id = Uuid::now_v7();
-        let command_id = Uuid::now_v7();
+        let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
+        let command_id = deterministic_storage_id("command", &intent.idempotency_key);
         let envelope = self.envelope(
             &intent,
             command_id,
@@ -249,12 +251,14 @@ where
         intent.validate()?;
         self.fence.assert_current(intent.controller_epoch).await?;
         let fingerprint = intent.fingerprint()?;
-        if let Ok(existing) = self
+        match self
             .store
             .get_agent_command_by_idempotency_key(&intent.idempotency_key)
             .await
         {
-            return self.replay_existing(&existing, &fingerprint).await;
+            Ok(existing) => return self.replay_existing(&existing, &fingerprint).await,
+            Err(StoreError::OperationNotFound) => {}
+            Err(error) => return Err(StorageWorkflowError::Store(error)),
         }
         let record = self
             .store
@@ -270,8 +274,8 @@ where
         {
             return Err(StorageWorkflowError::InvalidIntent);
         }
-        let operation_id = Uuid::now_v7();
-        let command_id = Uuid::now_v7();
+        let operation_id = deterministic_storage_id("operation", &intent.idempotency_key);
+        let command_id = deterministic_storage_id("command", &intent.idempotency_key);
         let envelope = self.envelope(
             &intent,
             command_id,
@@ -870,6 +874,11 @@ fn hex_digest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn deterministic_storage_id(kind: &str, idempotency_key: &str) -> Uuid {
+    let name = format!("o3k-storage:{kind}:{idempotency_key}");
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
 }
 
 #[cfg(test)]
