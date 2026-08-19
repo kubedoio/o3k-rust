@@ -28,6 +28,8 @@ for needle in (
     "if-no-files-found: error",
     "actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808",
     "--preserve-env=PATH,CARGO_HOME",
+    'target_dir="${GITHUB_WORKSPACE}/target"',
+    'chown -R "$(id -u):$(id -g)" "${target_dir}"',
 ):
     assert needle in workflow, needle
 assert "continue-on-error" not in workflow
