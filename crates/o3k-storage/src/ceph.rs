@@ -347,6 +347,9 @@ where
         validate_volume(request)?;
         match self.owned_image(request).await {
             Ok((_, size)) => {
+                if size != request.size_bytes {
+                    return Err(StorageProviderError::Conflict);
+                }
                 return Ok(observation(self.image_name(request.volume_id), size));
             }
             Err(StorageProviderError::NotFound) => {}
@@ -516,6 +519,9 @@ where
             })
             .await?;
         let snapshot = self.snapshot_name(request.snapshot_id);
+        if self.snapshot_exists(&image, &snapshot).await? {
+            return Ok(snapshot_observation(image, snapshot));
+        }
         let mut args = self.rbd_args();
         args.extend([
             "snap".to_owned(),
@@ -523,14 +529,10 @@ where
             format!("{image}@{snapshot}"),
         ]);
         self.checked("rbd", args).await?;
-        Ok(StorageSnapshotObservation {
-            provider_reference: StorageProviderReference {
-                provider: "ceph-rbd".to_owned(),
-                resource_id: format!("{image}@{snapshot}"),
-            },
-            consistency: SnapshotConsistency::CrashConsistent,
-            available: true,
-        })
+        if !self.snapshot_exists(&image, &snapshot).await? {
+            return Err(StorageProviderError::CommandFailed);
+        }
+        Ok(snapshot_observation(image, snapshot))
     }
 
     async fn delete_snapshot(
@@ -591,6 +593,17 @@ fn observation(image: String, size_bytes: u64) -> StorageVolumeObservation {
     }
 }
 
+fn snapshot_observation(image: String, snapshot: String) -> StorageSnapshotObservation {
+    StorageSnapshotObservation {
+        provider_reference: StorageProviderReference {
+            provider: "ceph-rbd".to_owned(),
+            resource_id: format!("{image}@{snapshot}"),
+        },
+        consistency: SnapshotConsistency::CrashConsistent,
+        available: true,
+    }
+}
+
 fn map_command_error(error: CephCommandError) -> StorageProviderError {
     match error {
         CephCommandError::Unavailable => StorageProviderError::Unavailable,
@@ -631,7 +644,7 @@ struct CephDfStats {
 mod tests {
     use super::*;
     use crate::StorageProviderError;
-    use o3k_domain::VolumeId;
+    use o3k_domain::{SnapshotId, VolumeId};
     use std::{collections::VecDeque, sync::Mutex};
     use uuid::Uuid;
 
@@ -746,6 +759,60 @@ mod tests {
             .await
             .expect_err("foreign image");
         assert_eq!(error, StorageProviderError::ForeignResource);
+    }
+
+    #[tokio::test]
+    async fn existing_owned_image_with_different_size_conflicts() {
+        let request = volume();
+        let provider = CephRbdStorageProvider::with_runner(
+            config(),
+            FakeRunner::with_outputs([
+                FakeRunner::output(0, r#"{"size":134217728}"#),
+                FakeRunner::output(0, &format!("{}\n", provider_marker(&request))),
+            ]),
+        )
+        .expect("valid config");
+        let error = provider
+            .create_volume(&request)
+            .await
+            .expect_err("size mismatch");
+        assert_eq!(error, StorageProviderError::Conflict);
+    }
+
+    #[tokio::test]
+    async fn snapshot_create_verifies_and_replays_observable_snapshot() {
+        let request = volume();
+        let snapshot = StorageSnapshotRequest {
+            snapshot_id: SnapshotId::from_uuid(Uuid::from_u128(8)),
+            volume_id: request.volume_id,
+            project_id: request.project_id.clone(),
+            source_generation: request.generation,
+        };
+        let provider = CephRbdStorageProvider::with_runner(
+            config(),
+            FakeRunner::with_outputs([
+                FakeRunner::output(0, r#"{"size":67108864}"#),
+                FakeRunner::output(0, &format!("{}\n", provider_marker(&request))),
+                FakeRunner::output(0, "[]"),
+                FakeRunner::output(0, ""),
+                FakeRunner::output(0, r#"[{"name":"o3k-s-00000000000000000000000000000008"}]"#),
+                FakeRunner::output(0, r#"{"size":67108864}"#),
+                FakeRunner::output(0, &format!("{}\n", provider_marker(&request))),
+                FakeRunner::output(0, r#"[{"name":"o3k-s-00000000000000000000000000000008"}]"#),
+            ]),
+        )
+        .expect("valid config");
+        let observed = provider
+            .create_snapshot(&snapshot)
+            .await
+            .expect("snapshot converges");
+        assert!(observed.available);
+        assert_eq!(observed.consistency, SnapshotConsistency::CrashConsistent);
+        let replayed = provider
+            .create_snapshot(&snapshot)
+            .await
+            .expect("equivalent snapshot create replays");
+        assert_eq!(replayed, observed);
     }
 
     #[tokio::test]

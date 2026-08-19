@@ -148,6 +148,8 @@ discover_domain_ip() {
 try_guest_ssh() {
     local candidate="$1"
     : >"${CANDIDATE_KNOWN_HOSTS}"
+    # $1 must expand inside the child bash, not in this shell.
+    # shellcheck disable=SC2016
     timeout --foreground 3s bash -c ': >/dev/tcp/$1/22' _ "${candidate}" 2>/dev/null || return 1
     timeout --foreground 8s ssh-keyscan -T 3 -H "${candidate}" >"${CANDIDATE_KNOWN_HOSTS}" 2>/dev/null || return 1
     timeout --foreground 8s ssh -i "${SSH_KEY}" -o BatchMode=yes -o ConnectTimeout=3 \
@@ -187,7 +189,9 @@ reset_guest_connection_state() {
 }
 
 create_domain() {
-    local domain="$1" overlay="$2" seed_iso="${STATE_ROOT}/${domain}.cidata.iso"
+    local domain="$1"
+    local overlay="$2"
+    local seed_iso="${STATE_ROOT}/${domain}.cidata.iso"
     qemu-img create -f qcow2 -F qcow2 -b "${BASE_IMAGE}" "${overlay}" >/dev/null
     genisoimage -quiet -output "${seed_iso}" -volid cidata -joliet -rock "${USER_DATA}" "${META_DATA}"
     chmod 0644 "${seed_iso}"

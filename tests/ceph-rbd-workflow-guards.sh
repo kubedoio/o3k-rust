@@ -46,6 +46,7 @@ for needle in (
     assert needle in profile, needle
 for needle in (
     'genisoimage -quiet -output "${seed_iso}"',
+    'local seed_iso="${STATE_ROOT}/${domain}.cidata.iso"',
     "--rng /dev/urandom",
     "provider snapshot-create",
     "provider snapshot-delete",
