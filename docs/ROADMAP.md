@@ -73,27 +73,36 @@ service-testbed profile, not native Volume authority. Boot-from-volume,
 multi-attach, migration, backups, replication/mirroring, CephFS/NFS, and KMS
 remain later profiles unless separately accepted and proven.
 
-## P11 — Namespaced Routed Edge Fabric v1 — accepted implementation milestone
+## P11 — Small multi-hypervisor edge cloud — architecture transition
 
-Turn the proven compute + P9 network + P10 storage model into the first real
+P11 turns the proven compute + P9 network + P10 storage model into the first real
 multi-hypervisor edge profile for roughly 10–20 hypervisors.
 
-The accepted normative architecture is ADR-0170/SPEC-0028 plus
-`contracts/p11-edge-fabric.md`. Runtime implementation is authorized, but no
-runtime, scale, or support claim exists until the required evidence gates pass.
+ADR-0170/SPEC-0028 are the currently accepted v1 architecture and PR #703 merged
+only its portable endpoint-directory/planner slice. The project is now reviewing
+a proposed successor, ADR-0171/SPEC-0029 plus
+`contracts/p11-realm-overlay-fabric.md`, before further privileged fabric work.
+The successor exists because a general cloud should allow independent customers
+to reuse the same private CIDRs across hosts.
 
-### P11 user outcome
+No new privileged P11 fabric implementation should proceed from the proposed
+successor until its human architecture/security gate is accepted. If accepted,
+ADR-0171/SPEC-0029 supersede ADR-0170/SPEC-0028 for P11 fabric implementation.
+No support claim exists until the complete real-host evidence gate passes.
 
-> A tenant can place VMs from one AddressRealm/subnet on different eligible
-> hypervisors, use normal ARP/local Ethernet for same-host peers, reach remote
-> same-realm endpoints without cross-host ARP flooding through an O3K-derived
-> endpoint directory and endpoint `/32` routes, preserve stateful policy and
-> public/FIP behavior, use LVM/RBD according to storage locality, survive
-> supported drain/restart/disconnect/reconnect scenarios, and delete the
-> environment without duplicate resources, owned leaks, or foreign-state
-> mutation.
+### Proposed P11 user outcome
 
-### P11 reference network topology
+> Independent tenants can use identical private CIDRs in separate AddressRealms,
+> place real VMs from each realm on different eligible hypervisors, use normal
+> ARP/local Ethernet for same-host peers, resolve remote peers locally without
+> cross-host ARP flooding, carry AddressRealm identity through a bounded Geneve
+> encapsulation layer over an authenticated/encrypted WireGuard host transport,
+> preserve stateful policy and public/FIP behavior, use LVM/RBD according to
+> storage locality, survive supported drain/restart/disconnect/reconnect
+> scenarios, and delete the environment without duplicate resources, realm
+> misdelivery, owned leaks, or foreign-state mutation.
+
+### Proposed P11 reference network topology
 
 - one VM-facing host-local Linux bridge per active AddressRealm on a host,
   preserving the proven libvirt/TAP path;
@@ -105,24 +114,32 @@ runtime, scale, or support claim exists until the required evidence gates pass.
 - a control-plane-derived distributed realm endpoint directory identifies
   current local/remote endpoints from accepted endpoint placement;
 - remote same-realm ARP is answered locally using a deterministic AddressRealm
-  proxy MAC; ARP is not flooded across hypervisors;
-- remote endpoint reachability follows accepted endpoint location using host
-  routes, normally IPv4 `/32`, instead of tying a tenant subnet to one host;
-- one shared routed host fabric per compute host, with WireGuard as the
-  reference encrypted transport;
+  proxy MAC; tenant ARP is not flooded across hypervisors;
+- endpoint identity is interpreted as `(AddressRealm, IP)`, not globally by bare
+  tenant IP;
+- each active AddressRealm receives a durable provider-native Geneve VNI mapping
+  in the selected fabric domain;
+- remote known-unicast traffic is encapsulated with the current realm VNI and
+  sent to the accepted target host;
+- Geneve carries realm identity but does not create an arbitrary regional L2
+  flood domain;
+- one shared WireGuard host transport remains per compute host;
+- WireGuard peer routing uses unique provider host-fabric transport addresses,
+  not tenant endpoint `/32`s, so overlapping customer IPs remain unambiguous;
 - WireGuard provides transport security only: AddressRealm and NetworkPolicy
   remain tenant isolation/authorization;
-- host WireGuard private keys remain host-local; only bounded public fabric
-  identity/generation is distributed;
-- P11 v1 keeps non-overlapping AddressRealm prefixes across the shared routed
-  fabric and does not claim regional L2.
+- host WireGuard private keys remain host-local;
+- overlapping AddressRealm CIDRs are a mandatory successor-profile capability;
+- arbitrary cross-host broadcast/multicast/unknown-unicast flooding remains out
+  of scope.
 
 ### P11 placement and host lifecycle
 
 - reuse existing authenticated agent inventory, Placement, scheduling, durable
   work leases, fencing, agent epochs, and reconciliation;
 - new placement must account for host availability/admin state, compute
-  capacity, P11 network/fabric readiness, and P10 storage placement scope;
+  capacity, P11 realm/Geneve/WireGuard readiness, and P10 storage placement
+  scope;
 - host-local LVM constrains placement to its owning eligible host;
 - shared Ceph RBD may be used serially from another eligible host only after the
   previous attachment is cleanly terminated or otherwise safely fenced;
@@ -135,24 +152,31 @@ runtime, scale, or support claim exists until the required evidence gates pass.
 ### P11 evidence posture
 
 - core functional evidence uses at least three independent real KVM/libvirt
-  compute hosts unless the accepted SPEC selects a stronger minimum;
-- real tests prove local actual-MAC ARP, remote proxy-MAC ARP, no cross-host ARP
-  flood dependency, WireGuard-encrypted packet path, local/cross-host policy
-  allow/deny, public/FIP behavior, MTU, LVM locality, serial RBD checksum
-  persistence, drain/reconnect/failure recovery, and independent cleanup;
+  compute hosts unless the accepted successor SPEC selects a stronger minimum;
+- the mandatory overlap gate uses two independent projects/AddressRealms with
+  the same CIDR and overlapping endpoint IPs across hosts;
+- real tests prove local actual-MAC ARP, remote proxy-MAC ARP, correct realm/VNI
+  demultiplexing, zero cross-realm overlapping-IP misdelivery, no cross-host ARP
+  flood dependency, WireGuard-encrypted host transport, local/cross-host policy
+  allow/deny, overlap-safe public/FIP behavior, MTU, LVM locality, serial RBD
+  checksum persistence, drain/reconnect/failure recovery, and independent
+  cleanup;
 - separate target-count evidence exercises approximately the roadmap host count
-  for registration, inventory, scheduling, directory/fabric-plan fanout,
-  reconnect, and controller concurrency;
+  for registration, inventory, scheduling, realm/VNI/directory/tunnel-plan
+  fanout, reconnect, and controller concurrency;
 - simulated agents may supplement scale evidence but do not expand the real
-  hypervisor support claim.
+  hypervisor support claim;
+- if simple static Geneve state grows beyond an operationally reasonable bound
+  at the claimed P11 scale, implementation stops for architecture review rather
+  than silently adding OVN/EVPN/eBPF/BGP complexity.
 
 ### P11 non-goals
 
-P11 v1 does not mean:
+The proposed P11 successor does not mean:
 
-- cross-host overlapping CIDRs;
-- regional L2 adjacency or ARP/Ethernet flooding;
-- VXLAN/Geneve/EVPN or OVN/OVS;
+- arbitrary regional L2 adjacency;
+- cross-host ARP/Ethernet/unknown-unicast/multicast flooding;
+- VXLAN/EVPN or mandatory OVN/OVS;
 - custom eBPF dataplane;
 - internal BGP;
 - STUN/TURN/relay/NAT traversal;
@@ -162,9 +186,10 @@ P11 v1 does not mean:
 - multi-region;
 - P12 native API/CLI or Terraform/UI work.
 
-Future profiles may add VRF/encapsulation/OVN/EVPN/eBPF/BGP where the product
-actually requires regional L2, overlapping realms, larger topology, hardware
-offload, or external-router integration.
+Future profiles may replace/accelerate the provider with OVN/EVPN/eBPF/BGP when
+the product genuinely requires broader L2 semantics, larger topology, hardware
+offload, or external-router integration. Such providers must preserve canonical
+AddressRealm/endpoint identity.
 
 ## P12 — Native O3K API and CLI
 
@@ -220,8 +245,11 @@ evidence exists.
 - P9 networking must not become an excuse for a generic infrastructure
   abstraction program;
 - P10 storage must not conflate external Cinder with native Volume authority;
-- P11 fabric implementation must not turn WireGuard into tenant identity,
-  silently add regional L2, or claim a larger real topology than was tested;
+- P11 fabric implementation must not turn WireGuard or Geneve provider IDs into
+  tenant identity, silently add regional L2 flooding, or claim a larger real
+  topology than was tested;
+- while ADR-0171/SPEC-0029 are proposed, do not continue privileged successor
+  fabric implementation from stale ADR-0170-era prompt text;
 - P12 native API work follows mature domain semantics rather than preceding
   them;
 - architecture direction does not replace executable evidence or human review.
