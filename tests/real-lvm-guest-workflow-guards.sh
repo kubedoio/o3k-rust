@@ -38,5 +38,7 @@ assert "O3K_LVM_GUEST_IMAGE_PATH: ${{ vars." not in text
 assert "O3K_LVM_GUEST_SSH_PRIVATE_KEY: ${{ secrets." not in text
 PY
 grep -Fq -- "--cloud-init" "${SCRIPT}"
+grep -Fq -- 'rmdir -- "${STATE_ROOT}"' "${SCRIPT}"
+grep -Fq -- 'install -m 0755 -d "${ARTIFACT_DIR}"' "${SCRIPT}"
 
 echo "real LVM guest workflow guard tests passed"
