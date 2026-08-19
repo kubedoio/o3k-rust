@@ -17,6 +17,7 @@ product rules. Summaries explain these decisions but do not override them.
 | OpenStack compatibility and evidence gates | `docs/specs/SPEC-0022-service-api-baseline-and-evidence-gates.md` | `README.md`, `docs/ROADMAP.md` |
 | External OpenStack service-under-test profile | `docs/specs/SPEC-0023-external-cinder-service-under-test.md` | `README.md`, `docs/ARCHITECTURE.md`, `docs/PROJECT_CHARTER.md`, `docs/ROADMAP.md` |
 | Execution authority and protocol invariants | `contracts/execution-boundaries.md` | `docs/ARCHITECTURE.md`, `AGENTS.md` |
+| Native persistent Volume/Attachment/Snapshot authority and storage execution | `docs/adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md` and `docs/specs/SPEC-0027-native-persistent-storage-v1.md` | `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
 
 ## Core rules
 
