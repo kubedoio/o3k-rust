@@ -388,9 +388,10 @@ json -X PUT "$BASE/v2.0/ports/$PORT_ID" -H 'content-type: application/json' \
 # Native O3K deny remains a separate canonical policy action; this proves the
 # compatibility allow projection does not silently change fail-closed deny
 # semantics.
-json -X POST "$BASE/v2.0/network-policies" -H 'content-type: application/json' \
+POLICY_JSON="$(json -X POST "$BASE/v2.0/network-policies" -H 'content-type: application/json' \
     -H 'idempotency-key: p9-api-policy' \
-    --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"deny\"}}" >/dev/null
+    --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"deny\"}}")"
+POLICY_ID="$(printf '%s' "$POLICY_JSON" | field policy.id)"
 
 FLAVOR_ID="$(json "$BASE/v2.1/$PROJECT_ID/flavors" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flavors"][0]["id"])')"
 if [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
@@ -414,6 +415,10 @@ if busybox wget -q -T 3 -O /dev/null http://198.51.100.2:8082/; then
 else
     echo O3K_PUBLIC_API_LIBVIRT_EGRESS_DENIED
 fi
+while ! busybox wget -q -T 2 -O /dev/null http://198.51.100.2:8082/; do sleep 1; done
+echo O3K_PUBLIC_API_POLICY_UPDATE_ALLOWED
+while busybox wget -q -T 2 -O /dev/null http://198.51.100.2:8082/; do sleep 1; done
+echo O3K_PUBLIC_API_POLICY_UPDATE_DENIED
 GUEST
     SERVER_REQUEST="$WORK_DIR/server-request.json"
     python3 - "$SERVER_REQUEST" "$IMAGE_ID" "$FLAVOR_ID" "$PORT_ID" "$USER_DATA_FILE" <<'PY'
@@ -547,6 +552,10 @@ sleep 4
 kill "\$probe_pid" 2>/dev/null || true
 wait "\$probe_pid" 2>/dev/null || true
 echo O3K_PUBLIC_API_EGRESS_DENIED
+while ! wget -q -T 2 -O /dev/null http://198.51.100.2:8082/; do sleep 1; done
+echo O3K_PUBLIC_API_POLICY_UPDATE_ALLOWED
+while wget -q -T 2 -O /dev/null http://198.51.100.2:8082/; do sleep 1; done
+echo O3K_PUBLIC_API_POLICY_UPDATE_DENIED
 sleep 30
 GUEST
     chmod 0755 "$ROOTFS/etc/guest-init"
@@ -574,8 +583,32 @@ GUEST
     FLOATING_ADDRESS="$(printf '%s' "$FLOATING_JSON" | field floatingip.floating_ip_address)"
     nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 4 \
         "http://$FLOATING_ADDRESS:8080/" | grep -q o3k-public-api-real-guest
+    ip link set "$UPLINK" down
+    if nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 2 \
+        "http://$FLOATING_ADDRESS:8080/" >/dev/null 2>&1; then
+        echo "external uplink outage did not interrupt public traffic" >&2
+        exit 1
+    fi
+    ip link set "$UPLINK" up
+    recovered=0
+    for _ in $(seq 1 80); do
+        if nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 2 \
+            "http://$FLOATING_ADDRESS:8080/" 2>/dev/null \
+            | grep -q o3k-public-api-real-guest; then
+            recovered=1
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "$recovered" == 1 ]] || { echo "public traffic did not recover after external uplink restoration" >&2; exit 1; }
     wait_marker O3K_PUBLIC_API_EGRESS_ALLOWED
     wait_marker O3K_PUBLIC_API_EGRESS_DENIED
+    json -X PUT "$BASE/v2.0/network-policies/$POLICY_ID" -H 'content-type: application/json' \
+        --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"allow\"}}" >/dev/null
+    wait_marker O3K_PUBLIC_API_POLICY_UPDATE_ALLOWED
+    json -X PUT "$BASE/v2.0/network-policies/$POLICY_ID" -H 'content-type: application/json' \
+        --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"deny\"}}" >/dev/null
+    wait_marker O3K_PUBLIC_API_POLICY_UPDATE_DENIED
     nft list chain ip o3k_policy forward 2>/dev/null \
         | grep -Eq 'counter packets [1-9][0-9]*.* drop'
 
@@ -636,6 +669,22 @@ elif [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
     grep -q O3K_PUBLIC_API_LIBVIRT_GUEST_READY <<<"$CONSOLE_OUTPUT"
     grep -q O3K_PUBLIC_API_LIBVIRT_EGRESS_ALLOWED <<<"$CONSOLE_OUTPUT"
     grep -q O3K_PUBLIC_API_LIBVIRT_EGRESS_DENIED <<<"$CONSOLE_OUTPUT"
+    json -X PUT "$BASE/v2.0/network-policies/$POLICY_ID" -H 'content-type: application/json' \
+        --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"allow\"}}" >/dev/null
+    for _ in $(seq 1 120); do
+        CONSOLE_OUTPUT="$(json -X POST "$BASE/v2.1/$PROJECT_ID/servers/$SERVER_ID/action" -H 'content-type: application/json' --data '{"os-getConsoleOutput":{"length":65536}}' 2>/dev/null | field output || true)"
+        grep -q O3K_PUBLIC_API_POLICY_UPDATE_ALLOWED <<<"$CONSOLE_OUTPUT" && break
+        sleep 0.5
+    done
+    grep -q O3K_PUBLIC_API_POLICY_UPDATE_ALLOWED <<<"$CONSOLE_OUTPUT"
+    json -X PUT "$BASE/v2.0/network-policies/$POLICY_ID" -H 'content-type: application/json' \
+        --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"deny\"}}" >/dev/null
+    for _ in $(seq 1 120); do
+        CONSOLE_OUTPUT="$(json -X POST "$BASE/v2.1/$PROJECT_ID/servers/$SERVER_ID/action" -H 'content-type: application/json' --data '{"os-getConsoleOutput":{"length":65536}}' 2>/dev/null | field output || true)"
+        grep -q O3K_PUBLIC_API_POLICY_UPDATE_DENIED <<<"$CONSOLE_OUTPUT" && break
+        sleep 0.5
+    done
+    grep -q O3K_PUBLIC_API_POLICY_UPDATE_DENIED <<<"$CONSOLE_OUTPUT"
     if grep -q O3K_PUBLIC_API_LIBVIRT_EGRESS_DENIED_FAILED <<<"$CONSOLE_OUTPUT"; then
         echo "real guest reached the denied external service" >&2
         exit 1
@@ -769,7 +818,7 @@ if [[ "${O3K_P9_PUBLIC_API_QEMU:-}" == 1 ]]; then
     OUTPUT_PATH="${O3K_P9_PUBLIC_API_QEMU_OUTPUT:-$ROOT_DIR/target/p9-public-api-real-qemu-packet-path.json}"
     mkdir -p "$(dirname "$OUTPUT_PATH")"
     cat >"$OUTPUT_PATH" <<JSON
-{"artifact_type":"p9-public-api-real-qemu-packet-path","schema_version":1,"evidence_tier":"fake-control-plane-real-qemu-guest","full_profile_verified":false,"real_vm_verified":true,"public_api_lifecycle_verified":true,"fixed_ip_packet_path_verified":true,"routed_snat_verified":true,"public_dnat_verified":true,"stateful_policy_allow_verified":true,"stateful_policy_deny_verified":true,"network_agent_restart_replay_verified":true,"owned_leaks":0,"owned_inconsistencies":0,"foreign_mutations":0,"source_revision":"$(git -C "$ROOT_DIR" rev-parse HEAD)"}
+{"artifact_type":"p9-public-api-real-qemu-packet-path","schema_version":1,"evidence_tier":"fake-control-plane-real-qemu-guest","full_profile_verified":false,"real_vm_verified":true,"public_api_lifecycle_verified":true,"fixed_ip_packet_path_verified":true,"routed_snat_verified":true,"public_dnat_verified":true,"stateful_policy_allow_verified":true,"stateful_policy_deny_verified":true,"security_group_projection_verified":true,"policy_update_under_real_traffic_verified":true,"external_unavailable_recovered_verified":true,"network_agent_restart_replay_verified":true,"controller_restart_verified":true,"owned_leaks":0,"owned_inconsistencies":0,"foreign_mutations":0,"source_revision":"$(git -C "$ROOT_DIR" rev-parse HEAD)"}
 JSON
     echo "P9 public API -> real QEMU guest gate passed (fake control plane, routed/public/policy traffic, restart, cleanup)"
 else

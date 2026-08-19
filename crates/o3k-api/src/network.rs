@@ -1028,6 +1028,7 @@ async fn dispatch_policy_network(
         .into_iter()
         .filter(|policy| policy.endpoint_id == port.id)
         .collect();
+    let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         serde_json::to_string(&policies)
@@ -1043,7 +1044,7 @@ async fn dispatch_policy_network(
         subnet_cidr: &subnet.cidr,
         node_id: &host,
         operation_id,
-        deadline_unix_ms: unix_time_millis().saturating_add(30_000),
+        deadline_unix_ms,
         public_address: None,
         external_realm_id: state.network_external_realm_id,
         policies,
@@ -1060,7 +1061,7 @@ async fn dispatch_policy_network(
             action: o3k_network::NetworkPlanAction::Apply,
             target: agent,
             controller: controller.clone(),
-            deadline_unix_ms: unix_time_millis().saturating_add(30_000),
+            deadline_unix_ms,
             plan,
         })
         .await
