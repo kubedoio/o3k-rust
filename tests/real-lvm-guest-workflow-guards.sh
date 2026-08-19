@@ -40,5 +40,18 @@ PY
 grep -Fq -- "--cloud-init" "${SCRIPT}"
 grep -Fq -- 'rmdir -- "${STATE_ROOT}"' "${SCRIPT}"
 grep -Fq -- 'install -m 0755 -d "${ARTIFACT_DIR}"' "${SCRIPT}"
+grep -Fq -- 'O3K_EPHEMERAL_KEY' "${SCRIPT}"
+grep -Fq -- 'domain_mac()' "${SCRIPT}"
+grep -Fq -- 'tolower($3) == tolower(wanted_mac)' "${SCRIPT}"
+grep -Fq -- 'ACTIVE_SSH_HOST="${candidate_host}"' "${SCRIPT}"
+grep -Fq -- 'SSH_HOST_OVERRIDE' "${SCRIPT}"
+grep -Fq -- 'reset_guest_connection_state' "${SCRIPT}"
+grep -Fq -- 'guest readiness diagnostics:' "${SCRIPT}"
+grep -Fq -- 'if [[ "${1:-}" == cleanup ]]' "${SCRIPT}"
+grep -Fq -- 'Clean up exact real guest resources' "${WORKFLOW}"
+if grep -Fq -- 'ssh_pwauth:' "${SCRIPT}"; then
+    echo "cloud-config YAML must not be used for CirrOS userdata" >&2
+    exit 1
+fi
 
 echo "real LVM guest workflow guard tests passed"
