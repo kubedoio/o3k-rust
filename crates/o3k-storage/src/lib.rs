@@ -17,6 +17,13 @@ use std::{fmt, sync::Arc};
 use thiserror::Error;
 use tokio::process::Command;
 
+mod ceph;
+
+pub use ceph::{
+    CephCommandError, CephCommandOutput, CephCommandRunner, CephRbdConfig, CephRbdStorageProvider,
+    SystemCephCommandRunner,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageVolumeRequest {
     pub volume_id: VolumeId,
