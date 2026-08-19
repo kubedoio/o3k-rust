@@ -91,6 +91,15 @@ jobs:
           O3K_LVM_THIN_POOL: o3k-thin-${{ steps.runner.outputs.run_slug }}
           O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
         run: sudo -n --preserve-env=GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_VOLUME_GROUP,O3K_LVM_THIN_POOL,O3K_LVM_PROVIDER_NAMESPACE,O3K_LVM_GUEST_IMAGE_PATH,O3K_LVM_GUEST_SSH_PRIVATE_KEY,O3K_LVM_GUEST_SSH_USER bash scripts/real-lvm-guest-gate.sh
+      - name: Clean up exact real guest resources
+        if: always()
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+        run: >-
+          sudo -n
+          --preserve-env=GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE
+          bash scripts/real-lvm-guest-gate.sh cleanup
       - name: Tear down disposable tagged LVM profile
         if: always()
         env:
