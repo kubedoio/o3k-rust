@@ -71,6 +71,8 @@ jobs:
         run: bash tests/real-host-workflow-guards.sh
       - name: Test protected LVM provider workflow guards
         run: bash tests/lvm-provider-workflow-guards.sh
+      - name: Test protected LVM real guest workflow guards
+        run: bash tests/real-lvm-guest-workflow-guards.sh
       - name: Test real-host leak verifier
         run: bash tests/real-host-leak-verifier.sh
       - name: Test protected real-Cinder workflow guards
