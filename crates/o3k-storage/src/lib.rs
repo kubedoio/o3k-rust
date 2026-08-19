@@ -62,6 +62,26 @@ pub struct PreparedAttachment {
 }
 
 impl PreparedAttachment {
+    /// Construct a transient provider/compute hand-off. The value is kept
+    /// execution-only; callers must not persist or serialize `device_path` in
+    /// canonical state or public responses.
+    pub fn from_provider(
+        provider_reference: StorageProviderReference,
+        device_path: String,
+        attachment_id: VolumeAttachmentId,
+        volume_id: VolumeId,
+    ) -> Result<Self, StorageProviderError> {
+        if device_path.is_empty() || device_path.len() > 512 || device_path.contains('\0') {
+            return Err(StorageProviderError::InvalidRequest);
+        }
+        Ok(Self {
+            provider_reference,
+            device_path,
+            attachment_id,
+            volume_id,
+        })
+    }
+
     #[must_use]
     pub fn device_path(&self) -> &str {
         &self.device_path
@@ -132,6 +152,13 @@ pub trait StorageProvider: Send + Sync {
         &self,
         request: &StorageAttachmentRequest,
     ) -> Result<PreparedAttachment, StorageProviderError>;
+    /// Observe the bounded storage-side attachment state without retrying a
+    /// mutation. A controller uses this after an unknown outcome before it
+    /// may issue another command.
+    async fn inspect_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError>;
     async fn terminate_attachment(
         &self,
         request: &StorageAttachmentRequest,
@@ -566,6 +593,22 @@ where
             attachment_id: request.attachment_id,
             volume_id: request.volume_id,
             host_id: request.host_id.clone(),
+            attached: false,
+            provider_reference: prepared.provider_reference,
+        })
+    }
+
+    async fn inspect_attachment(
+        &self,
+        request: &StorageAttachmentRequest,
+    ) -> Result<StorageAttachmentObservation, StorageProviderError> {
+        let prepared = self.prepare_attachment(request).await?;
+        Ok(StorageAttachmentObservation {
+            attachment_id: request.attachment_id,
+            volume_id: request.volume_id,
+            host_id: request.host_id.clone(),
+            // LVM preparation is intentionally stateless at the storage
+            // boundary; libvirt/compute owns the live attach observation.
             attached: false,
             provider_reference: prepared.provider_reference,
         })
