@@ -38,6 +38,8 @@ assert "run: bash packaging/get-o3k-worker/sync.sh --check" in text
 assert "run: cargo test --workspace\n" not in text
 assert "protobuf-compiler libvirt-dev pkg-config" in text
 assert "cargo clean -p virt-sys" in text
+assert text.count("mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu") >= 2
+assert text.count("rewrite_apt_sources()") >= 2
 assert "git fetch origin main:refs/heads/main" not in text
 assert "buf breaking --against '.git#branch=main,subdir=proto'" not in text
 assert "sha256sum result.json sbom.spdx.json > SHA256SUMS" in text

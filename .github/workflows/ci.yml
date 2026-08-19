@@ -29,18 +29,26 @@ jobs:
             -o Acquire::https::Timeout=20
             -o DPkg::Lock::Timeout=120
           )
+          rewrite_apt_sources() {
+            for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              if [[ -f "${apt_source}" ]]; then
+                sudo -n sed -i \
+                  -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+                  -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+                  "${apt_source}"
+              fi
+            done
+          }
           # Select the canonical mirror before the first network operation;
           # waiting for a broken regional mirror makes the timeout fallback
           # unreachable on runners with a ten-minute step limit.
-          sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          rewrite_apt_sources
           if ! timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
             apt-get "${apt_options[@]}" update; then
             # GitHub-hosted runners occasionally receive an unhealthy regional
             # Ubuntu mirror. Retry through the canonical mirror before failing
             # the job; this is runner provisioning, not a repository failure.
-            sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-              /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+            rewrite_apt_sources
             timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
               apt-get "${apt_options[@]}" update
           fi
@@ -271,11 +279,19 @@ jobs:
         run: |
           set -euo pipefail
           apt_options=(-o Acquire::Retries=5 -o Acquire::ForceIPv4=true -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
-          sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          rewrite_apt_sources() {
+            for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              if [[ -f "${apt_source}" ]]; then
+                sudo -n sed -i \
+                  -e 's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+                  -e 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
+                  "${apt_source}"
+              fi
+            done
+          }
+          rewrite_apt_sources
           if ! timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update; then
-            sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
-              /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+            rewrite_apt_sources
             timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
           fi
           sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y python3-venv python3-pip
