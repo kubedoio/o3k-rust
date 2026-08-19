@@ -248,6 +248,16 @@ impl LinuxP11FabricBackend {
         if exists {
             return Err(LinuxP11Error::ForeignState);
         }
+        let (interface_exists, _) = self
+            .command
+            .output(
+                "ip",
+                &["link", "show", "dev", &self.config.fabric_interface],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if interface_exists {
+            return Err(LinuxP11Error::ForeignState);
+        }
         if private_key_path.exists() {
             return Err(LinuxP11Error::ForeignState);
         }
@@ -359,6 +369,21 @@ impl LinuxP11FabricBackend {
                 .map_err(LinuxP11Error::Storage)?;
             if exists {
                 return Err(LinuxP11Error::ForeignState);
+            }
+            for interface in [
+                &ownership.bridge,
+                &ownership.host_veth,
+                &ownership.realm_veth,
+                &ownership.fabric_veth,
+                &ownership.fabric_realm_veth,
+            ] {
+                let (interface_exists, _) = self
+                    .command
+                    .output("ip", &["link", "show", "dev", interface])
+                    .map_err(LinuxP11Error::Storage)?;
+                if interface_exists {
+                    return Err(LinuxP11Error::ForeignState);
+                }
             }
             self.state.realms.insert(plan.realm_id, ownership.clone());
             store_state(&self.state_path, &self.state)?;
