@@ -4,9 +4,11 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW="${ROOT_DIR}/.github/workflows/real-lvm-guest.yml"
 SCRIPT="${ROOT_DIR}/scripts/real-lvm-guest-gate.sh"
+PROFILE="${ROOT_DIR}/scripts/lvm-testlab-profile.sh"
 
 test -f "${WORKFLOW}"
 test -f "${SCRIPT}"
+test -f "${PROFILE}"
 bash -n "${SCRIPT}"
 
 python3 - "${WORKFLOW}" <<'PY'
@@ -24,6 +26,7 @@ required = (
     "Remove exact disposable guest inputs",
     "scripts/lvm-testlab-profile.sh provision",
     "scripts/real-lvm-guest-gate.sh",
+    "genisoimage",
     "scripts/lvm-testlab-profile.sh cleanup",
     "if: always()",
     "if-no-files-found: error",
@@ -37,7 +40,10 @@ assert "o3k-storage start" not in text
 assert "O3K_LVM_GUEST_IMAGE_PATH: ${{ vars." not in text
 assert "O3K_LVM_GUEST_SSH_PRIVATE_KEY: ${{ secrets." not in text
 PY
-grep -Fq -- "--cloud-init" "${SCRIPT}"
+grep -Fq -- 'genisoimage -quiet -output "${seed_iso}"' "${SCRIPT}"
+grep -Fq -- '"${CLOUD_INIT_META_DATA}"' "${SCRIPT}"
+grep -Fq -- '--rng /dev/urandom' "${SCRIPT}"
+grep -Fq -- '--serial "file,path=${STATE_ROOT}/${domain}.serial.log"' "${SCRIPT}"
 grep -Fq -- 'rmdir -- "${STATE_ROOT}"' "${SCRIPT}"
 grep -Fq -- 'install -m 0755 -d "${ARTIFACT_DIR}"' "${SCRIPT}"
 grep -Fq -- 'O3K_EPHEMERAL_KEY' "${SCRIPT}"
@@ -47,8 +53,10 @@ grep -Fq -- 'ACTIVE_SSH_HOST="${candidate_host}"' "${SCRIPT}"
 grep -Fq -- 'SSH_HOST_OVERRIDE' "${SCRIPT}"
 grep -Fq -- 'reset_guest_connection_state' "${SCRIPT}"
 grep -Fq -- 'guest readiness diagnostics:' "${SCRIPT}"
+grep -Fq -- 'LAST_TCP22_STATUS' "${SCRIPT}"
 grep -Fq -- 'if [[ "${1:-}" == cleanup ]]' "${SCRIPT}"
 grep -Fq -- 'Clean up exact real guest resources' "${WORKFLOW}"
+grep -Fq -- 'rm -f -- "${STATE_FILE}" "${STATE_ROOT}/${vg}.img"' "${PROFILE}"
 if grep -Fq -- 'ssh_pwauth:' "${SCRIPT}"; then
     echo "cloud-config YAML must not be used for CirrOS userdata" >&2
     exit 1

@@ -42,12 +42,13 @@ jobs:
       - name: Ensure libvirt guest tooling is available
         run: |
           set -euo pipefail
-          if ! command -v virt-install >/dev/null 2>&1; then
+          if ! command -v virt-install >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1; then
             sudo -n timeout --foreground 900s apt-get update
-            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst
+            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst genisoimage
           fi
           command -v virsh >/dev/null 2>&1
           command -v virt-install >/dev/null 2>&1
+          command -v genisoimage >/dev/null 2>&1
       - name: Prepare pinned disposable CirrOS guest and ephemeral SSH key
         env:
           CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img

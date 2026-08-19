@@ -31,6 +31,7 @@ SECOND_OVERLAY="${STATE_ROOT}/${SECOND_DOMAIN}.qcow2"
 KNOWN_HOSTS="${STATE_ROOT}/known_hosts"
 CANDIDATE_KNOWN_HOSTS="${STATE_ROOT}/known_hosts.candidate"
 CLOUD_INIT_USER_DATA="${STATE_ROOT}/user-data"
+CLOUD_INIT_META_DATA="${STATE_ROOT}/meta-data"
 RESULT_STATUS=failed
 RESULT_REASON=not_completed
 CHECKSUM=""
@@ -42,6 +43,7 @@ VOLUME_CREATED=false
 SNAPSHOT_CREATED=false
 LAST_KEYSCAN_STATUS=not_run
 LAST_SSH_AUTH_STATUS=not_run
+LAST_TCP22_STATUS=not_run
 CLEANUP_FAILED=false
 
 die() {
@@ -97,6 +99,17 @@ chmod 700 /home/cirros/.ssh
 chmod 600 /home/cirros/.ssh/authorized_keys
 EOF
     chmod 0600 "${CLOUD_INIT_USER_DATA}"
+    # CirrOS selects its NoCloud datasource only when the seed contains a
+    # valid JSON meta-data file. virt-install otherwise creates an empty
+    # meta-data file when only user-data is supplied, so the executable
+    # userdata above is never delivered to the guest.
+    cat >"${CLOUD_INIT_META_DATA}" <<EOF
+{
+  "instance-id": "o3k-${RUN_SLUG}",
+  "local-hostname": "${DOMAIN}"
+}
+EOF
+    chmod 0600 "${CLOUD_INIT_META_DATA}"
 }
 
 require_tools() {
@@ -130,15 +143,18 @@ provider() {
 inventory_foreign() {
     local output="${STATE_ROOT}/lvs.json"
     sudo -n lvs --reportformat json --options lv_name,lv_tags,vg_name,lv_attr >"${output}"
-    python3 - "${output}" "${O3K_LVM_PROVIDER_NAMESPACE}" <<'PY'
+    python3 - "${output}" "${O3K_LVM_PROVIDER_NAMESPACE}" "${O3K_LVM_VOLUME_GROUP}" <<'PY'
 import hashlib, json, sys
-path, namespace = sys.argv[1:]
+path, namespace, owned_vg = sys.argv[1:]
 value = json.load(open(path, encoding="utf-8"))
 rows = value.get("report", [{}])[0].get("lv", [])
 owned_prefix = "o3k_" + hashlib.sha256(namespace.encode()).hexdigest()
 foreign = []
 owned = []
 for row in rows:
+    if row.get("vg_name", "") == owned_vg:
+        owned.append(row.get("lv_name", ""))
+        continue
     tags = row.get("lv_tags", "").split(",") if row.get("lv_tags") else []
     if any(tag.startswith(owned_prefix) for tag in tags):
         owned.append(row.get("lv_name", ""))
@@ -183,8 +199,17 @@ discover_domain_ip() {
 
 try_guest_ssh() {
     local candidate_host="$1"
+    LAST_TCP22_STATUS=closed
     LAST_KEYSCAN_STATUS=failed
-    LAST_SSH_AUTH_STATUS=failed
+    LAST_SSH_AUTH_STATUS=not_run
+    if timeout --foreground 3s bash -c ': >/dev/tcp/$1/22' _ "${candidate_host}" 2>/dev/null; then
+        LAST_TCP22_STATUS=open
+    else
+        if [[ "$?" -eq 124 ]]; then
+            LAST_TCP22_STATUS=timeout
+        fi
+        return 1
+    fi
     : >"${CANDIDATE_KNOWN_HOSTS}"
     if ! timeout --foreground 8s ssh-keyscan -T 3 -H "${candidate_host}" \
         >"${CANDIDATE_KNOWN_HOSTS}" 2>/dev/null; then
@@ -213,6 +238,27 @@ dump_guest_diagnostics() {
     printf 'network DHCP leases:\n'
     sudo -n timeout --foreground 5s virsh -c qemu:///system net-dhcp-leases "${NETWORK}" 2>&1 \
         | sed -n '1,40p'
+    printf 'host network: libvirt network:\n'
+    sudo -n timeout --foreground 5s virsh -c qemu:///system net-info "${NETWORK}" 2>&1 \
+        | sed -n '1,20p'
+    if command -v ip >/dev/null 2>&1; then
+        printf 'host network: neighbor:\n'
+        ip neigh show 2>&1 | awk '$1 ~ /^192\.168\.122\./ {print; count++; if (count >= 20) exit}'
+    fi
+    if command -v bridge >/dev/null 2>&1; then
+        printf 'host network: bridge links:\n'
+        bridge link 2>&1 | sed -n '1,40p'
+    fi
+    printf 'guest serial console (bounded, host-key section redacted):\n'
+    local console_log="${STATE_ROOT}/${CURRENT_DOMAIN}.serial.log"
+    awk '
+        /-----BEGIN SSH HOST KEY KEYS-----/ {skip=1; next}
+        /-----END SSH HOST KEY KEYS-----/ {skip=0; next}
+        !skip {print}
+    ' "${console_log}" 2>/dev/null | tail -n 160 || true
+    printf 'libvirt QEMU log (bounded):\n'
+    sudo -n timeout --foreground 5s tail -n 80 \
+        "/var/log/libvirt/qemu/${CURRENT_DOMAIN}.log" 2>&1 | sed -n '1,80p'
     set -e
 }
 
@@ -230,9 +276,9 @@ wait_for_guest() {
             return 0
         fi
         if (( attempt % 10 == 0 )); then
-            printf 'guest readiness: domain=%s attempt=%s candidate_ip=%s ssh_keyscan=%s ssh_auth=%s\n' \
+            printf 'guest readiness: domain=%s attempt=%s candidate_ip=%s tcp22=%s ssh_keyscan=%s ssh_auth=%s\n' \
                 "${CURRENT_DOMAIN}" "${attempt}" "${candidate_host:-none}" \
-                "${LAST_KEYSCAN_STATUS}" "${LAST_SSH_AUTH_STATUS}"
+                "${LAST_TCP22_STATUS}" "${LAST_KEYSCAN_STATUS}" "${LAST_SSH_AUTH_STATUS}"
         fi
         sleep 2
     done
@@ -254,12 +300,19 @@ reset_guest_connection_state() {
 
 create_domain() {
     local domain="$1" overlay="$2"
+    local seed_iso="${STATE_ROOT}/${domain}.cidata.iso"
     qemu-img create -f qcow2 -F qcow2 -b "${BASE_IMAGE}" "${overlay}" >/dev/null
+    genisoimage -quiet -output "${seed_iso}" -volid cidata -joliet -rock \
+        "${CLOUD_INIT_USER_DATA}" "${CLOUD_INIT_META_DATA}"
+    chmod 0644 "${seed_iso}"
     sudo -n virt-install --connect qemu:///system --name "${domain}" --memory 2048 --vcpus 2 \
         --osinfo detect=on,require=off \
         --disk "path=${overlay},format=qcow2,bus=virtio" \
-        --network "network=${NETWORK},model=virtio" --graphics none --import \
-        --cloud-init "user-data=${CLOUD_INIT_USER_DATA}" --noautoconsole >/dev/null
+        --network "network=${NETWORK},model=virtio" --rng /dev/urandom \
+        --serial "file,path=${STATE_ROOT}/${domain}.serial.log" \
+        --disk "path=${seed_iso},device=cdrom,readonly=on" \
+        --graphics none --import \
+        --noautoconsole >/dev/null
 }
 
 destroy_domain() {
@@ -286,7 +339,7 @@ write_and_checksum() {
     guest sudo -n mkdir -p /mnt/o3k-p10
     guest sudo -n mkfs.ext4 -F "/dev/${DEVICE}" >/dev/null
     guest sudo -n mount "/dev/${DEVICE}" /mnt/o3k-p10
-    guest sudo -n sh -c "printf '%s\\n' '${payload}' > /mnt/o3k-p10/payload"
+    printf '%s\n' "${payload}" | guest sudo -n tee /mnt/o3k-p10/payload >/dev/null
     guest sudo -n sync
     CHECKSUM="$(guest sudo -n sha256sum /mnt/o3k-p10/payload | awk '{print $1}')"
     [[ "${CHECKSUM}" =~ ^[0-9a-f]{64}$ ]] || die guest_checksum_unavailable
@@ -304,7 +357,10 @@ cleanup_resources() {
     destroy_domain "${SECOND_DOMAIN}"
     rm -f -- "${OVERLAY}" "${SECOND_OVERLAY}" "${STATE_ROOT}/cirros-base.img" \
         "${STATE_ROOT}/lvs.json" "${KNOWN_HOSTS}" \
-        "${CANDIDATE_KNOWN_HOSTS}" "${CLOUD_INIT_USER_DATA}"
+        "${CANDIDATE_KNOWN_HOSTS}" "${CLOUD_INIT_USER_DATA}" \
+        "${CLOUD_INIT_META_DATA}" "${STATE_ROOT}/${DOMAIN}.serial.log" \
+        "${STATE_ROOT}/${SECOND_DOMAIN}.serial.log" \
+        "${STATE_ROOT}/${DOMAIN}.cidata.iso" "${STATE_ROOT}/${SECOND_DOMAIN}.cidata.iso"
     if [[ -d "${STATE_ROOT}" ]] && ! rmdir -- "${STATE_ROOT}"; then
         RESULT_REASON=guest_state_cleanup_failed
         CLEANUP_FAILED=true
@@ -340,7 +396,7 @@ on_exit() {
     if [[ "${CLEANUP_FAILED}" == true ]]; then
         status=1
     fi
-    if ((status == 0 && RESULT_REASON == passed)); then
+    if [[ "${status}" -eq 0 && "${RESULT_REASON}" == passed ]]; then
         RESULT_STATUS=passed
     else
         RESULT_STATUS=failed
@@ -380,6 +436,7 @@ detach_volume "${DOMAIN}"
     sudo -n virsh -c qemu:///system start "${DOMAIN}" >/dev/null
 wait_for_guest
 attach_volume "${DOMAIN}"
+guest sudo -n mkdir -p /mnt/o3k-p10
 guest sudo -n mount "/dev/${DEVICE}" /mnt/o3k-p10
 verify_checksum
 guest sudo -n umount /mnt/o3k-p10
@@ -394,6 +451,7 @@ CURRENT_DOMAIN="${SECOND_DOMAIN}"
 reset_guest_connection_state
 wait_for_guest
 attach_volume "${SECOND_DOMAIN}"
+guest sudo -n mkdir -p /mnt/o3k-p10
 guest sudo -n mount "/dev/${DEVICE}" /mnt/o3k-p10
 verify_checksum
 guest sudo -n umount /mnt/o3k-p10
