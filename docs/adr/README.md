@@ -179,6 +179,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0167](ADR-0167-kubernetes-native-control-plane-deployment.md)
 - [ADR-0168](ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0169](ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
+- [ADR-0170](ADR-0170-namespaced-routed-edge-fabric.md) (proposed)
 
 ## Required audit
 
