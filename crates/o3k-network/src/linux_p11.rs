@@ -601,13 +601,11 @@ impl LinuxP11FabricBackend {
                 if let Some(existing) = peers.get_mut(&peer.host_id) {
                     if existing.public_key != peer.public_key
                         || existing.underlay_endpoint != peer.underlay_endpoint
+                        || existing.fabric_transport_ip != peer.fabric_transport_ip
                         || existing.fabric_generation != peer.fabric_generation
                     {
                         return Err(LinuxP11Error::OwnershipConflict);
                     }
-                    existing
-                        .allowed_destinations
-                        .extend(peer.allowed_destinations.iter().copied());
                 } else {
                     peers.insert(peer.host_id.clone(), peer.clone());
                 }
@@ -651,11 +649,11 @@ impl LinuxP11FabricBackend {
                     .underlay_endpoint
                     .parse::<std::net::SocketAddr>()
                     .is_err()
+                || peer.fabric_transport_ip.is_unspecified()
+                || peer.fabric_transport_ip.is_loopback()
             {
                 return Err(LinuxP11Error::OwnershipConflict);
             }
-            peer.allowed_destinations.sort();
-            peer.allowed_destinations.dedup();
             let mut args = vec![
                 "netns".to_owned(),
                 "exec".to_owned(),
@@ -668,16 +666,10 @@ impl LinuxP11FabricBackend {
                 "endpoint".to_owned(),
                 peer.underlay_endpoint.clone(),
             ];
-            let allowed_ips = peer
-                .allowed_destinations
-                .iter()
-                .map(|destination| format!("{}/32", destination.network))
-                .collect::<Vec<_>>()
-                .join(",");
-            if allowed_ips.is_empty() {
-                return Err(LinuxP11Error::OwnershipConflict);
-            }
-            args.extend(["allowed-ips".to_owned(), allowed_ips]);
+            args.extend([
+                "allowed-ips".to_owned(),
+                format!("{}/32", peer.fabric_transport_ip),
+            ]);
             let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
             if !self
                 .command
@@ -686,28 +678,26 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::CommandFailed);
             }
-            for destination in &peer.allowed_destinations {
-                let route = format!("{}/32", destination.network);
-                if !self
-                    .command
-                    .run(
+            let route = format!("{}/32", peer.fabric_transport_ip);
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &fabric.namespace,
                         "ip",
-                        &[
-                            "netns",
-                            "exec",
-                            &fabric.namespace,
-                            "ip",
-                            "route",
-                            "replace",
-                            &route,
-                            "dev",
-                            &fabric.interface,
-                        ],
-                    )
-                    .map_err(LinuxP11Error::Storage)?
-                {
-                    return Err(LinuxP11Error::CommandFailed);
-                }
+                        "route",
+                        "replace",
+                        &route,
+                        "dev",
+                        &fabric.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
             }
         }
         if let Some(stored) = self.state.fabric.as_mut() {
@@ -971,7 +961,8 @@ fn valid_wireguard_key(value: &str) -> bool {
 mod tests {
     use super::*;
     use o3k_domain::{
-        AddressRealm, EndpointLocation, FabricHostIdentity, Ipv4Prefix, RealmEndpointDirectory,
+        AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
+        RealmEncapsulationBinding, RealmEndpointDirectory,
     };
     use std::{os::unix::fs::PermissionsExt, sync::Mutex};
 
@@ -1031,6 +1022,7 @@ mod tests {
             host_id: "host-a".to_owned(),
             public_key: "public-a".to_owned(),
             underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            fabric_transport_ip: "198.18.0.1".parse().expect("transport ip"),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
@@ -1040,13 +1032,21 @@ mod tests {
             host_id: "host-b".to_owned(),
             public_key: "B".repeat(43) + "=",
             underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            fabric_transport_ip: "198.18.0.2".parse().expect("transport ip"),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
             underlay_mtu: 1500,
             fabric_mtu: 1420,
         };
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(100),
+            realm_id: realm.id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: 101,
+            binding_generation: 3,
+        };
         directory
-            .compile_fabric_plan(&local, &[local.clone(), remote], 1400)
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
             .expect("plan")
     }
 

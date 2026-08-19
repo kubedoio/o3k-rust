@@ -135,9 +135,9 @@ mod vocabulary_tests {
 mod p9_plan_tests {
     use super::*;
     use o3k_domain::{
-        EndpointIntent, EndpointLocation, FabricEndpointRoute, FabricPeer, Ipv4Prefix,
-        NamespacedRoutedFabricPlan, NetworkPlanIntent, NetworkProtocol, PolicyAction,
-        PolicyDirection, PolicyIntent, PortRange, RouteIntent,
+        EndpointIntent, EndpointLocation, FabricEndpointRoute, FabricPeer, FabricProviderKind,
+        Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkPlanIntent, NetworkProtocol, PolicyAction,
+        PolicyDirection, PolicyIntent, PortRange, RealmEncapsulationBinding, RouteIntent,
     };
     use std::net::Ipv4Addr;
 
@@ -249,6 +249,13 @@ mod p9_plan_tests {
             local_underlay_mtu: 1500,
             local_fabric_mtu: 1420,
             realm_id: Uuid::from_u128(2),
+            encapsulation: RealmEncapsulationBinding {
+                fabric_domain_id: Uuid::from_u128(100),
+                realm_id: Uuid::from_u128(2),
+                provider_kind: FabricProviderKind::Geneve,
+                provider_segment_id: 101,
+                binding_generation: 1,
+            },
             directory_generation: 3,
             directory: o3k_domain::RealmEndpointDirectory {
                 realm_id: Uuid::from_u128(2),
@@ -268,19 +275,22 @@ mod p9_plan_tests {
             proxy_mac: "02:11:22:33:44:55".to_owned(),
             tenant_mtu: 1400,
             routes: vec![FabricEndpointRoute {
+                realm_id: Uuid::from_u128(2),
                 destination,
                 endpoint_id: Uuid::from_u128(3),
                 target_host: "node-b".to_owned(),
+                target_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
                 endpoint_generation: 4,
                 placement_generation: 5,
+                realm_binding_generation: 1,
                 fabric_generation: 6,
             }],
             peers: vec![FabricPeer {
                 host_id: "node-b".to_owned(),
                 public_key: "public-key".to_owned(),
                 underlay_endpoint: "192.0.2.2:51820".to_owned(),
+                fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
                 fabric_generation: 6,
-                allowed_destinations: vec![destination],
             }],
         };
         let plan = base
@@ -3673,6 +3683,8 @@ impl NodeNetworkPlan {
             || fabric.tenant_mtu == 0
             || fabric.tenant_mtu > fabric.local_fabric_mtu
             || fabric.proxy_mac.len() != 17
+            || fabric.encapsulation.realm_id != fabric.realm_id
+            || fabric.encapsulation.validate().is_err()
             || fabric.directory.realm_id != fabric.realm_id
             || fabric.directory.directory_generation != fabric.directory_generation
             || fabric.directory.proxy_mac != fabric.proxy_mac
@@ -3683,9 +3695,13 @@ impl NodeNetworkPlan {
         let mut route_endpoints = BTreeSet::new();
         for route in &fabric.routes {
             if route.destination.prefix_len != 32
+                || route.realm_id != fabric.realm_id
                 || route.target_host.is_empty()
+                || route.target_fabric_transport_ip.is_unspecified()
+                || route.target_fabric_transport_ip.is_loopback()
                 || route.endpoint_generation == 0
                 || route.placement_generation == 0
+                || route.realm_binding_generation != fabric.encapsulation.binding_generation
                 || route.fabric_generation == 0
                 || !route_destinations.insert(route.destination)
                 || !route_endpoints.insert(route.endpoint_id)
@@ -3701,34 +3717,34 @@ impl NodeNetworkPlan {
             }
         }
         let mut peer_hosts = BTreeSet::new();
+        let mut peer_transport_ips = BTreeSet::new();
         for peer in &fabric.peers {
             if peer.host_id.is_empty()
                 || peer.host_id == fabric.local_host
                 || peer.public_key.is_empty()
                 || peer.underlay_endpoint.is_empty()
+                || peer.fabric_transport_ip.is_unspecified()
+                || peer.fabric_transport_ip.is_loopback()
                 || peer.fabric_generation == 0
-                || peer.allowed_destinations.is_empty()
                 || !peer_hosts.insert(peer.host_id.as_str())
+                || !peer_transport_ips.insert(peer.fabric_transport_ip)
             {
                 return Err(NetworkPlanError::InvalidFabricPlan);
             }
-            let mut allowed = BTreeSet::new();
-            for destination in &peer.allowed_destinations {
-                if destination.prefix_len != 32
-                    || !allowed.insert(*destination)
-                    || !fabric.routes.iter().any(|route| {
-                        route.target_host == peer.host_id && route.destination == *destination
-                    })
-                {
-                    return Err(NetworkPlanError::InvalidFabricPlan);
-                }
+            if !fabric.routes.iter().any(|route| {
+                route.target_host == peer.host_id
+                    && route.target_fabric_transport_ip == peer.fabric_transport_ip
+            }) {
+                return Err(NetworkPlanError::InvalidFabricPlan);
             }
         }
-        if fabric
-            .routes
-            .iter()
-            .any(|route| !peer_hosts.contains(route.target_host.as_str()))
-        {
+        if fabric.routes.iter().any(|route| {
+            !peer_hosts.contains(route.target_host.as_str())
+                || !fabric.peers.iter().any(|peer| {
+                    peer.host_id == route.target_host
+                        && peer.fabric_transport_ip == route.target_fabric_transport_ip
+                })
+        }) {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }
         Ok(())

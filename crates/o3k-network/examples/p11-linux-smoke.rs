@@ -4,7 +4,8 @@
 //! not guest traffic, policy, MTU, multi-host, or product-profile evidence.
 
 use o3k_domain::{
-    AddressRealm, EndpointLocation, FabricHostIdentity, Ipv4Prefix, RealmEndpointDirectory,
+    AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
+    RealmEncapsulationBinding, RealmEndpointDirectory,
 };
 use o3k_network::{LinuxP11Config, LinuxP11FabricBackend, P11FabricBackend};
 use std::{env, fs, path::PathBuf};
@@ -42,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_id: "smoke-local".to_owned(),
         public_key: "local-public-key-is-not-a-peer".to_owned(),
         underlay_endpoint: "127.0.0.1:51820".to_owned(),
+        fabric_transport_ip: "198.18.0.1".parse()?,
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
@@ -51,12 +53,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         host_id: "smoke-remote".to_owned(),
         public_key: "v+3Zvbhhd38dkie1myZTB4IyAIlHlM23ImWM9QXqnFM=".to_owned(),
         underlay_endpoint: "127.0.0.1:51821".to_owned(),
+        fabric_transport_ip: "198.18.0.2".parse()?,
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,
         underlay_mtu: 1500,
         fabric_mtu: 1420,
     };
-    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400)?;
+    let binding = RealmEncapsulationBinding {
+        fabric_domain_id: Uuid::from_u128(0x1300),
+        realm_id: realm.id,
+        provider_kind: FabricProviderKind::Geneve,
+        provider_segment_id: 101,
+        binding_generation: 1,
+    };
+    let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)?;
     let mut provider = LinuxP11FabricBackend::open(LinuxP11Config::for_root(&root))?;
     provider.apply(&plan)?;
     if !provider.observe(&plan)? {
