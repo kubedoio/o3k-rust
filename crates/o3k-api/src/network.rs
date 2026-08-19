@@ -324,7 +324,26 @@ pub(crate) async fn create_network_policy(
             "invalid policy request",
         );
     };
-    let (network_id, policy) = match parse_policy_request(body.policy, Uuid::now_v7()) {
+    let request_identity = headers
+        .get("idempotency-key")
+        .or_else(|| headers.get("x-openstack-request-id"))
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::now_v7().to_string());
+    let policy_input = body.policy;
+    let policy_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!(
+            "o3k:network:policy:{}:{}:{}:{}",
+            auth.effective_scope().id(),
+            policy_input.network_id,
+            policy_input.endpoint_id,
+            request_identity
+        )
+        .as_bytes(),
+    );
+    let (network_id, policy) = match parse_policy_request(policy_input, policy_id) {
         Ok(value) => value,
         Err(()) => {
             return keystone_error(

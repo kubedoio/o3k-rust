@@ -131,6 +131,7 @@ async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
                 .uri("/v2.0/network-policies")
                 .header("x-auth-token", &token)
                 .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "policy-create-1")
                 .body(Body::from(create.to_string()))?,
         )
         .await?;
@@ -148,6 +149,22 @@ async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
     let policy_id = created_body["policy"]["id"]
         .as_str()
         .ok_or("policy id missing")?;
+
+    let duplicate = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/network-policies")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "policy-create-1")
+                .body(Body::from(create.to_string()))?,
+        )
+        .await?;
+    assert_eq!(duplicate.status(), StatusCode::CREATED);
+    let duplicate_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(duplicate.into_body(), 4096).await?)?;
+    assert_eq!(duplicate_body["policy"]["id"], policy_id);
 
     let listed = o3k_api::router_with_state(state.clone())
         .oneshot(
@@ -190,7 +207,7 @@ async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
         )
         .await?;
     assert_eq!(updated.status(), StatusCode::OK);
-    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 2);
+    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 3);
 
     let deleted = o3k_api::router_with_state(state)
         .oneshot(
@@ -205,7 +222,7 @@ async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
         )
         .await?;
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
-    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 3);
+    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 4);
     assert!(
         network
             .list_policies_for_project(project_id, network_record.id)
