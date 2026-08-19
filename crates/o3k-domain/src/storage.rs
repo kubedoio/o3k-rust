@@ -73,6 +73,97 @@ pub enum StorageExecutionScope {
     Backend(String),
 }
 
+/// Mutations and observations permitted at the bounded storage execution
+/// boundary. Provider-native device identity is deliberately absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageAction {
+    CreateVolume,
+    InspectVolume,
+    DeleteVolume,
+    PrepareAttachment,
+    TerminateAttachment,
+    CreateSnapshot,
+    DeleteSnapshot,
+    Reconcile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageCommandEnvelope {
+    pub protocol_version: u16,
+    pub command_id: Uuid,
+    pub operation_id: Uuid,
+    pub idempotency_key: String,
+    pub resource_id: String,
+    pub resource_generation: u64,
+    pub project_id: String,
+    pub target_agent_id: String,
+    pub target_agent_epoch: u64,
+    pub deadline: String,
+    pub trace_id: String,
+    pub action: StorageAction,
+    pub canonical_payload_fingerprint: String,
+}
+
+impl StorageCommandEnvelope {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.protocol_version == 0
+            || self.idempotency_key.is_empty()
+            || self.resource_id.is_empty()
+            || self.resource_generation == 0
+            || self.project_id.is_empty()
+            || self.target_agent_id.is_empty()
+            || self.target_agent_epoch == 0
+            || self.deadline.is_empty()
+            || self.trace_id.is_empty()
+            || self.canonical_payload_fingerprint.is_empty()
+        {
+            return Err(StorageValidationError::InvalidCommandEnvelope);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageOperationState {
+    Accepted,
+    Running,
+    Succeeded,
+    Failed,
+    UnknownOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageObservation {
+    pub agent_id: String,
+    pub agent_epoch: u64,
+    pub resource_id: String,
+    pub provider_resource_id: Option<String>,
+    pub operation_id: Uuid,
+    pub resource_generation: u64,
+    pub observation_sequence: u64,
+    pub observed_at: String,
+    pub operation_state: StorageOperationState,
+    pub resource_state: String,
+    pub error_category: Option<StorageErrorCategory>,
+    pub redacted_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StorageErrorCategory {
+    InvalidRequest,
+    AuthorizationBinding,
+    UnsupportedCapability,
+    Conflict,
+    NotFound,
+    CapacityExhausted,
+    TransientUnavailable,
+    Timeout,
+    UnknownOutcome,
+    TerminalProvider,
+    OwnershipAmbiguity,
+    Protocol,
+}
+
 impl StorageExecutionScope {
     pub fn validate(&self) -> Result<(), StorageValidationError> {
         let id = match self {
@@ -353,6 +444,8 @@ impl Snapshot {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StorageValidationError {
+    #[error("invalid storage command envelope")]
+    InvalidCommandEnvelope,
     #[error("project identity is invalid")]
     InvalidProject,
     #[error("volume fields are invalid")]
@@ -376,6 +469,7 @@ pub enum StorageTransitionError {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

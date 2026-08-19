@@ -10,9 +10,10 @@ pub use network::{
 };
 pub use storage::{
     AttachmentAccessMode, ProviderReference as StorageProviderReference, Snapshot,
-    SnapshotConsistency, SnapshotId, SnapshotState, StorageBackend, StorageCapabilities,
-    StorageExecutionScope, StorageTransitionError, StorageValidationError, Volume,
-    VolumeAttachment, VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
+    SnapshotConsistency, SnapshotId, SnapshotState, StorageAction, StorageBackend,
+    StorageCapabilities, StorageCommandEnvelope, StorageErrorCategory, StorageExecutionScope,
+    StorageObservation, StorageOperationState, StorageTransitionError, StorageValidationError,
+    Volume, VolumeAttachment, VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
 };
 
 use serde::{Deserialize, Serialize};
