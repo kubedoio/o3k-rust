@@ -89,6 +89,8 @@ jobs:
         run: bash tests/tempest-runner-isolation.sh
       - name: Test CI workflow contracts
         run: bash tests/ci-workflow.sh
+      - name: Test disposable LVM profile guards
+        run: bash tests/lvm-testlab-profile.sh
       - name: Test OpenAPI contract governance
         run: bash tests/openapi-governance.sh
       - name: Test static compatibility target
