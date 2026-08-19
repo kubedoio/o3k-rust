@@ -86,7 +86,8 @@ pub struct DnsmasqSupervisor {
     /// same-user argv spoof or a PID-reuse replacement has a different start
     /// time, so neither can be mistaken for the owned process.
     identity_file: PathBuf,
-    child: Child,
+    child: Option<Child>,
+    adopted_pid: Option<(i32, u64)>,
 }
 
 impl DnsmasqSupervisor {
@@ -101,39 +102,92 @@ impl DnsmasqSupervisor {
             config,
             pid_file,
             identity_file,
-            child,
+            child: Some(child),
+            adopted_pid: None,
         })
+    }
+
+    fn adopt(root: &Path, binary: &Path) -> Result<Option<Self>, DhcpError> {
+        let mut candidate = None;
+        for entry in fs::read_dir(root).map_err(DhcpError::Storage)? {
+            let path = entry.map_err(DhcpError::Storage)?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("dnsmasq-") || !name.ends_with(".pid") {
+                continue;
+            }
+            let identity_file = PathBuf::from(format!("{}.owner", path.display()));
+            let parsed = fs::read_to_string(&path)
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok())
+                .zip(
+                    fs::read_to_string(&identity_file)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u64>().ok()),
+                );
+            let Some((pid, starttime)) = parsed else {
+                remove_metadata(&path, &identity_file)?;
+                continue;
+            };
+            if process_starttime(pid) != Some(starttime) {
+                remove_metadata(&path, &identity_file)?;
+                continue;
+            }
+            if candidate.is_some() {
+                return Err(DhcpError::CommandFailed);
+            }
+            candidate = Some(Self {
+                binary: binary.to_path_buf(),
+                config: root.join("dnsmasq.conf"),
+                pid_file: path,
+                identity_file,
+                child: None,
+                adopted_pid: Some((pid, starttime)),
+            });
+        }
+        Ok(candidate)
     }
 
     /// Returns whether the owned process is still running.
     pub fn is_running(&mut self) -> Result<bool, DhcpError> {
+        if let Some(child) = self.child.as_mut() {
+            return Ok(child
+                .try_wait()
+                .map_err(|_| DhcpError::CommandFailed)?
+                .is_none());
+        }
         Ok(self
-            .child
-            .try_wait()
-            .map_err(|_| DhcpError::CommandFailed)?
-            .is_none())
+            .adopted_pid
+            .is_some_and(|(pid, starttime)| process_starttime(pid) == Some(starttime)))
     }
 
     /// Restart the owned process after the caller has published new config.
     pub fn restart(&mut self) -> Result<(), DhcpError> {
         self.stop()?;
-        self.child = launch(&self.binary, &self.config, &self.pid_file)?;
-        record_spawn_identity(&self.child, &self.identity_file)?;
+        let child = launch(&self.binary, &self.config, &self.pid_file)?;
+        record_spawn_identity(&child, &self.identity_file)?;
+        self.child = Some(child);
+        self.adopted_pid = None;
         Ok(())
     }
 
     /// Stop the owned process and remove only its managed pid file and the
     /// recorded spawn identity next to it.
     pub fn stop(&mut self) -> Result<(), DhcpError> {
-        if self
-            .child
-            .try_wait()
-            .map_err(|_| DhcpError::CommandFailed)?
-            .is_none()
-        {
-            self.child.kill().map_err(|_| DhcpError::CommandFailed)?;
+        if let Some(child) = self.child.as_mut() {
+            if child
+                .try_wait()
+                .map_err(|_| DhcpError::CommandFailed)?
+                .is_none()
+            {
+                child.kill().map_err(|_| DhcpError::CommandFailed)?;
+            }
+            child.wait().map_err(|_| DhcpError::CommandFailed)?;
+        } else if let Some((pid, starttime)) = self.adopted_pid.take() {
+            terminate_owned_process(pid, starttime)?;
         }
-        self.child.wait().map_err(|_| DhcpError::CommandFailed)?;
+        self.child = None;
         for path in [&self.pid_file, &self.identity_file] {
             match fs::remove_file(path) {
                 Ok(()) => {}
@@ -149,6 +203,38 @@ impl Drop for DnsmasqSupervisor {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+fn remove_metadata(pid_file: &Path, identity_file: &Path) -> Result<(), DhcpError> {
+    for path in [pid_file, identity_file] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DhcpError::Storage(error)),
+        }
+    }
+    Ok(())
+}
+
+fn terminate_owned_process(pid: i32, starttime: u64) -> Result<(), DhcpError> {
+    if process_starttime(pid) != Some(starttime) {
+        return Ok(());
+    }
+    Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .map_err(|_| DhcpError::CommandFailed)?;
+    let deadline = Instant::now() + LIVENESS_GRACE;
+    while process_starttime(pid) == Some(starttime) && Instant::now() < deadline {
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    if process_starttime(pid) == Some(starttime) {
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+            .map_err(|_| DhcpError::CommandFailed)?;
+    }
+    Ok(())
 }
 
 /// Fail closed before any serving process is spawned if the binary rejects
@@ -361,6 +447,10 @@ impl DhcpService {
         DnsmasqSupervisor::spawn(&self.root, binary)
     }
 
+    pub fn adopt_supervisor(&self, binary: &Path) -> Result<Option<DnsmasqSupervisor>, DhcpError> {
+        DnsmasqSupervisor::adopt(&self.root, binary)
+    }
+
     /// Publish the current state and restart the owned process.
     pub fn reload(&self, supervisor: &mut DnsmasqSupervisor) -> Result<(), DhcpError> {
         self.write_config()?;
@@ -571,9 +661,14 @@ mod tests {
         // The spawn identity must be recorded next to the pidfile and must
         // match the child's kernel start time exactly.
         let identity = fs::read_to_string(&supervisor.identity_file).map_err(DhcpError::Storage)?;
+        let child_id = supervisor
+            .child
+            .as_ref()
+            .map(Child::id)
+            .ok_or(DhcpError::CommandFailed)?;
         assert_eq!(
             identity.trim().parse::<u64>().ok(),
-            process_starttime(supervisor.child.id() as i32),
+            process_starttime(child_id as i32),
             "the recorded spawn identity must be the child's kernel start time"
         );
         service.upsert_binding(Binding {
@@ -586,9 +681,14 @@ mod tests {
         // A restart respawns the child: the recorded identity must be
         // refreshed to the new process, never carried over from the old one.
         let identity = fs::read_to_string(&supervisor.identity_file).map_err(DhcpError::Storage)?;
+        let child_id = supervisor
+            .child
+            .as_ref()
+            .map(Child::id)
+            .ok_or(DhcpError::CommandFailed)?;
         assert_eq!(
             identity.trim().parse::<u64>().ok(),
-            process_starttime(supervisor.child.id() as i32),
+            process_starttime(child_id as i32),
             "restart must rewrite the spawn identity for the new child"
         );
         assert!(
@@ -610,6 +710,45 @@ mod tests {
         ));
 
         let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn supervisor_can_be_adopted_after_agent_restart() -> Result<(), DhcpError> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "o3k-dhcp-adopt-{}-{}",
+            std::process::id(),
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).map_err(DhcpError::Storage)?;
+        let binary = root.join("fake-dnsmasq.sh");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = \"--test\" ]; then exit 0; fi\nfor arg in \"$@\"; do case \"$arg\" in --pid-file=*) echo $$ > \"${arg#--pid-file=}\";; esac; done\ntrap 'exit 0' TERM INT HUP\nsleep 30\n",
+        )
+        .map_err(DhcpError::Storage)?;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
+            .map_err(DhcpError::Storage)?;
+
+        let mut service = DhcpService::open(&root)?;
+        service.configure(config()?)?;
+        let supervisor = service.start(&binary)?;
+        let pid_file = supervisor.pid_file.clone();
+        let identity_file = supervisor.identity_file.clone();
+        std::mem::forget(supervisor);
+
+        let reopened = DhcpService::open(&root)?;
+        let mut adopted = reopened
+            .adopt_supervisor(&binary)?
+            .ok_or(DhcpError::CommandFailed)?;
+        assert!(adopted.is_running()?);
+        adopted.stop()?;
+        assert!(!pid_file.exists());
+        assert!(!identity_file.exists());
+        fs::remove_dir_all(root).map_err(DhcpError::Storage)?;
         Ok(())
     }
 

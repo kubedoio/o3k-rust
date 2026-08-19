@@ -470,11 +470,14 @@ impl FlatNetworkRealizer {
         dhcp_root: impl Into<PathBuf>,
         dnsmasq_binary: impl Into<PathBuf>,
     ) -> Result<Self, FlatNetworkError> {
+        let dnsmasq_binary = dnsmasq_binary.into();
+        let dhcp = DhcpService::open(dhcp_root)?;
+        let supervisor = dhcp.adopt_supervisor(&dnsmasq_binary)?;
         Ok(Self {
             network: HostNetworkManager::with_ownership_root(network, network_ownership_root)?,
-            dhcp: DhcpService::open(dhcp_root)?,
-            dnsmasq_binary: dnsmasq_binary.into(),
-            supervisor: None,
+            dhcp,
+            dnsmasq_binary,
+            supervisor,
         })
     }
 

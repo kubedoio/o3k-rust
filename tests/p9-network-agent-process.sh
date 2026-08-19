@@ -81,22 +81,26 @@ JSON
 sed 's/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000005/g' \
     "$WORK_DIR/plan.json" >"$WORK_DIR/plan-remove.json"
 
-O3K_NETWORK_AGENT_ID=agent-process \
-O3K_NETWORK_AGENT_EPOCH=epoch-1 \
-O3K_NETWORK_CONTROLLER_ID=controller-process \
-O3K_NETWORK_CONTROLLER_EPOCH=epoch-1 \
-O3K_NETWORK_FENCING_TOKEN=7 \
-O3K_NETWORK_ROOT="$WORK_DIR/executor" \
-O3K_NETWORK_BRIDGE=o3kp9br0 \
-O3K_NETWORK_OWNERSHIP_ROOT="$WORK_DIR/ownership" \
-O3K_NETWORK_DHCP_ROOT="$WORK_DIR/dhcp" \
-O3K_NETWORK_DNSMASQ="$DNSMASQ" \
-O3K_NETWORK_LISTEN=127.0.0.1:19181 \
-O3K_NETWORK_TLS_CERT="$FIXTURES/server-chain.pem" \
-O3K_NETWORK_TLS_KEY="$FIXTURES/server-key.pem" \
-O3K_NETWORK_TLS_CLIENT_CA="$FIXTURES/ca.pem" \
-"$BIN" >"$WORK_DIR/agent.log" 2>&1 &
-AGENT_PID=$!
+start_agent() {
+    O3K_NETWORK_AGENT_ID=agent-process \
+    O3K_NETWORK_AGENT_EPOCH=epoch-1 \
+    O3K_NETWORK_CONTROLLER_ID=controller-process \
+    O3K_NETWORK_CONTROLLER_EPOCH=epoch-1 \
+    O3K_NETWORK_FENCING_TOKEN=7 \
+    O3K_NETWORK_ROOT="$WORK_DIR/executor" \
+    O3K_NETWORK_BRIDGE=o3kp9br0 \
+    O3K_NETWORK_OWNERSHIP_ROOT="$WORK_DIR/ownership" \
+    O3K_NETWORK_DHCP_ROOT="$WORK_DIR/dhcp" \
+    O3K_NETWORK_DNSMASQ="$DNSMASQ" \
+    O3K_NETWORK_LISTEN=127.0.0.1:19181 \
+    O3K_NETWORK_TLS_CERT="$FIXTURES/server-chain.pem" \
+    O3K_NETWORK_TLS_KEY="$FIXTURES/server-key.pem" \
+    O3K_NETWORK_TLS_CLIENT_CA="$FIXTURES/ca.pem" \
+    "$BIN" >>"$WORK_DIR/agent.log" 2>&1 &
+    AGENT_PID=$!
+}
+
+start_agent
 
 client() {
     local command_id="$1" operation_id="$2" key="$3" mode="${4:-}"
@@ -141,6 +145,33 @@ fi
     exit 1
 }
 [[ -e "$WORK_DIR/executor/accepted-network-plans.json" ]]
+ip link show o3kp9br0 >/dev/null
+
+# Restart the real agent while its owned bridge and dnsmasq process remain.
+# Startup must adopt the durable process identity, and replay must not mutate
+# or duplicate the already-realized plan.
+kill "$AGENT_PID"
+wait "$AGENT_PID" 2>/dev/null || true
+AGENT_PID=""
+start_agent
+deadline=$((SECONDS + 30))
+while ((SECONDS < deadline)); do
+    if restart_result="$(client 00000000-0000-0000-0000-000000000010 \
+        00000000-0000-0000-0000-000000000002 process-apply 2>/dev/null)"; then
+        [[ "$restart_result" == "replayed true" ]] || {
+            echo "unexpected restart replay result: $restart_result" >&2
+            sed -n '1,200p' "$WORK_DIR/agent.log" >&2
+            exit 1
+        }
+        break
+    fi
+    sleep 0.2
+done
+[[ "${restart_result:-}" == "replayed true" ]] || {
+    echo "network agent did not recover after restart" >&2
+    sed -n '1,200p' "$WORK_DIR/agent.log" >&2
+    exit 1
+}
 ip link show o3kp9br0 >/dev/null
 
 [[ "$(client 00000000-0000-0000-0000-000000000011 \
