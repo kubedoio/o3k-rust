@@ -337,6 +337,9 @@ PY
 on_exit() {
     local status="$?"
     cleanup_resources
+    if [[ "${CLEANUP_FAILED}" == true ]]; then
+        status=1
+    fi
     if ((status == 0 && RESULT_REASON == passed)); then
         RESULT_STATUS=passed
     else
