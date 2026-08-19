@@ -47,9 +47,11 @@ jobs:
           chmod 0644 "${image}"
           ssh-keygen -q -t ed25519 -N '' -f "${key}"
           chmod 0600 "${key}"
-          printf 'O3K_LVM_GUEST_IMAGE_PATH=%s\n' "${image}" >> "${GITHUB_ENV}"
-          printf 'O3K_LVM_GUEST_SSH_PRIVATE_KEY=%s\n' "${key}" >> "${GITHUB_ENV}"
-          printf 'O3K_LVM_GUEST_SSH_USER=cirros\n' >> "${GITHUB_ENV}"
+          {
+            printf 'O3K_LVM_GUEST_IMAGE_PATH=%s\n' "${image}"
+            printf 'O3K_LVM_GUEST_SSH_PRIVATE_KEY=%s\n' "${key}"
+            printf 'O3K_LVM_GUEST_SSH_USER=cirros\n'
+          } >> "${GITHUB_ENV}"
       - name: Provision disposable tagged LVM profile
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
