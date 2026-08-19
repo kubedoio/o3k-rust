@@ -187,7 +187,7 @@ cleanup() {
     vgremove --yes "${vg}" >/dev/null
     pvremove --force --yes "${loop_device}" >/dev/null
     losetup -d "${loop_device}"
-    rm -f -- "${STATE_ROOT}/${vg}.img"
+    rm -f -- "${STATE_FILE}" "${STATE_ROOT}/${vg}.img"
     rmdir -- "${STATE_ROOT}"
     echo "cleaned disposable LVM profile for ${run_id}"
 }
