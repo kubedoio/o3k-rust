@@ -20,7 +20,7 @@ PROJECT_ID="${O3K_CEPH_PROJECT_ID:-p10-ceph-real-guest}"
 NETWORK="${O3K_CEPH_GUEST_NETWORK:-default}"
 DEVICE="${O3K_CEPH_GUEST_DEVICE:-vdb}"
 BASE_IMAGE_SOURCE="${O3K_CEPH_GUEST_IMAGE_PATH:-}"
-BASE_IMAGE=""
+BASE_IMAGE="${STATE_ROOT}/cirros-base.img"
 SSH_KEY="${O3K_CEPH_GUEST_SSH_PRIVATE_KEY:-}"
 SSH_USER="${O3K_CEPH_GUEST_SSH_USER:-}"
 SSH_HOST_OVERRIDE="${O3K_CEPH_GUEST_SSH_HOST:-}"
@@ -57,7 +57,6 @@ require_inputs() {
         || die unsafe_state_root
     install -m 0700 -d "${STATE_ROOT}" "${ARTIFACT_DIR}"
     chmod 0711 "${STATE_ROOT}"
-    BASE_IMAGE="${STATE_ROOT}/cirros-base.img"
     install -m 0644 "${BASE_IMAGE_SOURCE}" "${BASE_IMAGE}"
     chmod 0600 "${SSH_KEY}"
     local public_key

@@ -30,6 +30,11 @@ for needle in (
     "--preserve-env=PATH,CARGO_HOME",
     'target_dir="${GITHUB_WORKSPACE}/target"',
     'chown -R "$(id -u):$(id -g)" "${target_dir}"',
+    'export PATH="/snap/bin:${PATH}"',
+    "id: profile",
+    "if: always() && steps.profile.outcome == 'success'",
+    'sudo -n microceph.ceph config set mon mon_allow_pool_delete true',
+    'restore_pool_delete() { sudo -n microceph.ceph config set mon mon_allow_pool_delete false',
 ):
     assert needle in workflow, needle
 assert "continue-on-error" not in workflow
@@ -54,6 +59,7 @@ for needle in (
     "provider snapshot-delete",
     "foreign_ceph_mutation",
     "StrictHostKeyChecking=yes",
+    'BASE_IMAGE="${STATE_ROOT}/cirros-base.img"',
     'rmdir -- "${STATE_ROOT}"',
 ):
     assert needle in gate, needle
