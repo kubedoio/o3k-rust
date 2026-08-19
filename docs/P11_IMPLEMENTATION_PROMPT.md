@@ -1,8 +1,8 @@
 # P11 implementation prompt — Namespaced Routed Edge Fabric v1
 
 Use this prompt only after the P11 architecture has been reviewed against the
-current repository. Runtime implementation is blocked while ADR-0170 or
-SPEC-0028 remains `Proposed`.
+current repository. ADR-0170 and SPEC-0028 are accepted; runtime implementation
+is authorized only within their bounded contracts and evidence gates.
 
 ---
 
@@ -38,10 +38,8 @@ Before modifying runtime code:
 11. inspect current compatibility/product-profile manifests before changing
     claims.
 
-If ADR-0170 or SPEC-0028 is still `Proposed`, **stop runtime implementation**.
-You may improve architecture/docs in the existing architecture PR/issue, but do
-not activate privileged P11 behavior until explicit human acceptance is
-recorded.
+If ADR-0170 or SPEC-0028 is not `Accepted`, **stop runtime implementation**.
+Do not activate privileged P11 behavior outside the accepted contracts.
 
 If the repository now contains a later accepted decision that supersedes any
 part of this prompt, follow the repository and explain the conflict.

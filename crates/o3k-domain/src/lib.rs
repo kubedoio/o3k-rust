@@ -2,11 +2,12 @@ mod network;
 mod storage;
 
 pub use network::{
-    AddressPool, AddressRealm, EgressIntent, EndpointIntent, GatewayIntent, Ipv4Prefix,
-    NetworkCapability, NetworkIntent, NetworkIntentState, NetworkPlanIntent, NetworkProtocol,
-    PolicyAction, PolicyDirection, PolicyIntent, PortRange, PublicAddressBindingIntent,
-    RouteIntent, SecurityGroupBinding, SecurityGroupIntent, SecurityGroupRuleIntent,
-    SecurityGroupState,
+    AddressPool, AddressRealm, EgressIntent, EndpointDirectoryError, EndpointIntent,
+    EndpointLocation, FabricEndpointRoute, FabricHostIdentity, GatewayIntent, Ipv4Prefix,
+    NeighborResolution, NetworkCapability, NetworkIntent, NetworkIntentState, NetworkPlanIntent,
+    NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+    PublicAddressBindingIntent, RealmEndpointDirectory, RouteIntent, SecurityGroupBinding,
+    SecurityGroupIntent, SecurityGroupRuleIntent, SecurityGroupState, realm_proxy_mac,
 };
 pub use storage::{
     AttachmentAccessMode, ProviderReference as StorageProviderReference, Snapshot,

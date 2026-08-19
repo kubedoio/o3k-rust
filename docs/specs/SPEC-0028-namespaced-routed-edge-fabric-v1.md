@@ -1,9 +1,9 @@
 # SPEC-0028 — Namespaced Routed Edge Fabric v1
 
-Status: Proposed
+Status: Accepted
 
-Decision-accepted: pending
-Human-approval: pending
+Decision-accepted: explicit acceptance by the task requester, 2026-08-19
+Human-approval: task requester, explicit acceptance recorded in task instruction, 2026-08-19
 
 Related decision: [ADR-0170](../adr/ADR-0170-namespaced-routed-edge-fabric.md)
 Related issue: [#701](https://github.com/kubedoio/o3k-rust/issues/701)
@@ -28,9 +28,9 @@ semantics into a bounded small multi-hypervisor edge-cloud profile. This spec
 freezes the first multi-host fabric, neighbor, placement, drain, failure, and
 evidence semantics before privileged implementation begins.
 
-Runtime implementation is blocked while ADR-0170 or this SPEC remains
-`Proposed`. Human acceptance does not itself create a support claim; the exact
-real topology and host count proven by evidence bound the final claim.
+Runtime implementation was blocked while ADR-0170 or this SPEC was `Proposed`.
+Both are now accepted. Human acceptance does not itself create a support claim;
+the exact real topology and host count proven by evidence bound the final claim.
 
 ## P11 product outcome
 

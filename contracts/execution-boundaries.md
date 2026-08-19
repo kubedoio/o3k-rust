@@ -8,10 +8,10 @@ Related decisions:
 - [ADR-0166](../docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md) (supersedes ADR-0161)
 - [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0169](../docs/adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
-- [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md) (Proposed)
+- [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md) (Accepted)
 - [SPEC-0021](../docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md)
-- [SPEC-0028](../docs/specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md) (Proposed)
-- [P11 edge-fabric contract](p11-edge-fabric.md) (Proposed)
+- [SPEC-0028](../docs/specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md) (Accepted)
+- [P11 edge-fabric contract](p11-edge-fabric.md) (Accepted)
 
 ## Purpose
 
@@ -26,8 +26,8 @@ The current protobuf schema may implement only a subset. New wire fields or
 actions must preserve these authority, identity, security, retry, and evidence
 rules.
 
-Proposed P11 fabric additions remain inactive until ADR-0170/SPEC-0028 receive
-explicit human architecture/security acceptance.
+Accepted P11 fabric additions remain bounded by ADR-0170, SPEC-0028, and the
+evidence gates; acceptance does not itself establish runtime or product claims.
 
 ## Authority boundary
 
@@ -260,7 +260,7 @@ The network executor cannot allocate a different public fixed IP or MAC, change
 AddressRealm/project ownership, or select a different endpoint host without an
 accepted control-plane operation.
 
-### Proposed P11 namespaced routed-fabric actions
+### Accepted P11 namespaced routed-fabric actions
 
 When ADR-0170/SPEC-0028 are accepted, the P11 contract additionally allows
 semantic actions equivalent to:
@@ -314,7 +314,7 @@ application intent.
 - WireGuard private keys remain host-local and are never protocol payload or
   ordinary evidence.
 
-See `contracts/p11-edge-fabric.md` for the full proposed contract.
+See `contracts/p11-edge-fabric.md` for the full accepted contract.
 
 ## Storage actions
 
