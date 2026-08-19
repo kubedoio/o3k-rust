@@ -78,19 +78,17 @@ remain later profiles unless separately accepted and proven.
 P11 turns the proven compute + P9 network + P10 storage model into the first real
 multi-hypervisor edge profile for roughly 10–20 hypervisors.
 
-ADR-0170/SPEC-0028 are the currently accepted v1 architecture and PR #703 merged
-only its portable endpoint-directory/planner slice. The project is now reviewing
-a proposed successor, ADR-0171/SPEC-0029 plus
-`contracts/p11-realm-overlay-fabric.md`, before further privileged fabric work.
-The successor exists because a general cloud should allow independent customers
-to reuse the same private CIDRs across hosts.
+ADR-0170/SPEC-0028 are the superseded v1 architecture and PR #703 merged only
+its portable endpoint-directory/planner slice. ADR-0171/SPEC-0029 plus
+`contracts/p11-realm-overlay-fabric.md` are accepted as the v2 implementation
+authority. The successor exists because a general cloud should allow
+independent customers to reuse the same private CIDRs across hosts.
 
-No new privileged P11 fabric implementation should proceed from the proposed
-successor until its human architecture/security gate is accepted. If accepted,
-ADR-0171/SPEC-0029 supersede ADR-0170/SPEC-0028 for P11 fabric implementation.
+Acceptance authorizes bounded implementation only. No support claim exists until
+the complete real-host evidence gate passes.
 No support claim exists until the complete real-host evidence gate passes.
 
-### Proposed P11 user outcome
+### Accepted P11 v2 user outcome
 
 > Independent tenants can use identical private CIDRs in separate AddressRealms,
 > place real VMs from each realm on different eligible hypervisors, use normal
@@ -172,7 +170,7 @@ No support claim exists until the complete real-host evidence gate passes.
 
 ### P11 non-goals
 
-The proposed P11 successor does not mean:
+The accepted P11 successor does not mean:
 
 - arbitrary regional L2 adjacency;
 - cross-host ARP/Ethernet/unknown-unicast/multicast flooding;
@@ -248,8 +246,8 @@ evidence exists.
 - P11 fabric implementation must not turn WireGuard or Geneve provider IDs into
   tenant identity, silently add regional L2 flooding, or claim a larger real
   topology than was tested;
-- while ADR-0171/SPEC-0029 are proposed, do not continue privileged successor
-  fabric implementation from stale ADR-0170-era prompt text;
+- do not continue privileged successor fabric implementation from stale
+  ADR-0170-era prompt text;
 - P12 native API work follows mature domain semantics rather than preceding
   them;
 - architecture direction does not replace executable evidence or human review.

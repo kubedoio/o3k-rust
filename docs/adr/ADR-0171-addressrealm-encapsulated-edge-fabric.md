@@ -1,10 +1,10 @@
 # ADR-0171 — AddressRealm-encapsulated edge fabric for overlapping tenant CIDRs
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-20
-Decision-accepted: pending
-Human-approval: pending
-Supersedes: ADR-0170 on acceptance
+Decision-accepted: 2026-08-20
+Human-approval: requester acceptance recorded in issue #705 comment 5349129789
+Supersedes: ADR-0170
 Superseded-by: none
 Affected-services: network, compute, placement, scheduler, storage, kernel, edge, governance
 
@@ -21,13 +21,14 @@ Related decisions and specifications:
 - [SPEC-0027 — native persistent storage v1](../specs/SPEC-0027-native-persistent-storage-v1.md)
 - [SPEC-0028 — Namespaced Routed Edge Fabric v1](../specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md)
 - [SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2](../specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md)
-- [Proposed P11 realm-overlay contract](../../contracts/p11-realm-overlay-fabric.md)
+- [P11 realm-overlay contract](../../contracts/p11-realm-overlay-fabric.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
-This is a privileged multi-host networking change. ADR-0170/SPEC-0028 remain the
-current accepted decision until this ADR and SPEC-0029 receive explicit human
-architecture/security acceptance. No privileged Geneve implementation or new
-support claim may be justified by this proposed text alone.
+This is a privileged multi-host networking change. The requester acceptance is
+recorded on issue #705 and activates this ADR and SPEC-0029 as the P11 v2
+implementation authority. Acceptance authorizes bounded implementation only;
+it does not create a runtime, product, or real-host support claim. Those claims
+remain gated on the evidence requirements below.
 
 ## Context
 
@@ -558,19 +559,19 @@ This ADR does not add:
 
 ## Migration from ADR-0170 / PR #703
 
-Until this ADR is accepted, ADR-0170/SPEC-0028 remain the active authority and
-new privileged successor implementation is blocked.
+ADR-0171 is accepted and is now the active authority for P11 v2. The v1
+documents remain useful historical references but are superseded for successor
+fabric implementation.
 
-If accepted:
+The migration requires:
 
-1. mark ADR-0170 and SPEC-0028 `Superseded` by ADR-0171/SPEC-0029;
-2. activate `contracts/p11-realm-overlay-fabric.md`;
-3. retire the old non-overlap implementation prompt;
-4. retain PR #703 realm endpoint directory semantics;
-5. revise fabric route/host identity types to be realm-aware and transport-IP
-   based;
-6. add durable realm-to-VNI provider mapping;
-7. only then implement privileged Geneve/WireGuard realization.
+1. activate `contracts/p11-realm-overlay-fabric.md`;
+2. retire the old non-overlap implementation prompt;
+3. retain PR #703 realm endpoint directory semantics;
+4. revise fabric route/host identity types to be realm-aware and transport-IP
+  based;
+5. add durable realm-to-VNI provider mapping;
+6. only then implement privileged Geneve/WireGuard realization.
 
 No runtime compatibility/support claim changes merely because the successor is
 accepted.

@@ -1,13 +1,13 @@
 # SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2
 
-Status: Proposed
+Status: Accepted
 
-Decision-accepted: pending
-Human-approval: pending
+Decision-accepted: 2026-08-20
+Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
 Related decision: [ADR-0171](../adr/ADR-0171-addressrealm-encapsulated-edge-fabric.md)
 Related issue: [#705](https://github.com/kubedoio/o3k-rust/issues/705)
-Related proposed contract: [P11 realm-overlay fabric](../../contracts/p11-realm-overlay-fabric.md)
+Related contract: [P11 realm-overlay fabric](../../contracts/p11-realm-overlay-fabric.md)
 
 Related normative sources:
 
@@ -25,14 +25,14 @@ Related normative sources:
 
 ## Purpose and governance gate
 
-This proposed spec replaces the cross-host non-overlap assumption in accepted
+This accepted spec replaces the cross-host non-overlap assumption in accepted
 SPEC-0028 with a realm-encapsulated P11 provider that supports overlapping
 customer CIDRs across hypervisors while retaining the existing O3K authority,
 neighbor-directory, policy, scheduling, storage, failure, and evidence model.
 
-SPEC-0028 remains active until ADR-0171 and this SPEC receive explicit human
-architecture/security acceptance. Privileged Geneve realization must not begin
-from this proposed document alone.
+ADR-0171 and this SPEC are now the active P11 v2 architecture authority.
+Privileged Geneve realization is still subject to the implementation, safety,
+and real-host evidence gates in this document and the successor contract.
 
 PR #703 is an already-merged portable semantic slice and remains reusable only
 where its types/behavior do not depend on global tenant-IP uniqueness.

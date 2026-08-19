@@ -1,6 +1,9 @@
 # P11 AddressRealm-encapsulated edge-fabric contract
 
-Status: Proposed
+Status: Accepted
+
+Decision-accepted: 2026-08-20
+Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
 Related architecture:
 
@@ -10,9 +13,10 @@ Related architecture:
 - [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md)
 - [current execution-boundary contract](execution-boundaries.md)
 
-This proposed contract supersedes `contracts/p11-edge-fabric.md` only after
-ADR-0171/SPEC-0029 receive explicit human acceptance. Until then it is design
-input, not active execution authority.
+This accepted contract supersedes `contracts/p11-edge-fabric.md` for P11 v2
+implementation authority. Acceptance authorizes bounded implementation only;
+runtime, product, and real-host support claims remain gated by the evidence
+requirements in this contract and SPEC-0029.
 
 ## Purpose
 
