@@ -31,8 +31,10 @@ does not alter the first-alpha release gate or the external-hosted Cinder
 profile.
 
 Authority mode: `o3k-implemented` for Volume/Attachment/Snapshot domain state;
-execution provider for `o3k-storage`; external-hosted only for the existing
-Cinder service-testbed.
+host- or backend-scoped execution provider for `o3k-storage`; external-hosted
+only for the existing Cinder service-testbed. LVM v1 uses host-local placement
+and attachment scope. Ceph RBD may use shared cluster/region placement and
+attachment scope; the canonical model must not require local-disk topology.
 
 `o3kd` owns canonical state, authorization, quotas, backend selection, durable
 operations, reconciliation, and compatibility projection. `o3k-storage` owns
@@ -53,9 +55,12 @@ backend dispatch and cannot be silently changed by a provider.
 
 ### VolumeAttachment
 
-Required fields: ID, project, volume ID, server ID, selected compute/storage
-hosts, attachment mode, bounded device identity, storage phase, compute phase,
-desired/observed status, generation, operation, and compensation state.
+Required fields: ID, project, volume ID, server ID, technology-independent
+attachment intent and mode, storage phase, compute phase, desired/observed
+status, generation, operation, and compensation state. Canonical state must
+not contain Linux device paths, `/dev/*`, device-mapper paths, RBD device
+names, libvirt target names, or other provider-native device identity. Those
+are bounded provider/compute observations only.
 
 Connection information is a typed secret-bearing operational result. It is
 never part of a normal resource representation, audit event, log, or CI
@@ -98,16 +103,28 @@ The typed storage provider contract reports capabilities and bounded
 observations, including capacity, allocation unit, volume/snapshot/attachment
 support, provider reference, lifecycle, and redacted failure category.
 
-`LvmStorageProvider` is the first implementation and accepts only a dedicated
-configured volume group. Ownership is proved by an O3K-managed metadata marker
-bound to the canonical volume ID, project scope, generation, and provider
-namespace; LV names and paths are hints, never proof. It supports create,
-inspect, delete, prepare attachment, terminate attachment, and the selected
-snapshot semantics.
+`LvmStorageProvider` is the first/reference implementation and accepts only a
+dedicated configured volume group. Ownership is proved by an O3K-managed
+metadata marker bound to the canonical volume ID, project scope, generation,
+and provider namespace; LV names and paths are hints, never proof. It supports
+create, inspect, delete, prepare attachment, terminate attachment, and the
+selected snapshot semantics.
 
-`CephRbdStorageProvider` is conditional on passing the same provider
-conformance and real-guest gate with a real RBD cluster. RBD image names,
-pool names, monitor addresses, credentials, and keyrings remain adapter-local.
+The protected LVM gate may provision an isolated, dedicated, disposable VG and
+snapshot-capable profile itself, including a loop-backed implementation where
+appropriate. It must never adopt or mutate pre-existing VGs/LVs and must prove
+independent cleanup. Operator deployments may provide an explicitly configured
+dedicated VG. The reference LVM profile is a bounded thin-pool VG, and its
+snapshots are crash-consistent; no guest/application quiescing is claimed.
+
+`CephRbdStorageProvider` is required for P10 completion, but may begin only
+after LVM passes the complete provider-conformance and real-guest gates. The
+same canonical Volume/VolumeAttachment/Snapshot lifecycle must pass against a
+real Ceph RBD backend, including create, attach, guest I/O, detach, restart,
+snapshot, delete, and foreign-image protection. RBD image names, pool names,
+monitor addresses, credentials, and keyrings remain adapter-local. RBD
+snapshot consistency and attachment scope must be explicitly documented
+before its gate.
 
 ## Required public compatibility subset
 
@@ -134,11 +151,12 @@ Before any release claim:
    secret-redaction tests;
 2. stateful fake-provider conformance for all failure windows;
 3. real `o3k-storage` process/mTLS/restart/replay tests;
-4. LVM component gate with foreign-volume byte/state preservation;
+4. LVM component gate with foreign-volume byte/state preservation and
+   disposable isolated-VG/thin-pool cleanup evidence;
 5. real guest workflow with filesystem creation, unique payload/checksum,
    detach/reattach and supported restarts;
 6. snapshot semantics evidence;
-7. optional Ceph RBD gate only after LVM promotion;
+7. mandatory Ceph RBD component and real-guest gate after LVM promotion;
 8. machine-readable failure matrix with the four zero-count invariants.
 
 The gate must include controller and storage-agent abrupt/graceful restart,
@@ -156,4 +174,3 @@ multi-host/edge storage, P12 native API, and external-Cinder replacement.
 ## Acceptance record
 
 Pending human architecture/security review of ADR-0169 and SPEC-0027.
-

@@ -31,9 +31,11 @@ The canonical domain owns typed, durable:
 - `Volume`: public ID, project/security scope, size, type, desired/observed
   lifecycle, selected backend/failure domain, provider mapping, generation,
   operation identity, and audit identity;
-- `VolumeAttachment`: public ID, volume/server/project IDs, host, device/mode,
-  desired/observed lifecycle, storage and compute phases, generation, and
-  compensation state;
+- `VolumeAttachment`: public ID, volume/server/project IDs, technology-
+  independent attachment intent and mode, desired/observed lifecycle, storage
+  and compute phases, generation, and compensation state. It must not contain
+  Linux device paths, `/dev/*`, device-mapper paths, RBD device names, libvirt
+  target names, or any other provider-native device identity;
 - `Snapshot`: public ID, source-volume identity/generation, project scope,
   immutable source/content semantics, desired/observed lifecycle, provider
   mapping, and documented consistency semantics;
@@ -49,8 +51,12 @@ compatibility projection only.
 `o3kd` remains authoritative for public IDs, project ownership,
 authentication/authorization, quotas, desired state, backend selection,
 operation identity, scheduling, reconciliation, compatibility projection, and
-audit identity. `o3k-storage` is only a mutually authenticated, node-local
-executor/observer for bounded backend mutations and observations.
+audit identity. `o3k-storage` is a mutually authenticated, bounded
+host- or backend-scoped executor/observer for bounded backend mutations and
+observations. LVM v1 has host-local placement and attachment scope. Ceph RBD
+may use shared cluster/region placement and attachment scope. The canonical
+architecture must not force a future shared-storage provider into a local-disk
+execution topology.
 
 `o3k-storage` may not authorize tenants, allocate public IDs, select a project,
 change desired state, choose an arbitrary backend, or mutate a resource without
@@ -58,21 +64,39 @@ an exact O3K ownership marker. It uses the common command envelope, agent epoch,
 controller fence, generation, deadline, deterministic idempotency identity,
 canonical fingerprint, durable local journal, and observe-before-retry rules.
 
-### 3. Provider scope
+### 3. Provider scope and completion order
 
-The first provider is `LvmStorageProvider` against one explicitly configured,
-dedicated volume group. It must reject ambiguous or foreign logical volumes;
-an LV name, path, or matching size alone is never ownership evidence. Each owned
-backend object carries a verifiable O3K ownership identity and immutable
-resource binding.
+Ceph RBD is required for P10 completion. The first/reference provider is
+`LvmStorageProvider`, against one explicitly configured, dedicated volume
+group. It must reject ambiguous or foreign logical volumes; an LV name, path,
+or matching size alone is never ownership evidence. Each owned backend object
+carries a verifiable O3K ownership identity and immutable resource binding.
 
-After LVM passes provider conformance and the full real-guest storage gate, the
-same domain/provider contract may be implemented by `CephRbdStorageProvider`.
+Only after LVM passes the complete provider-conformance suite and full
+real-guest storage gate may the same domain/provider contract be implemented by
+`CephRbdStorageProvider`. P10 cannot be declared complete until the canonical
+Volume, VolumeAttachment, and Snapshot lifecycle is proven against a real Ceph
+RBD backend, including real create/attach/I/O/detach/restart/snapshot/delete
+and foreign-image protection.
 Ceph credentials, keyrings, monitor addresses, and connection details remain
 typed secret-bearing adapter data and never enter public resources, ordinary
 logs/events, or evidence.
 
-### 4. Attachment authority and workflow
+### 4. LVM acceptance environment and snapshot profile
+
+The protected LVM TestLab gate must not depend on an arbitrary pre-existing
+host VG. The runner may provision an isolated, dedicated, disposable,
+snapshot-capable VG, including a loop-backed implementation where appropriate,
+and must independently prove teardown and zero owned leaks. It must never adopt
+or mutate pre-existing VGs or LVs. Operator deployments may instead provide an
+explicitly configured dedicated VG.
+
+The reference LVM profile is an isolated thin-pool volume group with bounded
+thin-pool allocation and snapshot capability. Snapshot behavior is explicitly
+crash-consistent: guest/application quiescing is not claimed unless it is
+implemented and separately proven.
+
+### 5. Attachment authority and workflow
 
 Attachment is a first-class O3K workflow coordinating storage and compute:
 
@@ -87,16 +111,24 @@ precedes retry or compensation. Equivalent command replay returns the durable
 outcome. Conflicting fingerprints, stale controller fences, stale agent epochs,
 stale generations, and provider-reference mismatches fail closed.
 
-### 5. Snapshot semantics
+Canonical attachment state contains only technology-independent intent and
+bounded lifecycle/phase data. Provider-native device paths, `/dev/*`,
+device-mapper paths, RBD device names, libvirt target names, and similar
+identities are returned only as bounded provider/compute observations where
+strictly needed for execution and are never promoted into canonical tenant
+resource state.
+
+### 6. Snapshot semantics
 
 P10 initially supports snapshots only after the base volume lifecycle is
-proven. The selected provider must document whether a snapshot is crash
-consistent or application consistent, whether it is point-in-time immutable,
-whether it may be created while attached, and its cleanup/retry behavior. No
-clone, backup, replication, mirroring, encryption/KMS, or boot-from-volume
-claim is implied.
+proven. The LVM thin-pool reference snapshot is crash-consistent and
+point-in-time immutable under the documented provider boundary; application
+quiescing is not implemented. The Ceph RBD implementation must document its
+equivalent crash-consistency and attachment rules before its gate. No clone,
+backup, replication, mirroring, encryption/KMS, or boot-from-volume claim is
+implied.
 
-### 6. Compatibility and product claims
+### 7. Compatibility and product claims
 
 P10 adds only the bounded Cinder-compatible operations needed for the proven
 journey: volume create/show/list/delete, selected volume type/capability
@@ -163,4 +195,3 @@ external Cinder native.
 - Letting backend paths or LV/RBD names stand in for ownership.
 - Returning unrestricted connection information through public APIs or logs.
 - Activating a daemon solely because Cinder has a historical service process.
-
