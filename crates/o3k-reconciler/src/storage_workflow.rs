@@ -884,7 +884,7 @@ mod tests {
         StorageAttachmentObservation, StorageProviderError, StorageSnapshotObservation,
         StorageSnapshotRequest, StorageVolumeObservation,
     };
-    use o3k_store::{ResourceRecord, SqliteStore, VolumeRecord};
+    use o3k_store::{O3kStore, ResourceRecord, VolumeRecord};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1050,12 +1050,12 @@ mod tests {
     async fn fixture(
         prepare_unknown: bool,
     ) -> (
-        Arc<SqliteStore>,
+        Arc<O3kStore>,
         Arc<FakeStorage>,
         Arc<FakeCompute>,
         VolumeAttachment,
     ) {
-        let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+        let store = Arc::new(O3kStore::connect_sqlite_memory().await.unwrap());
         let volume = Volume {
             id: VolumeId::from_uuid(Uuid::from_u128(10)),
             project_id: "project-a".to_owned(),
