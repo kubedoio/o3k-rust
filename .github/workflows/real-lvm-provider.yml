@@ -1,0 +1,95 @@
+name: Protected LVM provider gate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: o3k-real-lvm-provider
+  cancel-in-progress: false
+
+jobs:
+  lvm-provider:
+    name: Protected LVM provider component gate
+    runs-on: [self-hosted, linux, x64, kvm, libvirt, o3k-testlab]
+    environment: o3k-real-host-validation
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
+      - name: Validate protected source and privileges
+        id: runner
+        run: |
+          set -euo pipefail
+          test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"
+          test "${GITHUB_REF}" = "refs/heads/main"
+          sudo -n true
+          test -w "${GITHUB_WORKSPACE}"
+          run_slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
+          test -n "${run_slug}"
+          printf 'run_slug=%s\n' "${run_slug}" >> "${GITHUB_OUTPUT}"
+      - name: Provision disposable tagged LVM profile
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_LVM_VG_NAME: o3k-lvm-${{ steps.runner.outputs.run_slug }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ steps.runner.outputs.run_slug }}
+        run: >-
+          sudo -n
+          --preserve-env=O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_PROVIDER_NAMESPACE,O3K_LVM_VG_NAME,O3K_LVM_THIN_POOL
+          env O3K_LVM_VG_NAME="${O3K_LVM_VG_NAME}"
+          O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}"
+          bash scripts/lvm-testlab-profile.sh provision
+      - name: Build LVM provider smoke gate
+        run: cargo build -p o3k-storage --example lvm-provider-smoke
+      - name: Run LVM provider lifecycle and cleanup evidence
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+          O3K_LVM_VOLUME_GROUP: o3k-lvm-${{ steps.runner.outputs.run_slug }}
+          O3K_LVM_THIN_POOL: o3k-thin-${{ steps.runner.outputs.run_slug }}
+          O3K_LVM_HOST_ID: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/lvm-provider-artifacts
+          sudo -n env \
+            O3K_LVM_VOLUME_GROUP="${O3K_LVM_VOLUME_GROUP}" \
+            O3K_LVM_THIN_POOL="${O3K_LVM_THIN_POOL}" \
+            O3K_LVM_PROVIDER_NAMESPACE="${O3K_LVM_PROVIDER_NAMESPACE}" \
+            O3K_LVM_HOST_ID="${O3K_LVM_HOST_ID}" \
+            target/debug/examples/lvm-provider-smoke \
+            | tee target/lvm-provider-artifacts/lvm-provider-smoke.json >/dev/null
+          python3 - target/lvm-provider-artifacts/lvm-provider-smoke.json "${GITHUB_SHA}" <<'PY'
+          import json, sys
+          path, source_commit = sys.argv[1:]
+          value = json.load(open(path, encoding="utf-8"))
+          assert value["status"] == "passed", value
+          assert value["redacted"] is True, value
+          assert all(value[key] == 0 for key in ("owned_backend_leaks", "owned_attachment_leaks", "owned_inconsistencies", "foreign_mutations")), value
+          value["source_commit"] = source_commit
+          json.dump(value, open(path, "w", encoding="utf-8"), indent=2, sort_keys=True)
+          open(path, "a", encoding="utf-8").write("\n")
+          PY
+      - name: Tear down disposable tagged LVM profile
+        if: always()
+        env:
+          O3K_LVM_RUN_ID: ${{ github.run_id }}
+          O3K_LVM_STATE_BASE: /var/lib/o3k-lvm-testlab
+          O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
+        run: sudo -n --preserve-env=O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_PROVIDER_NAMESPACE bash scripts/lvm-testlab-profile.sh cleanup
+      - name: Verify disposable profile state is gone
+        if: always()
+        run: test ! -e "/var/lib/o3k-lvm-testlab/${{ steps.runner.outputs.run_slug }}"
+      - name: Upload redacted LVM evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607af02 # v4
+        with:
+          name: lvm-provider-evidence
+          if-no-files-found: warn
+          path: target/lvm-provider-artifacts/lvm-provider-smoke.json
