@@ -17,6 +17,13 @@ jobs:
     environment: o3k-real-host-validation
     timeout-minutes: 60
     steps:
+      - name: Repair prior protected artifact ownership
+        run: |
+          set -euo pipefail
+          artifact_dir="${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"
+          if test -e "${artifact_dir}"; then
+            sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
@@ -94,6 +101,11 @@ jobs:
       - name: Verify disposable profile state is gone
         if: always()
         run: test ! -e "/var/lib/o3k-lvm-testlab/${{ steps.runner.outputs.run_slug }}"
+      - name: Repair real guest evidence ownership
+        if: always()
+        run: |
+          sudo -n chown -R "$(id -u):$(id -g)" \
+            "${GITHUB_WORKSPACE}/target/lvm-real-guest-artifacts"
       - name: Upload redacted real guest evidence
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
