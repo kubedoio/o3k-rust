@@ -410,6 +410,7 @@ mod tests {
             deadline_unix_ms,
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
+            p11_fabric: None,
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 =

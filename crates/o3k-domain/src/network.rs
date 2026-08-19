@@ -189,6 +189,35 @@ pub struct FabricEndpointRoute {
     pub fabric_generation: u64,
 }
 
+/// Provider-derived public peer state for the shared host fabric. Allowed
+/// destinations are endpoint routes, never tenant-owned WireGuard identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricPeer {
+    pub host_id: String,
+    pub public_key: String,
+    pub underlay_endpoint: String,
+    pub fabric_generation: u64,
+    pub allowed_destinations: Vec<Ipv4Prefix>,
+}
+
+/// Semantic P11 plan for one host and one AddressRealm. Provider realizers may
+/// map it to bridges, realm namespaces, routes, proxy neighbors, nftables and
+/// WireGuard state, but none of those mappings are represented here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespacedRoutedFabricPlan {
+    pub local_host: String,
+    pub local_fabric_generation: u64,
+    pub local_underlay_mtu: u16,
+    pub local_fabric_mtu: u16,
+    pub realm_id: Uuid,
+    pub directory_generation: u64,
+    pub directory: RealmEndpointDirectory,
+    pub proxy_mac: String,
+    pub tenant_mtu: u16,
+    pub routes: Vec<FabricEndpointRoute>,
+    pub peers: Vec<FabricPeer>,
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum EndpointDirectoryError {
     #[error("endpoint directory generation must be non-zero")]
@@ -211,6 +240,10 @@ pub enum EndpointDirectoryError {
     MissingFabricIdentity,
     #[error("host fabric identity is duplicated or invalid")]
     InvalidFabricIdentity,
+    #[error("fabric plan has no local host identity")]
+    MissingLocalFabricIdentity,
+    #[error("fabric plan has an invalid or unsafe tenant MTU")]
+    InvalidMtu,
 }
 
 impl RealmEndpointDirectory {
@@ -349,6 +382,73 @@ impl RealmEndpointDirectory {
         }
         routes.sort_by_key(|route| (route.destination, route.endpoint_id));
         Ok(routes)
+    }
+
+    /// Compiles the accepted directory and public host identities into one
+    /// host/realm semantic plan. The local host is never emitted as a fabric
+    /// peer, and remote peer AllowedIPs are exactly the current endpoint
+    /// /32 routes for that peer.
+    pub fn compile_fabric_plan(
+        &self,
+        local_identity: &FabricHostIdentity,
+        host_identities: &[FabricHostIdentity],
+        tenant_mtu: u16,
+    ) -> Result<NamespacedRoutedFabricPlan, EndpointDirectoryError> {
+        if local_identity.host_id.is_empty() {
+            return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
+        }
+        if tenant_mtu == 0 || tenant_mtu > local_identity.fabric_mtu {
+            return Err(EndpointDirectoryError::InvalidMtu);
+        }
+        if host_identities
+            .iter()
+            .any(|identity| tenant_mtu > identity.fabric_mtu)
+        {
+            return Err(EndpointDirectoryError::InvalidMtu);
+        }
+        if host_identities
+            .iter()
+            .all(|identity| identity != local_identity)
+        {
+            return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
+        }
+        let routes = self.remote_routes(&local_identity.host_id, host_identities)?;
+        let mut peers = Vec::new();
+        for identity in host_identities {
+            if identity.host_id == local_identity.host_id {
+                continue;
+            }
+            let mut allowed_destinations = routes
+                .iter()
+                .filter(|route| route.target_host == identity.host_id)
+                .map(|route| route.destination)
+                .collect::<Vec<_>>();
+            if allowed_destinations.is_empty() {
+                continue;
+            }
+            allowed_destinations.sort();
+            peers.push(FabricPeer {
+                host_id: identity.host_id.clone(),
+                public_key: identity.public_key.clone(),
+                underlay_endpoint: identity.underlay_endpoint.clone(),
+                fabric_generation: identity.fabric_generation,
+                allowed_destinations,
+            });
+        }
+        peers.sort_by_key(|peer| peer.host_id.clone());
+        Ok(NamespacedRoutedFabricPlan {
+            local_host: local_identity.host_id.clone(),
+            local_fabric_generation: local_identity.fabric_generation,
+            local_underlay_mtu: local_identity.underlay_mtu,
+            local_fabric_mtu: local_identity.fabric_mtu,
+            realm_id: self.realm_id,
+            directory_generation: self.directory_generation,
+            directory: self.clone(),
+            proxy_mac: self.proxy_mac.clone(),
+            tenant_mtu,
+            routes,
+            peers,
+        })
     }
 }
 
@@ -573,6 +673,62 @@ mod endpoint_directory_tests {
         assert_eq!(
             directory.remote_routes("host-01", &invalid),
             Err(EndpointDirectoryError::InvalidFabricIdentity)
+        );
+    }
+
+    #[test]
+    fn fabric_plan_derives_shared_peers_and_rejects_unsafe_mtu() {
+        let directory = RealmEndpointDirectory::build(
+            &realm(),
+            vec![
+                location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10"),
+                location(2, [10, 40, 1, 12], "host-07", "02:00:00:00:00:12"),
+            ],
+            &[],
+            4,
+        );
+        assert!(directory.is_ok());
+        let Some(directory) = directory.ok() else {
+            return;
+        };
+        let local = FabricHostIdentity {
+            host_id: "host-01".to_owned(),
+            public_key: "public-key-01".to_owned(),
+            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            provider_version: "wireguard-v1".to_owned(),
+            fabric_generation: 8,
+            underlay_mtu: 1500,
+            fabric_mtu: 1420,
+        };
+        let remote = FabricHostIdentity {
+            host_id: "host-07".to_owned(),
+            public_key: "public-key-07".to_owned(),
+            underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            provider_version: "wireguard-v1".to_owned(),
+            fabric_generation: 9,
+            underlay_mtu: 1500,
+            fabric_mtu: 1420,
+        };
+        let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400);
+        assert!(plan.is_ok());
+        let Some(plan) = plan.ok() else {
+            return;
+        };
+        assert_eq!(plan.local_host, "host-01");
+        assert_eq!(plan.local_fabric_generation, 8);
+        assert_eq!(plan.tenant_mtu, 1400);
+        assert_eq!(plan.routes.len(), 1);
+        assert_eq!(plan.peers.len(), 1);
+        assert_eq!(plan.peers[0].host_id, "host-07");
+        assert_eq!(plan.peers[0].allowed_destinations.len(), 1);
+        assert_eq!(plan.peers[0].allowed_destinations[0].prefix_len, 32);
+        assert_eq!(
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1400),
+            Err(EndpointDirectoryError::MissingFabricIdentity)
+        );
+        assert_eq!(
+            directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1501),
+            Err(EndpointDirectoryError::InvalidMtu)
         );
     }
 }

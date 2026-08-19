@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs, io,
     net::Ipv4Addr,
     path::{Path, PathBuf},
@@ -9,8 +9,8 @@ use std::{
 };
 
 use o3k_domain::{
-    AddressRealm, Ipv4Prefix, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
-    PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+    AddressRealm, Ipv4Prefix, NamespacedRoutedFabricPlan, NetworkCapability, NetworkIntent,
+    NetworkPlanIntent, NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -22,6 +22,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod p11;
 pub mod policy;
 pub mod public;
 pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
@@ -32,6 +33,7 @@ pub use execution::{
     NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
     PlanAdmission, journal_path,
 };
+pub use p11::{InMemoryP11FabricBackend, P11FabricBackend, P11FabricError, P11FabricRealizer};
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
     PublicAddressRealizer,
@@ -131,7 +133,8 @@ mod vocabulary_tests {
 mod p9_plan_tests {
     use super::*;
     use o3k_domain::{
-        EndpointIntent, Ipv4Prefix, NetworkPlanIntent, NetworkProtocol, PolicyAction,
+        EndpointIntent, EndpointLocation, FabricEndpointRoute, FabricPeer, Ipv4Prefix,
+        NamespacedRoutedFabricPlan, NetworkPlanIntent, NetworkProtocol, PolicyAction,
         PolicyDirection, PolicyIntent, PortRange, RouteIntent,
     };
     use std::net::Ipv4Addr;
@@ -224,6 +227,73 @@ mod p9_plan_tests {
                 .any(|item| matches!(item, NetworkPlanIntent::EndpointAttachment { .. }))
         );
         assert_eq!(first.fingerprint_sha256.len(), 64);
+    }
+
+    #[test]
+    fn p11_fabric_payload_is_fingerprinted_and_admission_validated() {
+        let base = compile_node_network_plan(
+            &intent(),
+            "node-a",
+            Uuid::from_u128(6),
+            123,
+            &capabilities(),
+            &[],
+        )
+        .expect("plan");
+        let destination = prefix("10.0.0.3", 32);
+        let fabric = NamespacedRoutedFabricPlan {
+            local_host: "node-a".to_owned(),
+            local_fabric_generation: 2,
+            local_underlay_mtu: 1500,
+            local_fabric_mtu: 1420,
+            realm_id: Uuid::from_u128(2),
+            directory_generation: 3,
+            directory: o3k_domain::RealmEndpointDirectory {
+                realm_id: Uuid::from_u128(2),
+                directory_generation: 3,
+                proxy_mac: "02:11:22:33:44:55".to_owned(),
+                entries: vec![EndpointLocation {
+                    endpoint_id: Uuid::from_u128(3),
+                    project_id: "project-a".to_owned(),
+                    realm_id: Uuid::from_u128(2),
+                    fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+                    mac: "02:00:00:00:00:03".to_owned(),
+                    selected_host: "node-b".to_owned(),
+                    endpoint_generation: 4,
+                    placement_generation: 5,
+                }],
+            },
+            proxy_mac: "02:11:22:33:44:55".to_owned(),
+            tenant_mtu: 1400,
+            routes: vec![FabricEndpointRoute {
+                destination,
+                endpoint_id: Uuid::from_u128(3),
+                target_host: "node-b".to_owned(),
+                endpoint_generation: 4,
+                placement_generation: 5,
+                fabric_generation: 6,
+            }],
+            peers: vec![FabricPeer {
+                host_id: "node-b".to_owned(),
+                public_key: "public-key".to_owned(),
+                underlay_endpoint: "192.0.2.2:51820".to_owned(),
+                fabric_generation: 6,
+                allowed_destinations: vec![destination],
+            }],
+        };
+        let plan = base
+            .clone()
+            .with_p11_fabric(fabric)
+            .expect("valid P11 plan");
+        assert_ne!(plan.fingerprint_sha256, base.fingerprint_sha256);
+        assert_eq!(plan.validate_p11_fabric(), Ok(()));
+
+        let mut invalid = plan.clone();
+        invalid.p11_fabric.as_mut().expect("fabric").routes[0].destination = prefix("10.0.0.0", 24);
+        assert_eq!(
+            invalid.validate_p11_fabric(),
+            Err(NetworkPlanError::InvalidFabricPlan)
+        );
     }
 
     #[test]
@@ -3537,6 +3607,10 @@ pub struct NodeNetworkPlan {
     pub deadline_unix_ms: u64,
     pub resource_generations: BTreeMap<Uuid, u64>,
     pub intents: Vec<NetworkPlanIntent>,
+    /// Optional accepted P11 semantic fabric plan. `None` preserves the P9
+    /// wire shape and legacy fingerprint for non-P11 plans.
+    #[serde(default)]
+    pub p11_fabric: Option<NamespacedRoutedFabricPlan>,
     pub fingerprint_sha256: String,
 }
 
@@ -3562,9 +3636,102 @@ pub enum NetworkPlanError {
     InvalidPolicy,
     #[error("network intent has an invalid IPv4 prefix")]
     InvalidPrefix,
+    #[error("P11 fabric plan is invalid")]
+    InvalidFabricPlan,
 }
 
 pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
+
+impl NodeNetworkPlan {
+    /// Attaches accepted P11 semantic state and recomputes the transport
+    /// fingerprint. Provider-native state is intentionally not accepted here.
+    pub fn with_p11_fabric(
+        mut self,
+        fabric: NamespacedRoutedFabricPlan,
+    ) -> Result<Self, NetworkPlanError> {
+        self.p11_fabric = Some(fabric);
+        self.validate_p11_fabric()?;
+        self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
+        Ok(self)
+    }
+
+    /// Validates the semantic P11 payload before admission to a node-local
+    /// executor. A valid fingerprint alone is insufficient authorization.
+    pub fn validate_p11_fabric(&self) -> Result<(), NetworkPlanError> {
+        let Some(fabric) = &self.p11_fabric else {
+            return Ok(());
+        };
+        if fabric.local_host != self.node_id
+            || fabric.local_host.is_empty()
+            || fabric.local_fabric_generation == 0
+            || fabric.local_underlay_mtu == 0
+            || fabric.local_fabric_mtu == 0
+            || fabric.local_fabric_mtu > fabric.local_underlay_mtu
+            || fabric.directory_generation == 0
+            || fabric.tenant_mtu == 0
+            || fabric.tenant_mtu > fabric.local_fabric_mtu
+            || fabric.proxy_mac.len() != 17
+            || fabric.directory.realm_id != fabric.realm_id
+            || fabric.directory.directory_generation != fabric.directory_generation
+            || fabric.directory.proxy_mac != fabric.proxy_mac
+        {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        let mut route_destinations = BTreeSet::new();
+        let mut route_endpoints = BTreeSet::new();
+        for route in &fabric.routes {
+            if route.destination.prefix_len != 32
+                || route.target_host.is_empty()
+                || route.endpoint_generation == 0
+                || route.placement_generation == 0
+                || route.fabric_generation == 0
+                || !route_destinations.insert(route.destination)
+                || !route_endpoints.insert(route.endpoint_id)
+                || fabric
+                    .directory
+                    .location(route.endpoint_id)
+                    .is_none_or(|entry| {
+                        entry.fixed_ip != route.destination.network
+                            || entry.selected_host != route.target_host
+                    })
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+        }
+        let mut peer_hosts = BTreeSet::new();
+        for peer in &fabric.peers {
+            if peer.host_id.is_empty()
+                || peer.host_id == fabric.local_host
+                || peer.public_key.is_empty()
+                || peer.underlay_endpoint.is_empty()
+                || peer.fabric_generation == 0
+                || peer.allowed_destinations.is_empty()
+                || !peer_hosts.insert(peer.host_id.as_str())
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+            let mut allowed = BTreeSet::new();
+            for destination in &peer.allowed_destinations {
+                if destination.prefix_len != 32
+                    || !allowed.insert(*destination)
+                    || !fabric.routes.iter().any(|route| {
+                        route.target_host == peer.host_id && route.destination == *destination
+                    })
+                {
+                    return Err(NetworkPlanError::InvalidFabricPlan);
+                }
+            }
+        }
+        if fabric
+            .routes
+            .iter()
+            .any(|route| !peer_hosts.contains(route.target_host.as_str()))
+        {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        Ok(())
+    }
+}
 
 /// Compile the currently supported flat attachment projection into the same
 /// canonical per-node plan used by routed providers. This helper is kept in
@@ -3882,6 +4049,7 @@ pub fn compile_node_network_plan(
         deadline_unix_ms,
         resource_generations: generations,
         intents,
+        p11_fabric: None,
         fingerprint_sha256,
     })
 }
@@ -3910,15 +4078,27 @@ pub fn validate_plan_replay(
 pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
     let mut intents = plan.intents.clone();
     intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
-    let unsigned = (
-        &plan.plan_id,
-        &plan.node_id,
-        &plan.operation_id,
-        &plan.schema_version,
-        &plan.resource_generations,
-        &intents,
-    );
-    let bytes = serde_json::to_vec(&unsigned).map_err(|_| NetworkPlanError::Serialization)?;
+    let bytes = if let Some(fabric) = &plan.p11_fabric {
+        serde_json::to_vec(&(
+            &plan.plan_id,
+            &plan.node_id,
+            &plan.operation_id,
+            &plan.schema_version,
+            &plan.resource_generations,
+            &intents,
+            fabric,
+        ))
+    } else {
+        serde_json::to_vec(&(
+            &plan.plan_id,
+            &plan.node_id,
+            &plan.operation_id,
+            &plan.schema_version,
+            &plan.resource_generations,
+            &intents,
+        ))
+    }
+    .map_err(|_| NetworkPlanError::Serialization)?;
     use sha2::{Digest, Sha256};
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
