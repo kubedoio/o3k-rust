@@ -29,17 +29,17 @@ jobs:
             -o Acquire::https::Timeout=20
             -o DPkg::Lock::Timeout=120
           )
-          if ! timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive \
+          if ! timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
             apt-get "${apt_options[@]}" update; then
             # GitHub-hosted runners occasionally receive an unhealthy regional
             # Ubuntu mirror. Retry through the canonical mirror before failing
             # the job; this is runner provisioning, not a repository failure.
             sudo -n sed -i 's|azure.archive.ubuntu.com|archive.ubuntu.com|g' \
               /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
-            timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive \
+            timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
               apt-get "${apt_options[@]}" update
           fi
-          timeout --foreground 300s sudo -n env DEBIAN_FRONTEND=noninteractive \
+          timeout --foreground 900s sudo -n env DEBIAN_FRONTEND=noninteractive \
             apt-get "${apt_options[@]}" install --no-install-recommends -y \
               protobuf-compiler libvirt-dev pkg-config python3-yaml qemu-utils sqlite3 tgt
       - name: Refresh cached libvirt bindings

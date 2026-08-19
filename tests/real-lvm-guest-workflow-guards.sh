@@ -18,8 +18,10 @@ required = (
     'test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"',
     'test "${GITHUB_REF}" = "refs/heads/main"',
     "sudo -n true",
-    "O3K_LVM_GUEST_IMAGE_PATH",
-    "O3K_LVM_GUEST_SSH_PRIVATE_KEY",
+    "CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img",
+    "CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b",
+    "ssh-keygen -q -t ed25519",
+    "Remove exact disposable guest inputs",
     "scripts/lvm-testlab-profile.sh provision",
     "scripts/real-lvm-guest-gate.sh",
     "scripts/lvm-testlab-profile.sh cleanup",
@@ -32,6 +34,9 @@ for needle in required:
 assert "continue-on-error" not in text
 assert "rm -rf" not in text
 assert "o3k-storage start" not in text
+assert "O3K_LVM_GUEST_IMAGE_PATH: ${{ vars." not in text
+assert "O3K_LVM_GUEST_SSH_PRIVATE_KEY: ${{ secrets." not in text
 PY
+grep -Fq -- "--cloud-init" "${SCRIPT}"
 
 echo "real LVM guest workflow guard tests passed"

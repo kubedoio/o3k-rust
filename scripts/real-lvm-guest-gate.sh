@@ -27,6 +27,7 @@ CURRENT_DOMAIN="${DOMAIN}"
 OVERLAY="${STATE_ROOT}/${DOMAIN}.qcow2"
 SECOND_OVERLAY="${STATE_ROOT}/${SECOND_DOMAIN}.qcow2"
 KNOWN_HOSTS="${STATE_ROOT}/known_hosts"
+CLOUD_INIT_USER_DATA="${STATE_ROOT}/user-data"
 RESULT_STATUS=failed
 RESULT_REASON=not_completed
 CHECKSUM=""
@@ -63,11 +64,18 @@ require_inputs() {
     [[ "${STATE_ROOT##*/}" == guest ]] || die unsafe_state_root
     install -m 0700 -d "${STATE_ROOT}" "${ARTIFACT_DIR}"
     chmod 0600 "${SSH_KEY}"
+    local public_key
+    public_key="$(ssh-keygen -y -f "${SSH_KEY}")" || die guest_key_invalid
+    printf '%s\n' '#cloud-config' 'ssh_pwauth: false' 'users:' \
+        '  - name: cirros' '    sudo: ALL=(ALL) NOPASSWD:ALL' \
+        '    shell: /bin/bash' '    ssh_authorized_keys:' \
+        "      - ${public_key}" >"${CLOUD_INIT_USER_DATA}"
+    chmod 0600 "${CLOUD_INIT_USER_DATA}"
 }
 
 require_tools() {
     local tool
-    for tool in virsh virt-install qemu-img ssh ssh-keyscan sha256sum python3; do
+    for tool in virsh virt-install qemu-img ssh ssh-keyscan ssh-keygen sha256sum python3; do
         command -v "${tool}" >/dev/null 2>&1 || die "missing_tool_${tool}"
     done
 }
@@ -154,7 +162,8 @@ create_domain() {
     qemu-img create -f qcow2 -F qcow2 -b "${BASE_IMAGE}" "${overlay}" >/dev/null
     sudo -n virt-install --connect qemu:///system --name "${domain}" --memory 2048 --vcpus 2 \
         --disk "path=${overlay},format=qcow2,bus=virtio" \
-        --network "network=${NETWORK},model=virtio" --graphics none --import --noautoconsole >/dev/null
+        --network "network=${NETWORK},model=virtio" --graphics none --import \
+        --cloud-init "user-data=${CLOUD_INIT_USER_DATA}" --noautoconsole >/dev/null
 }
 
 destroy_domain() {
@@ -232,8 +241,8 @@ PY
 }
 trap on_exit EXIT
 
-require_inputs
 require_tools
+require_inputs
 profile_env >/dev/null
 FOREIGN_BEFORE="$(inventory_foreign)"
 create_domain "${DOMAIN}" "${OVERLAY}"
