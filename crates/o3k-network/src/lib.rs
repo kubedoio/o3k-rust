@@ -4347,6 +4347,7 @@ impl NetworkService {
             .ok_or(NetworkError::NotFound)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_security_group_rule_for_project(
         &self,
         project_id: &str,
