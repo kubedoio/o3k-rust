@@ -23,24 +23,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # pinned; reads rust-toolchain.toml
       - name: Validate protected source, guest inputs, and privileges
         id: runner
-        env:
-          O3K_LVM_GUEST_IMAGE_PATH: ${{ vars.O3K_LVM_GUEST_IMAGE_PATH }}
-          O3K_LVM_GUEST_SSH_PRIVATE_KEY: ${{ secrets.O3K_LVM_GUEST_SSH_PRIVATE_KEY }}
-          O3K_LVM_GUEST_SSH_USER: ${{ vars.O3K_LVM_GUEST_SSH_USER }}
         run: |
           set -euo pipefail
           test "${GITHUB_REPOSITORY}" = "kubedoio/o3k-rust"
           test "${GITHUB_REF}" = "refs/heads/main"
           sudo -n true
           test -w "${GITHUB_WORKSPACE}"
-          test -n "${O3K_LVM_GUEST_IMAGE_PATH}"
-          test -f "${O3K_LVM_GUEST_IMAGE_PATH}"
-          test -n "${O3K_LVM_GUEST_SSH_PRIVATE_KEY}"
-          test -f "${O3K_LVM_GUEST_SSH_PRIVATE_KEY}"
-          test -n "${O3K_LVM_GUEST_SSH_USER}"
           run_slug="$(printf '%s' "${GITHUB_RUN_ID}" | tr -cd '[:alnum:]' | head -c 16)"
           test -n "${run_slug}"
           printf 'run_slug=%s\n' "${run_slug}" >> "${GITHUB_OUTPUT}"
+      - name: Prepare pinned disposable CirrOS guest and ephemeral SSH key
+        env:
+          CIRROS_IMAGE_URL: https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-x86_64-disk.img
+          CIRROS_IMAGE_SHA256: 7d6355852aeb6dbcd191bcda7cd74f1536cfe5cbf8a10495a7283a8396e4b75b
+        run: |
+          set -euo pipefail
+          image="${RUNNER_TEMP}/o3k-lvm-cirros-${{ steps.runner.outputs.run_slug }}.img"
+          key="${RUNNER_TEMP}/o3k-lvm-guest-${{ steps.runner.outputs.run_slug }}.key"
+          curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 \
+            --proto '=https' --tlsv1.2 --output "${image}" "${CIRROS_IMAGE_URL}"
+          printf '%s  %s\n' "${CIRROS_IMAGE_SHA256}" "${image}" \
+            | sha256sum --check --strict --status
+          chmod 0644 "${image}"
+          ssh-keygen -q -t ed25519 -N '' -f "${key}"
+          chmod 0600 "${key}"
+          printf 'O3K_LVM_GUEST_IMAGE_PATH=%s\n' "${image}" >> "${GITHUB_ENV}"
+          printf 'O3K_LVM_GUEST_SSH_PRIVATE_KEY=%s\n' "${key}" >> "${GITHUB_ENV}"
+          printf 'O3K_LVM_GUEST_SSH_USER=cirros\n' >> "${GITHUB_ENV}"
       - name: Provision disposable tagged LVM profile
         env:
           O3K_LVM_RUN_ID: ${{ github.run_id }}
@@ -63,9 +72,6 @@ jobs:
           O3K_LVM_VOLUME_GROUP: o3k-lvm-${{ steps.runner.outputs.run_slug }}
           O3K_LVM_THIN_POOL: o3k-thin-${{ steps.runner.outputs.run_slug }}
           O3K_LVM_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
-          O3K_LVM_GUEST_IMAGE_PATH: ${{ vars.O3K_LVM_GUEST_IMAGE_PATH }}
-          O3K_LVM_GUEST_SSH_PRIVATE_KEY: ${{ secrets.O3K_LVM_GUEST_SSH_PRIVATE_KEY }}
-          O3K_LVM_GUEST_SSH_USER: ${{ vars.O3K_LVM_GUEST_SSH_USER }}
         run: sudo -n --preserve-env=GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_LVM_RUN_ID,O3K_LVM_STATE_BASE,O3K_LVM_VOLUME_GROUP,O3K_LVM_THIN_POOL,O3K_LVM_PROVIDER_NAMESPACE,O3K_LVM_GUEST_IMAGE_PATH,O3K_LVM_GUEST_SSH_PRIVATE_KEY,O3K_LVM_GUEST_SSH_USER bash scripts/real-lvm-guest-gate.sh
       - name: Tear down disposable tagged LVM profile
         if: always()
@@ -84,3 +90,17 @@ jobs:
           name: lvm-real-guest-evidence
           if-no-files-found: error
           path: target/lvm-real-guest-artifacts/lvm-real-guest-result.json
+      - name: Remove exact disposable guest inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          case "${O3K_LVM_GUEST_IMAGE_PATH:-}" in
+            "${RUNNER_TEMP}/o3k-lvm-cirros-${{ steps.runner.outputs.run_slug }}.img") rm -f -- "${O3K_LVM_GUEST_IMAGE_PATH}" ;;
+            "") ;;
+            *) exit 1 ;;
+          esac
+          case "${O3K_LVM_GUEST_SSH_PRIVATE_KEY:-}" in
+            "${RUNNER_TEMP}/o3k-lvm-guest-${{ steps.runner.outputs.run_slug }}.key") rm -f -- "${O3K_LVM_GUEST_SSH_PRIVATE_KEY}" "${O3K_LVM_GUEST_SSH_PRIVATE_KEY}.pub" ;;
+            "") ;;
+            *) exit 1 ;;
+          esac
