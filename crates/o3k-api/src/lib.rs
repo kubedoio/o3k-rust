@@ -50,10 +50,11 @@ use crate::{
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::microversion_middleware,
     network::{
-        create_floating_ip, create_network, create_port, create_subnet, delete_floating_ip,
-        delete_network, delete_port, delete_subnet, list_extensions, list_floating_ips,
-        list_networks, list_ports, list_subnets, show_floating_ip, show_network, show_port,
-        show_subnet, update_floating_ip,
+        create_floating_ip, create_network, create_network_policy, create_port, create_subnet,
+        delete_floating_ip, delete_network, delete_network_policy, delete_port, delete_subnet,
+        list_extensions, list_floating_ips, list_network_policies, list_networks, list_ports,
+        list_subnets, show_floating_ip, show_network, show_network_policy, show_port, show_subnet,
+        update_floating_ip, update_network_policy,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -238,6 +239,16 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
         .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
+        .route(
+            "/v2.0/network-policies",
+            get(list_network_policies).post(create_network_policy),
+        )
+        .route(
+            "/v2.0/network-policies/{id}",
+            get(show_network_policy)
+                .put(update_network_policy)
+                .delete(delete_network_policy),
+        )
         .route(
             "/v2.0/floatingips",
             get(list_floating_ips).post(create_floating_ip),

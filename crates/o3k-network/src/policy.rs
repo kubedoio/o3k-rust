@@ -477,6 +477,7 @@ mod tests {
 
     fn policy(endpoint_id: Uuid) -> NetworkPlanIntent {
         NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(10),
             endpoint_id,
             direction: PolicyDirection::Ingress,
             protocol: NetworkProtocol::Tcp,
@@ -494,6 +495,7 @@ mod tests {
         ports: Option<o3k_domain::PortRange>,
     ) -> NetworkPlanIntent {
         NetworkPlanIntent::Policy(PolicyIntent {
+            id: Uuid::from_u128(11),
             endpoint_id,
             direction,
             protocol,

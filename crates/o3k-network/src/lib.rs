@@ -10,7 +10,7 @@ use std::{
 
 use o3k_domain::{
     AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
-    PolicyDirection,
+    PolicyDirection, PolicyIntent,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -170,6 +170,7 @@ mod p9_plan_tests {
             egress: vec![],
             public_addresses: vec![],
             policies: vec![PolicyIntent {
+                id: Uuid::from_u128(10),
                 endpoint_id: Uuid::from_u128(3),
                 direction: PolicyDirection::Egress,
                 protocol: NetworkProtocol::Tcp,
@@ -3503,6 +3504,7 @@ pub struct AttachmentPlanInput<'a> {
     pub deadline_unix_ms: u64,
     pub public_address: Option<std::net::Ipv4Addr>,
     pub external_realm_id: Option<Uuid>,
+    pub policies: Vec<PolicyIntent>,
 }
 
 pub fn compile_attachment_plan(
@@ -3520,7 +3522,9 @@ pub fn compile_attachment_plan(
         deadline_unix_ms,
         public_address,
         external_realm_id,
+        policies,
     } = input;
+    let has_policies = !policies.is_empty();
     let (network, prefix_len) = subnet_cidr
         .split_once('/')
         .ok_or(NetworkPlanError::InvalidPrefix)?;
@@ -3572,7 +3576,7 @@ pub fn compile_attachment_plan(
                 }]
             })
             .unwrap_or_default(),
-        policies: Vec::new(),
+        policies,
         state: o3k_domain::NetworkIntentState::Requested,
     };
     let mut capabilities: HashSet<NetworkCapability> = [
@@ -3587,6 +3591,9 @@ pub fn compile_attachment_plan(
     if external_realm_id.is_some() {
         capabilities.insert(NetworkCapability::Routing);
         capabilities.insert(NetworkCapability::Nat);
+    }
+    if has_policies {
+        capabilities.insert(NetworkCapability::StatefulPolicy);
     }
     compile_node_network_plan(
         &intent,
@@ -3865,6 +3872,23 @@ fn require_capability(
         .ok_or(NetworkPlanError::UnsupportedCapability(capability))
 }
 
+fn validate_policy_shape(policy: &PolicyIntent) -> Result<(), NetworkError> {
+    if policy.id.is_nil()
+        || policy.ports.is_some_and(|ports| ports.start > ports.end)
+        || policy.ports.is_some_and(|_| {
+            matches!(
+                policy.protocol,
+                NetworkProtocol::Any | NetworkProtocol::Icmp
+            )
+        })
+        || (matches!(policy.direction, PolicyDirection::Ingress) && policy.destination.is_some())
+        || (matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some())
+    {
+        return Err(NetworkError::InvalidRequest);
+    }
+    Ok(())
+}
+
 /// Canonical binding state of a port on its selected host.
 ///
 /// The durable store persists the string projections (persistence
@@ -4131,6 +4155,267 @@ impl NetworkService {
                 Err(map_store_error(error))
             }
         }
+    }
+
+    /// Returns the durable canonical policy rules for a network. A network
+    /// without policy state is intentionally an empty policy, not an implicit
+    /// provider default.
+    pub async fn list_policies_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<Vec<PolicyIntent>, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        let Some(record) = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        else {
+            return Ok(Vec::new());
+        };
+        let intent: NetworkIntent =
+            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+        if intent.id != network_id || intent.project_id != project_id {
+            return Err(NetworkError::InvalidRequest);
+        }
+        Ok(intent.policies)
+    }
+
+    /// Adds or replaces one canonical policy rule and persists the complete
+    /// network intent under one generation-fenced store record. The record is
+    /// keyed by the public network ID; provider-native rules are never stored.
+    pub async fn upsert_policy_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        policy: PolicyIntent,
+    ) -> Result<PolicyIntent, NetworkError> {
+        let _guard = self.lock().await;
+        let mut intent = self
+            .load_policy_intent_locked(project_id, network_id)
+            .await?;
+        if policy.endpoint_id.is_nil()
+            || !intent
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == policy.endpoint_id)
+            || intent.policies.iter().any(|existing| {
+                existing.id == policy.id && existing.endpoint_id != policy.endpoint_id
+            })
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        validate_policy_shape(&policy)?;
+        intent.policies.retain(|existing| existing.id != policy.id);
+        intent.policies.push(policy.clone());
+        intent.policies.sort_by_key(|value| value.id);
+        intent.generation = intent.generation.saturating_add(1);
+        self.persist_policy_intent_locked(project_id, network_id, intent)
+            .await?;
+        Ok(policy)
+    }
+
+    pub async fn delete_policy_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        policy_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        let mut intent = self
+            .load_policy_intent_locked(project_id, network_id)
+            .await?;
+        let original = intent.policies.len();
+        intent.policies.retain(|policy| policy.id != policy_id);
+        if intent.policies.len() == original {
+            return Err(NetworkError::NotFound);
+        }
+        intent.generation = intent.generation.saturating_add(1);
+        self.persist_policy_intent_locked(project_id, network_id, intent)
+            .await
+    }
+
+    /// Projects a successful provider observation onto the durable intent.
+    /// Dispatch alone is not success; callers invoke this only after the
+    /// executor returned an observed terminal success.
+    pub async fn mark_network_intent_active_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        let Some(record) = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        else {
+            return Err(NetworkError::NotFound);
+        };
+        let mut intent: NetworkIntent =
+            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+        intent.state = o3k_domain::NetworkIntentState::Active;
+        intent.generation = intent.generation.saturating_add(1);
+        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
+        self.inner
+            .repository
+            .update_network_intent(
+                project_id,
+                &network_id,
+                record.generation,
+                &payload,
+                record.plan_fingerprint_sha256.as_deref(),
+                "active",
+            )
+            .await
+            .map_err(map_store_error)?;
+        Ok(())
+    }
+
+    async fn load_policy_intent_locked(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<NetworkIntent, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        if let Some(record) = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let intent: NetworkIntent =
+                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+            if intent.id != network_id || intent.project_id != project_id {
+                return Err(NetworkError::InvalidRequest);
+            }
+            return Ok(intent);
+        }
+        let subnet = self
+            .inner
+            .repository
+            .list_subnets_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
+            .ok_or(NetworkError::NotFound)?;
+        let (network, prefix_len) = subnet
+            .cidr
+            .split_once('/')
+            .ok_or(NetworkError::InvalidRequest)?;
+        let prefix = o3k_domain::Ipv4Prefix::new(
+            network.parse().map_err(|_| NetworkError::InvalidRequest)?,
+            prefix_len
+                .parse()
+                .map_err(|_| NetworkError::InvalidRequest)?,
+        )
+        .ok_or(NetworkError::InvalidRequest)?;
+        let ports = self
+            .inner
+            .repository
+            .list_ports_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(NetworkIntent {
+            id: network_id,
+            project_id: project_id.to_owned(),
+            realm: AddressRealm {
+                id: network_id,
+                project_id: project_id.to_owned(),
+                prefix,
+                overlapping_prefixes: false,
+            },
+            address_pools: vec![o3k_domain::AddressPool {
+                id: subnet.id,
+                realm_id: network_id,
+                project_id: project_id.to_owned(),
+                prefix,
+                gateway: Some(subnet.gateway_ip),
+                first_usable: subnet.allocation_start,
+                last_usable: subnet.allocation_end,
+            }],
+            endpoints: ports
+                .into_iter()
+                .map(|port| o3k_domain::EndpointIntent {
+                    id: port.id,
+                    project_id: port.project_id,
+                    mac: port.mac_address,
+                    fixed_ip: port.fixed_ip,
+                    generation: 1,
+                })
+                .collect(),
+            routes: Vec::new(),
+            gateways: Vec::new(),
+            egress: Vec::new(),
+            public_addresses: Vec::new(),
+            policies: Vec::new(),
+            generation: 1,
+            state: o3k_domain::NetworkIntentState::Requested,
+        })
+    }
+
+    async fn persist_policy_intent_locked(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        intent: NetworkIntent,
+    ) -> Result<(), NetworkError> {
+        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
+        let fingerprint = format!("policy-generation-{}", intent.generation);
+        let repository = self.inner.repository.as_ref();
+        if let Some(existing) = repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            repository
+                .update_network_intent(
+                    project_id,
+                    &network_id,
+                    existing.generation,
+                    &payload,
+                    Some(&fingerprint),
+                    existing.status.as_str(),
+                )
+                .await
+                .map_err(map_store_error)?;
+        } else {
+            repository
+                .insert_network_intent(&o3k_store::NetworkIntentRecord {
+                    id: network_id,
+                    project_id: project_id.to_owned(),
+                    generation: 1,
+                    payload,
+                    plan_fingerprint_sha256: Some(fingerprint),
+                    status: "requested".to_owned(),
+                })
+                .await
+                .map_err(map_store_error)?;
+        }
+        Ok(())
     }
 
     pub async fn list_networks(
@@ -5240,6 +5525,7 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_domain::PolicyAction;
 
     fn auth(project_id: &str) -> AuthContext {
         AuthContext::new(
@@ -6145,6 +6431,102 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn policy_intent_is_durable_generation_fenced_and_compiled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("policy-intent");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let project = "project-a";
+        let network = service
+            .create_network(&auth(project), "policy-net".to_owned())
+            .await?;
+        service
+            .create_subnet(
+                &auth(project),
+                network.id,
+                "policy-subnet".to_owned(),
+                "10.20.0.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port(&auth(project), network.id, "policy-port".to_owned())
+            .await?;
+        let policy_id = Uuid::now_v7();
+        let policy = PolicyIntent {
+            id: policy_id,
+            endpoint_id: port.id,
+            direction: PolicyDirection::Ingress,
+            protocol: NetworkProtocol::Tcp,
+            ports: Some(o3k_domain::PortRange {
+                start: 8080,
+                end: 8080,
+            }),
+            source: Some(
+                o3k_domain::Ipv4Prefix::new("198.51.100.0".parse()?, 24)
+                    .ok_or("invalid source prefix")?,
+            ),
+            destination: None,
+            action: PolicyAction::Deny,
+        };
+        service
+            .upsert_policy_for_project(project, network.id, policy.clone())
+            .await?;
+        assert_eq!(
+            service
+                .list_policies_for_project(project, network.id)
+                .await?,
+            vec![policy.clone()]
+        );
+        let record = store
+            .get_network_intent(project, &network.id)
+            .await?
+            .ok_or("policy intent not persisted")?;
+        assert_eq!(record.status, "requested");
+        assert!(record.payload.contains(&policy_id.to_string()));
+
+        let compiled = compile_attachment_plan(AttachmentPlanInput {
+            endpoint_id: port.id,
+            realm_id: network.id,
+            project_id: project,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: "10.20.0.0/24",
+            node_id: "network-agent-1",
+            operation_id: Uuid::now_v7(),
+            deadline_unix_ms: 1,
+            public_address: None,
+            external_realm_id: None,
+            policies: vec![policy.clone()],
+        })?;
+        assert!(compiled.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::Policy(value) if value == &policy
+        )));
+
+        service
+            .delete_policy_for_project(project, network.id, policy_id)
+            .await?;
+        assert!(
+            service
+                .list_policies_for_project(project, network.id)
+                .await?
+                .is_empty()
+        );
+        assert!(matches!(
+            service
+                .delete_policy_for_project("other-project", network.id, policy_id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        Ok(())
+    }
+
     #[test]
     fn attachment_plan_can_carry_operator_owned_routed_egress() -> Result<(), NetworkPlanError> {
         let endpoint_id = Uuid::from_u128(11);
@@ -6161,6 +6543,7 @@ mod tests {
             deadline_unix_ms: 1,
             public_address: None,
             external_realm_id: Some(external_realm_id),
+            policies: Vec::new(),
         })?;
         assert!(plan.intents.iter().any(|intent| matches!(
             intent,

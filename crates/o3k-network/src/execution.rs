@@ -646,6 +646,7 @@ mod tests {
             egress: vec![],
             public_addresses: vec![],
             policies: vec![PolicyIntent {
+                id: Uuid::from_u128(10),
                 endpoint_id: Uuid::from_u128(3),
                 direction: PolicyDirection::Egress,
                 protocol: NetworkProtocol::Tcp,

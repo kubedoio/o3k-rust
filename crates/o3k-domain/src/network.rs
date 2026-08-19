@@ -187,6 +187,9 @@ pub struct PortRange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyIntent {
+    /// Stable control-plane identity for update/delete/replay. Provider rule
+    /// names and handles are derived observations, never canonical identity.
+    pub id: Uuid,
     pub endpoint_id: Uuid,
     pub direction: PolicyDirection,
     pub protocol: NetworkProtocol,

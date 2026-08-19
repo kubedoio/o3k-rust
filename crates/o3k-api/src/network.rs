@@ -5,10 +5,11 @@ use std::{net::Ipv4Addr, sync::Arc};
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{Path, Query, State, rejection::JsonRejection},
     http::StatusCode,
     response::IntoResponse,
 };
+use o3k_domain::{NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange};
 use o3k_network::{
     NetworkError, NetworkRecord, NetworkService, PortRecord, PublicAddressAllocator,
     PublicAddressBinding, PublicAddressError, SubnetRecord,
@@ -137,6 +138,467 @@ pub(crate) struct PortResponse {
 pub(crate) struct FixedIpResponse {
     subnet_id: String,
     ip_address: Ipv4Addr,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct NetworkPolicyQuery {
+    network_id: Uuid,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct NetworkPolicyRequestBody {
+    policy: NetworkPolicyRequest,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct NetworkPolicyRequest {
+    network_id: Uuid,
+    endpoint_id: Uuid,
+    direction: String,
+    protocol: String,
+    ports: Option<PolicyPortRange>,
+    source: Option<String>,
+    destination: Option<String>,
+    action: String,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct PolicyPortRange {
+    start: u16,
+    end: u16,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct NetworkPolicyEnvelope {
+    policy: NetworkPolicyResponse,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct NetworkPolicyList {
+    policies: Vec<NetworkPolicyResponse>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct NetworkPolicyResponse {
+    id: String,
+    network_id: String,
+    endpoint_id: String,
+    direction: &'static str,
+    protocol: &'static str,
+    ports: Option<PolicyPortRange>,
+    source: Option<String>,
+    destination: Option<String>,
+    action: &'static str,
+    status: &'static str,
+}
+
+fn policy_response(network_id: Uuid, policy: PolicyIntent) -> NetworkPolicyResponse {
+    NetworkPolicyResponse {
+        id: policy.id.to_string(),
+        network_id: network_id.to_string(),
+        endpoint_id: policy.endpoint_id.to_string(),
+        direction: match policy.direction {
+            PolicyDirection::Ingress => "ingress",
+            PolicyDirection::Egress => "egress",
+        },
+        protocol: match policy.protocol {
+            NetworkProtocol::Any => "any",
+            NetworkProtocol::Tcp => "tcp",
+            NetworkProtocol::Udp => "udp",
+            NetworkProtocol::Icmp => "icmp",
+        },
+        ports: policy.ports.map(|ports| PolicyPortRange {
+            start: ports.start,
+            end: ports.end,
+        }),
+        source: policy
+            .source
+            .map(|prefix| format!("{}/{}", prefix.network, prefix.prefix_len)),
+        destination: policy
+            .destination
+            .map(|prefix| format!("{}/{}", prefix.network, prefix.prefix_len)),
+        action: match policy.action {
+            PolicyAction::Allow => "allow",
+            PolicyAction::Deny => "deny",
+        },
+        // The API mutation is durable intent. Host realization is reported by
+        // the agent observation path, so this projection must not claim active
+        // before that evidence exists.
+        status: "pending",
+    }
+}
+
+fn parse_policy_prefix(value: Option<String>) -> Result<Option<o3k_domain::Ipv4Prefix>, ()> {
+    value
+        .map(|value| {
+            let (address, length) = value.split_once('/').ok_or(())?;
+            let address = address.parse().map_err(|_| ())?;
+            let length = length.parse().map_err(|_| ())?;
+            o3k_domain::Ipv4Prefix::new(address, length).ok_or(())
+        })
+        .transpose()
+}
+
+fn parse_policy_request(
+    request: NetworkPolicyRequest,
+    id: Uuid,
+) -> Result<(Uuid, PolicyIntent), ()> {
+    let direction = match request.direction.as_str() {
+        "ingress" => PolicyDirection::Ingress,
+        "egress" => PolicyDirection::Egress,
+        _ => return Err(()),
+    };
+    let protocol = match request.protocol.as_str() {
+        "any" => NetworkProtocol::Any,
+        "tcp" => NetworkProtocol::Tcp,
+        "udp" => NetworkProtocol::Udp,
+        "icmp" => NetworkProtocol::Icmp,
+        _ => return Err(()),
+    };
+    let action = match request.action.as_str() {
+        "allow" => PolicyAction::Allow,
+        "deny" => PolicyAction::Deny,
+        _ => return Err(()),
+    };
+    let source = parse_policy_prefix(request.source)?;
+    let destination = parse_policy_prefix(request.destination)?;
+    Ok((
+        request.network_id,
+        PolicyIntent {
+            id,
+            endpoint_id: request.endpoint_id,
+            direction,
+            protocol,
+            ports: request.ports.map(|ports| PortRange {
+                start: ports.start,
+                end: ports.end,
+            }),
+            source,
+            destination,
+            action,
+        },
+    ))
+}
+
+pub(crate) async fn list_network_policies(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<NetworkPolicyQuery>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .list_policies_for_project(auth.effective_scope().id().as_str(), query.network_id)
+        .await
+    {
+        Ok(policies) => Json(NetworkPolicyList {
+            policies: policies
+                .into_iter()
+                .map(|policy| policy_response(query.network_id, policy))
+                .collect(),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn create_network_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<NetworkPolicyRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid policy request",
+        );
+    };
+    let (network_id, policy) = match parse_policy_request(body.policy, Uuid::now_v7()) {
+        Ok(value) => value,
+        Err(()) => {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "invalid policy shape",
+            );
+        }
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project_id = auth.effective_scope().id().as_str();
+    let endpoint_id = policy.endpoint_id;
+    let policy = match service
+        .upsert_policy_for_project(project_id, network_id, policy)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) =
+        dispatch_policy_network(&state, project_id, network_id, endpoint_id).await
+    {
+        return response;
+    }
+    (
+        StatusCode::CREATED,
+        Json(NetworkPolicyEnvelope {
+            policy: policy_response(network_id, policy),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn show_network_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(query): Query<NetworkPolicyQuery>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .list_policies_for_project(auth.effective_scope().id().as_str(), query.network_id)
+        .await
+    {
+        Ok(policies) => match policies.into_iter().find(|policy| policy.id == id) {
+            Some(policy) => Json(NetworkPolicyEnvelope {
+                policy: policy_response(query.network_id, policy),
+            })
+            .into_response(),
+            None => network_error(o3k_network::NetworkError::NotFound),
+        },
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_network_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<NetworkPolicyRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid policy request",
+        );
+    };
+    let (network_id, policy) = match parse_policy_request(body.policy, id) {
+        Ok(value) => value,
+        Err(()) => {
+            return keystone_error(
+                StatusCode::BAD_REQUEST,
+                "Bad Request",
+                "invalid policy shape",
+            );
+        }
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project_id = auth.effective_scope().id().as_str();
+    let endpoint_id = policy.endpoint_id;
+    let policy = match service
+        .upsert_policy_for_project(project_id, network_id, policy)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) =
+        dispatch_policy_network(&state, project_id, network_id, endpoint_id).await
+    {
+        return response;
+    }
+    Json(NetworkPolicyEnvelope {
+        policy: policy_response(network_id, policy),
+    })
+    .into_response()
+}
+
+pub(crate) async fn delete_network_policy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    Query(query): Query<NetworkPolicyQuery>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project_id = auth.effective_scope().id().as_str();
+    let endpoint_id = match service
+        .list_policies_for_project(project_id, query.network_id)
+        .await
+    {
+        Ok(policies) => match policies.into_iter().find(|policy| policy.id == id) {
+            Some(policy) => policy.endpoint_id,
+            None => return network_error(o3k_network::NetworkError::NotFound),
+        },
+        Err(error) => return network_error(error),
+    };
+    if let Err(error) = service
+        .delete_policy_for_project(project_id, query.network_id, id)
+        .await
+    {
+        return network_error(error);
+    }
+    if let Err(response) =
+        dispatch_policy_network(&state, project_id, query.network_id, endpoint_id).await
+    {
+        return response;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn dispatch_policy_network(
+    state: &AppState,
+    project_id: &str,
+    network_id: Uuid,
+    endpoint_id: Uuid,
+) -> Result<(), axum::response::Response> {
+    let Some(dispatcher) = state.network_dispatcher.as_ref() else {
+        return Ok(());
+    };
+    let Some(controller) = state.network_controller.as_ref() else {
+        return Ok(());
+    };
+    let network = network_service(state)?;
+    let ports = network
+        .list_ports_for_project(project_id)
+        .await
+        .map_err(network_error)?;
+    let port = ports
+        .into_iter()
+        .find(|port| port.network_id == network_id && port.id == endpoint_id)
+        .ok_or_else(|| network_error(o3k_network::NetworkError::NotFound))?;
+    let host = port.binding_host.clone().ok_or_else(|| {
+        keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "endpoint is not bound",
+        )
+    })?;
+    let agent = if let Some(registry) = state.agent_registry.as_ref()
+        && let Some(agent) = registry.snapshot(&host).await
+    {
+        o3k_network::NetworkAgentIdentity {
+            agent_id: agent.agent_id,
+            agent_epoch: agent.agent_epoch,
+        }
+    } else if let Some(agent) = state.network_agent.as_ref()
+        && agent.agent_id == host
+    {
+        agent.clone()
+    } else {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "selected network agent is unavailable",
+        ));
+    };
+    let subnet_id = port.subnet_id.ok_or_else(|| {
+        keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "endpoint has no fixed subnet",
+        )
+    })?;
+    let subnet = network
+        .get_subnet_for_project(project_id, subnet_id)
+        .await
+        .map_err(network_error)?;
+    let policies = network
+        .list_policies_for_project(project_id, network_id)
+        .await
+        .map_err(network_error)?
+        .into_iter()
+        .filter(|policy| policy.endpoint_id == port.id)
+        .collect();
+    let operation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        serde_json::to_string(&policies)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+        endpoint_id: port.id,
+        realm_id: port.network_id,
+        project_id,
+        mac: &port.mac_address,
+        fixed_ip: port.fixed_ip,
+        subnet_cidr: &subnet.cidr,
+        node_id: &host,
+        operation_id,
+        deadline_unix_ms: unix_time_millis().saturating_add(30_000),
+        public_address: None,
+        external_realm_id: state.network_external_realm_id,
+        policies,
+    })
+    .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
+    let status = dispatcher
+        .dispatch(o3k_network::NetworkPlanCommand {
+            command_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("policy:{operation_id}").as_bytes(),
+            ),
+            operation_id,
+            idempotency_key: format!("o3k:network:policy:{project_id}:{network_id}:{operation_id}"),
+            action: o3k_network::NetworkPlanAction::Apply,
+            target: agent,
+            controller: controller.clone(),
+            deadline_unix_ms: unix_time_millis().saturating_add(30_000),
+            plan,
+        })
+        .await
+        .map_err(|error| {
+            keystone_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Service Unavailable",
+                error.to_string(),
+            )
+        })?;
+    if status != o3k_network::NetworkPlanStatus::Succeeded {
+        return Err(keystone_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Service Unavailable",
+            "policy realization requires observation",
+        ));
+    }
+    network
+        .mark_network_intent_active_for_project(project_id, network_id)
+        .await
+        .map_err(network_error)?;
+    Ok(())
 }
 
 pub(crate) fn port_response(value: PortRecord) -> PortResponse {
@@ -334,6 +796,13 @@ async fn dispatch_public_binding(
         .get_subnet_for_project(&binding.project_id, subnet_id)
         .await
         .map_err(network_error)?;
+    let policies = network
+        .list_policies_for_project(&binding.project_id, port.network_id)
+        .await
+        .map_err(network_error)?
+        .into_iter()
+        .filter(|policy| policy.endpoint_id == port.id)
+        .collect();
     let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
     let operation_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
@@ -355,6 +824,7 @@ async fn dispatch_public_binding(
         deadline_unix_ms,
         public_address: Some(binding.public_address),
         external_realm_id: state.network_external_realm_id,
+        policies,
     })
     .map_err(|error| keystone_error(StatusCode::BAD_REQUEST, "Bad Request", error.to_string()))?;
     let command_id = Uuid::new_v5(

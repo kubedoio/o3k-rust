@@ -49,6 +49,174 @@ async fn health_endpoint_is_machine_readable() -> Result<(), Box<dyn std::error:
 }
 
 #[tokio::test]
+async fn network_policy_api_persists_updates_and_deletes_canonical_intent()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = std::path::PathBuf::from(format!(
+        "/tmp/o3k-api-network-policy-{}",
+        uuid::Uuid::now_v7()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let identity = test_service("http://127.0.0.1:8080").await?;
+    let project_id = "eba29e2d-53de-461d-ae91-ede7402713cb";
+    let store = std::sync::Arc::new(o3k_store::testkit::open_memory().await?);
+    let network = NetworkService::open(root.join("network"), store).await?;
+    let network_record = network
+        .create_network_for_project(project_id, "policy-network".to_owned())
+        .await?;
+    network
+        .create_subnet_for_project(
+            project_id,
+            network_record.id,
+            "policy-subnet".to_owned(),
+            "10.0.0.0/24".to_owned(),
+            None,
+            None,
+            None,
+        )
+        .await?;
+    let port = network
+        .create_port_for_project(project_id, network_record.id, "policy-port".to_owned())
+        .await?;
+    network
+        .record_binding_intent(project_id, port.id, "network-agent")
+        .await?;
+    let dispatcher = RecordingNetworkDispatcher::default();
+    let commands = dispatcher.commands.clone();
+    let state = o3k_api::AppState::new()
+        .with_identity(identity)
+        .with_network(network.clone())
+        .with_network_dispatcher(
+            Arc::new(dispatcher),
+            o3k_network::NetworkControllerLease {
+                controller_id: "controller-test".to_owned(),
+                controller_epoch: "epoch-1".to_owned(),
+                fencing_token: 1,
+            },
+        )
+        .with_network_agent_identity(o3k_network::NetworkAgentIdentity {
+            agent_id: "network-agent".to_owned(),
+            agent_epoch: "network-epoch-1".to_owned(),
+        });
+    let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
+    let token_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v3/auth/tokens")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(auth.to_string()))?,
+        )
+        .await?;
+    let token = token_response
+        .headers()
+        .get("x-subject-token")
+        .ok_or("token missing")?
+        .to_str()?
+        .to_owned();
+    let create = serde_json::json!({
+        "policy": {
+            "network_id": network_record.id,
+            "endpoint_id": port.id,
+            "direction": "ingress",
+            "protocol": "tcp",
+            "ports": {"start": 8080, "end": 8080},
+            "source": "198.51.100.0/24",
+            "action": "deny"
+        }
+    });
+    let created = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/network-policies")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(create.to_string()))?,
+        )
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 1);
+    assert!(
+        commands.lock().map_err(|_| "commands poisoned")?[0]
+            .plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, o3k_domain::NetworkPlanIntent::Policy(_)))
+    );
+    let created_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(created.into_body(), 4096).await?)?;
+    let policy_id = created_body["policy"]["id"]
+        .as_str()
+        .ok_or("policy id missing")?;
+
+    let listed = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v2.0/network-policies?network_id={network_id}",
+                    network_id = network_record.id
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_body: Value =
+        serde_json::from_slice(&axum::body::to_bytes(listed.into_body(), 4096).await?)?;
+    assert_eq!(listed_body["policies"].as_array().map(Vec::len), Some(1));
+
+    let update = serde_json::json!({
+        "policy": {
+            "network_id": network_record.id,
+            "endpoint_id": port.id,
+            "direction": "ingress",
+            "protocol": "tcp",
+            "ports": {"start": 8080, "end": 8080},
+            "source": "198.51.100.0/24",
+            "action": "allow"
+        }
+    });
+    let updated = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!(
+                    "/v2.0/network-policies/{policy_id}?network_id={network_id}",
+                    network_id = network_record.id
+                ))
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(update.to_string()))?,
+        )
+        .await?;
+    assert_eq!(updated.status(), StatusCode::OK);
+    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 2);
+
+    let deleted = o3k_api::router_with_state(state)
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri(format!(
+                    "/v2.0/network-policies/{policy_id}?network_id={network_id}",
+                    network_id = network_record.id
+                ))
+                .header("x-auth-token", &token)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 3);
+    assert!(
+        network
+            .list_policies_for_project(project_id, network_record.id)
+            .await?
+            .is_empty()
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(())
+}
+
+#[tokio::test]
 async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
 -> Result<(), Box<dyn std::error::Error>> {
     let root =
