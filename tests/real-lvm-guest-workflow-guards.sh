@@ -27,7 +27,7 @@ required = (
     "scripts/lvm-testlab-profile.sh cleanup",
     "if: always()",
     "if-no-files-found: error",
-    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607af02",
+    "actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808",
 )
 for needle in required:
     assert needle in text, needle
