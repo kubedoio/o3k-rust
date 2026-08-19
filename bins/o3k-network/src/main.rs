@@ -20,6 +20,12 @@ fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The workspace intentionally contains dependencies that expose both
+    // Rustls provider families.  Select the workspace's explicit `ring`
+    // provider before tonic constructs server TLS state; otherwise a
+    // process-level provider cannot be inferred reliably from feature
+    // unification.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
     let agent_id = required("O3K_NETWORK_AGENT_ID")?;
     let agent_epoch = required("O3K_NETWORK_AGENT_EPOCH")?;
