@@ -42,6 +42,7 @@ jobs:
       - name: Ensure MicroCeph and guest tooling are available
         run: |
           set -euo pipefail
+          export PATH="/snap/bin:${PATH}"
           if ! command -v microceph >/dev/null 2>&1; then
             sudo -n snap install microceph
             sudo -n snap refresh --hold microceph
@@ -88,6 +89,7 @@ jobs:
             printf 'O3K_CEPH_GUEST_SSH_USER=cirros\n'
           } >>"${GITHUB_ENV}"
       - name: Provision exact run-scoped MicroCeph RBD profile
+        id: profile
         env:
           O3K_CEPH_RUN_ID: ${{ github.run_id }}
           O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
@@ -134,7 +136,7 @@ jobs:
           sudo -n --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CAPACITY_BYTES,O3K_CEPH_VOLUME_SIZE_BYTES,O3K_CEPH_GUEST_IMAGE_PATH,O3K_CEPH_GUEST_SSH_PRIVATE_KEY,O3K_CEPH_GUEST_SSH_USER
           bash scripts/real-ceph-rbd-guest-gate.sh cleanup
       - name: Tear down exact run-scoped MicroCeph RBD profile
-        if: always()
+        if: always() && steps.profile.outcome == 'success'
         env:
           O3K_CEPH_RUN_ID: ${{ github.run_id }}
           O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab

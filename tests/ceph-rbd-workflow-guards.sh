@@ -30,6 +30,9 @@ for needle in (
     "--preserve-env=PATH,CARGO_HOME",
     'target_dir="${GITHUB_WORKSPACE}/target"',
     'chown -R "$(id -u):$(id -g)" "${target_dir}"',
+    'export PATH="/snap/bin:${PATH}"',
+    "id: profile",
+    "if: always() && steps.profile.outcome == 'success'",
 ):
     assert needle in workflow, needle
 assert "continue-on-error" not in workflow
