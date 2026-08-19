@@ -4,6 +4,7 @@ Status: Accepted
 
 Decision-accepted: explicit acceptance by the task requester, 2026-08-19
 Human-approval: task requester, explicit acceptance recorded in task instruction, 2026-08-19
+Superseded-by: SPEC-0029
 
 Related decision: [ADR-0170](../adr/ADR-0170-namespaced-routed-edge-fabric.md)
 Related issue: [#701](https://github.com/kubedoio/o3k-rust/issues/701)

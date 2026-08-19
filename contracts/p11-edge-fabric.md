@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Superseded-by: `contracts/p11-realm-overlay-fabric.md` for P11 v2
+
 Related architecture:
 
 - [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md)
@@ -9,9 +11,9 @@ Related architecture:
 - [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [execution-boundary contract](execution-boundaries.md)
 
-This contract is active for bounded P11 implementation now that ADR-0170 and
-SPEC-0028 have explicit acceptance. It remains an implementation contract, not
-runtime or product evidence.
+This contract remains the historical v1 implementation contract. It is
+superseded for P11 v2 by `contracts/p11-realm-overlay-fabric.md`; it remains
+useful only for v1 behavior that is explicitly retained by the v2 authority.
 
 ## Purpose
 

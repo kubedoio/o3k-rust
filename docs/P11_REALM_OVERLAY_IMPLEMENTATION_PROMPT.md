@@ -1,7 +1,8 @@
 # P11 implementation prompt — AddressRealm-encapsulated Edge Fabric v2
 
-**Do not use this prompt for privileged/runtime implementation while ADR-0171 or
-SPEC-0029 is still `Proposed`.**
+**ADR-0171 and SPEC-0029 are accepted. Use this prompt only for bounded
+implementation that follows those normative documents; it does not authorize
+unsupported product or real-host claims.**
 
 Repository: `kubedoio/o3k-rust`
 
@@ -44,7 +45,9 @@ Before modifying runtime code:
 12. inspect current compatibility/product-profile claims before modifying them.
 
 If ADR-0171 or SPEC-0029 is not `Accepted`, **stop runtime implementation**.
-Only architecture/docs/review work for the successor may proceed.
+Implementation may proceed in bounded, reviewable slices after the accepted
+architecture gate; the full P11 claim remains gated by the real-host evidence
+requirements below.
 
 If ADR-0171/SPEC-0029 become accepted, verify repository governance has also
 made the supersession relationship explicit. Do not silently combine conflicting
