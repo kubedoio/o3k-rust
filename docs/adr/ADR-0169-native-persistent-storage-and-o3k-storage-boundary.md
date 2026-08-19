@@ -78,6 +78,9 @@ real-guest storage gate may the same domain/provider contract be implemented by
 Volume, VolumeAttachment, and Snapshot lifecycle is proven against a real Ceph
 RBD backend, including real create/attach/I/O/detach/restart/snapshot/delete
 and foreign-image protection.
+The protected Ceph gate may use a pinned canonical MicroCeph deployment as its
+real RBD backend; MicroCeph is testbed provisioning, not a new O3K authority or
+canonical tenant-resource concept.
 Ceph credentials, keyrings, monitor addresses, and connection details remain
 typed secret-bearing adapter data and never enter public resources, ordinary
 logs/events, or evidence.

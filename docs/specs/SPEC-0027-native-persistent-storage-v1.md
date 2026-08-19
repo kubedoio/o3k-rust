@@ -127,7 +127,9 @@ real Ceph RBD backend, including create, attach, guest I/O, detach, restart,
 snapshot, delete, and foreign-image protection. RBD image names, pool names,
 monitor addresses, credentials, and keyrings remain adapter-local. RBD
 snapshot consistency and attachment scope must be explicitly documented
-before its gate.
+before its gate. The protected real-RBD gate may provision a pinned canonical
+MicroCeph deployment; MicroCeph is only testbed provisioning and does not
+become an O3K authority or canonical tenant-resource model.
 
 ## Required public compatibility subset
 

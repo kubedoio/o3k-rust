@@ -28,6 +28,7 @@ pub mod coordination;
 pub mod postgres;
 pub mod quota;
 mod server_state;
+pub mod storage;
 pub mod unified;
 
 pub use coordination::{
@@ -60,6 +61,9 @@ pub use artifact_transfer::{
     MAX_ARTIFACT_TRANSFER_BYTES, MAX_ARTIFACT_TRANSFER_CHUNK_BYTES, MAX_ARTIFACT_TRANSFER_RETRIES,
 };
 pub use server_state::{server_state_from_storage, server_state_to_storage};
+pub use storage::{
+    SnapshotRecord, StorageBackendRecord, StorageRepository, VolumeAttachmentRecordV1, VolumeRecord,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseHealth {
@@ -1511,12 +1515,12 @@ impl SqliteStore {
             return Err(StoreError::Corrupt(result));
         }
         let table_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('resources', 'operations', 'provider_refs', 'keypairs', 'server_keypairs', 'agent_commands', 'operation_retry_state', 'artifact_transfers', 'image_overlay_ownership', 'volume_attachments', 'keystone_domains', 'keystone_projects', 'keystone_users', 'keystone_roles', 'keystone_role_assignments', 'keystone_services', 'keystone_endpoints', 'keystone_regions', 'image_metadata', 'network_networks', 'network_subnets', 'network_ports', 'placement_providers', 'placement_inventories', 'placement_allocations', 'placement_allocation_resources', 'placement_allocation_intents', 'placement_allocation_intent_resources', 'native_storage_backends', 'native_volumes', 'native_volume_attachments', 'native_snapshots')",
         )
         .fetch_one(&self.pool)
         .await
         .map_err(StoreError::Database)?;
-        if table_count != 28 {
+        if table_count != 32 {
             return Err(StoreError::Corrupt("required table is missing".to_owned()));
         }
 
