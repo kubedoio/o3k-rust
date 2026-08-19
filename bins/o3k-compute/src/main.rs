@@ -4681,12 +4681,14 @@ mod tests {
             "qcow2",
             b"3333",
             "318aee3fed8c9d040d35a7fc1fa776fb31303833aa2de885354ddf3d44d8fb69",
-            unix_ms_now() + 100,
+            // Keep enough admission headroom for the full parallel suite;
+            // the transfer must expire only after it has been created.
+            unix_ms_now() + 1_000,
         )?;
         // Part with no manifest: nothing references it.
         std::fs::write(root.join(".orphan-1.part"), b"orphan")?;
         // Let the near-future offer expire before the reap runs.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
 
         reap_orphaned_transfer_parts(&root, "agent-1", None);
 
