@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::info;
+use uuid::Uuid;
 
 fn required(name: &str) -> Result<String, Box<dyn std::error::Error>> {
     env::var(name).map_err(|_| format!("missing required environment variable {name}").into())
@@ -28,6 +29,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(required("O3K_NETWORK_ROOT")?);
     let bridge_name = required("O3K_NETWORK_BRIDGE")?;
     let uplink = env::var("O3K_NETWORK_UPLINK").ok();
+    let external_realm = env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
+        .ok()
+        .map(|value| value.parse::<Uuid>())
+        .transpose()?;
+    // In routed mode the external uplink is a distinct north/south link for
+    // nftables/routing. It must never be enslaved into the tenant bridge by
+    // the flat attachment realizer. Flat-only mode retains the historical
+    // optional bridge-uplink behavior.
+    let flat_uplink = match env::var("O3K_NETWORK_BRIDGE_UPLINK").ok() {
+        Some(value) => Some(value),
+        None if external_realm.is_none() => uplink.clone(),
+        None => None,
+    };
     let ownership_root = PathBuf::from(required("O3K_NETWORK_OWNERSHIP_ROOT")?);
     let dhcp_root = PathBuf::from(required("O3K_NETWORK_DHCP_ROOT")?);
     let dnsmasq = PathBuf::from(required("O3K_NETWORK_DNSMASQ")?);
@@ -51,22 +65,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let flat = FlatNetworkRealizer::open(
         HostNetworkConfig {
             bridge_name,
-            uplink,
+            uplink: flat_uplink,
         },
         ownership_root,
         dhcp_root,
         dnsmasq,
     )?;
-    let routed = match env::var("O3K_NETWORK_EXTERNAL_REALM_ID") {
-        Ok(realm) => Some(LinuxRoutedProvider::open(
+    let routed = match external_realm {
+        Some(realm) => Some(LinuxRoutedProvider::open(
             RoutedExternalConfig {
-                external_realm_id: realm.parse()?,
+                external_realm_id: realm,
                 uplink: required("O3K_NETWORK_UPLINK")?,
                 bridge: required("O3K_NETWORK_BRIDGE")?,
             },
             PathBuf::from(required("O3K_NETWORK_ROUTED_ROOT")?),
         )?),
-        Err(_) => None,
+        None => None,
     };
     let policy = match env::var("O3K_NETWORK_POLICY_ROOT") {
         Ok(root) => Some(StatefulPolicyProvider::open(root)?),

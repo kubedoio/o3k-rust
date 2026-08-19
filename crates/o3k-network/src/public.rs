@@ -515,7 +515,8 @@ impl PublicAddressRealizer {
             PUBLIC_TABLE,
             "{",
             "comment",
-            PUBLIC_MARKER,
+            &format!("\"{}\"", PUBLIC_MARKER),
+            ";",
             "}",
         ];
         if !self
@@ -541,6 +542,7 @@ impl PublicAddressRealizer {
             ";",
             "policy",
             "accept",
+            ";",
             "}",
         ];
         let postrouting = [
@@ -559,6 +561,7 @@ impl PublicAddressRealizer {
             ";",
             "policy",
             "accept",
+            ";",
             "}",
         ];
         for address in &desired_addresses {
@@ -589,7 +592,7 @@ impl PublicAddressRealizer {
             let private_address = binding.private_address.to_string();
             let public_address = binding.public_address.to_string();
             let uplink = format!("\"{}\"", self.uplink);
-            let comment = format!("{}:{}", PUBLIC_MARKER, binding.endpoint_id);
+            let comment = format!("\"{}:{}\"", PUBLIC_MARKER, binding.endpoint_id);
             if !self
                 .command
                 .run(
@@ -727,7 +730,8 @@ impl PublicAddressRealizer {
                 PUBLIC_TABLE,
                 "{",
                 "comment",
-                PUBLIC_MARKER,
+                &format!("\"{}\"", PUBLIC_MARKER),
+                ";",
                 "}",
             ];
             if !self
@@ -753,6 +757,7 @@ impl PublicAddressRealizer {
                 ";",
                 "policy",
                 "accept",
+                ";",
                 "}",
             ];
             let postrouting = [
@@ -771,6 +776,7 @@ impl PublicAddressRealizer {
                 ";",
                 "policy",
                 "accept",
+                ";",
                 "}",
             ];
             for address in &desired_addresses {
@@ -801,7 +807,7 @@ impl PublicAddressRealizer {
                 let private_address = endpoint_addresses[endpoint_id].to_string();
                 let public_address = public_address.to_string();
                 let uplink = format!("\"{}\"", self.uplink);
-                let comment = format!("{}:{}", PUBLIC_MARKER, endpoint_id);
+                let comment = format!("\"{}:{}\"", PUBLIC_MARKER, endpoint_id);
                 if !self
                     .command
                     .run(
@@ -1194,7 +1200,8 @@ mod tests {
                 PUBLIC_TABLE,
                 "{",
                 "comment",
-                PUBLIC_MARKER,
+                &format!("\"{}\"", PUBLIC_MARKER),
+                ";",
                 "}"
             ]));
         assert!(

@@ -219,12 +219,13 @@ impl StatefulPolicyProvider {
                 "{",
                 "comment",
                 &format!(
-                    "{}:{}",
+                    "\"{}:{}\"",
                     MARKER,
                     self.ownership
                         .as_ref()
                         .map_or("unknown", |value| value.fingerprint.as_str())
                 ),
+                ";",
                 "}",
             ])
             .map_err(PolicyNetworkError::Storage)?
@@ -232,7 +233,7 @@ impl StatefulPolicyProvider {
                 .command
                 .run(&[
                     "add", "chain", "ip", TABLE, CHAIN, "{", "type", "filter", "hook", "forward",
-                    "priority", "-100", ";", "policy", "accept", "}",
+                    "priority", "-100", ";", "policy", "accept", ";", "}",
                 ])
                 .map_err(PolicyNetworkError::Storage)?
         {
@@ -287,22 +288,16 @@ impl StatefulPolicyProvider {
             if let Some(protocol) = protocol {
                 args.push(protocol);
                 if let Some(port) = port.as_deref() {
-                    args.extend([
-                        if matches!(policy.direction, PolicyDirection::Ingress) {
-                            "dport"
-                        } else {
-                            "sport"
-                        },
-                        port,
-                    ]);
+                    args.extend(["dport", port]);
                 }
             }
+            args.push("counter");
             args.push(if policy.action == PolicyAction::Allow {
                 "accept"
             } else {
                 "drop"
             });
-            let comment = format!("{}:{}", MARKER, index);
+            let comment = format!("\"{}:{}\"", MARKER, index);
             args.extend(["comment", &comment]);
             if !self
                 .command
@@ -631,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn ingress_ports_target_destination_and_egress_ports_target_source() {
+    fn ingress_and_egress_ports_target_destination() {
         let root = std::env::temp_dir().join(format!("o3k-policy-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
@@ -677,7 +672,7 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|call| { call.windows(2).any(|pair| pair == ["sport", "443-443"]) })
+                .any(|call| { call.windows(2).any(|pair| pair == ["dport", "443-443"]) })
         );
     }
 

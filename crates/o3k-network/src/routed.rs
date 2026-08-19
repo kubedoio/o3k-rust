@@ -294,7 +294,17 @@ impl LinuxRoutedProvider {
                 .command
                 .run(
                     "nft",
-                    &["add", "table", "ip", TABLE, "{", "comment", MARKER, "}"],
+                    &[
+                        "add",
+                        "table",
+                        "ip",
+                        TABLE,
+                        "{",
+                        "comment",
+                        &format!("\"{}\"", MARKER),
+                        ";",
+                        "}",
+                    ],
                 )
                 .map_err(RoutedNetworkError::Storage)?
         {
@@ -320,6 +330,7 @@ impl LinuxRoutedProvider {
                     ";",
                     "policy",
                     "accept",
+                    ";",
                     "}",
                 ],
             )
