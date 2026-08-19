@@ -69,6 +69,8 @@ jobs:
         run: bash tests/workflow-validation.sh actionlint
       - name: Test protected real-host workflow guards
         run: bash tests/real-host-workflow-guards.sh
+      - name: Test protected LVM provider workflow guards
+        run: bash tests/lvm-provider-workflow-guards.sh
       - name: Test real-host leak verifier
         run: bash tests/real-host-leak-verifier.sh
       - name: Test protected real-Cinder workflow guards
