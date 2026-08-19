@@ -52,12 +52,12 @@ jobs:
             sudo -n microceph disk add loop,4G,3
           fi
           sudo -n microceph.ceph -s >/dev/null
-          if ! command -v ceph >/dev/null 2>&1 || ! command -v rbd >/dev/null 2>&1; then
-            sudo -n timeout --foreground 900s apt-get update
-            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends ceph-common
-          fi
-          command -v ceph
-          command -v rbd
+          sudo -n timeout --foreground 900s apt-get update
+          sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends ceph-common
+          test -x /usr/bin/ceph
+          test -x /usr/bin/rbd
+          printf 'PATH=/usr/bin:/usr/sbin:/bin:/snap/bin:%s\n' "${PATH}" >>"${GITHUB_ENV}"
+          printf 'O3K_CEPH_CEPH_BIN=/usr/bin/ceph\nO3K_CEPH_RBD_BIN=/usr/bin/rbd\n' >>"${GITHUB_ENV}"
           if ! command -v virt-install >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1; then
             sudo -n timeout --foreground 900s apt-get update
             sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst genisoimage
@@ -96,7 +96,7 @@ jobs:
           O3K_CEPH_CLIENT_ID: admin
           O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
         run: >-
-          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CEPH_BIN,O3K_CEPH_RBD_BIN
           bash scripts/microceph-testlab-profile.sh provision
       - name: Build Ceph RBD provider helper
         run: cargo build --locked -p o3k-storage --example ceph-rbd-provider-volume
@@ -142,7 +142,7 @@ jobs:
           O3K_CEPH_CLIENT_ID: admin
           O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
         run: >-
-          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CEPH_BIN,O3K_CEPH_RBD_BIN
           bash scripts/microceph-testlab-profile.sh cleanup
       - name: Verify exact MicroCeph profile state is gone
         if: always()

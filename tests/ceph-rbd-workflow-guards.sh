@@ -19,6 +19,8 @@ for needle in (
     "microceph cluster bootstrap",
     "microceph disk add loop,4G,3",
     "ceph-common",
+    "/usr/bin/ceph",
+    "/usr/bin/rbd",
     "scripts/microceph-testlab-profile.sh provision",
     "scripts/real-ceph-rbd-guest-gate.sh",
     "scripts/microceph-testlab-profile.sh cleanup",
