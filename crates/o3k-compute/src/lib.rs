@@ -5146,7 +5146,10 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             let operation = store.get_operation(request.operation_id).await?;
-            if operation.state == o3k_store::OperationState::Succeeded {
+            let resource = store.get_resource(request.o3k_server_id).await?;
+            if operation.state == o3k_store::OperationState::Succeeded
+                && resource.observed_state == "ACTIVE"
+            {
                 break;
             }
             assert!(
