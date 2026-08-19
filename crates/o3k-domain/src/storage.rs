@@ -96,6 +96,9 @@ pub struct StorageCommandEnvelope {
     pub resource_id: String,
     pub resource_generation: u64,
     pub project_id: String,
+    /// Controller fencing epoch. Storage agents must reject commands from a
+    /// controller that no longer owns the durable work lease.
+    pub controller_epoch: u64,
     pub target_agent_id: String,
     pub target_agent_epoch: u64,
     pub deadline: String,
@@ -111,6 +114,7 @@ impl StorageCommandEnvelope {
             || self.resource_id.is_empty()
             || self.resource_generation == 0
             || self.project_id.is_empty()
+            || self.controller_epoch == 0
             || self.target_agent_id.is_empty()
             || self.target_agent_epoch == 0
             || self.deadline.is_empty()
@@ -726,6 +730,7 @@ mod tests {
             resource_id: "volume-1".to_owned(),
             resource_generation: 1,
             project_id: "project-a".to_owned(),
+            controller_epoch: 1,
             target_agent_id: "storage-a".to_owned(),
             target_agent_epoch: 1,
             deadline: "2026-08-19T00:00:00Z".to_owned(),

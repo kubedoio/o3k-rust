@@ -16,6 +16,8 @@ use o3k_store::{
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod storage_workflow;
+
 /// Test-only fault pause (issue #87): sleeps the configured duration when the
 /// named env var is set. Absent, empty, non-numeric, or zero values are no-ops;
 /// production configuration never sets these variables.
