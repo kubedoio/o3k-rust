@@ -92,6 +92,7 @@ pub struct AppState {
     network_external_realm_id: Option<uuid::Uuid>,
     network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
     network_controller: Option<o3k_network::NetworkControllerLease>,
+    network_agent: Option<o3k_network::NetworkAgentIdentity>,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
@@ -151,6 +152,16 @@ impl AppState {
     ) -> Self {
         self.network_dispatcher = Some(dispatcher);
         self.network_controller = Some(controller);
+        self
+    }
+
+    /// Configures the explicitly selected host-local network executor. This
+    /// identity is used only when the network executor is intentionally
+    /// separate from the compute-agent registry; the dispatcher still proves
+    /// liveness and fencing over the authenticated network-agent transport.
+    #[must_use]
+    pub fn with_network_agent_identity(mut self, agent: o3k_network::NetworkAgentIdentity) -> Self {
+        self.network_agent = Some(agent);
         self
     }
 

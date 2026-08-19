@@ -14,8 +14,10 @@ for tool in cargo ip nft nsenter unshare setsid; do
 done
 cargo build -p o3k-network-bin >/dev/null
 cargo build -p o3k-network-protocol --example network-agent-client >/dev/null
+cargo build -p o3k-network --example network-plan-fingerprint >/dev/null
 BIN="$ROOT_DIR/target/debug/o3k-network-bin"
 CLIENT="$ROOT_DIR/target/debug/examples/network-agent-client"
+FINGERPRINT="$ROOT_DIR/target/debug/examples/network-plan-fingerprint"
 FIXTURES="$ROOT_DIR/crates/o3k-compute-agent/tests/fixtures"
 DNSMASQ="$ROOT_DIR/tests/p9-test-dnsmasq"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p9-provider.XXXXXX")"
@@ -77,13 +79,26 @@ AGENT_PID=$!
 cat >"$WORK_DIR/plan.json" <<JSON
 {"schema_version":1,"plan_id":"00000000-0000-0000-0000-000000000001","node_id":"agent-provider","operation_id":"00000000-0000-0000-0000-000000000002","deadline_unix_ms":4102444800000,"resource_generations":{"00000000-0000-0000-0000-000000000003":1},"intents":[{"AddressRealm":{"realm_id":"00000000-0000-0000-0000-000000000004","prefix":{"network":"10.0.0.0","prefix_len":24},"gateway":"10.0.0.1"}},{"EndpointAttachment":{"endpoint_id":"00000000-0000-0000-0000-000000000003","mac":"02:00:00:00:00:03","fixed_ip":"10.0.0.3","generation":1}},{"AddressAssignment":{"endpoint_id":"00000000-0000-0000-0000-000000000003","address":"10.0.0.3","generation":1}},{"Egress":{"external_realm_id":"$EXTERNAL_REALM","enabled":true,"nat":true}},{"PublicAddressBinding":{"id":"00000000-0000-0000-0000-000000000005","project_id":"project-a","public_address":"198.51.100.10","endpoint_id":"00000000-0000-0000-0000-000000000003","generation":1}},{"Policy":{"endpoint_id":"00000000-0000-0000-0000-000000000003","direction":"Egress","protocol":"Tcp","ports":{"start":8082,"end":8082},"source":null,"destination":{"network":"198.51.100.0","prefix_len":24},"action":"Deny"}}],"fingerprint_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
 JSON
+"$FINGERPRINT" "$WORK_DIR/plan.json" >"$WORK_DIR/plan.signed.json"
+mv "$WORK_DIR/plan.signed.json" "$WORK_DIR/plan.json"
+sed 's/198.51.100.10/198.51.100.11/' "$WORK_DIR/plan.json" >"$WORK_DIR/conflict.json"
+"$FINGERPRINT" "$WORK_DIR/conflict.json" >"$WORK_DIR/conflict.signed.json"
+mv "$WORK_DIR/conflict.signed.json" "$WORK_DIR/conflict.json"
 sed 's/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000005/g' "$WORK_DIR/plan.json" >"$WORK_DIR/remove.json"
-client() {
+"$FINGERPRINT" "$WORK_DIR/remove.json" >"$WORK_DIR/remove.signed.json"
+mv "$WORK_DIR/remove.signed.json" "$WORK_DIR/remove.json"
+client_identity() {
+    local agent_epoch="$1"
+    local controller_epoch="$2"
+    local fencing_token="$3"
+    shift 3
     timeout 8 "$CLIENT" https://127.0.0.1:19182 o3k-control-plane \
         "$FIXTURES/ca.pem" "$FIXTURES/agent-chain.pem" "$FIXTURES/agent-key-pkcs8.pem" \
-        agent-provider epoch-1 controller-provider epoch-1 7 "$1" "$2" "$3" \
+        agent-provider "$agent_epoch" controller-provider "$controller_epoch" "$fencing_token" "$1" "$2" "$3" \
         4102444800000 "$4" "${5:-}"
 }
+client_epoch() { client_identity "$1" epoch-1 7 "${@:2}"; }
+client() { client_identity epoch-1 epoch-1 7 "$@"; }
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
     if result="$(client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-apply "$WORK_DIR/plan.json" 2>/dev/null)"; then
@@ -93,6 +108,18 @@ while ((SECONDS < deadline)); do
     sleep 0.2
 done
 [[ "${result:-}" == "succeeded false" ]] || { cat "$WORK_DIR/agent.log" >&2; exit 1; }
+if client 00000000-0000-0000-0000-000000000010 00000000-0000-0000-0000-000000000002 provider-conflict "$WORK_DIR/conflict.json" >/dev/null 2>&1; then
+    echo "conflicting replay was accepted" >&2
+    exit 1
+fi
+if client_epoch epoch-0 00000000-0000-0000-0000-000000000012 00000000-0000-0000-0000-000000000002 stale-epoch "$WORK_DIR/plan.json" >/dev/null 2>&1; then
+    echo "stale agent epoch was accepted" >&2
+    exit 1
+fi
+if client_identity epoch-1 epoch-0 6 00000000-0000-0000-0000-000000000013 00000000-0000-0000-0000-000000000002 stale-controller "$WORK_DIR/plan.json" >/dev/null 2>&1; then
+    echo "stale controller lease was accepted" >&2
+    exit 1
+fi
 ip link show "$BRIDGE" >/dev/null
 if ip -o link show "$UPLINK" | grep -q "master $BRIDGE"; then
     echo "routed external uplink was enslaved into tenant bridge" >&2

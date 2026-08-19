@@ -383,7 +383,7 @@ mod tests {
             .expect("clock")
             .as_millis() as u64
             + 60_000;
-        let plan = o3k_network::NodeNetworkPlan {
+        let mut plan = o3k_network::NodeNetworkPlan {
             schema_version: 1,
             plan_id: Uuid::now_v7(),
             node_id: agent.agent_id.clone(),
@@ -391,8 +391,10 @@ mod tests {
             deadline_unix_ms,
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
-            fingerprint_sha256: "0".repeat(64),
+            fingerprint_sha256: String::new(),
         };
+        plan.fingerprint_sha256 =
+            o3k_network::canonical_plan_fingerprint(&plan).expect("fingerprint");
         let command = NetworkPlanCommand {
             command_id: Uuid::now_v7(),
             operation_id,

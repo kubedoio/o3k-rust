@@ -6,8 +6,9 @@ set -Eeuo pipefail
 # public o3kd API lifecycle or the protected deployment gate.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${O3K_P9_AGENT_QEMU_INNER:-}" != 1 ]]; then
-    exec unshare -n -- env O3K_P9_AGENT_QEMU_INNER=1 "$0"
+    exec unshare -n -- env O3K_P9_AGENT_QEMU_INNER=1 "$0" "$@"
 fi
+OUTPUT_PATH="${1:-$ROOT_DIR/target/p9-real-qemu-agent-packet-path.json}"
 for tool in cargo ip nft nsenter unshare setsid qemu-system-x86_64 cpio gzip; do
     command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 2; }
 done
@@ -16,8 +17,10 @@ BUSYBOX="${O3K_P9_QEMU_BUSYBOX:-/usr/bin/busybox}"
 [[ -r "$KERNEL" && -x "$BUSYBOX" ]] || exit 2
 cargo build -p o3k-network-bin >/dev/null
 cargo build -p o3k-network-protocol --example network-agent-client >/dev/null
+cargo build -p o3k-network --example network-plan-fingerprint >/dev/null
 BIN="$ROOT_DIR/target/debug/o3k-network-bin"
 CLIENT="$ROOT_DIR/target/debug/examples/network-agent-client"
+FINGERPRINT="$ROOT_DIR/target/debug/examples/network-plan-fingerprint"
 FIXTURES="$ROOT_DIR/crates/o3k-compute-agent/tests/fixtures"
 DNSMASQ="$ROOT_DIR/tests/p9-test-dnsmasq"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p9-agent-qemu.XXXXXX")"
@@ -29,6 +32,7 @@ QEMU_PID=""
 EXTERNAL_SERVER_PID=""
 UPLINK=p9qext0
 EXT_PEER=p9qextpeer0
+FOREIGN_LINK=p9foreign0
 BRIDGE=o3kp9br0
 PUBLIC_ADDR=198.51.100.10
 REALM=00000000-0000-0000-0000-000000000004
@@ -52,6 +56,7 @@ cleanup() {
     nft delete table ip o3k_public 2>/dev/null
     nft delete table ip o3k_policy 2>/dev/null
     ip link del "$UPLINK" 2>/dev/null
+    ip link del "$FOREIGN_LINK" 2>/dev/null
     rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -102,6 +107,10 @@ ip link set "$EXT_PEER" netns "$EXT_PID"
 ip link set lo up
 ip link set "$UPLINK" up
 ip addr add 198.51.100.1/24 dev "$UPLINK"
+ip link add "$FOREIGN_LINK" type dummy
+ip link set "$FOREIGN_LINK" up
+ip addr add 203.0.113.7/32 dev "$FOREIGN_LINK"
+FOREIGN_SNAPSHOT="$(ip -o -4 addr show dev "$FOREIGN_LINK")"
 ns() { nsenter -t "$EXT_PID" -n -- "$@"; }
 ns ip link set lo up
 ns ip link set "$EXT_PEER" up
@@ -143,8 +152,14 @@ client() {
 cat >"$WORK_DIR/base.json" <<JSON
 {"schema_version":1,"plan_id":"$ENDPOINT","node_id":"agent-qemu","operation_id":"$BASE_OP","deadline_unix_ms":4102444800000,"resource_generations":{"$ENDPOINT":1},"intents":[{"AddressRealm":{"realm_id":"$REALM","prefix":{"network":"10.0.0.0","prefix_len":24},"gateway":"10.0.0.1"}},{"EndpointAttachment":{"endpoint_id":"$ENDPOINT","mac":"02:00:00:00:00:03","fixed_ip":"10.0.0.3","generation":1}},{"AddressAssignment":{"endpoint_id":"$ENDPOINT","address":"10.0.0.3","generation":1}},{"Egress":{"external_realm_id":"$REALM","enabled":true,"nat":true}},{"PublicAddressBinding":{"id":"00000000-0000-0000-0000-000000000005","project_id":"project-a","public_address":"$PUBLIC_ADDR","endpoint_id":"$ENDPOINT","generation":1}}],"fingerprint_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
 JSON
+"$FINGERPRINT" "$WORK_DIR/base.json" >"$WORK_DIR/base.signed.json"
+mv "$WORK_DIR/base.signed.json" "$WORK_DIR/base.json"
 sed "s/\"operation_id\":\"$BASE_OP\"/\"operation_id\":\"$POLICY_OP\"/; s/\"intents\":\[/\"intents\":[{\"Policy\":{\"endpoint_id\":\"$ENDPOINT\",\"direction\":\"Egress\",\"protocol\":\"Tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"source\":null,\"destination\":{\"network\":\"198.51.100.0\",\"prefix_len\":24},\"action\":\"Deny\"}},/" "$WORK_DIR/base.json" >"$WORK_DIR/policy.json"
+"$FINGERPRINT" "$WORK_DIR/policy.json" >"$WORK_DIR/policy.signed.json"
+mv "$WORK_DIR/policy.signed.json" "$WORK_DIR/policy.json"
 sed "s/\"operation_id\":\"$POLICY_OP\"/\"operation_id\":\"$REMOVE_OP\"/" "$WORK_DIR/policy.json" >"$WORK_DIR/remove.json"
+"$FINGERPRINT" "$WORK_DIR/remove.json" >"$WORK_DIR/remove.signed.json"
+mv "$WORK_DIR/remove.signed.json" "$WORK_DIR/remove.json"
 start_agent
 deadline=$((SECONDS + 30))
 while ((SECONDS < deadline)); do
@@ -233,4 +248,13 @@ if ip link show "$BRIDGE" >/dev/null 2>&1 || ip link show "$TAP" >/dev/null 2>&1
     echo "agent-owned guest network resources remained after cleanup" >&2
     exit 1
 fi
+FOREIGN_AFTER="$(ip -o -4 addr show dev "$FOREIGN_LINK")"
+if [[ "$FOREIGN_AFTER" != "$FOREIGN_SNAPSHOT" ]]; then
+    echo "foreign interface inventory changed" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$OUTPUT_PATH")"
+cat >"$OUTPUT_PATH" <<JSON
+{"artifact_type":"p9-real-qemu-agent-packet-path","real_vm_verified":true,"agent_created_tap_verified":true,"routed_snat_verified":true,"public_dnat_verified":true,"policy_drop_packet_counter_verified":true,"agent_restart_replay_verified":true,"recovery_guest_verified":true,"owned_leaks":0,"owned_inconsistencies":0,"foreign_mutations":0,"foreign_interface":"$FOREIGN_LINK","source_revision":"$(git -C "$ROOT_DIR" rev-parse HEAD)"}
+JSON
 echo "P9 real-QEMU agent packet path passed (agent-created TAP, routed SNAT, public DNAT, policy, restart, cleanup)"

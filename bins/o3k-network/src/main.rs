@@ -340,7 +340,7 @@ mod transport_tests {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_millis() as u64
             + 60_000;
-        let plan = NodeNetworkPlan {
+        let mut plan = NodeNetworkPlan {
             schema_version: 1,
             plan_id: Uuid::now_v7(),
             node_id: "agent-transport".to_owned(),
@@ -348,8 +348,9 @@ mod transport_tests {
             deadline_unix_ms,
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
-            fingerprint_sha256: "0".repeat(64),
+            fingerprint_sha256: String::new(),
         };
+        plan.fingerprint_sha256 = o3k_network::canonical_plan_fingerprint(&plan)?;
         let client = o3k_network_protocol::NetworkAgentClient::connect(
             &format!("https://{address}"),
             "o3k-control-plane",

@@ -305,14 +305,18 @@ async fn dispatch_public_binding(
     let Some(host) = port.binding_host.as_deref() else {
         return Ok(());
     };
-    let Some(registry) = state.agent_registry.as_ref() else {
-        return Err(keystone_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Service Unavailable",
-            "network agent registry is not configured",
-        ));
-    };
-    let Some(agent) = registry.snapshot(host).await else {
+    let agent = if let Some(registry) = state.agent_registry.as_ref()
+        && let Some(agent) = registry.snapshot(host).await
+    {
+        o3k_network::NetworkAgentIdentity {
+            agent_id: agent.agent_id,
+            agent_epoch: agent.agent_epoch,
+        }
+    } else if let Some(agent) = state.network_agent.as_ref()
+        && agent.agent_id == host
+    {
+        agent.clone()
+    } else {
         return Err(keystone_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service Unavailable",
@@ -450,22 +454,24 @@ pub(crate) async fn create_floating_ip(
         .map(str::to_owned)
         .unwrap_or_else(|| Uuid::now_v7().to_string());
     let project_id = auth.effective_scope().id().as_str();
-    let mut binding = match allocator.allocate(project_id, &operation_id) {
-        Ok(value) => value,
-        Err(error) => return public_error(error),
-    };
-    if let Some(port_id) = body.floatingip.port_id {
+    let endpoint = if let Some(port_id) = body.floatingip.port_id {
         let service = match network_service(&state) {
             Ok(value) => value,
             Err(response) => return response,
         };
-        if service
-            .get_port_for_project(project_id, port_id)
-            .await
-            .is_err()
-        {
-            return public_error(PublicAddressError::MissingEndpoint);
+        match service.get_port_for_project(project_id, port_id).await {
+            Ok(value) => Some(value),
+            Err(_) => return public_error(PublicAddressError::MissingEndpoint),
         }
+    } else {
+        None
+    };
+    let mut binding = match allocator.allocate(project_id, &operation_id) {
+        Ok(value) => value,
+        Err(error) => return public_error(error),
+    };
+    if let Some(port) = endpoint {
+        let port_id = port.id;
         binding = match allocator.associate(project_id, binding.allocation_id, port_id) {
             Ok(value) => value,
             Err(error) => return public_error(error),

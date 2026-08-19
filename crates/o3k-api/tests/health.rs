@@ -124,6 +124,24 @@ async fn floating_ip_lifecycle_is_project_scoped_and_idempotent()
         )
         .await?;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let missing_endpoint = serde_json::json!({
+        "floatingip": {
+            "floating_network_id": external_realm_id,
+            "port_id": uuid::Uuid::now_v7()
+        }
+    });
+    let missing_endpoint_response = o3k_api::router_with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v2.0/floatingips")
+                .header("x-auth-token", &token)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("x-openstack-request-id", "floating-missing-endpoint")
+                .body(Body::from(missing_endpoint.to_string()))?,
+        )
+        .await?;
+    assert_eq!(missing_endpoint_response.status(), StatusCode::BAD_REQUEST);
     let empty = o3k_api::router_with_state(state.clone())
         .oneshot(
             Request::builder()
@@ -255,23 +273,6 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
         .record_binding_intent(project_id, port.id, "agent-network")
         .await?;
 
-    let registry = o3k_compute_agent::NodeRegistry::default();
-    registry
-        .register(&o3k_provider_contract::compute_proto::RegisterRequest {
-            agent_id: "agent-network".to_owned(),
-            agent_epoch: "epoch-1".to_owned(),
-            software_version: "test".to_owned(),
-            host_label: "network-host".to_owned(),
-            supported_versions: vec![o3k_compute_agent::PROTOCOL_VERSION],
-            capabilities: Some(o3k_provider_contract::compute_proto::Capabilities {
-                architecture: "x86_64".to_owned(),
-                agent_provider_name: "o3k-network".to_owned(),
-                agent_provider_version: "test".to_owned(),
-                ..Default::default()
-            }),
-        })
-        .await?;
-
     let dispatcher = RecordingNetworkDispatcher::default();
     let commands = dispatcher.commands.clone();
     let external_realm_id = uuid::Uuid::now_v7();
@@ -296,7 +297,10 @@ async fn floating_ip_api_dispatches_a_public_binding_plan_to_the_selected_agent(
                 fencing_token: 1,
             },
         )
-        .with_agent_registry(registry);
+        .with_network_agent_identity(o3k_network::NetworkAgentIdentity {
+            agent_id: "agent-network".to_owned(),
+            agent_epoch: "epoch-1".to_owned(),
+        });
     let auth = serde_json::json!({"auth":{"identity":{"methods":["password"],"password":{"user":{"name":"admin","password":"password"}}},"scope":{"project":{"name":"admin"}}}});
     let token_response = o3k_api::router_with_state(state.clone())
         .oneshot(

@@ -381,6 +381,11 @@ impl NetworkPlanExecutor {
         {
             return Err(NetworkExecutionError::InvalidCommand);
         }
+        let expected_fingerprint = crate::canonical_plan_fingerprint(&command.plan)
+            .map_err(|_| NetworkExecutionError::InvalidCommand)?;
+        if command.plan.fingerprint_sha256 != expected_fingerprint {
+            return Err(NetworkExecutionError::InvalidCommand);
+        }
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }
@@ -777,7 +782,7 @@ mod tests {
         conflict.plan.fingerprint_sha256.replace_range(..1, "0");
         assert!(matches!(
             executor.admit(&conflict, 1),
-            Err(NetworkExecutionError::ConflictingReplay)
+            Err(NetworkExecutionError::InvalidCommand)
         ));
         let mut stale = command.clone();
         stale.target.agent_epoch = "epoch-0".into();
@@ -787,6 +792,35 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(root);
         Ok(())
+    }
+
+    #[test]
+    fn semantic_payload_change_with_reused_fingerprint_is_rejected() {
+        let root = tempfile_path("fingerprint");
+        let command = command();
+        let executor =
+            NetworkPlanExecutor::open(&root, command.target.clone(), command.controller.clone())
+                .expect("executor");
+        let mut tampered = command.clone();
+        tampered.command_id = Uuid::from_u128(11);
+        tampered.operation_id = Uuid::from_u128(5);
+        tampered.plan.operation_id = tampered.operation_id;
+        if let Some(NetworkPlanIntent::Policy(policy)) = tampered
+            .plan
+            .intents
+            .iter_mut()
+            .find(|intent| matches!(intent, NetworkPlanIntent::Policy(_)))
+        {
+            policy.ports = Some(o3k_domain::PortRange {
+                start: 8443,
+                end: 8443,
+            });
+        }
+        assert!(matches!(
+            executor.admit(&tampered, 1),
+            Err(NetworkExecutionError::InvalidCommand)
+        ));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

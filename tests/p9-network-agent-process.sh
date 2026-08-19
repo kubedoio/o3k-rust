@@ -20,9 +20,11 @@ done
 
 cargo build -p o3k-network-bin >/dev/null
 cargo build -p o3k-network-protocol --example network-agent-client >/dev/null
+cargo build -p o3k-network --example network-plan-fingerprint >/dev/null
 
 BIN="$ROOT_DIR/target/debug/o3k-network-bin"
 CLIENT="$ROOT_DIR/target/debug/examples/network-agent-client"
+FINGERPRINT="$ROOT_DIR/target/debug/examples/network-plan-fingerprint"
 FIXTURES="$ROOT_DIR/crates/o3k-compute-agent/tests/fixtures"
 DNSMASQ="$ROOT_DIR/tests/p9-test-dnsmasq"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/o3k-p9-agent-process.XXXXXX")"
@@ -78,8 +80,12 @@ cat >"$WORK_DIR/plan.json" <<'JSON'
   "fingerprint_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
 }
 JSON
+"$FINGERPRINT" "$WORK_DIR/plan.json" >"$WORK_DIR/plan.signed.json"
+mv "$WORK_DIR/plan.signed.json" "$WORK_DIR/plan.json"
 sed 's/00000000-0000-0000-0000-000000000002/00000000-0000-0000-0000-000000000005/g' \
     "$WORK_DIR/plan.json" >"$WORK_DIR/plan-remove.json"
+"$FINGERPRINT" "$WORK_DIR/plan-remove.json" >"$WORK_DIR/plan-remove.signed.json"
+mv "$WORK_DIR/plan-remove.signed.json" "$WORK_DIR/plan-remove.json"
 
 start_agent() {
     O3K_NETWORK_AGENT_ID=agent-process \

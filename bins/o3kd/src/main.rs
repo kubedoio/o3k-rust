@@ -959,6 +959,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(dispatcher) = network_dispatcher {
         state = state.with_network_dispatcher(dispatcher, network_controller);
     }
+    let network_agent_identity = match (
+        std::env::var("O3K_NETWORK_AGENT_ID").ok(),
+        std::env::var("O3K_NETWORK_AGENT_EPOCH").ok(),
+    ) {
+        (Some(agent_id), Some(agent_epoch)) => Some(o3k_network::NetworkAgentIdentity {
+            agent_id,
+            agent_epoch,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "O3K_NETWORK_AGENT_ID and O3K_NETWORK_AGENT_EPOCH must be set together".into(),
+            );
+        }
+    };
+    if let Some(agent) = network_agent_identity {
+        state = state.with_network_agent_identity(agent);
+    }
     state.set_ready(compute_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),

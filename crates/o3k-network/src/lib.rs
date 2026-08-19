@@ -3820,6 +3820,26 @@ pub fn validate_plan_replay(
     Ok(())
 }
 
+/// Recomputes the transport fingerprint from the semantic plan fields. The
+/// executor uses this at the trust boundary so a caller cannot mark an
+/// arbitrary mutated payload with a syntactically valid but unrelated hash.
+pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
+    let mut intents = plan.intents.clone();
+    intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    let unsigned = (
+        &plan.plan_id,
+        &plan.node_id,
+        &plan.operation_id,
+        &plan.schema_version,
+        &plan.deadline_unix_ms,
+        &plan.resource_generations,
+        &intents,
+    );
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| NetworkPlanError::Serialization)?;
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 fn broadcast_address(prefix: o3k_domain::Ipv4Prefix) -> Option<Ipv4Addr> {
     let host_bits = 32u32.saturating_sub(u32::from(prefix.prefix_len));
     let size = 1u64.checked_shl(host_bits)?;
