@@ -357,12 +357,13 @@ where
         }
         let image = self.image_name(request.volume_id);
         let mut args = self.rbd_args();
+        let size = format!("{}B", request.size_bytes);
         args.extend([
             "create".to_owned(),
             "--image-format".to_owned(),
             "2".to_owned(),
             "--size".to_owned(),
-            request.size_bytes.to_string(),
+            size,
             image.clone(),
         ]);
         self.checked("rbd", args).await?;

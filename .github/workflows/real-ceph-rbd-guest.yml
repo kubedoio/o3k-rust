@@ -145,9 +145,16 @@ jobs:
           O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
           O3K_CEPH_CLIENT_ID: admin
           O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
-        run: >-
-          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CEPH_BIN,O3K_CEPH_RBD_BIN
-          bash scripts/microceph-testlab-profile.sh cleanup
+          O3K_CEPH_CEPH_BIN: /usr/bin/ceph
+          O3K_CEPH_RBD_BIN: /usr/bin/rbd
+        run: |
+          set -euo pipefail
+          restore_pool_delete() { sudo -n microceph.ceph config set mon mon_allow_pool_delete false >/dev/null 2>&1 || true; }
+          trap restore_pool_delete EXIT
+          sudo -n microceph.ceph config set mon mon_allow_pool_delete true >/dev/null
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CEPH_BIN,O3K_CEPH_RBD_BIN bash scripts/microceph-testlab-profile.sh cleanup
+          trap - EXIT
+          restore_pool_delete
       - name: Verify exact MicroCeph profile state is gone
         if: always()
         run: test ! -e "/var/lib/o3k-ceph-testlab/${{ steps.runner.outputs.run_slug }}"
