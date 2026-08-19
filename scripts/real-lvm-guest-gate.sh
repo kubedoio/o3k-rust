@@ -145,7 +145,7 @@ domain_ip() {
     # readiness proof below.
     local source host
     for source in lease arp agent; do
-        host="$(sudo -n virsh -c qemu:///system domifaddr "${CURRENT_DOMAIN}" \
+        host="$(sudo -n timeout --foreground 5s virsh -c qemu:///system domifaddr "${CURRENT_DOMAIN}" \
             --source "${source}" 2>/dev/null \
             | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}' || true)"
         if [[ -n "${host}" ]]; then
@@ -153,7 +153,7 @@ domain_ip() {
             return
         fi
     done
-    sudo -n virsh -c qemu:///system net-dhcp-leases "${NETWORK}" 2>/dev/null \
+    sudo -n timeout --foreground 5s virsh -c qemu:///system net-dhcp-leases "${NETWORK}" 2>/dev/null \
         | awk '/ipv4/ {sub(/\/.*/, "", $5); print $5; exit}'
 }
 
