@@ -7,6 +7,7 @@
 
 use crate::{NodeNetworkPlan, execution::NetworkPlanRealizer};
 use o3k_domain::{NamespacedRoutedFabricPlan, NeighborResolution};
+use std::collections::BTreeMap;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -99,29 +100,36 @@ impl<B: P11FabricBackend> NetworkPlanRealizer for P11FabricRealizer<B> {
 /// mutation.
 #[derive(Debug, Default)]
 pub struct InMemoryP11FabricBackend {
-    current: Option<NamespacedRoutedFabricPlan>,
+    current: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
 }
 
 impl InMemoryP11FabricBackend {
     #[must_use]
-    pub fn current(&self) -> Option<&NamespacedRoutedFabricPlan> {
-        self.current.as_ref()
+    pub fn current(&self, realm_id: Uuid) -> Option<&NamespacedRoutedFabricPlan> {
+        self.current.get(&realm_id)
     }
 
     #[must_use]
     pub fn resolve_neighbor(&self, destination: std::net::Ipv4Addr) -> NeighborResolution {
         self.current
-            .as_ref()
-            .map_or(NeighborResolution::Unknown, |plan| {
+            .values()
+            .map(|plan| {
                 plan.directory
                     .resolve_neighbor(destination, &plan.local_host)
             })
+            .find(|resolution| !matches!(resolution, NeighborResolution::Unknown))
+            .unwrap_or(NeighborResolution::Unknown)
     }
 
     #[must_use]
     pub fn route_for(&self, endpoint_id: Uuid) -> Option<&o3k_domain::FabricEndpointRoute> {
         self.current
-            .as_ref()?
+            .values()
+            .find(|plan| {
+                plan.routes
+                    .iter()
+                    .any(|route| route.endpoint_id == endpoint_id)
+            })?
             .routes
             .iter()
             .find(|route| route.endpoint_id == endpoint_id)
@@ -138,41 +146,41 @@ impl P11FabricBackend for InMemoryP11FabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
         if self
             .current
-            .as_ref()
+            .get(&plan.realm_id)
             .is_some_and(|current| Self::is_stale(current, plan))
         {
             return Err(P11FabricError::StaleGeneration);
         }
-        self.current = Some(plan.clone());
+        self.current.insert(plan.realm_id, plan.clone());
         Ok(())
     }
 
     fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
         if self
             .current
-            .as_ref()
+            .get(&plan.realm_id)
             .is_some_and(|current| Self::is_stale(current, plan))
         {
             return Err(P11FabricError::StaleGeneration);
         }
-        if self.current.as_ref().is_some_and(|current| {
-            current.realm_id == plan.realm_id
-                && current.local_host == plan.local_host
+        if self.current.get(&plan.realm_id).is_some_and(|current| {
+            current.local_host == plan.local_host
                 && current.directory_generation <= plan.directory_generation
         }) {
-            self.current = None;
+            self.current.remove(&plan.realm_id);
         }
         Ok(())
     }
 
     fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
-        Ok(self.current.as_ref() == Some(plan))
+        Ok(self.current.get(&plan.realm_id) == Some(plan))
     }
 
     fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
-        Ok(self.current.as_ref().is_none_or(|current| {
-            current.realm_id != plan.realm_id || current.local_host != plan.local_host
-        }))
+        Ok(self
+            .current
+            .get(&plan.realm_id)
+            .is_none_or(|current| current.local_host != plan.local_host))
     }
 }
 

@@ -408,7 +408,7 @@ impl RealmEndpointDirectory {
         }
         if host_identities
             .iter()
-            .all(|identity| identity.host_id != local_identity.host_id)
+            .all(|identity| identity != local_identity)
         {
             return Err(EndpointDirectoryError::MissingLocalFabricIdentity);
         }
