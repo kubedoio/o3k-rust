@@ -206,7 +206,11 @@ cleanup() {
     set +e
     destroy_domain "${DOMAIN}"
     destroy_domain "${SECOND_DOMAIN}"
-    rm -f -- "${OVERLAY}" "${SECOND_OVERLAY}" "${STATE_ROOT}/lvs.json"
+    rm -f -- "${OVERLAY}" "${SECOND_OVERLAY}" "${STATE_ROOT}/lvs.json" \
+        "${KNOWN_HOSTS}" "${CLOUD_INIT_USER_DATA}"
+    if [[ -d "${STATE_ROOT}" ]] && ! rmdir -- "${STATE_ROOT}"; then
+        RESULT_REASON=guest_state_cleanup_failed
+    fi
 }
 
 on_exit() {
@@ -239,6 +243,7 @@ open(path, "a", encoding="utf-8").write("\n")
 PY
     exit "${status}"
 }
+install -m 0755 -d "${ARTIFACT_DIR}"
 trap on_exit EXIT
 
 require_tools

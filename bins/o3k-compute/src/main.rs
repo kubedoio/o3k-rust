@@ -4735,7 +4735,9 @@ mod tests {
             "qcow2",
             b"4444",
             "79f06f8fde333461739f220090a23cb2a79f6d714bee100d0e4b4af249294619",
-            unix_ms_now() + 100,
+            // Keep enough admission headroom for the full parallel suite;
+            // the transfer must expire only after it has been created.
+            unix_ms_now() + 1_000,
         )?;
         // resource-b: a live (resumable) incomplete transfer.
         let preserved_live = begin_incomplete_transfer(
@@ -4758,7 +4760,7 @@ mod tests {
             b"1111",
             "0ffe1abd1a08215353c233d6e009613e95eec4253832a761af28ff37ac5a150c",
         )?;
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
 
         reap_orphaned_transfer_parts(&root, "agent-1", Some("resource-a"));
 
