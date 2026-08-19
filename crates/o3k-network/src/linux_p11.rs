@@ -1,4 +1,4 @@
-//! Fail-closed Linux realization for the accepted P11 v1 fabric contract.
+//! Fail-closed Linux realization for the accepted P11 v2 fabric contract.
 //!
 //! Provider-native objects are bounded by an ownership manifest. WireGuard
 //! private-key bytes are generated and retained locally and never occur in
@@ -27,6 +27,7 @@ pub struct LinuxP11Config {
     pub fabric_namespace: String,
     pub fabric_interface: String,
     pub wireguard_port: u16,
+    pub geneve_port: u16,
 }
 
 impl LinuxP11Config {
@@ -37,6 +38,7 @@ impl LinuxP11Config {
             fabric_namespace: "o3k-fabric".to_owned(),
             fabric_interface: "wg-o3k".to_owned(),
             wireguard_port: 51_820,
+            geneve_port: 6_081,
         }
     }
 
@@ -46,6 +48,7 @@ impl LinuxP11Config {
             || !valid_name(&self.fabric_namespace)
             || !valid_name(&self.fabric_interface)
             || self.wireguard_port == 0
+            || self.geneve_port == 0
         {
             return Err(LinuxP11Error::InvalidConfiguration);
         }
@@ -101,6 +104,7 @@ struct FabricOwnership {
     namespace: String,
     interface: String,
     private_key_path: String,
+    fabric_transport_ip: std::net::Ipv4Addr,
     fabric_generation: u64,
     #[serde(default)]
     managed_peers: BTreeSet<String>,
@@ -115,8 +119,21 @@ struct RealmOwnership {
     realm_veth: String,
     fabric_veth: String,
     fabric_realm_veth: String,
+    #[serde(default)]
+    geneve: BTreeMap<String, GeneveOwnership>,
     directory_generation: u64,
     local_fabric_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct GeneveOwnership {
+    target_host: String,
+    interface: String,
+    remote_transport_ip: std::net::Ipv4Addr,
+    vni: u32,
+    binding_generation: u64,
+    #[serde(default)]
+    realized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,6 +210,8 @@ impl LinuxP11FabricBackend {
         if let Some(fabric) = &self.state.fabric
             && (fabric.namespace != self.config.fabric_namespace
                 || fabric.interface != self.config.fabric_interface
+                || fabric.fabric_transport_ip.is_unspecified()
+                || fabric.fabric_transport_ip.is_loopback()
                 || fabric.fabric_generation == 0
                 || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
         {
@@ -202,14 +221,33 @@ impl LinuxP11FabricBackend {
             validate_private_key_file(Path::new(&fabric.private_key_path))?;
         }
         for (realm_id, ownership) in &self.state.realms {
+            let Some(plan) = self.plans.get(realm_id) else {
+                return Err(LinuxP11Error::CorruptState);
+            };
             if realm_id != &ownership.realm_id
-                || self.plans.get(realm_id).is_none_or(|plan| {
-                    plan.realm_id != *realm_id
-                        || plan.directory_generation != ownership.directory_generation
-                        || plan.local_fabric_generation != ownership.local_fabric_generation
-                })
+                || plan.realm_id != *realm_id
+                || plan.directory_generation != ownership.directory_generation
+                || plan.local_fabric_generation != ownership.local_fabric_generation
             {
                 return Err(LinuxP11Error::CorruptState);
+            }
+            for (target_host, geneve) in &ownership.geneve {
+                if target_host != &geneve.target_host
+                    || !valid_name(&geneve.interface)
+                    || geneve.remote_transport_ip.is_unspecified()
+                    || geneve.remote_transport_ip.is_loopback()
+                    || geneve.vni == 0
+                    || geneve.vni > 0x000f_ffff
+                    || geneve.binding_generation == 0
+                    || geneve.vni != plan.encapsulation.provider_segment_id
+                    || geneve.binding_generation != plan.encapsulation.binding_generation
+                    || !plan.peers.iter().any(|peer| {
+                        peer.host_id == geneve.target_host
+                            && peer.fabric_transport_ip == geneve.remote_transport_ip
+                    })
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
             }
         }
         Ok(())
@@ -225,6 +263,7 @@ impl LinuxP11FabricBackend {
             realm_veth: format!("o3k-n-{}", &suffix[..8]),
             fabric_veth: format!("o3k-f-{}", &suffix[..8]),
             fabric_realm_veth: format!("o3k-x-{}", &suffix[..8]),
+            geneve: BTreeMap::new(),
             directory_generation: plan.directory_generation,
             local_fabric_generation: plan.local_fabric_generation,
         }
@@ -233,6 +272,9 @@ impl LinuxP11FabricBackend {
     fn ensure_fabric(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
         if let Some(fabric) = &self.state.fabric {
             if plan.local_fabric_generation != fabric.fabric_generation {
+                return Err(LinuxP11Error::OwnershipConflict);
+            }
+            if plan.local_fabric_transport_ip != fabric.fabric_transport_ip {
                 return Err(LinuxP11Error::OwnershipConflict);
             }
             return Ok(());
@@ -266,6 +308,7 @@ impl LinuxP11FabricBackend {
             namespace: self.config.fabric_namespace.clone(),
             interface: self.config.fabric_interface.clone(),
             private_key_path: private_key_path.display().to_string(),
+            fabric_transport_ip: plan.local_fabric_transport_ip,
             fabric_generation: plan.local_fabric_generation,
             managed_peers: BTreeSet::new(),
         });
@@ -345,11 +388,35 @@ impl LinuxP11FabricBackend {
         {
             return Err(LinuxP11Error::CommandFailed);
         }
+        let transport_ip = format!("{}/32", plan.local_fabric_transport_ip);
+        if !self
+            .command
+            .run(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    &self.config.fabric_namespace,
+                    "ip",
+                    "addr",
+                    "replace",
+                    &transport_ip,
+                    "dev",
+                    &self.config.fabric_interface,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
         Ok(())
     }
 
     fn ensure_realm(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
-        let ownership = self.realm_ownership(plan);
+        let mut ownership = self.realm_ownership(plan);
+        if let Some(existing) = self.state.realms.get(&plan.realm_id) {
+            ownership.geneve = existing.geneve.clone();
+        }
         if let Some(existing) = self.state.realms.get(&plan.realm_id)
             && (existing.namespace != ownership.namespace
                 || existing.bridge != ownership.bridge
@@ -508,6 +575,222 @@ impl LinuxP11FabricBackend {
             store_state(&self.state_path, &self.state)?;
         }
         self.realize_routes(plan, &ownership)
+    }
+
+    /// Creates one provider-owned known-unicast Geneve device per current
+    /// remote host for this realm. The device lives in the shared fabric
+    /// namespace and carries only the current realm VNI; no kernel discovery
+    /// is used as ownership or placement authority.
+    fn ensure_geneve(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        if self.plans.values().any(|other| {
+            other.realm_id != plan.realm_id
+                && other.encapsulation.fabric_domain_id == plan.encapsulation.fabric_domain_id
+                && other.encapsulation.provider_segment_id == plan.encapsulation.provider_segment_id
+        }) {
+            return Err(LinuxP11Error::OwnershipConflict);
+        }
+        let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
+            return Err(LinuxP11Error::CorruptState);
+        };
+        let mut desired = BTreeMap::new();
+        for peer in &plan.peers {
+            if !plan
+                .routes
+                .iter()
+                .any(|route| route.target_host == peer.host_id)
+            {
+                continue;
+            }
+            let interface = geneve_name(plan.realm_id, &peer.host_id);
+            desired.insert(
+                peer.host_id.clone(),
+                GeneveOwnership {
+                    target_host: peer.host_id.clone(),
+                    interface,
+                    remote_transport_ip: peer.fabric_transport_ip,
+                    vni: plan.encapsulation.provider_segment_id,
+                    binding_generation: plan.encapsulation.binding_generation,
+                    realized: current
+                        .geneve
+                        .get(&peer.host_id)
+                        .is_some_and(|existing| existing.realized),
+                },
+            );
+        }
+        for (target_host, old) in &current.geneve {
+            if desired.contains_key(target_host) {
+                continue;
+            }
+            let (exists, output) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &old.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if exists {
+                if !geneve_link_matches(&output, old, self.config.geneve_port) {
+                    return Err(LinuxP11Error::ForeignState);
+                }
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "del",
+                            &old.interface,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
+        }
+        for (target_host, wanted) in &mut desired {
+            if let Some(existing) = current.geneve.get(target_host)
+                && (existing.target_host != wanted.target_host
+                    || existing.interface != wanted.interface
+                    || existing.remote_transport_ip != wanted.remote_transport_ip
+                    || existing.vni != wanted.vni
+                    || existing.binding_generation != wanted.binding_generation)
+            {
+                return Err(LinuxP11Error::OwnershipConflict);
+            }
+            let (exists, output) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &wanted.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if exists && !geneve_link_matches(&output, wanted, self.config.geneve_port) {
+                return Err(LinuxP11Error::ForeignState);
+            }
+            if !exists {
+                wanted.realized = false;
+            }
+            if exists
+                && current
+                    .geneve
+                    .get(target_host)
+                    .is_none_or(|existing| existing.realized)
+            {
+                continue;
+            }
+        }
+        let mut next = current.clone();
+        next.geneve = desired.clone();
+        if next != current {
+            self.state.realms.insert(plan.realm_id, next);
+            store_state(&self.state_path, &self.state)?;
+        }
+        for (target_host, wanted) in &desired {
+            if wanted.realized {
+                continue;
+            }
+            let vni = wanted.vni.to_string();
+            let remote = wanted.remote_transport_ip.to_string();
+            let port = self.config.geneve_port.to_string();
+            let (already_exists, _) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &wanted.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if !already_exists
+                && !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "add",
+                            &wanted.interface,
+                            "type",
+                            "geneve",
+                            "id",
+                            &vni,
+                            "remote",
+                            &remote,
+                            "dstport",
+                            &port,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "set",
+                        &wanted.interface,
+                        "up",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+            if let Some(realized) = self
+                .state
+                .realms
+                .get_mut(&plan.realm_id)
+                .and_then(|realm| realm.geneve.get_mut(target_host))
+            {
+                realized.realized = true;
+            }
+            store_state(&self.state_path, &self.state)?;
+        }
+        Ok(())
     }
 
     fn realize_routes(
@@ -801,6 +1084,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         self.ensure_fabric(plan)?;
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
+        self.ensure_geneve(plan)?;
         self.configure_peers()?;
         Ok(())
     }
@@ -814,6 +1098,52 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             || plan.local_fabric_generation < ownership.local_fabric_generation
         {
             return Err(P11FabricError::StaleGeneration);
+        }
+        for geneve in ownership.geneve.values() {
+            let (exists, output) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &geneve.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if exists {
+                if !geneve_link_matches(&output, geneve, self.config.geneve_port) {
+                    return Err(P11FabricError::Backend(
+                        LinuxP11Error::ForeignState.to_string(),
+                    ));
+                }
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "del",
+                            &geneve.interface,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(P11FabricError::Backend(
+                        LinuxP11Error::CommandFailed.to_string(),
+                    ));
+                }
+            }
         }
         let commands = [
             vec![
@@ -870,6 +1200,27 @@ fn valid_name(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn geneve_name(realm_id: Uuid, target_host: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in realm_id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(target_host.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("o3k-g-{:08x}", hash as u32)
+}
+
+fn geneve_link_matches(output: &str, ownership: &GeneveOwnership, port: u16) -> bool {
+    output.contains("geneve")
+        && output.contains(&format!("id {}", ownership.vni))
+        && output.contains(&format!("remote {}", ownership.remote_transport_ip))
+        && output.contains(&format!("dstport {}", port))
 }
 
 fn load_state(path: &Path) -> Result<ProviderState, LinuxP11Error> {
@@ -1100,6 +1451,34 @@ mod tests {
                 .iter()
                 .any(|(program, args)| program == "wg" && args == &["genkey"])
         );
+        let interface = geneve_name(plan().realm_id, "host-b");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.windows(8).any(|window| {
+                    window
+                        == [
+                            "type",
+                            "geneve",
+                            "id",
+                            "101",
+                            "remote",
+                            "198.18.0.2",
+                            "dstport",
+                            "6081",
+                        ]
+                })
+                && args.iter().any(|arg| arg == &interface)
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(2)
+                    .any(|window| window == ["allowed-ips", "198.18.0.2/32"])
+        }));
+        assert!(!calls.iter().any(|(_, args)| {
+            args.windows(2)
+                .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
+        }));
         let _ = fs::remove_dir_all(root);
     }
 
