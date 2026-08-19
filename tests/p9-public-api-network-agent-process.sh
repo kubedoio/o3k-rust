@@ -53,6 +53,7 @@ ip addr add 198.51.100.1/24 dev "$UPLINK"
 nsenter -t "$EXT_PID" -n -- ip link set lo up
 nsenter -t "$EXT_PID" -n -- ip link set "$EXT_PEER" up
 nsenter -t "$EXT_PID" -n -- ip addr add 198.51.100.2/24 dev "$EXT_PEER"
+FOREIGN_SNAPSHOT="$(ip -o -4 addr show dev "$FOREIGN_LINK")"
 chmod 0755 "$DNSMASQ"
 mkdir -p "$WORK_DIR"/{network/{executor,ownership,dhcp},data}
 
@@ -218,7 +219,16 @@ json -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" >/dev/null
 json -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" >/dev/null
 json -X DELETE "$BASE/v2/images/$IMAGE_ID" >/dev/null
 
-ip link show "$FOREIGN_LINK" >/dev/null
+for _ in $(seq 1 150); do
+    if ! ip -o link show | grep -q 'o3ktap-' \
+        && ! nft list table ip o3k_p9 >/dev/null 2>&1 \
+        && ! nft list table ip o3k_public >/dev/null 2>&1 \
+        && ! nft list table ip o3k_policy >/dev/null 2>&1 \
+        && ! ip -4 addr show dev "$UPLINK" | grep -q '198.51.100.10/32'; then
+        break
+    fi
+    sleep 0.1
+done
 if ip -o link show | grep -q 'o3ktap-'; then
     echo "owned endpoint TAP leaked after public lifecycle cleanup" >&2
     exit 1
@@ -228,6 +238,13 @@ if nft list table ip o3k_p9 >/dev/null 2>&1 \
     || nft list table ip o3k_policy >/dev/null 2>&1 \
     || ip -4 addr show dev "$UPLINK" | grep -q '198.51.100.10/32'; then
     echo "owned routed/public/policy state leaked after public lifecycle cleanup" >&2
+    exit 1
+fi
+ip link show "$FOREIGN_LINK" >/dev/null
+FOREIGN_AFTER="$(ip -o -4 addr show dev "$FOREIGN_LINK")"
+if [[ "$FOREIGN_AFTER" != "$FOREIGN_SNAPSHOT" ]]; then
+    echo "foreign interface address state changed during public lifecycle" >&2
+    printf 'before: %s\nafter: %s\n' "$FOREIGN_SNAPSHOT" "$FOREIGN_AFTER" >&2
     exit 1
 fi
 
