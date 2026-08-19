@@ -520,13 +520,12 @@ async fn dispatch_policy_network(
         .into_iter()
         .find(|port| port.network_id == network_id && port.id == endpoint_id)
         .ok_or_else(|| network_error(o3k_network::NetworkError::NotFound))?;
-    let host = port.binding_host.clone().ok_or_else(|| {
-        keystone_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Service Unavailable",
-            "endpoint is not bound",
-        )
-    })?;
+    // Policy intent is durable before an endpoint is scheduled.  Leave the
+    // provider projection pending until the normal binding lifecycle can
+    // dispatch the complete attachment plan.
+    let Some(host) = port.binding_host.clone() else {
+        return Ok(());
+    };
     let agent = if let Some(registry) = state.agent_registry.as_ref()
         && let Some(agent) = registry.snapshot(&host).await
     {
