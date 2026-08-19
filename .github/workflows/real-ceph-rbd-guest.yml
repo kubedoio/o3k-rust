@@ -46,13 +46,18 @@ jobs:
           fi
           command -v microceph
           command -v microceph.ceph
-          command -v microceph.rbd
           sudo -n modprobe rbd
           if ! sudo -n microceph status >/dev/null 2>&1; then sudo -n microceph cluster bootstrap; fi
           if ! sudo -n microceph status | grep -Eq '(^|[[:space:]])osd([,:]|[[:space:]]|$)'; then
             sudo -n microceph disk add loop,4G,3
           fi
           sudo -n microceph.ceph -s >/dev/null
+          if ! command -v ceph >/dev/null 2>&1 || ! command -v rbd >/dev/null 2>&1; then
+            sudo -n timeout --foreground 900s apt-get update
+            sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends ceph-common
+          fi
+          command -v ceph
+          command -v rbd
           if ! command -v virt-install >/dev/null 2>&1 || ! command -v genisoimage >/dev/null 2>&1; then
             sudo -n timeout --foreground 900s apt-get update
             sudo -n timeout --foreground 900s apt-get install -y --no-install-recommends virtinst genisoimage
@@ -87,9 +92,11 @@ jobs:
           O3K_CEPH_PROVIDER_NAMESPACE: testlab-${{ github.run_id }}
           O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
           O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
+          O3K_CEPH_CLIENT_ID: admin
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
         run: >-
-          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE
-          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH
           bash scripts/microceph-testlab-profile.sh provision
       - name: Build Ceph RBD provider helper
         run: cargo build --locked -p o3k-storage --example ceph-rbd-provider-volume
@@ -102,12 +109,11 @@ jobs:
           O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
           O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
           O3K_CEPH_CLIENT_ID: admin
-          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.client.admin.keyring
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
           O3K_CEPH_CAPACITY_BYTES: '10737418240'
           O3K_CEPH_VOLUME_SIZE_BYTES: '67108864'
         run: >-
           sudo -n --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CAPACITY_BYTES,O3K_CEPH_VOLUME_SIZE_BYTES,O3K_CEPH_GUEST_IMAGE_PATH,O3K_CEPH_GUEST_SSH_PRIVATE_KEY,O3K_CEPH_GUEST_SSH_USER
-          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
           bash scripts/real-ceph-rbd-guest-gate.sh
       - name: Clean up exact real guest resources
         if: always()
@@ -119,12 +125,11 @@ jobs:
           O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
           O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
           O3K_CEPH_CLIENT_ID: admin
-          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.client.admin.keyring
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
           O3K_CEPH_CAPACITY_BYTES: '10737418240'
           O3K_CEPH_VOLUME_SIZE_BYTES: '67108864'
         run: >-
           sudo -n --preserve-env=PATH,CARGO_HOME,GITHUB_WORKSPACE,GITHUB_RUN_ID,O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_PROVIDER_NAMESPACE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH,O3K_CEPH_CAPACITY_BYTES,O3K_CEPH_VOLUME_SIZE_BYTES,O3K_CEPH_GUEST_IMAGE_PATH,O3K_CEPH_GUEST_SSH_PRIVATE_KEY,O3K_CEPH_GUEST_SSH_USER
-          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
           bash scripts/real-ceph-rbd-guest-gate.sh cleanup
       - name: Tear down exact run-scoped MicroCeph RBD profile
         if: always()
@@ -133,9 +138,11 @@ jobs:
           O3K_CEPH_STATE_BASE: /var/lib/o3k-ceph-testlab
           O3K_CEPH_POOL: o3k-p10-${{ steps.runner.outputs.run_slug }}
           O3K_CEPH_NAMESPACE: o3k-${{ steps.runner.outputs.run_slug }}
+          O3K_CEPH_CONF_PATH: /var/snap/microceph/current/conf/ceph.conf
+          O3K_CEPH_CLIENT_ID: admin
+          O3K_CEPH_KEYRING_PATH: /var/snap/microceph/current/conf/ceph.keyring
         run: >-
-          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE
-          env O3K_CEPH_RBD_BIN=microceph.rbd O3K_CEPH_CEPH_BIN=microceph.ceph
+          sudo -n --preserve-env=O3K_CEPH_RUN_ID,O3K_CEPH_STATE_BASE,O3K_CEPH_POOL,O3K_CEPH_NAMESPACE,O3K_CEPH_CONF_PATH,O3K_CEPH_CLIENT_ID,O3K_CEPH_KEYRING_PATH
           bash scripts/microceph-testlab-profile.sh cleanup
       - name: Verify exact MicroCeph profile state is gone
         if: always()

@@ -18,8 +18,11 @@ STATE_ROOT="${O3K_CEPH_STATE_ROOT:-${STATE_BASE}/${RUN_SLUG}}"
 STATE_FILE="${STATE_ROOT}/profile.json"
 POOL="${O3K_CEPH_POOL:-o3k-p10-${RUN_SLUG}}"
 NAMESPACE="${O3K_CEPH_NAMESPACE:-o3k-${RUN_SLUG}}"
-CEPH_BIN="${O3K_CEPH_CEPH_BIN:-microceph.ceph}"
-RBD_BIN="${O3K_CEPH_RBD_BIN:-microceph.rbd}"
+CEPH_BIN="${O3K_CEPH_CEPH_BIN:-ceph}"
+RBD_BIN="${O3K_CEPH_RBD_BIN:-rbd}"
+CONF_PATH="${O3K_CEPH_CONF_PATH:-}"
+CLIENT_ID="${O3K_CEPH_CLIENT_ID:-}"
+KEYRING_PATH="${O3K_CEPH_KEYRING_PATH:-}"
 
 die() { echo "microceph-testlab-profile: $*" >&2; exit 1; }
 valid_name() { [[ "$1" =~ ^[A-Za-z0-9_.-]{1,128}$ ]]; }
@@ -39,9 +42,18 @@ require_tools() {
     command -v "${RBD_BIN}" >/dev/null 2>&1 || die "RBD command is unavailable: ${RBD_BIN}"
 }
 
-pool_exists() { "${CEPH_BIN}" osd pool get "${POOL}" size >/dev/null 2>&1; }
+auth_args() {
+    [[ -n "${CONF_PATH}" ]] && printf '%s\n' --conf "${CONF_PATH}"
+    [[ -n "${CLIENT_ID}" ]] && printf '%s\n' --id "${CLIENT_ID}"
+    [[ -n "${KEYRING_PATH}" ]] && printf '%s\n' --keyring "${KEYRING_PATH}"
+}
+
+ceph() { mapfile -t args < <(auth_args); "${CEPH_BIN}" "${args[@]}" "$@"; }
+rbd() { mapfile -t args < <(auth_args); "${RBD_BIN}" "${args[@]}" "$@"; }
+
+pool_exists() { ceph osd pool get "${POOL}" size >/dev/null 2>&1; }
 namespace_exists() {
-    "${RBD_BIN}" namespace ls "${POOL}" --format json 2>/dev/null |
+    rbd namespace ls "${POOL}" --format json 2>/dev/null |
         python3 -c 'import json, sys; rows=json.load(sys.stdin); wanted=sys.argv[1]; raise SystemExit(0 if any(row.get("name") == wanted for row in rows) else 1)' "${NAMESPACE}"
 }
 
@@ -93,12 +105,12 @@ provision() {
     [[ ! -e "${STATE_ROOT}" ]] || die "run-owned state already exists: ${STATE_ROOT}"
     pool_exists && die "refusing to adopt pre-existing pool ${POOL}"
     local pool_created=false
-    trap 'if [[ "${pool_created}" == true ]]; then "${CEPH_BIN}" osd pool delete "${POOL}" "${POOL}" --yes-i-really-really-mean-it >/dev/null 2>&1 || true; fi' ERR
-    "${CEPH_BIN}" osd pool create "${POOL}" 8 8 >/dev/null
+    trap 'if [[ "${pool_created}" == true ]]; then ceph osd pool delete "${POOL}" "${POOL}" --yes-i-really-really-mean-it >/dev/null 2>&1 || true; fi' ERR
+    ceph osd pool create "${POOL}" 8 8 >/dev/null
     pool_created=true
-    "${CEPH_BIN}" osd pool application enable "${POOL}" rbd >/dev/null
-    "${RBD_BIN}" pool init "${POOL}" >/dev/null
-    "${RBD_BIN}" namespace create "${POOL}/${NAMESPACE}" >/dev/null
+    ceph osd pool application enable "${POOL}" rbd >/dev/null
+    rbd pool init "${POOL}" >/dev/null
+    rbd namespace create "${POOL}/${NAMESPACE}" >/dev/null
     write_state
     trap - ERR
     echo "provisioned MicroCeph RBD profile: ${STATE_FILE}"
@@ -115,10 +127,10 @@ cleanup() {
     require_tools; validate_inputs; read_state
     pool_exists || die "refusing cleanup of missing pool"
     namespace_exists || die "refusing cleanup of missing namespace"
-    images="$(${RBD_BIN} ls --pool "${POOL}" --namespace "${NAMESPACE}" --format json)"
+    images="$(rbd ls --pool "${POOL}" --namespace "${NAMESPACE}" --format json)"
     [[ "${images}" == "[]" ]] || die "run-scoped namespace still contains images"
-    "${RBD_BIN}" namespace remove "${POOL}/${NAMESPACE}" >/dev/null
-    "${CEPH_BIN}" osd pool delete "${POOL}" "${POOL}" --yes-i-really-really-mean-it >/dev/null
+    rbd namespace remove "${POOL}/${NAMESPACE}" >/dev/null
+    ceph osd pool delete "${POOL}" "${POOL}" --yes-i-really-really-mean-it >/dev/null
     rm -f -- "${STATE_FILE}"
     rmdir -- "${STATE_ROOT}"
     echo "cleaned MicroCeph RBD profile for ${RUN_ID}"

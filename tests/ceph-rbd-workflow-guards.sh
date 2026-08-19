@@ -18,7 +18,7 @@ for needle in (
     'test "${GITHUB_REF}" = "refs/heads/main"',
     "microceph cluster bootstrap",
     "microceph disk add loop,4G,3",
-    "microceph.rbd",
+    "ceph-common",
     "scripts/microceph-testlab-profile.sh provision",
     "scripts/real-ceph-rbd-guest-gate.sh",
     "scripts/microceph-testlab-profile.sh cleanup",
@@ -31,8 +31,10 @@ for needle in (
 assert "continue-on-error" not in workflow
 assert "rm -rf" not in workflow
 assert "o3k-storage start" not in workflow
+assert "microceph.rbd" not in workflow
+assert "/var/snap/microceph/current/conf/ceph.keyring" in workflow
 for needle in (
-    'pool init "${POOL}"',
+    'rbd pool init "${POOL}"',
     'namespace create "${POOL}/${NAMESPACE}"',
     'refusing to adopt pre-existing pool',
     'namespace still contains images',
