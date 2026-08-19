@@ -497,6 +497,53 @@ mod p9_plan_tests {
     }
 
     #[test]
+    fn plan_rejects_pool_gateway_from_the_allocatable_range() {
+        let mut value = intent();
+        value.address_pools.push(o3k_domain::AddressPool {
+            id: Uuid::from_u128(10),
+            realm_id: value.realm.id,
+            project_id: value.project_id.clone(),
+            prefix: prefix("10.0.0.0", 24),
+            gateway: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            first_usable: Ipv4Addr::new(10, 0, 0, 1),
+            last_usable: Ipv4Addr::new(10, 0, 0, 20),
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+
+        let mut value = intent();
+        value.address_pools.push(o3k_domain::AddressPool {
+            id: Uuid::from_u128(11),
+            realm_id: value.realm.id,
+            project_id: value.project_id.clone(),
+            prefix: prefix("10.0.0.0", 24),
+            gateway: Some(Ipv4Addr::new(10, 0, 0, 255)),
+            first_usable: Ipv4Addr::new(10, 0, 0, 2),
+            last_usable: Ipv4Addr::new(10, 0, 0, 20),
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+    }
+
+    #[test]
     fn equivalent_plan_replay_is_allowed_but_payload_conflict_is_rejected() {
         let plan = compile_node_network_plan(
             &intent(),
@@ -3587,9 +3634,13 @@ pub fn compile_node_network_plan(
                 pool.first_usable == broadcast || pool.last_usable == broadcast
             })
             || u32::from(pool.first_usable) > u32::from(pool.last_usable)
-            || pool
-                .gateway
-                .is_some_and(|gateway| !pool.prefix.contains(gateway))
+            || pool.gateway.is_some_and(|gateway| {
+                !pool.prefix.contains(gateway)
+                    || gateway == pool.prefix.network
+                    || broadcast_address(pool.prefix).is_some_and(|broadcast| gateway == broadcast)
+            })
+            || u32::from(pool.first_usable) <= u32::from(gateway)
+                && u32::from(gateway) <= u32::from(pool.last_usable)
         {
             return Err(NetworkPlanError::InvalidAddressPool);
         }
