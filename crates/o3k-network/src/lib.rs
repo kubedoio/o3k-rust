@@ -22,6 +22,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod linux_p11;
 pub mod p11;
 pub mod policy;
 pub mod public;
@@ -33,6 +34,7 @@ pub use execution::{
     NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
     PlanAdmission, journal_path,
 };
+pub use linux_p11::{LinuxP11Config, LinuxP11Error, LinuxP11FabricBackend};
 pub use p11::{InMemoryP11FabricBackend, P11FabricBackend, P11FabricError, P11FabricRealizer};
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
