@@ -1,9 +1,9 @@
 # ADR-0170 — Namespaced Routed Edge Fabric for P11
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-19
-Decision-accepted: pending
-Human-approval: pending
+Decision-accepted: explicit acceptance by the task requester, 2026-08-19
+Human-approval: task requester, explicit acceptance recorded in task instruction, 2026-08-19
 Supersedes: none
 Superseded-by: none
 Affected-services: network, compute, placement, scheduler, storage, kernel, edge, governance
@@ -22,9 +22,10 @@ Related decisions and specifications:
 - [P11 edge-fabric contract](../../contracts/p11-edge-fabric.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
-This is a privileged multi-host networking and scheduling decision. Runtime
-implementation is blocked until a human maintainer explicitly accepts this ADR
-and SPEC-0028. Architecture text alone is not product evidence.
+This is a privileged multi-host networking and scheduling decision. The task
+requester explicitly accepted this ADR and SPEC-0028 on 2026-08-19. The
+architecture is now authorized for bounded implementation; architecture text
+alone is not product evidence and does not create a runtime or support claim.
 
 ## Context
 
@@ -504,17 +505,20 @@ Rejected because loss of control-plane connectivity does not prove the old VM
 or shared-storage writer is stopped. Duplicate execution/data corruption is a
 worse failure than temporary unavailability.
 
-## Human acceptance gate
+## Human acceptance record
 
-Before implementation begins, a human maintainer must record:
+The task requester explicitly accepted ADR-0170 and SPEC-0028 for P11
+implementation on 2026-08-19. The requester identity is not exposed to the
+agent beyond the authenticated task instruction.
 
 ```text
 Decision: ACCEPT ADR-0170 and SPEC-0028 for P11 implementation
-Reviewer: <GitHub identity / organization>
-Date: <UTC date>
-Conditions: <if any>
-Evidence: issue #701 or linked PR review/comment
+Reviewer: task requester (explicit authenticated task instruction)
+Date: 2026-08-19 UTC
+Conditions: preserve all SPEC-0028 evidence gates and non-goals
+Evidence: acceptance instruction in the active task after PR #702 merged
 ```
 
-Until that record exists, ADR-0170/SPEC-0028 remain `Proposed` and privileged
-P11 runtime implementation is blocked.
+This acceptance authorizes bounded implementation. It does not claim that the
+runtime, privileged-host, real multi-host, target-scale, MTU, storage-placement,
+failure-matrix, or cleanup evidence gates have passed.

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, net::Ipv4Addr};
+use thiserror::Error;
 use uuid::Uuid;
 
 /// A canonical IPv4 prefix. The stored address is always the network address;
@@ -128,6 +129,452 @@ pub struct EndpointIntent {
     pub mac: String,
     pub fixed_ip: Ipv4Addr,
     pub generation: u64,
+}
+
+/// Accepted control-plane placement for one endpoint. Provider names, ARP/FDB
+/// observations, and kernel interface names are deliberately absent: this is
+/// the semantic input from which a host-local provider plan is derived.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointLocation {
+    pub endpoint_id: Uuid,
+    pub project_id: String,
+    pub realm_id: Uuid,
+    pub fixed_ip: Ipv4Addr,
+    pub mac: String,
+    pub selected_host: String,
+    pub endpoint_generation: u64,
+    pub placement_generation: u64,
+}
+
+/// A deterministic, generation-bound directory used by providers to answer
+/// only accepted same-realm neighbor requests and compile endpoint routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealmEndpointDirectory {
+    pub realm_id: Uuid,
+    pub directory_generation: u64,
+    pub proxy_mac: String,
+    pub entries: Vec<EndpointLocation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeighborResolution {
+    LocalActualMac(String),
+    RemoteRealmProxyMac(String),
+    Unknown,
+}
+
+/// Bounded public identity for one accepted host fabric enrollment. Private
+/// transport keys are intentionally not representable in this value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricHostIdentity {
+    pub host_id: String,
+    pub public_key: String,
+    pub underlay_endpoint: String,
+    pub provider_version: String,
+    pub fabric_generation: u64,
+    pub underlay_mtu: u16,
+    pub fabric_mtu: u16,
+}
+
+/// Semantic route intent for a remote endpoint. The provider may realize this
+/// as a host-local IPv4 /32 route, but the route never becomes endpoint
+/// authority by itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FabricEndpointRoute {
+    pub destination: Ipv4Prefix,
+    pub endpoint_id: Uuid,
+    pub target_host: String,
+    pub endpoint_generation: u64,
+    pub placement_generation: u64,
+    pub fabric_generation: u64,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum EndpointDirectoryError {
+    #[error("endpoint directory generation must be non-zero")]
+    InvalidDirectoryGeneration,
+    #[error("endpoint location has an empty project, host, or identity")]
+    InvalidIdentity,
+    #[error("endpoint location generation must be non-zero")]
+    InvalidGeneration,
+    #[error("endpoint location is outside the address realm")]
+    OutsideRealm,
+    #[error("endpoint location belongs to a different project or realm")]
+    ScopeMismatch,
+    #[error("endpoint directory contains a duplicate endpoint, address, or MAC")]
+    DuplicateEndpoint,
+    #[error("endpoint MAC is not a canonical unicast MAC address")]
+    InvalidMac,
+    #[error("realm proxy MAC collides with occupied provider state")]
+    ProxyMacCollision,
+    #[error("host fabric identity is missing or stale")]
+    MissingFabricIdentity,
+    #[error("host fabric identity is duplicated or invalid")]
+    InvalidFabricIdentity,
+}
+
+impl RealmEndpointDirectory {
+    /// Builds deterministic planner state from accepted endpoint placement.
+    /// `occupied_macs` represents provider-local MAC state that must not be
+    /// collided with; it is never used as an authority source.
+    pub fn build(
+        realm: &AddressRealm,
+        mut entries: Vec<EndpointLocation>,
+        occupied_macs: &[String],
+        directory_generation: u64,
+    ) -> Result<Self, EndpointDirectoryError> {
+        if directory_generation == 0 {
+            return Err(EndpointDirectoryError::InvalidDirectoryGeneration);
+        }
+        let proxy_mac = realm_proxy_mac(realm.id);
+        let mut endpoint_ids = std::collections::BTreeSet::new();
+        let mut addresses = std::collections::BTreeSet::new();
+        let mut macs = std::collections::BTreeSet::new();
+        for entry in &mut entries {
+            if entry.project_id.is_empty()
+                || entry.selected_host.is_empty()
+                || entry.endpoint_id == Uuid::nil()
+            {
+                return Err(EndpointDirectoryError::InvalidIdentity);
+            }
+            if entry.endpoint_generation == 0 || entry.placement_generation == 0 {
+                return Err(EndpointDirectoryError::InvalidGeneration);
+            }
+            if entry.project_id != realm.project_id || entry.realm_id != realm.id {
+                return Err(EndpointDirectoryError::ScopeMismatch);
+            }
+            if !realm.prefix.contains(entry.fixed_ip) {
+                return Err(EndpointDirectoryError::OutsideRealm);
+            }
+            entry.mac = canonical_mac(&entry.mac).ok_or(EndpointDirectoryError::InvalidMac)?;
+            if !endpoint_ids.insert(entry.endpoint_id)
+                || !addresses.insert(entry.fixed_ip)
+                || !macs.insert(entry.mac.clone())
+            {
+                return Err(EndpointDirectoryError::DuplicateEndpoint);
+            }
+        }
+        if macs.contains(&proxy_mac) {
+            return Err(EndpointDirectoryError::ProxyMacCollision);
+        }
+        for occupied_mac in occupied_macs {
+            let occupied_mac =
+                canonical_mac(occupied_mac).ok_or(EndpointDirectoryError::InvalidMac)?;
+            if occupied_mac == proxy_mac {
+                return Err(EndpointDirectoryError::ProxyMacCollision);
+            }
+        }
+        entries.sort_by_key(|entry| (entry.fixed_ip, entry.endpoint_id));
+        Ok(Self {
+            realm_id: realm.id,
+            directory_generation,
+            proxy_mac,
+            entries,
+        })
+    }
+
+    #[must_use]
+    pub fn resolve_neighbor(&self, destination: Ipv4Addr, local_host: &str) -> NeighborResolution {
+        if local_host.is_empty() {
+            return NeighborResolution::Unknown;
+        }
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.fixed_ip == destination)
+        else {
+            return NeighborResolution::Unknown;
+        };
+        if entry.selected_host == local_host {
+            NeighborResolution::LocalActualMac(entry.mac.clone())
+        } else {
+            NeighborResolution::RemoteRealmProxyMac(self.proxy_mac.clone())
+        }
+    }
+
+    #[must_use]
+    pub fn location(&self, endpoint_id: Uuid) -> Option<&EndpointLocation> {
+        self.entries
+            .iter()
+            .find(|entry| entry.endpoint_id == endpoint_id)
+    }
+
+    /// Derives only current remote endpoint routes for `local_host`.
+    pub fn remote_routes(
+        &self,
+        local_host: &str,
+        host_identities: &[FabricHostIdentity],
+    ) -> Result<Vec<FabricEndpointRoute>, EndpointDirectoryError> {
+        if local_host.is_empty() {
+            return Err(EndpointDirectoryError::InvalidIdentity);
+        }
+        let mut hosts = std::collections::BTreeSet::new();
+        for host in host_identities {
+            if host.host_id.is_empty()
+                || host.public_key.is_empty()
+                || host.underlay_endpoint.is_empty()
+                || host.provider_version.is_empty()
+                || host.fabric_generation == 0
+                || host.underlay_mtu == 0
+                || host.fabric_mtu == 0
+                || host.fabric_mtu > host.underlay_mtu
+                || !hosts.insert(host.host_id.as_str())
+            {
+                return Err(EndpointDirectoryError::InvalidFabricIdentity);
+            }
+        }
+
+        let mut routes = Vec::new();
+        for entry in &self.entries {
+            if entry.selected_host == local_host {
+                continue;
+            }
+            let Some(host) = host_identities
+                .iter()
+                .find(|host| host.host_id == entry.selected_host)
+            else {
+                return Err(EndpointDirectoryError::MissingFabricIdentity);
+            };
+            let Some(destination) = Ipv4Prefix::new(entry.fixed_ip, 32) else {
+                return Err(EndpointDirectoryError::OutsideRealm);
+            };
+            routes.push(FabricEndpointRoute {
+                destination,
+                endpoint_id: entry.endpoint_id,
+                target_host: entry.selected_host.clone(),
+                endpoint_generation: entry.endpoint_generation,
+                placement_generation: entry.placement_generation,
+                fabric_generation: host.fabric_generation,
+            });
+        }
+        routes.sort_by_key(|route| (route.destination, route.endpoint_id));
+        Ok(routes)
+    }
+}
+
+/// Versioned deterministic provider mapping for remote same-realm ARP. The
+/// result is locally administered and unicast; it is never a VM endpoint ID.
+#[must_use]
+pub fn realm_proxy_mac(realm_id: Uuid) -> String {
+    const VERSION: u8 = 1;
+    let mut hash = 0xcbf29ce484222325u64 ^ u64::from(VERSION);
+    for byte in realm_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let bytes = [
+        0x02,
+        (hash >> 32) as u8,
+        (hash >> 24) as u8,
+        (hash >> 16) as u8,
+        (hash >> 8) as u8,
+        hash as u8,
+    ];
+    format!(
+        "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]
+    )
+}
+
+fn canonical_mac(value: &str) -> Option<String> {
+    let bytes = value
+        .split(':')
+        .map(|part| (part.len() == 2).then(|| u8::from_str_radix(part, 16).ok())?)
+        .collect::<Option<Vec<_>>>()?;
+    if bytes.len() != 6 || bytes[0] & 1 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    )
+}
+
+#[cfg(test)]
+mod endpoint_directory_tests {
+    use super::*;
+
+    fn realm() -> AddressRealm {
+        AddressRealm {
+            id: Uuid::from_u128(1),
+            project_id: "project-a".to_owned(),
+            prefix: Ipv4Prefix {
+                network: Ipv4Addr::new(10, 40, 1, 0),
+                prefix_len: 24,
+            },
+            overlapping_prefixes: false,
+        }
+    }
+
+    fn location(id: u128, ip: [u8; 4], host: &str, mac: &str) -> EndpointLocation {
+        EndpointLocation {
+            endpoint_id: Uuid::from_u128(id),
+            project_id: "project-a".to_owned(),
+            realm_id: Uuid::from_u128(1),
+            fixed_ip: Ipv4Addr::from(ip),
+            mac: mac.to_owned(),
+            selected_host: host.to_owned(),
+            endpoint_generation: 1,
+            placement_generation: 1,
+        }
+    }
+
+    #[test]
+    fn directory_sorts_entries_and_resolves_local_or_remote_neighbors() {
+        let directory = RealmEndpointDirectory::build(
+            &realm(),
+            vec![
+                location(2, [10, 40, 1, 12], "host-07", "02:00:00:00:00:12"),
+                location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10"),
+            ],
+            &[],
+            3,
+        );
+        assert!(directory.is_ok());
+        let Some(directory) = directory.ok() else {
+            return;
+        };
+        assert_eq!(directory.entries[0].fixed_ip, Ipv4Addr::new(10, 40, 1, 10));
+        assert_eq!(
+            directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 10), "host-01"),
+            NeighborResolution::LocalActualMac("02:00:00:00:00:10".to_owned())
+        );
+        assert_eq!(
+            directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 12), "host-01"),
+            NeighborResolution::RemoteRealmProxyMac(directory.proxy_mac.clone())
+        );
+        assert_eq!(
+            directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 99), "host-01"),
+            NeighborResolution::Unknown
+        );
+        assert_eq!(
+            directory.resolve_neighbor(Ipv4Addr::new(10, 40, 1, 12), ""),
+            NeighborResolution::Unknown
+        );
+    }
+
+    #[test]
+    fn directory_rejects_scope_generation_address_and_identity_conflicts() {
+        let mut entry = location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10");
+        entry.project_id = "project-b".to_owned();
+        assert_eq!(
+            RealmEndpointDirectory::build(&realm(), vec![entry], &[], 1),
+            Err(EndpointDirectoryError::ScopeMismatch)
+        );
+
+        let mut entry = location(1, [10, 40, 2, 10], "host-01", "02:00:00:00:00:10");
+        assert_eq!(
+            RealmEndpointDirectory::build(&realm(), vec![entry.clone()], &[], 1),
+            Err(EndpointDirectoryError::OutsideRealm)
+        );
+        entry.fixed_ip = Ipv4Addr::new(10, 40, 1, 10);
+        entry.endpoint_generation = 0;
+        assert_eq!(
+            RealmEndpointDirectory::build(&realm(), vec![entry], &[], 1),
+            Err(EndpointDirectoryError::InvalidGeneration)
+        );
+
+        let duplicate = location(1, [10, 40, 1, 11], "host-01", "02:00:00:00:00:10");
+        assert_eq!(
+            RealmEndpointDirectory::build(
+                &realm(),
+                vec![
+                    location(2, [10, 40, 1, 12], "host-02", "02:00:00:00:00:10"),
+                    duplicate
+                ],
+                &[],
+                1,
+            ),
+            Err(EndpointDirectoryError::DuplicateEndpoint)
+        );
+    }
+
+    #[test]
+    fn proxy_mac_is_stable_local_unicast_and_collision_checked() {
+        let first = realm_proxy_mac(Uuid::from_u128(7));
+        assert_eq!(first, realm_proxy_mac(Uuid::from_u128(7)));
+        let octets = first
+            .split(':')
+            .filter_map(|part| u8::from_str_radix(part, 16).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(octets.len(), 6);
+        assert_eq!(octets[0] & 0x03, 0x02);
+
+        let collision = realm_proxy_mac(Uuid::from_u128(1));
+        let entry = location(1, [10, 40, 1, 10], "host-01", &collision);
+        assert_eq!(
+            RealmEndpointDirectory::build(&realm(), vec![entry], &[], 1),
+            Err(EndpointDirectoryError::ProxyMacCollision)
+        );
+        assert_eq!(
+            RealmEndpointDirectory::build(
+                &realm(),
+                vec![location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10")],
+                &[collision],
+                1,
+            ),
+            Err(EndpointDirectoryError::ProxyMacCollision)
+        );
+        assert_eq!(
+            RealmEndpointDirectory::build(
+                &realm(),
+                vec![location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10")],
+                &["not-a-mac".to_owned()],
+                1,
+            ),
+            Err(EndpointDirectoryError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn remote_routes_require_current_host_identity_and_use_endpoint_32s() {
+        let directory = RealmEndpointDirectory::build(
+            &realm(),
+            vec![
+                location(2, [10, 40, 1, 12], "host-07", "02:00:00:00:00:12"),
+                location(1, [10, 40, 1, 10], "host-01", "02:00:00:00:00:10"),
+            ],
+            &[],
+            3,
+        );
+        assert!(directory.is_ok());
+        let Some(directory) = directory.ok() else {
+            return;
+        };
+        let identities = vec![FabricHostIdentity {
+            host_id: "host-07".to_owned(),
+            public_key: "public-key-07".to_owned(),
+            underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            provider_version: "wireguard-v1".to_owned(),
+            fabric_generation: 9,
+            underlay_mtu: 1500,
+            fabric_mtu: 1420,
+        }];
+        let routes = directory.remote_routes("host-01", &identities);
+        assert!(routes.is_ok());
+        let Some(routes) = routes.ok() else {
+            return;
+        };
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].destination.prefix_len, 32);
+        assert_eq!(routes[0].destination.network, Ipv4Addr::new(10, 40, 1, 12));
+        assert_eq!(routes[0].target_host, "host-07");
+        assert_eq!(routes[0].fabric_generation, 9);
+
+        assert_eq!(
+            directory.remote_routes("host-01", &[]),
+            Err(EndpointDirectoryError::MissingFabricIdentity)
+        );
+        let mut invalid = identities;
+        invalid[0].fabric_mtu = 1501;
+        assert_eq!(
+            directory.remote_routes("host-01", &invalid),
+            Err(EndpointDirectoryError::InvalidFabricIdentity)
+        );
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

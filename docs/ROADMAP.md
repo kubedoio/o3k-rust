@@ -73,14 +73,14 @@ service-testbed profile, not native Volume authority. Boot-from-volume,
 multi-attach, migration, backups, replication/mirroring, CephFS/NFS, and KMS
 remain later profiles unless separately accepted and proven.
 
-## P11 — Namespaced Routed Edge Fabric v1 — proposed next milestone
+## P11 — Namespaced Routed Edge Fabric v1 — accepted implementation milestone
 
 Turn the proven compute + P9 network + P10 storage model into the first real
 multi-hypervisor edge profile for roughly 10–20 hypervisors.
 
-The proposed normative architecture is ADR-0170/SPEC-0028 plus
-`contracts/p11-edge-fabric.md`. Runtime implementation is blocked until explicit
-human architecture/security acceptance.
+The accepted normative architecture is ADR-0170/SPEC-0028 plus
+`contracts/p11-edge-fabric.md`. Runtime implementation is authorized, but no
+runtime, scale, or support claim exists until the required evidence gates pass.
 
 ### P11 user outcome
 

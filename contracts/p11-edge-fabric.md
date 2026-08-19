@@ -1,6 +1,6 @@
 # P11 Namespaced Routed Edge Fabric contract
 
-Status: Proposed
+Status: Accepted
 
 Related architecture:
 
@@ -9,8 +9,9 @@ Related architecture:
 - [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [execution-boundary contract](execution-boundaries.md)
 
-This contract is inactive until ADR-0170/SPEC-0028 receive explicit human
-architecture/security acceptance.
+This contract is active for bounded P11 implementation now that ADR-0170 and
+SPEC-0028 have explicit acceptance. It remains an implementation contract, not
+runtime or product evidence.
 
 ## Purpose
 
