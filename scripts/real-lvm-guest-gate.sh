@@ -138,8 +138,23 @@ domain_ip() {
         printf '%s\n' "${SSH_HOST}"
         return
     fi
-    sudo -n virsh -c qemu:///system domifaddr "${CURRENT_DOMAIN}" --source lease 2>/dev/null \
-        | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}'
+    # The protected runner's libvirt version does not always expose a guest
+    # address through the per-domain lease view, even when dnsmasq has issued
+    # the lease. Try the domain views first, then the network's authoritative
+    # DHCP lease table. The address is only an observation; SSH remains the
+    # readiness proof below.
+    local source host
+    for source in lease arp agent; do
+        host="$(sudo -n virsh -c qemu:///system domifaddr "${CURRENT_DOMAIN}" \
+            --source "${source}" 2>/dev/null \
+            | awk '/ipv4/ {sub(/\/.*/, "", $4); print $4; exit}' || true)"
+        if [[ -n "${host}" ]]; then
+            printf '%s\n' "${host}"
+            return
+        fi
+    done
+    sudo -n virsh -c qemu:///system net-dhcp-leases "${NETWORK}" 2>/dev/null \
+        | awk '/ipv4/ {sub(/\/.*/, "", $5); print $5; exit}'
 }
 
 wait_for_guest() {
