@@ -1,4 +1,5 @@
 mod network;
+mod storage;
 
 pub use network::{
     AddressPool, AddressRealm, EgressIntent, EndpointIntent, GatewayIntent, Ipv4Prefix,
@@ -6,6 +7,12 @@ pub use network::{
     PolicyAction, PolicyDirection, PolicyIntent, PortRange, PublicAddressBindingIntent,
     RouteIntent, SecurityGroupBinding, SecurityGroupIntent, SecurityGroupRuleIntent,
     SecurityGroupState,
+};
+pub use storage::{
+    AttachmentAccessMode, ProviderReference as StorageProviderReference, Snapshot,
+    SnapshotConsistency, SnapshotId, SnapshotState, StorageBackend, StorageCapabilities,
+    StorageExecutionScope, StorageTransitionError, StorageValidationError, Volume,
+    VolumeAttachment, VolumeAttachmentId, VolumeAttachmentState, VolumeId, VolumeState,
 };
 
 use serde::{Deserialize, Serialize};

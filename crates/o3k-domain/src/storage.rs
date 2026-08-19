@@ -1,0 +1,453 @@
+//! Canonical native persistent-storage resources.
+//!
+//! These types deliberately contain technology-independent intent and
+//! lifecycle semantics. Provider-native paths, device names, libvirt target
+//! names, RBD image/device names, and connection data belong to execution
+//! observations, never to these resources.
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use thiserror::Error;
+use uuid::Uuid;
+
+macro_rules! typed_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(Uuid);
+
+        impl $name {
+            #[must_use]
+            pub fn new() -> Self {
+                Self(Uuid::now_v7())
+            }
+
+            #[must_use]
+            pub const fn from_uuid(id: Uuid) -> Self {
+                Self(id)
+            }
+
+            #[must_use]
+            pub const fn as_uuid(self) -> Uuid {
+                self.0
+            }
+        }
+
+        impl Default for $name {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl From<Uuid> for $name {
+            fn from(id: Uuid) -> Self {
+                Self::from_uuid(id)
+            }
+        }
+
+        impl From<$name> for Uuid {
+            fn from(id: $name) -> Self {
+                id.as_uuid()
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(formatter)
+            }
+        }
+    };
+}
+
+typed_id!(VolumeId);
+typed_id!(VolumeAttachmentId);
+typed_id!(SnapshotId);
+
+/// Placement/execution scope. A host scope is used by local LVM; a backend
+/// scope permits shared providers such as Ceph RBD without changing the
+/// canonical resource model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "id")]
+pub enum StorageExecutionScope {
+    Host(String),
+    Backend(String),
+}
+
+impl StorageExecutionScope {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        let id = match self {
+            Self::Host(id) | Self::Backend(id) => id,
+        };
+        if id.is_empty() || id.len() > 128 {
+            return Err(StorageValidationError::InvalidScope);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeState {
+    Requested,
+    Creating,
+    Available,
+    Attaching,
+    InUse,
+    Detaching,
+    Deleting,
+    Deleted,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeAttachmentState {
+    Reserved,
+    Preparing,
+    Attaching,
+    Attached,
+    Detaching,
+    Detached,
+    Unknown,
+    Error,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotState {
+    Requested,
+    Creating,
+    Available,
+    Deleting,
+    Deleted,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentAccessMode {
+    ReadOnly,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotConsistency {
+    CrashConsistent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderReference {
+    pub provider: String,
+    pub resource_id: String,
+}
+
+impl ProviderReference {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.provider.is_empty()
+            || self.provider.len() > 128
+            || self.resource_id.is_empty()
+            || self.resource_id.len() > 512
+        {
+            return Err(StorageValidationError::InvalidProviderReference);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageCapabilities {
+    pub create_volume: bool,
+    pub snapshots: bool,
+    pub attachment: bool,
+    pub capacity_bytes: u64,
+    pub allocated_bytes: u64,
+    pub allocation_unit_bytes: u64,
+}
+
+impl StorageCapabilities {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.allocation_unit_bytes == 0 || self.allocated_bytes > self.capacity_bytes {
+            return Err(StorageValidationError::InvalidCapacity);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageBackend {
+    pub id: String,
+    pub scope: StorageExecutionScope,
+    pub capabilities: StorageCapabilities,
+    pub generation: u64,
+    pub available: bool,
+}
+
+impl StorageBackend {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.id.is_empty() || self.id.len() > 128 {
+            return Err(StorageValidationError::InvalidBackendId);
+        }
+        self.scope.validate()?;
+        self.capabilities.validate()?;
+        if self.generation == 0 {
+            return Err(StorageValidationError::InvalidGeneration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Volume {
+    pub id: VolumeId,
+    pub project_id: String,
+    pub size_bytes: u64,
+    pub volume_type: String,
+    pub backend_id: String,
+    pub execution_scope: StorageExecutionScope,
+    pub state: VolumeState,
+    pub generation: u64,
+    pub operation_id: Option<Uuid>,
+    pub provider_reference: Option<ProviderReference>,
+}
+
+impl Volume {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.project_id.is_empty() || self.project_id.len() > 256 {
+            return Err(StorageValidationError::InvalidProject);
+        }
+        if self.size_bytes == 0 || self.volume_type.is_empty() || self.volume_type.len() > 128 {
+            return Err(StorageValidationError::InvalidVolume);
+        }
+        if self.backend_id.is_empty() || self.backend_id.len() > 128 {
+            return Err(StorageValidationError::InvalidBackendId);
+        }
+        self.execution_scope.validate()?;
+        if self.generation == 0 {
+            return Err(StorageValidationError::InvalidGeneration);
+        }
+        if let Some(reference) = &self.provider_reference {
+            reference.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn transition(self, to: Self) -> Result<Self, StorageTransitionError> {
+        let from_state = self.state;
+        let to_state = to.state;
+        let valid = matches!(
+            (from_state, to_state),
+            (
+                VolumeState::Requested,
+                VolumeState::Creating | VolumeState::Error
+            ) | (
+                VolumeState::Creating,
+                VolumeState::Available
+                    | VolumeState::Unknown
+                    | VolumeState::Error
+                    | VolumeState::Deleting
+            ) | (
+                VolumeState::Available,
+                VolumeState::Attaching | VolumeState::Deleting | VolumeState::Error
+            ) | (
+                VolumeState::Attaching,
+                VolumeState::InUse
+                    | VolumeState::Unknown
+                    | VolumeState::Error
+                    | VolumeState::Deleting
+            ) | (
+                VolumeState::InUse,
+                VolumeState::Detaching | VolumeState::Deleting | VolumeState::Error
+            ) | (
+                VolumeState::Detaching,
+                VolumeState::Available
+                    | VolumeState::Unknown
+                    | VolumeState::Error
+                    | VolumeState::Deleting
+            ) | (
+                VolumeState::Unknown,
+                VolumeState::Creating
+                    | VolumeState::Available
+                    | VolumeState::Attaching
+                    | VolumeState::InUse
+                    | VolumeState::Deleting
+                    | VolumeState::Error
+            ) | (VolumeState::Error, VolumeState::Deleting)
+                | (
+                    VolumeState::Deleting,
+                    VolumeState::Deleted | VolumeState::Unknown | VolumeState::Error
+                )
+        );
+        valid
+            .then_some(to)
+            .ok_or(StorageTransitionError::InvalidVolume {
+                from: from_state,
+                to: to_state,
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeAttachment {
+    pub id: VolumeAttachmentId,
+    pub project_id: String,
+    pub volume_id: VolumeId,
+    pub server_id: Uuid,
+    pub execution_scope: StorageExecutionScope,
+    pub access_mode: AttachmentAccessMode,
+    pub delete_on_termination: bool,
+    pub state: VolumeAttachmentState,
+    pub generation: u64,
+    pub operation_id: Option<Uuid>,
+    pub provider_reference: Option<ProviderReference>,
+}
+
+impl VolumeAttachment {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.project_id.is_empty() || self.project_id.len() > 256 {
+            return Err(StorageValidationError::InvalidProject);
+        }
+        self.execution_scope.validate()?;
+        if self.generation == 0 {
+            return Err(StorageValidationError::InvalidGeneration);
+        }
+        if let Some(reference) = &self.provider_reference {
+            reference.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub id: SnapshotId,
+    pub project_id: String,
+    pub volume_id: VolumeId,
+    pub source_generation: u64,
+    pub execution_scope: StorageExecutionScope,
+    pub consistency: SnapshotConsistency,
+    pub state: SnapshotState,
+    pub generation: u64,
+    pub operation_id: Option<Uuid>,
+    pub provider_reference: Option<ProviderReference>,
+}
+
+impl Snapshot {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.project_id.is_empty() || self.project_id.len() > 256 {
+            return Err(StorageValidationError::InvalidProject);
+        }
+        self.execution_scope.validate()?;
+        if self.source_generation == 0 || self.generation == 0 {
+            return Err(StorageValidationError::InvalidGeneration);
+        }
+        if let Some(reference) = &self.provider_reference {
+            reference.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum StorageValidationError {
+    #[error("project identity is invalid")]
+    InvalidProject,
+    #[error("volume fields are invalid")]
+    InvalidVolume,
+    #[error("backend identity is invalid")]
+    InvalidBackendId,
+    #[error("storage scope is invalid")]
+    InvalidScope,
+    #[error("provider reference is invalid")]
+    InvalidProviderReference,
+    #[error("capacity or allocation unit is invalid")]
+    InvalidCapacity,
+    #[error("resource generation must be positive")]
+    InvalidGeneration,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum StorageTransitionError {
+    #[error("invalid volume transition from {from:?} to {to:?}")]
+    InvalidVolume { from: VolumeState, to: VolumeState },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn volume(state: VolumeState) -> Volume {
+        Volume {
+            id: VolumeId::from_uuid(Uuid::from_u128(1)),
+            project_id: "project-a".to_owned(),
+            size_bytes: 4096,
+            volume_type: "lvm-thin".to_owned(),
+            backend_id: "backend-a".to_owned(),
+            execution_scope: StorageExecutionScope::Host("host-a".to_owned()),
+            state,
+            generation: 1,
+            operation_id: None,
+            provider_reference: None,
+        }
+    }
+
+    #[test]
+    fn attachment_has_no_provider_device_identity() {
+        let attachment = VolumeAttachment {
+            id: VolumeAttachmentId::from_uuid(Uuid::from_u128(2)),
+            project_id: "project-a".to_owned(),
+            volume_id: VolumeId::from_uuid(Uuid::from_u128(1)),
+            server_id: Uuid::from_u128(3),
+            execution_scope: StorageExecutionScope::Host("host-a".to_owned()),
+            access_mode: AttachmentAccessMode::ReadWrite,
+            delete_on_termination: false,
+            state: VolumeAttachmentState::Reserved,
+            generation: 1,
+            operation_id: None,
+            provider_reference: None,
+        };
+        let encoded = serde_json::to_string(&attachment).expect("domain serialization");
+        assert!(!encoded.contains("/dev/"));
+        assert!(!encoded.contains("target"));
+        assert!(attachment.validate().is_ok());
+    }
+
+    #[test]
+    fn volume_lifecycle_requires_observation_for_unknown_outcomes() {
+        assert!(
+            volume(VolumeState::Requested)
+                .transition(volume(VolumeState::Available))
+                .is_err()
+        );
+        assert!(
+            volume(VolumeState::Creating)
+                .transition(volume(VolumeState::Unknown))
+                .is_ok()
+        );
+        assert!(
+            volume(VolumeState::Unknown)
+                .transition(volume(VolumeState::Available))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn shared_backend_scope_is_valid_without_local_device_fields() {
+        let snapshot = Snapshot {
+            id: SnapshotId::from_uuid(Uuid::from_u128(4)),
+            project_id: "project-a".to_owned(),
+            volume_id: VolumeId::from_uuid(Uuid::from_u128(1)),
+            source_generation: 1,
+            execution_scope: StorageExecutionScope::Backend("ceph-region-a".to_owned()),
+            consistency: SnapshotConsistency::CrashConsistent,
+            state: SnapshotState::Requested,
+            generation: 1,
+            operation_id: None,
+            provider_reference: None,
+        };
+        assert!(snapshot.validate().is_ok());
+    }
+}
