@@ -26,6 +26,7 @@ members = [
     "crates/o3k-console",
     "crates/o3k-store",
     "crates/o3k-kernel",
+    "crates/o3k-storage",
 ]
 resolver = "2"
 

@@ -32,6 +32,7 @@ non_application_crates = [
   "o3k-dhcp",
   "o3k-domain",
   "o3k-kernel",
+  "o3k-storage",
   "o3k-libvirt",
   "o3k-provider",
   "o3k-provider-contract",
