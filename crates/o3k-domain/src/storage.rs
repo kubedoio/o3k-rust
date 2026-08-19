@@ -119,6 +119,20 @@ impl StorageCommandEnvelope {
         {
             return Err(StorageValidationError::InvalidCommandEnvelope);
         }
+        if self.idempotency_key.len() > 256
+            || self.resource_id.len() > 256
+            || self.project_id.len() > 256
+            || self.target_agent_id.len() > 128
+            || self.deadline.len() > 128
+            || self.trace_id.len() > 256
+            || self.canonical_payload_fingerprint.len() != 64
+            || !self
+                .canonical_payload_fingerprint
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        {
+            return Err(StorageValidationError::InvalidCommandEnvelope);
+        }
         Ok(())
     }
 }
@@ -146,6 +160,37 @@ pub struct StorageObservation {
     pub resource_state: String,
     pub error_category: Option<StorageErrorCategory>,
     pub redacted_message: Option<String>,
+}
+
+impl StorageObservation {
+    pub fn validate(&self) -> Result<(), StorageValidationError> {
+        if self.agent_id.is_empty()
+            || self.agent_id.len() > 128
+            || self.agent_epoch == 0
+            || self.resource_id.is_empty()
+            || self.resource_id.len() > 256
+            || self.resource_generation == 0
+            || self.observation_sequence == 0
+            || self.observed_at.is_empty()
+            || self.observed_at.len() > 128
+            || self.resource_state.is_empty()
+            || self.resource_state.len() > 64
+        {
+            return Err(StorageValidationError::InvalidObservation);
+        }
+        if self
+            .provider_resource_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 512)
+            || self
+                .redacted_message
+                .as_ref()
+                .is_some_and(|value| value.len() > 1024 || value.contains('\0'))
+        {
+            return Err(StorageValidationError::InvalidObservation);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,7 +438,6 @@ pub struct VolumeAttachment {
     pub state: VolumeAttachmentState,
     pub generation: u64,
     pub operation_id: Option<Uuid>,
-    pub provider_reference: Option<ProviderReference>,
 }
 
 impl VolumeAttachment {
@@ -405,10 +449,58 @@ impl VolumeAttachment {
         if self.generation == 0 {
             return Err(StorageValidationError::InvalidGeneration);
         }
-        if let Some(reference) = &self.provider_reference {
-            reference.validate()?;
-        }
         Ok(())
+    }
+
+    pub fn transition(self, to: Self) -> Result<Self, StorageTransitionError> {
+        let from = self.state;
+        let target = to.state;
+        let valid = matches!(
+            (from, target),
+            (
+                VolumeAttachmentState::Reserved,
+                VolumeAttachmentState::Preparing | VolumeAttachmentState::Deleted
+            ) | (
+                VolumeAttachmentState::Preparing,
+                VolumeAttachmentState::Attaching
+                    | VolumeAttachmentState::Unknown
+                    | VolumeAttachmentState::Error
+                    | VolumeAttachmentState::Detaching
+            ) | (
+                VolumeAttachmentState::Attaching,
+                VolumeAttachmentState::Attached
+                    | VolumeAttachmentState::Unknown
+                    | VolumeAttachmentState::Error
+                    | VolumeAttachmentState::Detaching
+            ) | (
+                VolumeAttachmentState::Attached,
+                VolumeAttachmentState::Detaching | VolumeAttachmentState::Error
+            ) | (
+                VolumeAttachmentState::Detaching,
+                VolumeAttachmentState::Detached
+                    | VolumeAttachmentState::Unknown
+                    | VolumeAttachmentState::Error
+                    | VolumeAttachmentState::Deleted
+            ) | (
+                VolumeAttachmentState::Detached,
+                VolumeAttachmentState::Deleted
+            ) | (
+                VolumeAttachmentState::Unknown,
+                VolumeAttachmentState::Preparing
+                    | VolumeAttachmentState::Attaching
+                    | VolumeAttachmentState::Attached
+                    | VolumeAttachmentState::Detaching
+                    | VolumeAttachmentState::Detached
+                    | VolumeAttachmentState::Deleted
+                    | VolumeAttachmentState::Error
+            ) | (
+                VolumeAttachmentState::Error,
+                VolumeAttachmentState::Detaching | VolumeAttachmentState::Deleted
+            )
+        );
+        valid
+            .then_some(to)
+            .ok_or(StorageTransitionError::InvalidAttachment { from, to: target })
     }
 }
 
@@ -440,12 +532,47 @@ impl Snapshot {
         }
         Ok(())
     }
+
+    pub fn transition(self, to: Self) -> Result<Self, StorageTransitionError> {
+        let from = self.state;
+        let target = to.state;
+        let valid = matches!(
+            (from, target),
+            (
+                SnapshotState::Requested,
+                SnapshotState::Creating | SnapshotState::Deleting | SnapshotState::Error
+            ) | (
+                SnapshotState::Creating,
+                SnapshotState::Available
+                    | SnapshotState::Unknown
+                    | SnapshotState::Deleting
+                    | SnapshotState::Error
+            ) | (
+                SnapshotState::Available,
+                SnapshotState::Deleting | SnapshotState::Error
+            ) | (
+                SnapshotState::Deleting,
+                SnapshotState::Deleted | SnapshotState::Unknown | SnapshotState::Error
+            ) | (
+                SnapshotState::Unknown,
+                SnapshotState::Creating
+                    | SnapshotState::Available
+                    | SnapshotState::Deleting
+                    | SnapshotState::Error
+            ) | (SnapshotState::Error, SnapshotState::Deleting)
+        );
+        valid
+            .then_some(to)
+            .ok_or(StorageTransitionError::InvalidSnapshot { from, to: target })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StorageValidationError {
     #[error("invalid storage command envelope")]
     InvalidCommandEnvelope,
+    #[error("invalid storage observation")]
+    InvalidObservation,
     #[error("project identity is invalid")]
     InvalidProject,
     #[error("volume fields are invalid")]
@@ -466,6 +593,16 @@ pub enum StorageValidationError {
 pub enum StorageTransitionError {
     #[error("invalid volume transition from {from:?} to {to:?}")]
     InvalidVolume { from: VolumeState, to: VolumeState },
+    #[error("invalid volume attachment transition from {from:?} to {to:?}")]
+    InvalidAttachment {
+        from: VolumeAttachmentState,
+        to: VolumeAttachmentState,
+    },
+    #[error("invalid snapshot transition from {from:?} to {to:?}")]
+    InvalidSnapshot {
+        from: SnapshotState,
+        to: SnapshotState,
+    },
 }
 
 #[cfg(test)]
@@ -501,7 +638,6 @@ mod tests {
             state: VolumeAttachmentState::Reserved,
             generation: 1,
             operation_id: None,
-            provider_reference: None,
         };
         let encoded = serde_json::to_string(&attachment).expect("domain serialization");
         assert!(!encoded.contains("/dev/"));
@@ -543,5 +679,76 @@ mod tests {
             provider_reference: None,
         };
         assert!(snapshot.validate().is_ok());
+    }
+
+    #[test]
+    fn attachment_and_snapshot_transitions_are_validated() {
+        let attachment = VolumeAttachment {
+            id: VolumeAttachmentId::from_uuid(Uuid::from_u128(5)),
+            project_id: "project-a".to_owned(),
+            volume_id: VolumeId::from_uuid(Uuid::from_u128(1)),
+            server_id: Uuid::from_u128(6),
+            execution_scope: StorageExecutionScope::Host("host-a".to_owned()),
+            access_mode: AttachmentAccessMode::ReadWrite,
+            delete_on_termination: false,
+            state: VolumeAttachmentState::Reserved,
+            generation: 1,
+            operation_id: None,
+        };
+        let mut attached = attachment.clone();
+        attached.state = VolumeAttachmentState::Preparing;
+        assert!(attachment.transition(attached).is_ok());
+
+        let snapshot = Snapshot {
+            id: SnapshotId::from_uuid(Uuid::from_u128(7)),
+            project_id: "project-a".to_owned(),
+            volume_id: VolumeId::from_uuid(Uuid::from_u128(1)),
+            source_generation: 1,
+            execution_scope: StorageExecutionScope::Host("host-a".to_owned()),
+            consistency: SnapshotConsistency::CrashConsistent,
+            state: SnapshotState::Available,
+            generation: 1,
+            operation_id: None,
+            provider_reference: None,
+        };
+        let mut deleted = snapshot.clone();
+        deleted.state = SnapshotState::Deleted;
+        assert!(snapshot.transition(deleted).is_err());
+    }
+
+    #[test]
+    fn command_and_observation_validation_is_bounded() {
+        let command = StorageCommandEnvelope {
+            protocol_version: 1,
+            command_id: Uuid::from_u128(8),
+            operation_id: Uuid::from_u128(9),
+            idempotency_key: "operation-1".to_owned(),
+            resource_id: "volume-1".to_owned(),
+            resource_generation: 1,
+            project_id: "project-a".to_owned(),
+            target_agent_id: "storage-a".to_owned(),
+            target_agent_epoch: 1,
+            deadline: "2026-08-19T00:00:00Z".to_owned(),
+            trace_id: "trace-1".to_owned(),
+            action: StorageAction::InspectVolume,
+            canonical_payload_fingerprint: "a".repeat(64),
+        };
+        assert!(command.validate().is_ok());
+
+        let observation = StorageObservation {
+            agent_id: "storage-a".to_owned(),
+            agent_epoch: 1,
+            resource_id: "volume-1".to_owned(),
+            provider_resource_id: None,
+            operation_id: Uuid::from_u128(9),
+            resource_generation: 1,
+            observation_sequence: 1,
+            observed_at: "2026-08-19T00:00:00Z".to_owned(),
+            operation_state: StorageOperationState::Succeeded,
+            resource_state: "available".to_owned(),
+            error_category: None,
+            redacted_message: None,
+        };
+        assert!(observation.validate().is_ok());
     }
 }

@@ -31,10 +31,7 @@ CREATE TABLE IF NOT EXISTS native_volume_attachments (
     generation INTEGER NOT NULL CHECK (generation > 0),
     state TEXT NOT NULL,
     payload TEXT NOT NULL,
-    provider_name TEXT,
-    provider_resource_id TEXT,
-    created_at TEXT NOT NULL,
-    CHECK ((provider_name IS NULL) = (provider_resource_id IS NULL))
+    created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS native_volume_attachments_project_idx ON native_volume_attachments(project_id);
 CREATE INDEX IF NOT EXISTS native_volume_attachments_server_idx ON native_volume_attachments(server_id);

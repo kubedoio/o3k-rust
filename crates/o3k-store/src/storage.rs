@@ -472,13 +472,12 @@ impl StorageRepository for SqliteStore {
         let payload = json(&record.attachment)?;
         let state = state_name(&record.attachment.state)?;
         let (scope_kind, scope_id) = scope_columns(&record.attachment.execution_scope);
-        let provider = provider_columns(record.attachment.provider_reference.as_ref());
-        let result = sqlx::query("INSERT INTO native_volume_attachments (id, project_id, volume_id, server_id, scope_kind, scope_id, generation, state, payload, provider_name, provider_resource_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        let result = sqlx::query("INSERT INTO native_volume_attachments (id, project_id, volume_id, server_id, scope_kind, scope_id, generation, state, payload, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .bind(record.attachment.id.to_string()).bind(&record.attachment.project_id)
             .bind(record.attachment.volume_id.to_string()).bind(record.attachment.server_id.to_string())
             .bind(scope_kind).bind(scope_id)
             .bind(i64::try_from(record.attachment.generation).map_err(|_| StoreError::Corrupt("attachment generation overflow".to_owned()))?)
-            .bind(state).bind(payload).bind(provider.0).bind(provider.1).bind(&record.created_at)
+            .bind(state).bind(payload).bind(&record.created_at)
             .execute(&self.pool).await;
         match result {
             Ok(_) => Ok(()),
@@ -518,10 +517,9 @@ impl StorageRepository for SqliteStore {
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         let payload = json(&record.attachment)?;
         let state = state_name(&record.attachment.state)?;
-        let provider = provider_columns(record.attachment.provider_reference.as_ref());
-        let result = sqlx::query("UPDATE native_volume_attachments SET generation = ?, state = ?, payload = ?, provider_name = ?, provider_resource_id = ? WHERE id = ? AND project_id = ? AND generation = ?")
+        let result = sqlx::query("UPDATE native_volume_attachments SET generation = ?, state = ?, payload = ? WHERE id = ? AND project_id = ? AND generation = ?")
             .bind(i64::try_from(record.attachment.generation).map_err(|_| StoreError::Corrupt("attachment generation overflow".to_owned()))?)
-            .bind(state).bind(payload).bind(provider.0).bind(provider.1)
+            .bind(state).bind(payload)
             .bind(record.attachment.id.to_string()).bind(&record.attachment.project_id)
             .bind(i64::try_from(expected_generation).map_err(|_| StoreError::StaleGeneration)?).execute(&self.pool).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
@@ -768,11 +766,10 @@ impl StorageRepository for crate::PostgresStore {
             .validate()
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
         let (scope_kind, scope_id) = scope_columns(&record.attachment.execution_scope);
-        let provider = provider_columns(record.attachment.provider_reference.as_ref());
-        let result = sqlx::query("INSERT INTO native_volume_attachments (id, project_id, volume_id, server_id, scope_kind, scope_id, generation, state, payload, provider_name, provider_resource_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)")
+        let result = sqlx::query("INSERT INTO native_volume_attachments (id, project_id, volume_id, server_id, scope_kind, scope_id, generation, state, payload, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
             .bind(record.attachment.id.to_string()).bind(&record.attachment.project_id).bind(record.attachment.volume_id.to_string()).bind(record.attachment.server_id.to_string())
             .bind(scope_kind).bind(scope_id).bind(i64::try_from(record.attachment.generation).map_err(|_| StoreError::Corrupt("attachment generation overflow".to_owned()))?)
-            .bind(state_name(&record.attachment.state)?).bind(json(&record.attachment)?).bind(provider.0).bind(provider.1).bind(&record.created_at)
+            .bind(state_name(&record.attachment.state)?).bind(json(&record.attachment)?).bind(&record.created_at)
             .execute(&self.pool).await;
         match result {
             Ok(_) => Ok(()),
@@ -806,9 +803,8 @@ impl StorageRepository for crate::PostgresStore {
             .attachment
             .validate()
             .map_err(|error| StoreError::Corrupt(error.to_string()))?;
-        let provider = provider_columns(record.attachment.provider_reference.as_ref());
-        let result = sqlx::query("UPDATE native_volume_attachments SET generation = $1, state = $2, payload = $3, provider_name = $4, provider_resource_id = $5 WHERE id = $6 AND project_id = $7 AND generation = $8")
-            .bind(i64::try_from(record.attachment.generation).map_err(|_| StoreError::Corrupt("attachment generation overflow".to_owned()))?).bind(state_name(&record.attachment.state)?).bind(json(&record.attachment)?).bind(provider.0).bind(provider.1)
+        let result = sqlx::query("UPDATE native_volume_attachments SET generation = $1, state = $2, payload = $3 WHERE id = $4 AND project_id = $5 AND generation = $6")
+            .bind(i64::try_from(record.attachment.generation).map_err(|_| StoreError::Corrupt("attachment generation overflow".to_owned()))?).bind(state_name(&record.attachment.state)?).bind(json(&record.attachment)?)
             .bind(record.attachment.id.to_string()).bind(&record.attachment.project_id).bind(i64::try_from(expected_generation).map_err(|_| StoreError::StaleGeneration)?)
             .execute(&self.pool).await.map_err(StoreError::Database)?;
         if result.rows_affected() == 0 {
@@ -969,7 +965,6 @@ mod tests {
                 state: o3k_domain::VolumeAttachmentState::Reserved,
                 generation: 1,
                 operation_id: None,
-                provider_reference: None,
             },
             created_at: "2026-08-19T00:00:00Z".to_owned(),
         };
