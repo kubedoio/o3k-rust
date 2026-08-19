@@ -22,6 +22,8 @@ jobs:
           set -euo pipefail
           artifact_dir="${GITHUB_WORKSPACE}/target/ceph-rbd-real-guest-artifacts"
           if test -e "${artifact_dir}"; then sudo -n chown -R "$(id -u):$(id -g)" "${artifact_dir}"; fi
+          target_dir="${GITHUB_WORKSPACE}/target"
+          if test -e "${target_dir}"; then sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"; fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
@@ -149,7 +151,10 @@ jobs:
         run: test ! -e "/var/lib/o3k-ceph-testlab/${{ steps.runner.outputs.run_slug }}"
       - name: Repair real guest evidence ownership
         if: always()
-        run: sudo -n chown -R "$(id -u):$(id -g)" "${GITHUB_WORKSPACE}/target/ceph-rbd-real-guest-artifacts"
+        run: |
+          set -euo pipefail
+          target_dir="${GITHUB_WORKSPACE}/target"
+          if test -e "${target_dir}"; then sudo -n chown -R "$(id -u):$(id -g)" "${target_dir}"; fi
       - name: Upload redacted real guest evidence
         if: always()
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
