@@ -164,12 +164,17 @@ enum CompositeRealizerError {
     PolicyNotConfigured,
     #[error("public bindings require O3K_NETWORK_PUBLIC_ROOT configuration")]
     PublicNotConfigured,
+    #[error("P11 fabric plans require an activated host fabric provider")]
+    P11NotConfigured,
 }
 
 impl NetworkPlanRealizer for CompositeRealizer {
     type Error = CompositeRealizerError;
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if plan.p11_fabric.is_some() {
+            return Err(CompositeRealizerError::P11NotConfigured);
+        }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
         self.flat.realize(&flat_plan)?;
@@ -195,6 +200,9 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
+        if plan.p11_fabric.is_some() {
+            return Err(CompositeRealizerError::P11NotConfigured);
+        }
         if plan.intents.iter().any(is_public_intent) {
             self.public
                 .as_mut()
@@ -220,6 +228,9 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
+        if plan.p11_fabric.is_some() {
+            return Err(CompositeRealizerError::P11NotConfigured);
+        }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
         if !self.flat.observe(&flat_plan)? {
@@ -371,6 +382,7 @@ mod transport_tests {
             deadline_unix_ms,
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
+            p11_fabric: None,
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 = o3k_network::canonical_plan_fingerprint(&plan)?;

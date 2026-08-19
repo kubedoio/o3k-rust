@@ -390,6 +390,10 @@ impl NetworkPlanExecutor {
         if command.plan.fingerprint_sha256 != expected_fingerprint {
             return Err(NetworkExecutionError::InvalidCommand);
         }
+        command
+            .plan
+            .validate_p11_fabric()
+            .map_err(|_| NetworkExecutionError::InvalidCommand)?;
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);
         }
