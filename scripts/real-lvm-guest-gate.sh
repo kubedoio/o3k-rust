@@ -161,6 +161,7 @@ create_domain() {
     local domain="$1" overlay="$2"
     qemu-img create -f qcow2 -F qcow2 -b "${BASE_IMAGE}" "${overlay}" >/dev/null
     sudo -n virt-install --connect qemu:///system --name "${domain}" --memory 2048 --vcpus 2 \
+        --osinfo detect=on,require=off \
         --disk "path=${overlay},format=qcow2,bus=virtio" \
         --network "network=${NETWORK},model=virtio" --graphics none --import \
         --cloud-init "user-data=${CLOUD_INIT_USER_DATA}" --noautoconsole >/dev/null
