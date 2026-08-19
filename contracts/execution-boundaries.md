@@ -6,7 +6,12 @@ Related decisions:
 
 - [ADR-0160](../docs/adr/ADR-0160-service-topology-and-execution-boundaries.md)
 - [ADR-0166](../docs/adr/ADR-0166-o3k-iam-and-keystone-compatibility-boundary.md) (supersedes ADR-0161)
+- [ADR-0168](../docs/adr/ADR-0168-o3k-routed-fabric-and-network-execution.md)
+- [ADR-0169](../docs/adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
+- [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md) (Proposed)
 - [SPEC-0021](../docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md)
+- [SPEC-0028](../docs/specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md) (Proposed)
+- [P11 edge-fabric contract](p11-edge-fabric.md) (Proposed)
 
 ## Purpose
 
@@ -21,16 +26,20 @@ The current protobuf schema may implement only a subset. New wire fields or
 actions must preserve these authority, identity, security, retry, and evidence
 rules.
 
+Proposed P11 fabric additions remain inactive until ADR-0170/SPEC-0028 receive
+explicit human architecture/security acceptance.
+
 ## Authority boundary
 
 ### `o3kd` is authoritative for
 
 - user, project, service, and policy identity;
-- public OpenStack resource IDs and representations;
+- public OpenStack/O3K resource IDs and representations;
 - desired state;
 - immutable request snapshots;
 - operation identity and workflow phase;
 - scheduling and Placement allocation;
+- endpoint-to-host placement and derived multi-host fabric intent;
 - retry, compensation, and reconciliation decisions;
 - compatibility behavior and public errors.
 
@@ -44,7 +53,8 @@ rules.
 - redacted provider failure classification.
 
 An agent cannot authorize a project, select a tenant, allocate control-plane
-capacity, or create a new public O3K resource identity.
+capacity, choose a new workload/endpoint host, or create a new public O3K
+resource identity.
 
 ## Common command envelope
 
@@ -66,6 +76,9 @@ action
 canonical_payload_fingerprint
 ```
 
+A profile may add another bounded generation/fence such as the P11 host-fabric
+generation, but it cannot weaken the common identities above.
+
 Requirements:
 
 - identities are bounded typed values;
@@ -79,8 +92,8 @@ Requirements:
 - a duplicate equivalent command replays durable status rather than mutating
   again.
 
-Raw user tokens, passwords, private keys, service credentials, and unrestricted
-provider payloads are forbidden in the envelope.
+Raw user tokens, passwords, private keys, service credentials, WireGuard private
+keys, and unrestricted provider payloads are forbidden in the envelope.
 
 ## Common response and event types
 
@@ -125,9 +138,11 @@ Requirements:
 - provider-resource identity cannot change silently;
 - unknown outcome is preserved until observation resolves it;
 - observations cannot create an unknown control-plane resource;
-- observations cannot change project ownership;
+- observations cannot change project ownership or endpoint placement;
 - console or diagnostic bytes are bounded and separately authorized;
-- provider paths are never returned as public API fields.
+- provider paths are never returned as public API fields;
+- secret-bearing storage connection data and private fabric key material never
+  enter ordinary observations/evidence.
 
 ## Capability contract
 
@@ -146,11 +161,18 @@ for scheduling or compatibility decisions.
 
 ### Network examples
 
-- flat, VLAN, VXLAN, bridge, OVS, or OVN modes;
+- flat, routed, VLAN, VXLAN, bridge, OVS, or OVN modes;
 - IPv4/IPv6 and DHCP support;
 - MTU bounds;
 - routing, NAT, and policy features;
+- local/regional L2-adjacency scope;
+- overlapping-address-realm support;
+- route/neighbor/fabric realization capability;
+- encrypted-host-transport capability;
 - supported port-binding modes.
+
+A P11 fabric capability describes bounded behavior, not raw WireGuard
+configuration or a private key.
 
 ### Storage examples
 
@@ -158,6 +180,7 @@ for scheduling or compatibility decisions.
 - capacity and allocation unit;
 - volume, snapshot, clone, encryption, and attachment capabilities;
 - supported connection modes;
+- attachment/placement scope;
 - backend availability zone or failure domain.
 
 A capability is not support evidence until the conformance suite and required
@@ -199,21 +222,23 @@ Compute-owned state includes only O3K-owned:
 
 ## Network actions
 
-The network contract is logically independent even when its executor is hosted
-inside `o3k-compute`.
+The network contract is logically independent from compute. ADR-0168 activates
+`o3k-network` as the bounded node-local network executor; it remains subordinate
+to control-plane desired state and scheduling authority.
 
-The first network contract may include:
+The network contract may include:
 
-- realize port binding;
-- inspect port binding;
-- remove port binding;
+- realize/inspect/remove endpoint or port binding;
 - configure/reconcile DHCP state;
+- realize/inspect/reconcile semantic node network plans;
+- realize/inspect/reconcile routing, NAT, public-address and policy state for
+  activated profiles;
 - inspect connectivity evidence;
-- reconcile owned links and leases.
+- reconcile owned links, leases, routes, policy and neighbor state.
 
 A binding command references:
 
-- network, subnet, and port IDs;
+- network/AddressRealm, subnet and port/endpoint IDs;
 - project binding;
 - selected host;
 - MAC;
@@ -222,16 +247,74 @@ A binding command references:
 - provider-network identity;
 - security-policy reference when the selected profile supports it.
 
-Network-owned state includes only O3K-owned:
+Network-owned state includes only proven O3K-owned:
 
 - TAP or equivalent interface;
-- bridge/OVS/OVN binding record;
+- realm bridge/OVS/OVN binding record selected by the activated provider;
 - DHCP host/lease/config fragment;
 - routing/NAT/policy state in supported profiles;
+- provider-owned namespace/veth/neighbor/fabric state in supported profiles;
 - network-local journal and manifests.
 
-The network executor cannot allocate a different public fixed IP or MAC without
-an accepted control-plane operation.
+The network executor cannot allocate a different public fixed IP or MAC, change
+AddressRealm/project ownership, or select a different endpoint host without an
+accepted control-plane operation.
+
+### Proposed P11 namespaced routed-fabric actions
+
+When ADR-0170/SPEC-0028 are accepted, the P11 contract additionally allows
+semantic actions equivalent to:
+
+- realize/inspect/remove one host-local AddressRealm L2 island;
+- realize/inspect/remove one routed AddressRealm namespace attachment;
+- apply/inspect endpoint anti-spoofing and local bridge policy;
+- publish/withdraw current remote proxy-neighbor entries from a control-plane
+  derived realm endpoint directory;
+- publish/withdraw current endpoint-location routes, normally IPv4 `/32`;
+- realize/inspect one host fabric identity and encrypted transport;
+- reconcile current fabric peer/public-key/route state;
+- perform bounded neighbor convergence after accepted endpoint placement change.
+
+The exact wire action names may differ. The semantic authority may not.
+
+A P11 realm/fabric command references typed accepted state such as:
+
+```text
+realm_id / project binding
+endpoint_id / endpoint generation
+fixed IP / canonical endpoint MAC
+selected endpoint host / placement generation
+current realm endpoint directory generation
+current target host fabric public identity/generation
+semantic policy generation
+MTU capability/selection
+```
+
+It must not carry raw `ip`/`bridge`/`nft`/`wg` command text as canonical
+application intent.
+
+### P11 neighbor and fabric invariants
+
+- same-host/same-realm endpoints may use normal ARP and actual endpoint MACs;
+- local bridge forwarding must remain subject to accepted endpoint anti-spoofing
+  and NetworkPolicy;
+- remote same-realm ARP is answered locally only for a current accepted remote
+  endpoint and uses the deterministic AddressRealm proxy MAC;
+- remote endpoint actual MACs are not presented as cross-host L2 reachability;
+- ARP/Ethernet broadcast is not flooded across the P11 host fabric;
+- remote endpoint routes follow current accepted endpoint placement rather than
+  assigning a tenant subnet permanently to a host;
+- one shared host fabric serves multiple realms; one WireGuard interface/key per
+  tenant is not the P11 authority model;
+- fabric forwarding is default-deny and route presence alone does not authorize
+  cross-realm traffic;
+- P11 v1 rejects overlapping active prefixes across the shared routed fabric;
+- WireGuard provides transport encryption/authentication only; AddressRealm and
+  NetworkPolicy remain the tenant isolation/authorization authority;
+- WireGuard private keys remain host-local and are never protocol payload or
+  ordinary evidence.
+
+See `contracts/p11-edge-fabric.md` for the full proposed contract.
 
 ## Storage actions
 
@@ -244,7 +327,7 @@ The first storage contract may include:
 - delete volume;
 - prepare attachment;
 - terminate attachment;
-- create/delete snapshot where later declared;
+- create/delete snapshot where declared;
 - reconcile owned backend resources.
 
 A volume command references:
@@ -264,6 +347,9 @@ Storage-owned state includes only O3K-owned:
 Connection information is treated as secret-bearing operational data. It is
 never logged or uploaded as ordinary CI evidence and is returned only through a
 bounded authenticated path.
+
+P11 scheduling consumes storage placement/attachment scope but does not transfer
+storage placement authority into the network or compute executor.
 
 ## Artifact transfer
 
@@ -309,21 +395,27 @@ Errors use stable categories rather than unbounded provider text:
 - internal protocol failure.
 
 The redacted message is bounded and contains no secret, raw command, provider
-connection information, arbitrary XML, or filesystem path unless a separately
-protected operator artifact explicitly allows a safe relative identifier.
+connection information, private key, arbitrary XML, or filesystem path unless a
+separately protected operator artifact explicitly allows a safe relative
+identifier.
 
 ## Security and privilege rules
 
 - all network connections use mutually authenticated transport;
 - certificate identity binds to the agent ID;
 - old agent epochs are fenced;
-- each agent runs as a dedicated non-root account;
-- capabilities are minimal and documented per action;
-- compute, network, and storage privilege sets are reviewed independently;
+- each agent runs with the minimum documented account/privileges required for
+  its activated actions;
+- compute, network, storage and P11 fabric privilege sets are reviewed
+  independently;
 - an agent rejects commands outside its activated capability domain;
 - foreign resources are never mutated or deleted;
 - ambiguous ownership fails closed;
-- destructive cleanup requires deterministic ownership evidence.
+- destructive cleanup requires deterministic ownership evidence;
+- host private fabric keys remain local and are excluded from control-plane
+  state/protocol/log/audit/evidence;
+- control-plane or fabric disconnection never proves an old VM/storage writer is
+  stopped; duplicate execution requires an independently accepted fencing proof.
 
 ## Reconnect and replay
 
@@ -338,13 +430,19 @@ On connection loss:
 - terminal results and artifact status may be replayed idempotently;
 - the control plane observes before redispatching mutation.
 
+For P11, fabric/public-key generation is reconciled in addition to agent epoch.
+A stale fabric generation cannot regain route/endpoint authority merely because
+its old WireGuard interface/peer state remains in the kernel.
+
 On control-plane restart:
 
 - agent connections re-register;
 - control-plane operations are loaded before reconciliation;
 - no new provider identity is invented;
 - stale observations are rejected;
-- selected host/backend and allocations remain durable.
+- selected host/backend and allocations remain durable;
+- accepted P11 endpoint directory/fabric plans are republished/reconciled before
+  dependent guests are treated as network ready.
 
 ## Conformance suites
 
@@ -375,8 +473,25 @@ Every provider implementation passes a shared suite appropriate to its domain.
 - realize/inspect/remove binding;
 - deterministic MAC/IP identity;
 - DHCP/binding reconciliation;
-- no duplicate link or lease;
+- routing/NAT/policy realization where activated;
+- no duplicate link/lease/provider state;
 - cleanup and foreign-link protection.
+
+### P11 fabric extension (only after acceptance)
+
+- local same-realm ARP resolves actual local endpoint MAC;
+- remote same-realm ARP resolves deterministic realm proxy MAC;
+- no cross-host ARP broadcast dependency;
+- local bridge and cross-host routed policy allow/deny;
+- MAC/IP/ARP anti-spoofing;
+- endpoint-directory generation/fingerprint replay;
+- endpoint `/32` route placement/withdrawal;
+- WireGuard public identity/generation fencing;
+- WireGuard private-key redaction/locality;
+- MTU boundary;
+- peer/underlay interruption and recovery;
+- endpoint local/remote neighbor convergence;
+- netns/bridge/veth/neighbor/route/peer cleanup and foreign-state preservation.
 
 ### Storage
 
@@ -393,4 +508,6 @@ Every provider implementation passes a shared suite appropriate to its domain.
 - action behavior changes require contract fixtures and compatibility review;
 - independent agent releases declare supported protocol ranges;
 - a process split cannot change OpenStack public behavior without a separate
-  public-contract decision.
+  public-contract decision;
+- P11 endpoint-directory/fabric-plan versions must reject incompatible semantics
+  rather than silently guessing provider behavior.
