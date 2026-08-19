@@ -20,6 +20,7 @@ PROJECT_ID="${O3K_LVM_GUEST_PROJECT_ID:-p10-real-guest}"
 NETWORK="${O3K_LVM_GUEST_NETWORK:-default}"
 DEVICE="${O3K_LVM_GUEST_DEVICE:-vdb}"
 BASE_IMAGE="${O3K_LVM_GUEST_IMAGE_PATH:-}"
+BASE_IMAGE_SOURCE="${BASE_IMAGE}"
 SSH_KEY="${O3K_LVM_GUEST_SSH_PRIVATE_KEY:-}"
 SSH_USER="${O3K_LVM_GUEST_SSH_USER:-}"
 SSH_HOST="${O3K_LVM_GUEST_SSH_HOST:-}"
@@ -66,6 +67,12 @@ require_inputs() {
     # libvirt-qemu must traverse this disposable directory to open the
     # imported overlay. Keep listing/read access denied; cleanup removes it.
     chmod 0711 "${STATE_ROOT}"
+    # The runner's temporary directory is intentionally private to the job
+    # user. Copy the public base image into the exact run-scoped guest state so
+    # libvirt-qemu can traverse its backing path without broadening runner
+    # temporary-directory permissions.
+    BASE_IMAGE="${STATE_ROOT}/cirros-base.img"
+    install -m 0644 "${BASE_IMAGE_SOURCE}" "${BASE_IMAGE}"
     chmod 0600 "${SSH_KEY}"
     local public_key
     public_key="$(ssh-keygen -y -f "${SSH_KEY}")" || die guest_key_invalid
@@ -210,7 +217,8 @@ cleanup() {
     set +e
     destroy_domain "${DOMAIN}"
     destroy_domain "${SECOND_DOMAIN}"
-    rm -f -- "${OVERLAY}" "${SECOND_OVERLAY}" "${STATE_ROOT}/lvs.json" \
+    rm -f -- "${OVERLAY}" "${SECOND_OVERLAY}" "${STATE_ROOT}/cirros-base.img" \
+        "${STATE_ROOT}/lvs.json" \
         "${KNOWN_HOSTS}" "${CLOUD_INIT_USER_DATA}"
     if [[ -d "${STATE_ROOT}" ]] && ! rmdir -- "${STATE_ROOT}"; then
         RESULT_REASON=guest_state_cleanup_failed
