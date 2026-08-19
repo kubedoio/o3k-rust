@@ -9,7 +9,7 @@ use o3k_domain::{FabricPeer, NamespacedRoutedFabricPlan};
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -102,6 +102,8 @@ struct FabricOwnership {
     interface: String,
     private_key_path: String,
     fabric_generation: u64,
+    #[serde(default)]
+    managed_peers: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -255,6 +257,7 @@ impl LinuxP11FabricBackend {
             interface: self.config.fabric_interface.clone(),
             private_key_path: private_key_path.display().to_string(),
             fabric_generation: plan.local_fabric_generation,
+            managed_peers: BTreeSet::new(),
         });
         store_state(&self.state_path, &self.state)?;
         if !self
@@ -559,12 +562,16 @@ impl LinuxP11FabricBackend {
         Ok(())
     }
 
-    fn configure_peers(&self) -> Result<(), LinuxP11Error> {
-        let Some(fabric) = &self.state.fabric else {
+    fn configure_peers(&mut self) -> Result<(), LinuxP11Error> {
+        let Some(fabric) = self.state.fabric.clone() else {
             return Err(LinuxP11Error::CorruptState);
         };
         let mut peers = BTreeMap::<String, FabricPeer>::new();
-        for plan in self.plans.values() {
+        for plan in self
+            .plans
+            .values()
+            .filter(|plan| self.state.realms.contains_key(&plan.realm_id))
+        {
             for peer in &plan.peers {
                 if let Some(existing) = peers.get_mut(&peer.host_id) {
                     if existing.public_key != peer.public_key
@@ -579,6 +586,32 @@ impl LinuxP11FabricBackend {
                 } else {
                     peers.insert(peer.host_id.clone(), peer.clone());
                 }
+            }
+        }
+        let current_keys = peers
+            .values()
+            .map(|peer| peer.public_key.clone())
+            .collect::<BTreeSet<_>>();
+        for stale_key in fabric.managed_peers.difference(&current_keys) {
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &fabric.namespace,
+                        "wg",
+                        "set",
+                        &fabric.interface,
+                        "peer",
+                        stale_key,
+                        "remove",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
             }
         }
         for peer in peers.values_mut() {
@@ -651,6 +684,10 @@ impl LinuxP11FabricBackend {
                     return Err(LinuxP11Error::CommandFailed);
                 }
             }
+        }
+        if let Some(stored) = self.state.fabric.as_mut() {
+            stored.managed_peers = current_keys;
+            store_state(&self.state_path, &self.state)?;
         }
         Ok(())
     }
@@ -788,6 +825,9 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             }
         }
         self.remove_plan(plan)?;
+        if !self.state.realms.is_empty() {
+            self.configure_peers()?;
+        }
         self.remove_fabric_if_unused(plan.local_fabric_generation)?;
         Ok(())
     }
