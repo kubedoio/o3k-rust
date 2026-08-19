@@ -19,7 +19,8 @@ use crate::{
     NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
     OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
-    PostgresStore, ProviderReference, ResourceRecord, SqliteStore, StoreError, SubnetRecord,
+    PostgresStore, ProviderReference, ResourceRecord, SecurityGroupBindingRecord,
+    SecurityGroupRecord, SecurityGroupRuleRecord, SqliteStore, StoreError, SubnetRecord,
     VolumeAttachmentRecord, VolumeAttachmentRepository, WorkLease, quota::QuotaRepository,
 };
 
@@ -1176,6 +1177,128 @@ impl NetworkRepository for O3kStore {
             }
             Self::Postgres(s) => {
                 s.update_port_binding(project_id, id, binding_host, binding_state)
+                    .await
+            }
+        }
+    }
+
+    async fn insert_security_group(&self, group: &SecurityGroupRecord) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_security_group(group).await,
+            Self::Postgres(s) => s.insert_security_group(group).await,
+        }
+    }
+    async fn list_security_groups(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<SecurityGroupRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_security_groups(project_id).await,
+            Self::Postgres(s) => s.list_security_groups(project_id).await,
+        }
+    }
+    async fn get_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_security_group(project_id, id).await,
+            Self::Postgres(s) => s.get_security_group(project_id, id).await,
+        }
+    }
+    async fn update_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+        description: &str,
+    ) -> Result<SecurityGroupRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.update_security_group(project_id, id, name, description)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.update_security_group(project_id, id, name, description)
+                    .await
+            }
+        }
+    }
+    async fn delete_security_group(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_security_group(project_id, id).await,
+            Self::Postgres(s) => s.delete_security_group(project_id, id).await,
+        }
+    }
+    async fn insert_security_group_rule(
+        &self,
+        rule: &SecurityGroupRuleRecord,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.insert_security_group_rule(rule).await,
+            Self::Postgres(s) => s.insert_security_group_rule(rule).await,
+        }
+    }
+    async fn list_security_group_rules(
+        &self,
+        project_id: &str,
+        group_id: &Uuid,
+    ) -> Result<Vec<SecurityGroupRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.list_security_group_rules(project_id, group_id).await,
+            Self::Postgres(s) => s.list_security_group_rules(project_id, group_id).await,
+        }
+    }
+    async fn get_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRuleRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_security_group_rule(project_id, id).await,
+            Self::Postgres(s) => s.get_security_group_rule(project_id, id).await,
+        }
+    }
+    async fn delete_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => s.delete_security_group_rule(project_id, id).await,
+            Self::Postgres(s) => s.delete_security_group_rule(project_id, id).await,
+        }
+    }
+    async fn list_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<&Uuid>,
+    ) -> Result<Vec<SecurityGroupBindingRecord>, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.list_security_group_bindings(project_id, endpoint_id)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.list_security_group_bindings(project_id, endpoint_id)
+                    .await
+            }
+        }
+    }
+    async fn replace_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        group_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.replace_security_group_bindings(project_id, endpoint_id, group_ids)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.replace_security_group_bindings(project_id, endpoint_id, group_ids)
                     .await
             }
         }

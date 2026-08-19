@@ -22,7 +22,8 @@ use crate::{
     ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
     PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
     PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
-    ProviderReference, ResourceRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
+    ProviderReference, ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
+    SecurityGroupRuleRecord, StoreError, SubnetRecord, VolumeAttachmentRecord,
     VolumeAttachmentRepository, quota::QuotaRepository,
 };
 
@@ -99,6 +100,7 @@ impl PostgresStore {
                 keystone_domains, keystone_projects, keystone_users, keystone_roles,
                 keystone_role_assignments, keystone_services, keystone_endpoints, keystone_regions,
                 image_metadata, network_networks, network_subnets, network_ports,
+                network_security_group_bindings, network_security_group_rules, network_security_groups,
                 placement_providers, placement_inventories, placement_allocations,
                 placement_allocation_resources, placement_allocation_intents, placement_allocation_intent_resources,
                 quota_limits, quota_reservations, quota_reservation_amounts,
@@ -2675,6 +2677,12 @@ impl NetworkRepository for PostgresStore {
 
     async fn delete_port(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
         let id_str = id.to_string();
+        sqlx::query("DELETE FROM network_security_group_bindings WHERE project_id = $1 AND endpoint_id = $2")
+            .bind(project_id)
+            .bind(&id_str)
+            .execute(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
         let res = sqlx::query("DELETE FROM network_ports WHERE id = $1 AND project_id = $2")
             .bind(&id_str)
             .bind(project_id)
@@ -2717,6 +2725,80 @@ impl NetworkRepository for PostgresStore {
         self.get_port(project_id, id)
             .await?
             .ok_or(StoreError::NetworkNotFound)
+    }
+
+    async fn insert_security_group(&self, group: &SecurityGroupRecord) -> Result<(), StoreError> {
+        self.insert_security_group(group).await
+    }
+    async fn list_security_groups(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<SecurityGroupRecord>, StoreError> {
+        self.list_security_groups(project_id).await
+    }
+    async fn get_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRecord>, StoreError> {
+        self.get_security_group(project_id, id).await
+    }
+    async fn update_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+        description: &str,
+    ) -> Result<SecurityGroupRecord, StoreError> {
+        self.update_security_group(project_id, id, name, description)
+            .await
+    }
+    async fn delete_security_group(&self, project_id: &str, id: &Uuid) -> Result<(), StoreError> {
+        self.delete_security_group(project_id, id).await
+    }
+    async fn insert_security_group_rule(
+        &self,
+        rule: &SecurityGroupRuleRecord,
+    ) -> Result<(), StoreError> {
+        self.insert_security_group_rule(rule).await
+    }
+    async fn list_security_group_rules(
+        &self,
+        project_id: &str,
+        group_id: &Uuid,
+    ) -> Result<Vec<SecurityGroupRuleRecord>, StoreError> {
+        self.list_security_group_rules(project_id, group_id).await
+    }
+    async fn get_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRuleRecord>, StoreError> {
+        self.get_security_group_rule(project_id, id).await
+    }
+    async fn delete_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        self.delete_security_group_rule(project_id, id).await
+    }
+    async fn list_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<&Uuid>,
+    ) -> Result<Vec<SecurityGroupBindingRecord>, StoreError> {
+        self.list_security_group_bindings(project_id, endpoint_id)
+            .await
+    }
+    async fn replace_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        group_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        self.replace_security_group_bindings(project_id, endpoint_id, group_ids)
+            .await
     }
 }
 
@@ -2828,6 +2910,48 @@ fn parse_pg_subnet(row: &PgRow) -> Result<SubnetRecord, StoreError> {
         allocation_end: alloc_end
             .parse()
             .map_err(|_| StoreError::Corrupt("invalid IPv4 address in durable state".to_owned()))?,
+    })
+}
+
+fn pg_security_group_from_row(row: &PgRow) -> Result<SecurityGroupRecord, StoreError> {
+    Ok(SecurityGroupRecord {
+        id: parse_uuid(row.get("id"))?,
+        project_id: row.get("project_id"),
+        name: row.get("name"),
+        description: row.get("description"),
+    })
+}
+
+fn pg_security_group_rule_from_row(row: &PgRow) -> Result<SecurityGroupRuleRecord, StoreError> {
+    let port_min = row
+        .get::<Option<i32>, _>("port_min")
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| StoreError::Corrupt("security-group port is out of range".to_owned()))?;
+    let port_max = row
+        .get::<Option<i32>, _>("port_max")
+        .map(u16::try_from)
+        .transpose()
+        .map_err(|_| StoreError::Corrupt("security-group port is out of range".to_owned()))?;
+    Ok(SecurityGroupRuleRecord {
+        id: parse_uuid(row.get("id"))?,
+        security_group_id: parse_uuid(row.get("security_group_id"))?,
+        project_id: row.get("project_id"),
+        direction: row.get("direction"),
+        protocol: row.get("protocol"),
+        port_min,
+        port_max,
+        remote_ip_prefix: row.get("remote_ip_prefix"),
+    })
+}
+
+fn pg_security_group_binding_from_row(
+    row: &PgRow,
+) -> Result<SecurityGroupBindingRecord, StoreError> {
+    Ok(SecurityGroupBindingRecord {
+        project_id: row.get("project_id"),
+        endpoint_id: parse_uuid(row.get("endpoint_id"))?,
+        security_group_id: parse_uuid(row.get("security_group_id"))?,
     })
 }
 
@@ -3477,6 +3601,141 @@ impl PlacementRepository for PostgresStore {
 }
 
 impl PostgresStore {
+    pub async fn insert_security_group(
+        &self,
+        group: &SecurityGroupRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO network_security_groups (id, project_id, name, description) VALUES ($1, $2, $3, $4)").bind(group.id.to_string()).bind(&group.project_id).bind(&group.name).bind(&group.description).execute(&self.pool).await.map(|_| ()).map_err(map_pg_error)
+    }
+    pub async fn list_security_groups(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<SecurityGroupRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, project_id, name, description FROM network_security_groups WHERE project_id = $1 ORDER BY id").bind(project_id).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(pg_security_group_from_row).collect()
+    }
+    pub async fn get_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, project_id, name, description FROM network_security_groups WHERE project_id = $1 AND id = $2").bind(project_id).bind(id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref().map(pg_security_group_from_row).transpose()
+    }
+    pub async fn update_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+        name: &str,
+        description: &str,
+    ) -> Result<SecurityGroupRecord, StoreError> {
+        let result = sqlx::query("UPDATE network_security_groups SET name = $1, description = $2 WHERE project_id = $3 AND id = $4").bind(name).bind(description).bind(project_id).bind(id.to_string()).execute(&self.pool).await.map_err(map_pg_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::NetworkNotFound);
+        }
+        self.get_security_group(project_id, id)
+            .await?
+            .ok_or(StoreError::NetworkNotFound)
+    }
+    pub async fn delete_security_group(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query("DELETE FROM network_security_groups WHERE project_id = $1 AND id = $2 AND NOT EXISTS (SELECT 1 FROM network_security_group_rules WHERE security_group_id = $2) AND NOT EXISTS (SELECT 1 FROM network_security_group_bindings WHERE security_group_id = $2)").bind(project_id).bind(id.to_string()).execute(&self.pool).await.map_err(StoreError::Database)?;
+        if result.rows_affected() != 0 {
+            Ok(())
+        } else {
+            match self.get_security_group(project_id, id).await? {
+                Some(_) => Err(StoreError::NetworkInUse),
+                None => Err(StoreError::NetworkNotFound),
+            }
+        }
+    }
+    pub async fn insert_security_group_rule(
+        &self,
+        rule: &SecurityGroupRuleRecord,
+    ) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO network_security_group_rules (id, security_group_id, project_id, direction, protocol, port_min, port_max, remote_ip_prefix) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::inet)").bind(rule.id.to_string()).bind(rule.security_group_id.to_string()).bind(&rule.project_id).bind(&rule.direction).bind(&rule.protocol).bind(rule.port_min.map(i32::from)).bind(rule.port_max.map(i32::from)).bind(&rule.remote_ip_prefix).execute(&self.pool).await.map(|_| ()).map_err(map_pg_error)
+    }
+    pub async fn list_security_group_rules(
+        &self,
+        project_id: &str,
+        group_id: &Uuid,
+    ) -> Result<Vec<SecurityGroupRuleRecord>, StoreError> {
+        let rows = sqlx::query("SELECT id, security_group_id, project_id, direction, protocol, port_min, port_max, remote_ip_prefix::text AS remote_ip_prefix FROM network_security_group_rules WHERE project_id = $1 AND security_group_id = $2 ORDER BY id").bind(project_id).bind(group_id.to_string()).fetch_all(&self.pool).await.map_err(StoreError::Database)?;
+        rows.iter().map(pg_security_group_rule_from_row).collect()
+    }
+    pub async fn get_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<Option<SecurityGroupRuleRecord>, StoreError> {
+        let row = sqlx::query("SELECT id, security_group_id, project_id, direction, protocol, port_min, port_max, remote_ip_prefix::text AS remote_ip_prefix FROM network_security_group_rules WHERE project_id = $1 AND id = $2").bind(project_id).bind(id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)?;
+        row.as_ref()
+            .map(pg_security_group_rule_from_row)
+            .transpose()
+    }
+    pub async fn delete_security_group_rule(
+        &self,
+        project_id: &str,
+        id: &Uuid,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "DELETE FROM network_security_group_rules WHERE project_id = $1 AND id = $2",
+        )
+        .bind(project_id)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(StoreError::Database)?;
+        if result.rows_affected() == 0 {
+            Err(StoreError::NetworkNotFound)
+        } else {
+            Ok(())
+        }
+    }
+    pub async fn list_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<&Uuid>,
+    ) -> Result<Vec<SecurityGroupBindingRecord>, StoreError> {
+        let (sql, endpoint) = match endpoint_id {
+            Some(id) => (
+                "SELECT project_id, endpoint_id, security_group_id FROM network_security_group_bindings WHERE project_id = $1 AND endpoint_id = $2 ORDER BY security_group_id",
+                Some(id.to_string()),
+            ),
+            None => (
+                "SELECT project_id, endpoint_id, security_group_id FROM network_security_group_bindings WHERE project_id = $1 ORDER BY endpoint_id, security_group_id",
+                None,
+            ),
+        };
+        let mut query = sqlx::query(sql).bind(project_id);
+        if let Some(endpoint) = endpoint {
+            query = query.bind(endpoint);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        rows.iter()
+            .map(pg_security_group_binding_from_row)
+            .collect()
+    }
+    pub async fn replace_security_group_bindings(
+        &self,
+        project_id: &str,
+        endpoint_id: &Uuid,
+        group_ids: &[Uuid],
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        sqlx::query("DELETE FROM network_security_group_bindings WHERE project_id = $1 AND endpoint_id = $2").bind(project_id).bind(endpoint_id.to_string()).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        for group_id in group_ids {
+            sqlx::query("INSERT INTO network_security_group_bindings (project_id, endpoint_id, security_group_id) VALUES ($1, $2, $3)").bind(project_id).bind(endpoint_id.to_string()).bind(group_id.to_string()).execute(&mut *tx).await.map_err(map_pg_error)?;
+        }
+        tx.commit().await.map_err(StoreError::Database)
+    }
+
     async fn load_placement_inventories(
         &self,
         provider_id: &str,

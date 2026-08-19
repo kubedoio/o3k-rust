@@ -9,8 +9,8 @@ use std::{
 };
 
 use o3k_domain::{
-    AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
-    PolicyDirection, PolicyIntent,
+    AddressRealm, Ipv4Prefix, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
+    PolicyAction, PolicyDirection, PolicyIntent, PortRange,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -4233,6 +4233,239 @@ impl NetworkService {
         }
     }
 
+    pub async fn list_security_groups_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_store::SecurityGroupRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_security_groups(project_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn get_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_security_group(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn create_security_group_for_project(
+        &self,
+        project_id: &str,
+        name: String,
+        description: String,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        if project_id.trim().is_empty() || name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        let group = o3k_store::SecurityGroupRecord {
+            id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
+            name,
+            description,
+        };
+        self.inner
+            .repository
+            .insert_security_group(&group)
+            .await
+            .map_err(map_store_error)?;
+        Ok(group)
+    }
+
+    pub async fn update_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+        description: String,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .update_security_group(project_id, &id, &name, &description)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn delete_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_security_group(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_security_group_rules_for_project(
+        &self,
+        project_id: &str,
+        group_id: Uuid,
+    ) -> Result<Vec<o3k_store::SecurityGroupRuleRecord>, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_security_group(project_id, &group_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        self.inner
+            .repository
+            .list_security_group_rules(project_id, &group_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn get_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_security_group_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn create_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        group_id: Uuid,
+        direction: String,
+        protocol: String,
+        port_min: Option<u16>,
+        port_max: Option<u16>,
+        remote_ip_prefix: Option<String>,
+    ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
+        let direction = parse_security_group_direction(&direction)?;
+        let protocol_value = parse_security_group_protocol(&protocol)?;
+        if matches!(protocol_value, NetworkProtocol::Icmp | NetworkProtocol::Any)
+            && (port_min.is_some() || port_max.is_some())
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        match (port_min, port_max) {
+            (Some(start), Some(end)) if start <= end => {}
+            (None, None) => {}
+            _ => return Err(NetworkError::InvalidRequest),
+        }
+        if let Some(prefix) = remote_ip_prefix.as_deref() {
+            parse_security_group_prefix(prefix)?;
+        }
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_security_group(project_id, &group_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        let rule = o3k_store::SecurityGroupRuleRecord {
+            id: Uuid::now_v7(),
+            security_group_id: group_id,
+            project_id: project_id.to_owned(),
+            direction: match direction {
+                PolicyDirection::Ingress => "ingress",
+                PolicyDirection::Egress => "egress",
+            }
+            .to_owned(),
+            protocol,
+            port_min,
+            port_max,
+            remote_ip_prefix,
+        };
+        self.inner
+            .repository
+            .insert_security_group_rule(&rule)
+            .await
+            .map_err(map_store_error)?;
+        Ok(rule)
+    }
+
+    pub async fn delete_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_security_group_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_security_group_bindings_for_project(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<Uuid>,
+    ) -> Result<Vec<o3k_store::SecurityGroupBindingRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_security_group_bindings(project_id, endpoint_id.as_ref())
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn replace_security_group_bindings_for_project(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+        group_ids: Vec<Uuid>,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_port(project_id, &endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        for group_id in &group_ids {
+            if self
+                .inner
+                .repository
+                .get_security_group(project_id, group_id)
+                .await
+                .map_err(map_store_error)?
+                .is_none()
+            {
+                return Err(NetworkError::NotFound);
+            }
+        }
+        self.inner
+            .repository
+            .replace_security_group_bindings(project_id, &endpoint_id, &group_ids)
+            .await
+            .map_err(map_store_error)
+    }
+
     /// Returns the durable canonical policy rules for a network. A network
     /// without policy state is intentionally an empty policy, not an implicit
     /// provider default.
@@ -4251,21 +4484,82 @@ impl NetworkService {
         {
             return Err(NetworkError::NotFound);
         }
-        let Some(record) = self
+        let record = self
             .inner
             .repository
             .get_network_intent(project_id, &network_id)
             .await
-            .map_err(map_store_error)?
-        else {
-            return Ok(Vec::new());
+            .map_err(map_store_error)?;
+        let mut policies = if let Some(record) = record {
+            let intent: NetworkIntent =
+                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+            if intent.id != network_id || intent.project_id != project_id {
+                return Err(NetworkError::InvalidRequest);
+            }
+            intent.policies
+        } else {
+            Vec::new()
         };
-        let intent: NetworkIntent =
-            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
-        if intent.id != network_id || intent.project_id != project_id {
-            return Err(NetworkError::InvalidRequest);
+        for port in self
+            .inner
+            .repository
+            .list_ports_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let bindings = self
+                .inner
+                .repository
+                .list_security_group_bindings(project_id, Some(&port.id))
+                .await
+                .map_err(map_store_error)?;
+            for binding in bindings {
+                let Some(group) = self
+                    .inner
+                    .repository
+                    .get_security_group(project_id, &binding.security_group_id)
+                    .await
+                    .map_err(map_store_error)?
+                else {
+                    return Err(NetworkError::InvalidRequest);
+                };
+                for rule in self
+                    .inner
+                    .repository
+                    .list_security_group_rules(project_id, &group.id)
+                    .await
+                    .map_err(map_store_error)?
+                {
+                    let direction = parse_security_group_direction(&rule.direction)?;
+                    let remote = rule
+                        .remote_ip_prefix
+                        .as_deref()
+                        .map(parse_security_group_prefix)
+                        .transpose()?;
+                    let ports = match (rule.port_min, rule.port_max) {
+                        (Some(start), Some(end)) => Some(PortRange { start, end }),
+                        (None, None) => None,
+                        _ => return Err(NetworkError::InvalidRequest),
+                    };
+                    policies.push(PolicyIntent {
+                        id: rule.id,
+                        endpoint_id: port.id,
+                        direction,
+                        protocol: parse_security_group_protocol(&rule.protocol)?,
+                        ports,
+                        source: (direction == PolicyDirection::Ingress)
+                            .then_some(remote)
+                            .flatten(),
+                        destination: (direction == PolicyDirection::Egress)
+                            .then_some(remote)
+                            .flatten(),
+                        action: PolicyAction::Allow,
+                    });
+                }
+            }
         }
-        Ok(intent.policies)
+        policies.sort_by_key(|policy| policy.id);
+        Ok(policies)
     }
 
     /// Adds or replaces one canonical policy rule and persists the complete
@@ -5589,6 +5883,31 @@ async fn import_legacy_metadata(
     Ok(())
 }
 
+fn parse_security_group_prefix(value: &str) -> Result<Ipv4Prefix, NetworkError> {
+    let (address, length) = value.split_once('/').ok_or(NetworkError::InvalidRequest)?;
+    let address = address.parse().map_err(|_| NetworkError::InvalidRequest)?;
+    let length = length.parse().map_err(|_| NetworkError::InvalidRequest)?;
+    Ipv4Prefix::new(address, length).ok_or(NetworkError::InvalidRequest)
+}
+
+fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, NetworkError> {
+    match value {
+        "ingress" => Ok(PolicyDirection::Ingress),
+        "egress" => Ok(PolicyDirection::Egress),
+        _ => Err(NetworkError::InvalidRequest),
+    }
+}
+
+fn parse_security_group_protocol(value: &str) -> Result<NetworkProtocol, NetworkError> {
+    match value {
+        "any" => Ok(NetworkProtocol::Any),
+        "tcp" => Ok(NetworkProtocol::Tcp),
+        "udp" => Ok(NetworkProtocol::Udp),
+        "icmp" => Ok(NetworkProtocol::Icmp),
+        _ => Err(NetworkError::InvalidRequest),
+    }
+}
+
 fn deterministic_port_mac(port_id: Uuid) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(port_id.as_bytes());
@@ -6633,6 +6952,68 @@ mod tests {
             .intents
             .iter()
             .any(|intent| matches!(intent, NetworkPlanIntent::EndpointAttachment { endpoint_id: id, .. } if *id == endpoint_id)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn security_group_rules_project_to_endpoint_policy_and_enforce_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("security-groups");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store).await?;
+        let network = service
+            .create_network(&auth("project-a"), "net".to_owned())
+            .await?;
+        service
+            .create_subnet(
+                &auth("project-a"),
+                network.id,
+                "subnet".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port(&auth("project-a"), network.id, "port".to_owned())
+            .await?;
+        let group = service
+            .create_security_group_for_project("project-a", "web".to_owned(), String::new())
+            .await?;
+        let rule = service
+            .create_security_group_rule_for_project(
+                "project-a",
+                group.id,
+                "ingress".to_owned(),
+                "tcp".to_owned(),
+                Some(443),
+                Some(443),
+                Some("0.0.0.0/0".to_owned()),
+            )
+            .await?;
+        service
+            .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
+            .await?;
+        let policies = service
+            .list_policies_for_project("project-a", network.id)
+            .await?;
+        assert!(policies.iter().any(|policy| policy.id == rule.id
+            && policy.endpoint_id == port.id
+            && policy.action == PolicyAction::Allow));
+        assert!(
+            service
+                .list_policies_for_project("project-b", network.id)
+                .await
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 }

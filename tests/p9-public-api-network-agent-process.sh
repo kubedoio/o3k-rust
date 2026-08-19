@@ -275,24 +275,34 @@ if [[ "$PROVIDER" == agent ]]; then
 else
     unset O3K_COMPUTE_SERVER_CERTIFICATE O3K_COMPUTE_SERVER_PRIVATE_KEY O3K_COMPUTE_CLIENT_CA
 fi
-"$BIN" --listen-addr "127.0.0.1:$PORT" --data-dir "$WORK_DIR/data" --log-filter debug \
-    >"$WORK_DIR/o3kd.log" 2>&1 &
-O3KD_PID=$!
-
 BASE="http://127.0.0.1:$PORT"
-for _ in $(seq 1 120); do
+start_controller() {
+    "$BIN" --listen-addr "127.0.0.1:$PORT" --data-dir "$WORK_DIR/data" --log-filter debug \
+        >"$WORK_DIR/o3kd.log" 2>&1 &
+    O3KD_PID=$!
+    for _ in $(seq 1 120); do
+        if [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
+            curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break
+        else
+            curl -fsS "$BASE/readyz" >/dev/null 2>&1 && break
+        fi
+        sleep 0.1
+    done
     if [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
-        curl -fsS "$BASE/healthz" >/dev/null 2>&1 && break
+        curl -fsS "$BASE/healthz" >/dev/null
     else
-        curl -fsS "$BASE/readyz" >/dev/null 2>&1 && break
+        curl -fsS "$BASE/readyz" >/dev/null
     fi
-    sleep 0.1
-done
-if [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
-    curl -fsS "$BASE/healthz" >/dev/null
-else
-    curl -fsS "$BASE/readyz" >/dev/null
-fi
+}
+
+restart_controller() {
+    kill "$O3KD_PID" 2>/dev/null || true
+    wait "$O3KD_PID" 2>/dev/null || true
+    O3KD_PID=""
+    start_controller
+}
+
+start_controller
 
 if [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
     O3K_COMPUTE_DATA_DIR="$WORK_DIR/compute" \
@@ -362,8 +372,22 @@ PORT_ID="$(printf '%s' "$PORT_JSON" | field port.id)"
 FIXED_IP="$(printf '%s' "$PORT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["port"]["fixed_ips"][0]["ip_address"])')"
 PORT_MAC="$(printf '%s' "$PORT_JSON" | field port.mac_address)"
 
-# Policy is admitted before scheduling.  The public API must persist it as
-# pending, not reject it merely because the endpoint has not been bound yet.
+# The bounded Neutron projection is exercised before scheduling.  Rules remain
+# project-owned canonical policy and are expanded into the attachment plan;
+# the API must persist them even while the endpoint is unbound.
+SECURITY_GROUP_ID="$(json -X POST "$BASE/v2.0/security-groups" -H 'content-type: application/json' \
+    --data '{"security_group":{"name":"p9-api-web","description":"bounded IPv4 policy"}}' \
+    | field security_group.id)"
+json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
+    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"ingress\",\"protocol\":\"tcp\",\"port_range_min\":8080,\"port_range_max\":8080,\"remote_ip_prefix\":\"0.0.0.0/0\",\"ethertype\":\"IPv4\"}}" >/dev/null
+json -X POST "$BASE/v2.0/security-group-rules" -H 'content-type: application/json' \
+    --data "{\"security_group_rule\":{\"security_group_id\":\"$SECURITY_GROUP_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"port_range_min\":8081,\"port_range_max\":8081,\"remote_ip_prefix\":\"198.51.100.0/24\",\"ethertype\":\"IPv4\"}}" >/dev/null
+json -X PUT "$BASE/v2.0/ports/$PORT_ID" -H 'content-type: application/json' \
+    --data "{\"port\":{\"security_groups\":[\"$SECURITY_GROUP_ID\"]}}" \
+    | grep -Fq "$SECURITY_GROUP_ID"
+# Native O3K deny remains a separate canonical policy action; this proves the
+# compatibility allow projection does not silently change fail-closed deny
+# semantics.
 json -X POST "$BASE/v2.0/network-policies" -H 'content-type: application/json' \
     -H 'idempotency-key: p9-api-policy' \
     --data "{\"policy\":{\"network_id\":\"$NETWORK_ID\",\"endpoint_id\":\"$PORT_ID\",\"direction\":\"egress\",\"protocol\":\"tcp\",\"ports\":{\"start\":8082,\"end\":8082},\"destination\":\"198.51.100.0/24\",\"action\":\"deny\"}}" >/dev/null
@@ -587,6 +611,10 @@ GUEST
     }
     nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 4 \
         "http://$FLOATING_ADDRESS:8080/" | grep -q o3k-public-api-real-guest
+    restart_controller
+    json "$BASE/v2.0/floatingips/$FLOATING_ID" | grep -Fq "$PORT_ID"
+    nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 4 \
+        "http://$FLOATING_ADDRESS:8080/" | grep -q o3k-public-api-real-guest
     kill "$QEMU_PID"
     wait "$QEMU_PID" 2>/dev/null || true
     QEMU_PID=""
@@ -667,6 +695,19 @@ elif [[ "${O3K_P9_PUBLIC_API_LIBVIRT:-}" == 1 ]]; then
         echo "libvirt floating-IP ingress did not converge after network-agent restart" >&2
         exit 1
     }
+    restart_controller
+    json "$BASE/v2.0/floatingips/$FLOATING_ID" | grep -Fq "$PORT_ID"
+    ingress_ok=0
+    for _ in $(seq 1 80); do
+        if nsenter -t "$EXT_PID" -n -- curl --fail --silent --max-time 2 \
+            "http://$FLOATING_ADDRESS:8080/" 2>/dev/null \
+            | grep -q o3k-public-api-libvirt-guest; then
+            ingress_ok=1
+            break
+        fi
+        sleep 0.1
+    done
+    [[ "$ingress_ok" == 1 ]] || { echo "controller restart lost floating-IP ingress" >&2; exit 1; }
 
     for candidate in $(virsh -c qemu:///system list --all --name); do
         xml="$(virsh -c qemu:///system dumpxml "$candidate" 2>/dev/null || true)"
@@ -687,7 +728,10 @@ json -X PUT "$BASE/v2.0/floatingips/$FLOATING_ID" -H 'content-type: application/
     --data '{"floatingip":{}}' >/dev/null
 json -X DELETE "$BASE/v2.0/floatingips/$FLOATING_ID" >/dev/null
 json -X DELETE "$BASE/v2.1/$PROJECT_ID/servers/$SERVER_ID" >/dev/null
+RULE_IDS="$(json "$BASE/v2.0/security-group-rules?security_group_id=$SECURITY_GROUP_ID" | python3 -c 'import json,sys; print(" ".join(rule["id"] for rule in json.load(sys.stdin)["security_group_rules"]))')"
+for rule_id in $RULE_IDS; do json -X DELETE "$BASE/v2.0/security-group-rules/$rule_id" >/dev/null; done
 json -X DELETE "$BASE/v2.0/ports/$PORT_ID" >/dev/null
+json -X DELETE "$BASE/v2.0/security-groups/$SECURITY_GROUP_ID" >/dev/null
 json -X DELETE "$BASE/v2.0/subnets/$SUBNET_ID" >/dev/null
 json -X DELETE "$BASE/v2.0/networks/$NETWORK_ID" >/dev/null
 json -X DELETE "$BASE/v2/images/$IMAGE_ID" >/dev/null

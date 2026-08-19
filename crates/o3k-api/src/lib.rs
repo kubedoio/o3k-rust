@@ -50,11 +50,14 @@ use crate::{
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::microversion_middleware,
     network::{
-        create_floating_ip, create_network, create_network_policy, create_port, create_subnet,
-        delete_floating_ip, delete_network, delete_network_policy, delete_port, delete_subnet,
-        list_extensions, list_floating_ips, list_network_policies, list_networks, list_ports,
-        list_subnets, show_floating_ip, show_network, show_network_policy, show_port, show_subnet,
-        update_floating_ip, update_network_policy,
+        create_floating_ip, create_network, create_network_policy, create_port,
+        create_security_group, create_security_group_rule, create_subnet, delete_floating_ip,
+        delete_network, delete_network_policy, delete_port, delete_security_group,
+        delete_security_group_rule, delete_subnet, list_extensions, list_floating_ips,
+        list_network_policies, list_networks, list_ports, list_security_group_rules,
+        list_security_groups, list_subnets, show_floating_ip, show_network, show_network_policy,
+        show_port, show_security_group, show_security_group_rule, show_subnet, update_floating_ip,
+        update_network_policy, update_port, update_security_group,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -238,7 +241,28 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets", get(list_subnets).post(create_subnet))
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
-        .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
+        .route(
+            "/v2.0/ports/{id}",
+            get(show_port).put(update_port).delete(delete_port),
+        )
+        .route(
+            "/v2.0/security-groups",
+            get(list_security_groups).post(create_security_group),
+        )
+        .route(
+            "/v2.0/security-groups/{id}",
+            get(show_security_group)
+                .put(update_security_group)
+                .delete(delete_security_group),
+        )
+        .route(
+            "/v2.0/security-group-rules",
+            get(list_security_group_rules).post(create_security_group_rule),
+        )
+        .route(
+            "/v2.0/security-group-rules/{id}",
+            get(show_security_group_rule).delete(delete_security_group_rule),
+        )
         .route(
             "/v2.0/network-policies",
             get(list_network_policies).post(create_network_policy),

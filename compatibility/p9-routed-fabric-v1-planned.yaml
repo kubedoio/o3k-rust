@@ -102,3 +102,79 @@ operations:
     known_deviations: [not_implemented, not_advertised]
     status: planned
     supported: false
+  - id: neutron-security-group-list
+    service: network
+    method: GET
+    path: /v2.0/security-groups
+    resource_type: network:security_group
+    action: network:ListSecurityGroups
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group
+    error_contract: keystone_error
+    state_transition: read_only
+    dependencies: [security_group_store, authorization]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_guest_policy]
+    known_deviations: [not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-security-group-show-update-delete
+    service: network
+    method: GET_PUT_DELETE
+    path: /v2.0/security-groups/{id}
+    resource_type: network:security_group
+    action: network:ManageSecurityGroup
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_guest_policy, restart_replay]
+    known_deviations: [not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-security-group-rule-create
+    service: network
+    method: POST
+    path: /v2.0/security-group-rules
+    resource_type: network:security_group_rule
+    action: network:CreateSecurityGroupRule
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: ipv4_allow_rule
+    response_contract: neutron_security_group_rule
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_guest_policy, restart_replay]
+    known_deviations: [IPv4_only, no_remote_group_id, not_advertised]
+    status: planned
+    supported: false
+  - id: neutron-security-group-rule-list-show-delete
+    service: network
+    method: GET_DELETE
+    path: /v2.0/security-group-rules/{id}
+    resource_type: network:security_group_rule
+    action: network:ReadDeleteSecurityGroupRule
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group_rule
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_guest_policy, cleanup]
+    known_deviations: [IPv4_only, no_remote_group_id, not_advertised]
+    status: planned
+    supported: false

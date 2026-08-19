@@ -112,9 +112,20 @@ pub(crate) struct PortRequestBody {
     port: CreatePortRequest,
 }
 #[derive(serde::Deserialize)]
+pub(crate) struct UpdatePortRequestBody {
+    port: UpdatePortRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct UpdatePortRequest {
+    #[serde(default)]
+    security_groups: Vec<uuid::Uuid>,
+}
+#[derive(serde::Deserialize)]
 pub(crate) struct CreatePortRequest {
     name: String,
     network_id: uuid::Uuid,
+    #[serde(default)]
+    security_groups: Vec<uuid::Uuid>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct PortEnvelope {
@@ -133,6 +144,7 @@ pub(crate) struct PortResponse {
     mac_address: String,
     fixed_ips: Vec<FixedIpResponse>,
     status: String,
+    security_groups: Vec<String>,
 }
 #[derive(serde::Serialize)]
 pub(crate) struct FixedIpResponse {
@@ -166,6 +178,80 @@ pub(crate) struct NetworkPolicyRequest {
 pub(crate) struct PolicyPortRange {
     start: u16,
     end: u16,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct SecurityGroupRequestBody {
+    security_group: SecurityGroupRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct SecurityGroupRequest {
+    name: String,
+    #[serde(default)]
+    description: String,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupEnvelope {
+    security_group: SecurityGroupResponse,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupList {
+    security_groups: Vec<SecurityGroupResponse>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupResponse {
+    id: String,
+    project_id: String,
+    name: String,
+    description: String,
+    security_group_rules: Vec<SecurityGroupRuleResponse>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct SecurityGroupRuleRequestBody {
+    security_group_rule: SecurityGroupRuleRequest,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct SecurityGroupRuleRequest {
+    security_group_id: Uuid,
+    direction: String,
+    #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default)]
+    port_range_min: Option<u16>,
+    #[serde(default)]
+    port_range_max: Option<u16>,
+    #[serde(default)]
+    remote_ip_prefix: Option<String>,
+    #[serde(default)]
+    ethertype: Option<String>,
+    #[serde(default)]
+    remote_group_id: Option<Uuid>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupRuleResponse {
+    id: String,
+    project_id: String,
+    security_group_id: String,
+    direction: String,
+    ethertype: &'static str,
+    protocol: Option<String>,
+    port_range_min: Option<u16>,
+    port_range_max: Option<u16>,
+    remote_ip_prefix: Option<String>,
+    remote_group_id: Option<String>,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupRuleEnvelope {
+    security_group_rule: SecurityGroupRuleResponse,
+}
+#[derive(serde::Serialize)]
+pub(crate) struct SecurityGroupRuleList {
+    security_group_rules: Vec<SecurityGroupRuleResponse>,
+}
+#[derive(serde::Deserialize)]
+pub(crate) struct SecurityGroupRuleQuery {
+    #[serde(default)]
+    security_group_id: Option<Uuid>,
 }
 
 #[derive(serde::Serialize)]
@@ -278,6 +364,386 @@ fn parse_policy_request(
             action,
         },
     ))
+}
+
+async fn security_group_response(
+    service: &NetworkService,
+    project_id: &str,
+    group: o3k_store::SecurityGroupRecord,
+) -> Result<SecurityGroupResponse, NetworkError> {
+    let rules = service
+        .list_security_group_rules_for_project(project_id, group.id)
+        .await?
+        .into_iter()
+        .map(security_group_rule_response)
+        .collect();
+    Ok(SecurityGroupResponse {
+        id: group.id.to_string(),
+        project_id: group.project_id,
+        name: group.name,
+        description: group.description,
+        security_group_rules: rules,
+    })
+}
+
+fn security_group_rule_response(
+    rule: o3k_store::SecurityGroupRuleRecord,
+) -> SecurityGroupRuleResponse {
+    SecurityGroupRuleResponse {
+        id: rule.id.to_string(),
+        project_id: rule.project_id,
+        security_group_id: rule.security_group_id.to_string(),
+        direction: rule.direction,
+        ethertype: "IPv4",
+        protocol: (rule.protocol != "any").then_some(rule.protocol),
+        port_range_min: rule.port_min,
+        port_range_max: rule.port_max,
+        remote_ip_prefix: rule.remote_ip_prefix,
+        remote_group_id: None,
+    }
+}
+
+pub(crate) async fn list_security_groups(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let groups = match service.list_security_groups_for_project(project).await {
+        Ok(groups) => groups,
+        Err(error) => return network_error(error),
+    };
+    let mut responses = Vec::with_capacity(groups.len());
+    for group in groups {
+        match security_group_response(service, project, group).await {
+            Ok(value) => responses.push(value),
+            Err(error) => return network_error(error),
+        }
+    }
+    Json(SecurityGroupList {
+        security_groups: responses,
+    })
+    .into_response()
+}
+
+pub(crate) async fn create_security_group(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<SecurityGroupRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid security group request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    match service
+        .create_security_group_for_project(
+            project,
+            body.security_group.name,
+            body.security_group.description,
+        )
+        .await
+    {
+        Ok(group) => match security_group_response(service, project, group).await {
+            Ok(value) => (
+                StatusCode::CREATED,
+                Json(SecurityGroupEnvelope {
+                    security_group: value,
+                }),
+            )
+                .into_response(),
+            Err(error) => network_error(error),
+        },
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn show_security_group(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let group = match service.get_security_group_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    match security_group_response(service, project, group).await {
+        Ok(value) => Json(SecurityGroupEnvelope {
+            security_group: value,
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_security_group(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+    request: Result<Json<SecurityGroupRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid security group request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let group = match service
+        .update_security_group_for_project(
+            project,
+            id,
+            body.security_group.name,
+            body.security_group.description,
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    match security_group_response(service, project, group).await {
+        Ok(value) => Json(SecurityGroupEnvelope {
+            security_group: value,
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn delete_security_group(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .delete_security_group_for_project(auth.effective_scope().id().as_str(), id)
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn list_security_group_rules(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<SecurityGroupRuleQuery>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let groups = match service.list_security_groups_for_project(project).await {
+        Ok(groups) => groups,
+        Err(error) => return network_error(error),
+    };
+    let mut rules = Vec::new();
+    for group in groups {
+        if query.security_group_id.is_none() || query.security_group_id == Some(group.id) {
+            match service
+                .list_security_group_rules_for_project(project, group.id)
+                .await
+            {
+                Ok(values) => rules.extend(values.into_iter().map(security_group_rule_response)),
+                Err(error) => return network_error(error),
+            }
+        }
+    }
+    Json(SecurityGroupRuleList {
+        security_group_rules: rules,
+    })
+    .into_response()
+}
+
+pub(crate) async fn create_security_group_rule(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    request: Result<Json<SecurityGroupRuleRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid security group rule request",
+        );
+    };
+    let input = body.security_group_rule;
+    if input
+        .ethertype
+        .as_deref()
+        .is_some_and(|value| value != "IPv4")
+        || input.remote_group_id.is_some()
+    {
+        return network_error(NetworkError::InvalidRequest);
+    }
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let rule = match service
+        .create_security_group_rule_for_project(
+            project,
+            input.security_group_id,
+            input.direction,
+            input.protocol.unwrap_or_else(|| "any".to_owned()),
+            input.port_range_min,
+            input.port_range_max,
+            input.remote_ip_prefix,
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(response) =
+        dispatch_security_group_endpoints(&state, project, rule.security_group_id).await
+    {
+        return response;
+    }
+    (
+        StatusCode::CREATED,
+        Json(SecurityGroupRuleEnvelope {
+            security_group_rule: security_group_rule_response(rule),
+        }),
+    )
+        .into_response()
+}
+
+pub(crate) async fn show_security_group_rule(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match service
+        .get_security_group_rule_for_project(auth.effective_scope().id().as_str(), id)
+        .await
+    {
+        Ok(rule) => Json(SecurityGroupRuleEnvelope {
+            security_group_rule: security_group_rule_response(rule),
+        })
+        .into_response(),
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn delete_security_group_rule(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let rule = match service
+        .get_security_group_rule_for_project(project, id)
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(error) = service
+        .delete_security_group_rule_for_project(project, id)
+        .await
+    {
+        return network_error(error);
+    }
+    if let Err(response) =
+        dispatch_security_group_endpoints(&state, project, rule.security_group_id).await
+    {
+        return response;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn dispatch_security_group_endpoints(
+    state: &AppState,
+    project_id: &str,
+    group_id: Uuid,
+) -> Result<(), axum::response::Response> {
+    let service = network_service(state)?;
+    let bindings = service
+        .list_security_group_bindings_for_project(project_id, None)
+        .await
+        .map_err(network_error)?;
+    for binding in bindings
+        .into_iter()
+        .filter(|binding| binding.security_group_id == group_id)
+    {
+        let port = service
+            .get_port_for_project(project_id, binding.endpoint_id)
+            .await
+            .map_err(network_error)?;
+        dispatch_policy_network(state, project_id, port.network_id, port.id).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn list_network_policies(
@@ -619,7 +1085,7 @@ async fn dispatch_policy_network(
     Ok(())
 }
 
-pub(crate) fn port_response(value: PortRecord) -> PortResponse {
+pub(crate) fn port_response(value: PortRecord, security_groups: Vec<Uuid>) -> PortResponse {
     PortResponse {
         id: value.id.to_string(),
         network_id: value.network_id.to_string(),
@@ -635,6 +1101,10 @@ pub(crate) fn port_response(value: PortRecord) -> PortResponse {
             .into_iter()
             .collect(),
         status: value.status,
+        security_groups: security_groups
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
     }
 }
 
@@ -1362,17 +1832,43 @@ pub(crate) async fn create_port(
             "invalid port request",
         );
     };
+    let security_groups = body.port.security_groups.clone();
     match service
         .create_port(&auth, body.port.network_id, body.port.name)
         .await
     {
-        Ok(value) => (
-            StatusCode::CREATED,
-            Json(PortEnvelope {
-                port: port_response(value),
-            }),
-        )
-            .into_response(),
+        Ok(value) => {
+            if let Err(error) = service
+                .replace_security_group_bindings_for_project(
+                    auth.effective_scope().id().as_str(),
+                    value.id,
+                    security_groups,
+                )
+                .await
+            {
+                return network_error(error);
+            }
+            let groups = service
+                .list_security_group_bindings_for_project(
+                    auth.effective_scope().id().as_str(),
+                    Some(value.id),
+                )
+                .await
+                .map(|bindings| {
+                    bindings
+                        .into_iter()
+                        .map(|binding| binding.security_group_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            (
+                StatusCode::CREATED,
+                Json(PortEnvelope {
+                    port: port_response(value, groups),
+                }),
+            )
+                .into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -1390,10 +1886,27 @@ pub(crate) async fn list_ports(
         Err(response) => return response,
     };
     match service.list_ports(&auth).await {
-        Ok(values) => Json(PortList {
-            ports: values.into_iter().map(port_response).collect(),
-        })
-        .into_response(),
+        Ok(values) => {
+            let mut ports = Vec::with_capacity(values.len());
+            for value in values {
+                let groups = service
+                    .list_security_group_bindings_for_project(
+                        auth.effective_scope().id().as_str(),
+                        Some(value.id),
+                    )
+                    .await
+                    .map_err(network_error);
+                let groups = match groups {
+                    Ok(bindings) => bindings
+                        .into_iter()
+                        .map(|binding| binding.security_group_id)
+                        .collect(),
+                    Err(response) => return response,
+                };
+                ports.push(port_response(value, groups));
+            }
+            Json(PortList { ports }).into_response()
+        }
         Err(error) => network_error(error),
     }
 }
@@ -1412,8 +1925,78 @@ pub(crate) async fn show_port(
         Err(response) => return response,
     };
     match service.get_port(&auth, id).await {
+        Ok(value) => {
+            let groups = match service
+                .list_security_group_bindings_for_project(
+                    auth.effective_scope().id().as_str(),
+                    Some(value.id),
+                )
+                .await
+            {
+                Ok(bindings) => bindings
+                    .into_iter()
+                    .map(|binding| binding.security_group_id)
+                    .collect(),
+                Err(error) => return network_error(error),
+            };
+            Json(PortEnvelope {
+                port: port_response(value, groups),
+            })
+            .into_response()
+        }
+        Err(error) => network_error(error),
+    }
+}
+
+pub(crate) async fn update_port(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+    request: Result<Json<UpdatePortRequestBody>, JsonRejection>,
+) -> axum::response::Response {
+    let auth = match require_auth_context(&state, &headers) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let Ok(Json(body)) = request else {
+        return keystone_error(
+            StatusCode::BAD_REQUEST,
+            "Bad Request",
+            "invalid port request",
+        );
+    };
+    let service = match network_service(&state) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let project = auth.effective_scope().id().as_str();
+    let port = match service.get_port_for_project(project, id).await {
+        Ok(value) => value,
+        Err(error) => return network_error(error),
+    };
+    if let Err(error) = service
+        .replace_security_group_bindings_for_project(project, id, body.port.security_groups)
+        .await
+    {
+        return network_error(error);
+    }
+    if let Err(response) = dispatch_policy_network(&state, project, port.network_id, port.id).await
+    {
+        return response;
+    }
+    let groups = match service
+        .list_security_group_bindings_for_project(project, Some(id))
+        .await
+    {
+        Ok(values) => values
+            .into_iter()
+            .map(|value| value.security_group_id)
+            .collect(),
+        Err(error) => return network_error(error),
+    };
+    match service.get_port_for_project(project, id).await {
         Ok(value) => Json(PortEnvelope {
-            port: port_response(value),
+            port: port_response(value, groups),
         })
         .into_response(),
         Err(error) => network_error(error),

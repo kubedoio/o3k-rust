@@ -199,6 +199,41 @@ pub struct PolicyIntent {
     pub action: PolicyAction,
 }
 
+/// Durable compatibility projection for the bounded IPv4 security-group
+/// surface. These values are adapter state, not provider-native authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupIntent {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub rules: Vec<SecurityGroupRuleIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupRuleIntent {
+    pub id: Uuid,
+    pub security_group_id: Uuid,
+    pub direction: PolicyDirection,
+    pub protocol: NetworkProtocol,
+    pub ports: Option<PortRange>,
+    pub remote_ip_prefix: Option<Ipv4Prefix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecurityGroupState {
+    pub project_id: String,
+    pub generation: u64,
+    pub groups: Vec<SecurityGroupIntent>,
+    pub bindings: Vec<SecurityGroupBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupBinding {
+    pub endpoint_id: Uuid,
+    pub security_group_id: Uuid,
+}
+
 /// Bounded capability vocabulary used before a plan can be dispatched to an
 /// execution provider. These are semantic facts, not provider configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
