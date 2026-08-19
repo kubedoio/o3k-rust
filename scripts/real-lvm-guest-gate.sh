@@ -63,6 +63,9 @@ require_inputs() {
     [[ "${STATE_ROOT}" = /* && "${STATE_ROOT}" != "/" && "${STATE_ROOT}" != "/tmp" ]] || die unsafe_state_root
     [[ "${STATE_ROOT##*/}" == guest ]] || die unsafe_state_root
     install -m 0700 -d "${STATE_ROOT}" "${ARTIFACT_DIR}"
+    # libvirt-qemu must traverse this disposable directory to open the
+    # imported overlay. Keep listing/read access denied; cleanup removes it.
+    chmod 0711 "${STATE_ROOT}"
     chmod 0600 "${SSH_KEY}"
     local public_key
     public_key="$(ssh-keygen -y -f "${SSH_KEY}")" || die guest_key_invalid
