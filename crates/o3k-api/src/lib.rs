@@ -27,6 +27,7 @@ use o3k_console::ConsoleService;
 use o3k_identity::TokenService;
 use o3k_image::ImageService;
 use o3k_network::NetworkService;
+use o3k_network::PublicAddressAllocator;
 use serde::Serialize;
 
 mod auth;
@@ -49,9 +50,14 @@ use crate::{
     image::{create_image, delete_image, download_image, list_images, show_image, upload_image},
     middleware::microversion_middleware,
     network::{
-        create_network, create_port, create_subnet, delete_network, delete_port, delete_subnet,
-        list_extensions, list_networks, list_ports, list_subnets, show_network, show_port,
-        show_subnet,
+        create_floating_ip, create_network, create_network_policy, create_port,
+        create_security_group, create_security_group_rule, create_subnet, delete_floating_ip,
+        delete_network, delete_network_policy, delete_port, delete_security_group,
+        delete_security_group_rule, delete_subnet, list_extensions, list_floating_ips,
+        list_network_policies, list_networks, list_ports, list_security_group_rules,
+        list_security_groups, list_subnets, show_floating_ip, show_network, show_network_policy,
+        show_port, show_security_group, show_security_group_rule, show_subnet, update_floating_ip,
+        update_network_policy, update_port, update_security_group,
     },
     placement::placement_discovery,
     volume_attachment::{
@@ -86,6 +92,11 @@ pub struct AppState {
     identity: Option<Arc<TokenService>>,
     image: Option<Arc<ImageService>>,
     network: Option<Arc<NetworkService>>,
+    public_allocator: Option<Arc<PublicAddressAllocator>>,
+    network_external_realm_id: Option<uuid::Uuid>,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: Option<o3k_network::NetworkControllerLease>,
+    network_agent: Option<o3k_network::NetworkAgentIdentity>,
     compute: Option<Arc<ComputeService>>,
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
@@ -122,6 +133,39 @@ impl AppState {
     #[must_use]
     pub fn with_network(mut self, service: NetworkService) -> Self {
         self.network = Some(Arc::new(service));
+        self
+    }
+
+    #[must_use]
+    pub fn with_public_allocator(mut self, allocator: PublicAddressAllocator) -> Self {
+        self.public_allocator = Some(Arc::new(allocator));
+        self
+    }
+
+    #[must_use]
+    pub fn with_network_external_realm(mut self, realm_id: uuid::Uuid) -> Self {
+        self.network_external_realm_id = Some(realm_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_network_dispatcher(
+        mut self,
+        dispatcher: Arc<dyn o3k_network::NetworkPlanDispatcher>,
+        controller: o3k_network::NetworkControllerLease,
+    ) -> Self {
+        self.network_dispatcher = Some(dispatcher);
+        self.network_controller = Some(controller);
+        self
+    }
+
+    /// Configures the explicitly selected host-local network executor. This
+    /// identity is used only when the network executor is intentionally
+    /// separate from the compute-agent registry; the dispatcher still proves
+    /// liveness and fencing over the authenticated network-agent transport.
+    #[must_use]
+    pub fn with_network_agent_identity(mut self, agent: o3k_network::NetworkAgentIdentity) -> Self {
+        self.network_agent = Some(agent);
         self
     }
 
@@ -197,7 +241,48 @@ pub fn router_with_state(state: AppState) -> Router {
         .route("/v2.0/subnets", get(list_subnets).post(create_subnet))
         .route("/v2.0/subnets/{id}", get(show_subnet).delete(delete_subnet))
         .route("/v2.0/ports", get(list_ports).post(create_port))
-        .route("/v2.0/ports/{id}", get(show_port).delete(delete_port))
+        .route(
+            "/v2.0/ports/{id}",
+            get(show_port).put(update_port).delete(delete_port),
+        )
+        .route(
+            "/v2.0/security-groups",
+            get(list_security_groups).post(create_security_group),
+        )
+        .route(
+            "/v2.0/security-groups/{id}",
+            get(show_security_group)
+                .put(update_security_group)
+                .delete(delete_security_group),
+        )
+        .route(
+            "/v2.0/security-group-rules",
+            get(list_security_group_rules).post(create_security_group_rule),
+        )
+        .route(
+            "/v2.0/security-group-rules/{id}",
+            get(show_security_group_rule).delete(delete_security_group_rule),
+        )
+        .route(
+            "/v2.0/network-policies",
+            get(list_network_policies).post(create_network_policy),
+        )
+        .route(
+            "/v2.0/network-policies/{id}",
+            get(show_network_policy)
+                .put(update_network_policy)
+                .delete(delete_network_policy),
+        )
+        .route(
+            "/v2.0/floatingips",
+            get(list_floating_ips).post(create_floating_ip),
+        )
+        .route(
+            "/v2.0/floatingips/{id}",
+            get(show_floating_ip)
+                .put(update_floating_ip)
+                .delete(delete_floating_ip),
+        )
         .route(
             "/v2.1/{project_id}/flavors",
             get(list_flavors).post(create_flavor),

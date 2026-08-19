@@ -71,6 +71,7 @@ struct LibvirtCommandExecutor {
     /// same value is published to placement as the DISK_GB inventory; the
     /// create arm uses it as an agent-side backstop (issue #606).
     max_disk_gb: u64,
+    network_owned_by_external_agent: bool,
 }
 
 struct DhcpRuntime {
@@ -543,6 +544,7 @@ impl DhcpRuntime {
 struct NetworkPreparation {
     created_taps: Vec<o3k_network::TapSpec>,
     added_dhcp_ports: Vec<String>,
+    external_owner: bool,
 }
 
 fn rollback_network(
@@ -550,6 +552,9 @@ fn rollback_network(
     dhcp: &Arc<Mutex<DhcpRuntime>>,
     preparation: &NetworkPreparation,
 ) -> Result<(), AgentError> {
+    if preparation.external_owner {
+        return Ok(());
+    }
     let mut first_error = None;
     if let Ok(mut runtime) = dhcp.lock() {
         if let Err(error) = runtime.remove_ports(&preparation.added_dhcp_ports) {
@@ -775,6 +780,7 @@ fn prepare_network(
     let mut preparation = NetworkPreparation {
         created_taps: Vec::new(),
         added_dhcp_ports: Vec::new(),
+        external_owner: false,
     };
     for attachment in &resolved.network_attachments {
         let spec = o3k_network::TapSpec {
@@ -995,6 +1001,7 @@ fn resolve_committed_create_inputs(
     artifact_root: &std::path::Path,
     image_materializer: &o3k_compute_agent::ImageMaterializer,
     network: &o3k_network::HostNetworkManager,
+    network_owned_by_external_agent: bool,
 ) -> Result<CommittedCreateInputs, AgentError> {
     let Some(proto::command::Action::Create(create)) = command.action.as_ref() else {
         return Err(AgentError::Protocol("create action is missing".to_owned()));
@@ -1044,11 +1051,21 @@ fn resolve_committed_create_inputs(
     for attachment in &resolved.network_attachments {
         let tap_name = network
             .resolve_owned_tap(&o3k_network::TapSpec {
-                instance_id: command.resource_id.clone(),
+                instance_id: if network_owned_by_external_agent {
+                    attachment.port_id.clone()
+                } else {
+                    command.resource_id.clone()
+                },
                 port_id: attachment.port_id.clone(),
                 mac: attachment.mac.clone(),
             })
-            .map_err(|_| AgentError::Protocol("owned TAP is unavailable".to_owned()))?;
+            .map_err(|error| {
+                let managed_taps = network.discover_managed().unwrap_or_default();
+                AgentError::Protocol(format!(
+                    "owned TAP is unavailable for port {}: {error}; managed_taps={managed_taps:?}",
+                    attachment.port_id,
+                ))
+            })?;
         owned_taps.push(OwnedTap {
             port_id: attachment.port_id.clone(),
             tap_name,
@@ -1191,7 +1208,13 @@ impl CommandExecutor for LibvirtCommandExecutor {
                 let inspection = match self.adapter.inspect(name.clone()).await {
                     Ok(value) => value,
                     Err(error) if error.category == ErrorCategory::NotFound => {
-                        cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                        if !self.network_owned_by_external_agent {
+                            cleanup_instance_network(
+                                &self.network,
+                                &self.dhcp,
+                                &command.resource_id,
+                            )?;
+                        }
                         self.image_materializer
                             .delete_instance(&command.resource_id)
                             .map_err(|_| {
@@ -1223,7 +1246,9 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     .undefine_owned(name.clone(), command.resource_id.clone())
                     .await
                     .map_err(agent_error)?;
-                cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                if !self.network_owned_by_external_agent {
+                    cleanup_instance_network(&self.network, &self.dhcp, &command.resource_id)?;
+                }
                 self.image_materializer
                     .delete_instance(&command.resource_id)
                     .map_err(|_| {
@@ -1278,9 +1303,17 @@ impl CommandExecutor for LibvirtCommandExecutor {
                         error,
                     )
                 };
-                let preparation = match prepare_network(command, &self.network, &self.dhcp) {
-                    Ok(preparation) => preparation,
-                    Err(error) => return definitive_failure(error),
+                let preparation = if self.network_owned_by_external_agent {
+                    NetworkPreparation {
+                        created_taps: Vec::new(),
+                        added_dhcp_ports: Vec::new(),
+                        external_owner: true,
+                    }
+                } else {
+                    match prepare_network(command, &self.network, &self.dhcp) {
+                        Ok(preparation) => preparation,
+                        Err(error) => return definitive_failure(error),
+                    }
                 };
                 match self.adapter.inspect(name.clone()).await {
                     Ok(existing) => {
@@ -1309,6 +1342,7 @@ impl CommandExecutor for LibvirtCommandExecutor {
                     &self.artifact_root,
                     &self.image_materializer,
                     &self.network,
+                    self.network_owned_by_external_agent,
                 ) {
                     Ok(value) => value,
                     Err(error) => {
@@ -2403,6 +2437,7 @@ trait StartupTapRestore: Send + Sync {
 /// mutate a foreign interface.
 struct NetworkStartupTapRestore {
     network: Arc<o3k_network::HostNetworkManager>,
+    external_owner: bool,
 }
 
 #[async_trait]
@@ -2413,6 +2448,12 @@ impl StartupTapRestore for NetworkStartupTapRestore {
             .owned_tap_specs_for_instance(resource_id)
             .map_err(|error| AgentError::Protocol(format!("owned TAP lookup failed: {error}")))?;
         for spec in specs {
+            if self.external_owner {
+                self.network.resolve_owned_tap(&spec).map_err(|error| {
+                    AgentError::Protocol(format!("external network TAP is unavailable: {error}"))
+                })?;
+                continue;
+            }
             let (name, created) = self.network.ensure_tap(&spec).map_err(|error| {
                 AgentError::Protocol(format!("owned TAP restoration failed: {error}"))
             })?;
@@ -2687,19 +2728,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = AgentClient::new(config.clone())?;
     let agent_id = agent.load_identity()?;
     let artifact_root = agent.identity_file().with_extension("artifacts");
-    let network_root = agent
-        .identity_file()
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("network");
+    let network_root = env::var_os("O3K_COMPUTE_NETWORK_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            agent
+                .identity_file()
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("network")
+        });
     let network = Arc::new(o3k_network::HostNetworkManager::with_ownership_root(
         o3k_network::HostNetworkConfig {
             bridge_name: env::var("O3K_COMPUTE_BRIDGE_NAME")
                 .unwrap_or_else(|_| "o3k-br0".to_owned()),
             uplink: env::var("O3K_COMPUTE_UPLINK").ok(),
         },
-        network_root,
+        network_root.clone(),
     )?);
+    let network_owned_by_external_agent = matches!(
+        env::var("O3K_COMPUTE_NETWORK_EXTERNAL").as_deref(),
+        Ok("1" | "true" | "yes")
+    );
     let bridge_name = env::var("O3K_COMPUTE_BRIDGE_NAME").unwrap_or_else(|_| "o3k-br0".to_owned());
     let service_root = agent
         .identity_file()
@@ -2708,7 +2757,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dhcp = Arc::new(Mutex::new(DhcpRuntime::open(
         service_root.join("dhcp"),
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
-        bridge_name,
+        bridge_name.clone(),
     )?));
     // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3/S4
     // reruns): the stale-network reap removes the persisted DHCP bindings
@@ -2719,7 +2768,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // hold the DHCP socket and block the fresh supervisor). Live bindings
     // then get their fresh supervisor below. Errors are logged and retried
     // on the next restart; startup is never blocked.
-    if let Err(error) = reap_startup_residue(&network, &dhcp, &libvirt).await {
+    if !network_owned_by_external_agent
+        && let Err(error) = reap_startup_residue(&network, &dhcp, &libvirt).await
+    {
         tracing::warn!(
             error = %error,
             "startup residue reap failed; retried on the next restart"
@@ -2740,7 +2791,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the agent down: the failure is logged, the agent stays up, and DHCP
     // is retried on the next restart or the next create. Create-time DHCP
     // failures remain fail-closed in DhcpRuntime::apply.
-    if let Err(error) = reconcile_dhcp_on_startup(&dhcp, &network) {
+    if !network_owned_by_external_agent
+        && let Err(error) = reconcile_dhcp_on_startup(&dhcp, &network)
+    {
         tracing::warn!(
             error = %error,
             "DHCP reconciliation failed at startup; the agent stays up and \
@@ -2775,7 +2828,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let adapter = libvirt.clone();
         let network = Arc::clone(&network);
         async move {
-            let tap_restorer = NetworkStartupTapRestore { network };
+            let tap_restorer = NetworkStartupTapRestore {
+                network,
+                external_owner: network_owned_by_external_agent,
+            };
             // The unconverged outcome is logged once inside the restore pass
             // (with the pending count); the returned error needs no second
             // log site here.
@@ -2802,8 +2858,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         network,
         dhcp,
         max_disk_gb: config.capabilities.max_disk_gb,
+        network_owned_by_external_agent,
     });
-    info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
+    info!(
+        endpoint = %config.endpoint,
+        host_label = %config.host_label,
+        bridge = %bridge_name,
+        network_root = %network_root.display(),
+        network_owned_by_external_agent,
+        "o3k-compute starting"
+    );
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9100".to_owned())
         .parse::<SocketAddr>()?;

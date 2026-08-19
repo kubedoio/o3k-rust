@@ -9,7 +9,8 @@ use std::{
 };
 
 use o3k_domain::{
-    AddressRealm, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
+    AddressRealm, Ipv4Prefix, NetworkCapability, NetworkIntent, NetworkPlanIntent, NetworkProtocol,
+    PolicyAction, PolicyDirection, PolicyIntent, PortRange,
 };
 use o3k_kernel::{
     ActionId, AuditEvent, AuditOutcome, AuditSink, AuthContext, AuthorizationRequest, Authorizer,
@@ -19,6 +20,23 @@ use o3k_kernel::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+pub mod execution;
+pub mod policy;
+pub mod public;
+pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
+pub mod routed;
+pub use execution::{
+    FlatNetworkError, FlatNetworkRealizer, NetworkAgentIdentity, NetworkControllerLease,
+    NetworkDispatchError, NetworkExecutionError, NetworkPlanAction, NetworkPlanCommand,
+    NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
+    PlanAdmission, journal_path,
+};
+pub use public::{
+    PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
+    PublicAddressRealizer,
+};
+pub use routed::{LinuxRoutedProvider, RoutedExternalConfig, RoutedNetworkError};
 
 /// Poll interval while waiting for a freshly created TAP address to settle.
 #[cfg(not(test))]
@@ -42,6 +60,14 @@ const TAP_ADDRESS_STABILIZE_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct HostNetworkConfig {
     pub bridge_name: String,
     pub uplink: Option<String>,
+}
+
+/// Optional kernel TAP access identity for consumers such as libvirt that
+/// open a pre-created `managed="no"` interface themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapAccess {
+    pub user: String,
+    pub group: String,
 }
 
 /// Stable shared vocabulary for the P9 control-plane boundary. These values
@@ -152,6 +178,7 @@ mod p9_plan_tests {
             egress: vec![],
             public_addresses: vec![],
             policies: vec![PolicyIntent {
+                id: Uuid::from_u128(10),
                 endpoint_id: Uuid::from_u128(3),
                 direction: PolicyDirection::Egress,
                 protocol: NetworkProtocol::Tcp,
@@ -197,6 +224,27 @@ mod p9_plan_tests {
                 .any(|item| matches!(item, NetworkPlanIntent::EndpointAttachment { .. }))
         );
         assert_eq!(first.fingerprint_sha256.len(), 64);
+    }
+
+    #[test]
+    fn equivalent_retry_with_new_deadline_keeps_plan_fingerprint() {
+        let value = intent();
+        let operation = Uuid::from_u128(6);
+        let first =
+            compile_node_network_plan(&value, "node-a", operation, 123, &capabilities(), &[])
+                .expect("plan");
+        let retried =
+            compile_node_network_plan(&value, "node-a", operation, 456, &capabilities(), &[])
+                .expect("retried plan");
+        assert_eq!(first.fingerprint_sha256, retried.fingerprint_sha256);
+        assert_eq!(
+            canonical_plan_fingerprint(&first).expect("fingerprint"),
+            first.fingerprint_sha256
+        );
+        assert_eq!(
+            canonical_plan_fingerprint(&retried).expect("fingerprint"),
+            retried.fingerprint_sha256
+        );
     }
 
     #[test]
@@ -407,6 +455,144 @@ mod p9_plan_tests {
             gateway: Some(Ipv4Addr::new(10, 1, 0, 1)),
             first_usable: Ipv4Addr::new(10, 1, 0, 2),
             last_usable: Ipv4Addr::new(10, 1, 0, 20),
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+
+        let mut value = intent();
+        value.realm.prefix = prefix("10.0.0.0", 16);
+        value.address_pools = vec![
+            o3k_domain::AddressPool {
+                id: Uuid::from_u128(12),
+                realm_id: value.realm.id,
+                project_id: value.project_id.clone(),
+                prefix: prefix("10.0.0.0", 24),
+                gateway: Some(Ipv4Addr::new(10, 0, 0, 1)),
+                first_usable: Ipv4Addr::new(10, 0, 0, 2),
+                last_usable: Ipv4Addr::new(10, 0, 0, 20),
+            },
+            o3k_domain::AddressPool {
+                id: Uuid::from_u128(13),
+                realm_id: value.realm.id,
+                project_id: value.project_id.clone(),
+                prefix: prefix("10.0.1.0", 24),
+                gateway: Some(Ipv4Addr::new(10, 0, 1, 130)),
+                first_usable: Ipv4Addr::new(10, 0, 1, 130),
+                last_usable: Ipv4Addr::new(10, 0, 1, 140),
+            },
+        ];
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_duplicate_endpoint_addresses_and_macs() {
+        let mut duplicate_address = intent();
+        duplicate_address.endpoints.push(EndpointIntent {
+            id: Uuid::from_u128(99),
+            project_id: duplicate_address.project_id.clone(),
+            mac: "02:00:00:00:00:99".to_owned(),
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 3),
+            generation: 1,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &duplicate_address,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
+        );
+
+        let mut duplicate_mac = intent();
+        duplicate_mac.endpoints.push(EndpointIntent {
+            id: Uuid::from_u128(99),
+            project_id: duplicate_mac.project_id.clone(),
+            mac: duplicate_mac.endpoints[0].mac.clone(),
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 99),
+            generation: 1,
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &duplicate_mac,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
+        );
+
+        let mut invalid_mac = intent();
+        invalid_mac.endpoints[0].mac = "not-a-mac".to_owned();
+        assert_eq!(
+            compile_node_network_plan(
+                &invalid_mac,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::ConflictingEndpoint)
+        );
+    }
+
+    #[test]
+    fn plan_rejects_pool_gateway_from_the_allocatable_range() {
+        let mut value = intent();
+        value.address_pools.push(o3k_domain::AddressPool {
+            id: Uuid::from_u128(10),
+            realm_id: value.realm.id,
+            project_id: value.project_id.clone(),
+            prefix: prefix("10.0.0.0", 24),
+            gateway: Some(Ipv4Addr::new(10, 0, 0, 1)),
+            first_usable: Ipv4Addr::new(10, 0, 0, 1),
+            last_usable: Ipv4Addr::new(10, 0, 0, 20),
+        });
+        assert_eq!(
+            compile_node_network_plan(
+                &value,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &capabilities(),
+                &[],
+            ),
+            Err(NetworkPlanError::InvalidAddressPool)
+        );
+
+        let mut value = intent();
+        value.address_pools.push(o3k_domain::AddressPool {
+            id: Uuid::from_u128(11),
+            realm_id: value.realm.id,
+            project_id: value.project_id.clone(),
+            prefix: prefix("10.0.0.0", 24),
+            gateway: Some(Ipv4Addr::new(10, 0, 0, 255)),
+            first_usable: Ipv4Addr::new(10, 0, 0, 2),
+            last_usable: Ipv4Addr::new(10, 0, 0, 20),
         });
         assert_eq!(
             compile_node_network_plan(
@@ -2096,6 +2282,7 @@ pub struct HostNetworkManager {
     command: Arc<dyn NetworkCommand>,
     ownership: Option<Mutex<OwnershipStore>>,
     set_stable_bridge_mac: bool,
+    tap_access: Option<TapAccess>,
 }
 
 struct OwnershipStore {
@@ -2111,6 +2298,7 @@ impl HostNetworkManager {
             command: Arc::new(SystemNetworkCommand),
             ownership: None,
             set_stable_bridge_mac: true,
+            tap_access: None,
         })
     }
 
@@ -2134,6 +2322,7 @@ impl HostNetworkManager {
             command: Arc::new(SystemNetworkCommand),
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
             set_stable_bridge_mac: true,
+            tap_access: None,
         })
     }
 
@@ -2148,6 +2337,7 @@ impl HostNetworkManager {
             command,
             ownership: None,
             set_stable_bridge_mac: false,
+            tap_access: None,
         })
     }
 
@@ -2168,7 +2358,22 @@ impl HostNetworkManager {
             command,
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
             set_stable_bridge_mac: false,
+            tap_access: None,
         })
+    }
+
+    /// Configures the kernel identity allowed to open newly created TAPs.
+    /// This is intentionally explicit and optional; ordinary host consumers
+    /// retain the historical root-owned TAP behavior.
+    pub fn with_tap_access(mut self, access: Option<TapAccess>) -> Result<Self, HostNetworkError> {
+        if access
+            .as_ref()
+            .is_some_and(|value| value.user.trim().is_empty() || value.group.trim().is_empty())
+        {
+            return Err(HostNetworkError::InvalidConfiguration);
+        }
+        self.tap_access = access;
+        Ok(self)
     }
     pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
         if port_id.trim().is_empty() {
@@ -2438,7 +2643,11 @@ impl HostNetworkManager {
         // recording otherwise orphaned a deterministic-name TAP that wedged
         // every later create on the network).
         let temp_name = Self::partial_tap_name();
-        let created_tap = self.run_ip(["tuntap", "add", "dev", &temp_name, "mode", "tap"]);
+        let mut tuntap_args = vec!["tuntap", "add", "dev", &temp_name, "mode", "tap"];
+        if let Some(access) = &self.tap_access {
+            tuntap_args.extend(["user", access.user.as_str(), "group", access.group.as_str()]);
+        }
+        let created_tap = self.run_ip(tuntap_args);
         if let Err(error) = created_tap {
             return Err(if bridge_created {
                 self.rollback_bridge(error)
@@ -2671,6 +2880,11 @@ impl HostNetworkManager {
     /// current kernel interface both prove the requested instance/port/MAC
     /// binding. A deterministic TAP name alone is not sufficient evidence.
     pub fn resolve_owned_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        // The ownership manifest may be written by the bounded network
+        // executor after a compute agent has opened its manager. Refresh the
+        // durable snapshot before a cross-process read so a valid externally
+        // realized TAP is not mistaken for a foreign interface.
+        self.refresh_ownership()?;
         validate_reference(&spec.instance_id)?;
         validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
@@ -2707,6 +2921,32 @@ impl HostNetworkManager {
         self.ownership
             .as_ref()
             .and_then(|store| store.lock().ok().map(|guard| guard.path.clone()))
+    }
+
+    /// Reloads the manager-owned manifest after another O3K process has
+    /// durably changed it. The atomic manifest replacement makes this read
+    /// safe across the network executor and compute agent boundary.
+    pub fn refresh_ownership(&self) -> Result<(), HostNetworkError> {
+        let Some(ownership) = &self.ownership else {
+            return Ok(());
+        };
+        let path = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?
+            .path
+            .clone();
+        let manifest = load_ownership(&path)?;
+        validate_manifest(&self.config, &manifest)?;
+        let mut guard = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?;
+        guard.manifest = manifest;
+        Ok(())
+    }
+
+    /// Returns the configured bridge identity for bounded execution adapters.
+    pub fn bridge_name(&self) -> Option<String> {
+        Some(self.config.bridge_name.clone())
     }
 
     fn bridge_is_owned_output(&self, output: &NetworkCommandOutput) -> bool {
@@ -3320,9 +3560,128 @@ pub enum NetworkPlanError {
     InvalidAddressPool,
     #[error("network intent has an invalid policy")]
     InvalidPolicy,
+    #[error("network intent has an invalid IPv4 prefix")]
+    InvalidPrefix,
 }
 
 pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
+
+/// Compile the currently supported flat attachment projection into the same
+/// canonical per-node plan used by routed providers. This helper is kept in
+/// the network application boundary so callers cannot construct a wire-only
+/// payload that bypasses plan validation.
+pub struct AttachmentPlanInput<'a> {
+    pub endpoint_id: Uuid,
+    pub realm_id: Uuid,
+    pub project_id: &'a str,
+    pub mac: &'a str,
+    pub fixed_ip: std::net::Ipv4Addr,
+    pub subnet_cidr: &'a str,
+    pub node_id: &'a str,
+    pub operation_id: Uuid,
+    pub deadline_unix_ms: u64,
+    pub public_address: Option<std::net::Ipv4Addr>,
+    pub external_realm_id: Option<Uuid>,
+    pub policies: Vec<PolicyIntent>,
+}
+
+pub fn compile_attachment_plan(
+    input: AttachmentPlanInput<'_>,
+) -> Result<NodeNetworkPlan, NetworkPlanError> {
+    let AttachmentPlanInput {
+        endpoint_id,
+        realm_id,
+        project_id,
+        mac,
+        fixed_ip,
+        subnet_cidr,
+        node_id,
+        operation_id,
+        deadline_unix_ms,
+        public_address,
+        external_realm_id,
+        policies,
+    } = input;
+    let has_policies = !policies.is_empty();
+    let (network, prefix_len) = subnet_cidr
+        .split_once('/')
+        .ok_or(NetworkPlanError::InvalidPrefix)?;
+    let network = network
+        .parse()
+        .map_err(|_| NetworkPlanError::InvalidPrefix)?;
+    let prefix_len = prefix_len
+        .parse::<u8>()
+        .map_err(|_| NetworkPlanError::InvalidPrefix)?;
+    let prefix =
+        o3k_domain::Ipv4Prefix::new(network, prefix_len).ok_or(NetworkPlanError::InvalidPrefix)?;
+    let intent = NetworkIntent {
+        id: endpoint_id,
+        generation: 1,
+        project_id: project_id.to_owned(),
+        realm: AddressRealm {
+            id: realm_id,
+            project_id: project_id.to_owned(),
+            prefix,
+            overlapping_prefixes: false,
+        },
+        address_pools: Vec::new(),
+        endpoints: vec![o3k_domain::EndpointIntent {
+            id: endpoint_id,
+            project_id: project_id.to_owned(),
+            mac: mac.to_owned(),
+            fixed_ip,
+            generation: 1,
+        }],
+        routes: Vec::new(),
+        gateways: Vec::new(),
+        egress: external_realm_id
+            .map(|external_realm_id| {
+                vec![o3k_domain::EgressIntent {
+                    external_realm_id,
+                    enabled: true,
+                    nat: true,
+                }]
+            })
+            .unwrap_or_default(),
+        public_addresses: public_address
+            .map(|public_address| {
+                vec![o3k_domain::PublicAddressBindingIntent {
+                    id: endpoint_id,
+                    project_id: project_id.to_owned(),
+                    public_address,
+                    endpoint_id,
+                    generation: 1,
+                }]
+            })
+            .unwrap_or_default(),
+        policies,
+        state: o3k_domain::NetworkIntentState::Requested,
+    };
+    let mut capabilities: HashSet<NetworkCapability> = [
+        NetworkCapability::Ipv4,
+        NetworkCapability::EndpointAttachment,
+    ]
+    .into_iter()
+    .collect();
+    if public_address.is_some() {
+        capabilities.insert(NetworkCapability::PublicAddressRealization);
+    }
+    if external_realm_id.is_some() {
+        capabilities.insert(NetworkCapability::Routing);
+        capabilities.insert(NetworkCapability::Nat);
+    }
+    if has_policies {
+        capabilities.insert(NetworkCapability::StatefulPolicy);
+    }
+    compile_node_network_plan(
+        &intent,
+        node_id,
+        operation_id,
+        deadline_unix_ms,
+        &capabilities,
+        &[],
+    )
+}
 
 /// Compiles one canonical intent into a stable semantic node plan. The
 /// `realms` slice represents existing routed realms in the selected profile;
@@ -3369,6 +3728,18 @@ pub fn compile_node_network_plan(
     }
 
     let mut generations = BTreeMap::new();
+    let mut endpoint_addresses = HashSet::new();
+    let mut endpoint_macs = HashSet::new();
+    let gateway = intent
+        .address_pools
+        .iter()
+        .find_map(|pool| pool.gateway)
+        .or_else(|| {
+            u32::from(intent.realm.prefix.network)
+                .checked_add(1)
+                .map(Ipv4Addr::from)
+        })
+        .ok_or(NetworkPlanError::InvalidAddressPool)?;
     for pool in &intent.address_pools {
         if pool.project_id != intent.project_id
             || pool.realm_id != intent.realm.id
@@ -3376,31 +3747,57 @@ pub fn compile_node_network_plan(
             || !intent.realm.prefix.contains(pool.prefix.network)
             || !pool.prefix.contains(pool.first_usable)
             || !pool.prefix.contains(pool.last_usable)
+            || pool.first_usable == pool.prefix.network
+            || pool.last_usable == pool.prefix.network
+            || broadcast_address(pool.prefix).is_some_and(|broadcast| {
+                pool.first_usable == broadcast || pool.last_usable == broadcast
+            })
             || u32::from(pool.first_usable) > u32::from(pool.last_usable)
-            || pool
-                .gateway
-                .is_some_and(|gateway| !pool.prefix.contains(gateway))
+            || pool.gateway.is_some_and(|gateway| {
+                !pool.prefix.contains(gateway)
+                    || gateway == pool.prefix.network
+                    || broadcast_address(pool.prefix).is_some_and(|broadcast| gateway == broadcast)
+                    || u32::from(pool.first_usable) <= u32::from(gateway)
+                        && u32::from(gateway) <= u32::from(pool.last_usable)
+            })
+            || u32::from(pool.first_usable) <= u32::from(gateway)
+                && u32::from(gateway) <= u32::from(pool.last_usable)
         {
             return Err(NetworkPlanError::InvalidAddressPool);
         }
     }
     let mut intents =
         Vec::with_capacity(intent.endpoints.len() + intent.routes.len() + intent.policies.len());
+    intents.push(NetworkPlanIntent::AddressRealm {
+        realm_id: intent.realm.id,
+        prefix: intent.realm.prefix,
+        gateway,
+    });
     for endpoint in &intent.endpoints {
         if endpoint.project_id != intent.project_id
             || !intent.realm.prefix.contains(endpoint.fixed_ip)
+            || endpoint.fixed_ip == intent.realm.prefix.network
+            || broadcast_address(intent.realm.prefix)
+                .is_some_and(|broadcast| endpoint.fixed_ip == broadcast)
         {
             return Err(NetworkPlanError::AddressOutsideRealm);
+        }
+        let canonical_mac = endpoint.mac.to_ascii_lowercase();
+        if !valid_mac(&canonical_mac) {
+            return Err(NetworkPlanError::ConflictingEndpoint);
         }
         if generations
             .insert(endpoint.id, endpoint.generation)
             .is_some()
+            || !endpoint_addresses.insert(endpoint.fixed_ip)
+            || !endpoint_macs.insert(canonical_mac.clone())
+            || endpoint.fixed_ip == gateway
         {
             return Err(NetworkPlanError::ConflictingEndpoint);
         }
         intents.push(NetworkPlanIntent::EndpointAttachment {
             endpoint_id: endpoint.id,
-            mac: endpoint.mac.clone(),
+            mac: canonical_mac,
             fixed_ip: endpoint.fixed_ip,
             generation: endpoint.generation,
         });
@@ -3411,8 +3808,12 @@ pub fn compile_node_network_plan(
         });
     }
     let endpoint_ids: HashSet<Uuid> = generations.keys().copied().collect();
+    let mut public_addresses = HashSet::new();
     for binding in &intent.public_addresses {
-        if binding.project_id != intent.project_id || !endpoint_ids.contains(&binding.endpoint_id) {
+        if binding.project_id != intent.project_id
+            || !endpoint_ids.contains(&binding.endpoint_id)
+            || !public_addresses.insert(binding.public_address)
+        {
             return Err(NetworkPlanError::OwnershipViolation);
         }
     }
@@ -3425,6 +3826,9 @@ pub fn compile_node_network_plan(
                     NetworkProtocol::Any | NetworkProtocol::Icmp
                 )
             })
+            || (matches!(policy.direction, PolicyDirection::Ingress)
+                && policy.destination.is_some())
+            || (matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some())
         {
             return Err(NetworkPlanError::InvalidPolicy);
         }
@@ -3464,7 +3868,6 @@ pub fn compile_node_network_plan(
         node_id,
         &operation_id,
         &NODE_NETWORK_PLAN_SCHEMA_VERSION,
-        &deadline_unix_ms,
         &generations,
         &intents,
     );
@@ -3501,6 +3904,40 @@ pub fn validate_plan_replay(
     Ok(())
 }
 
+/// Recomputes the transport fingerprint from the semantic plan fields. The
+/// executor uses this at the trust boundary so a caller cannot mark an
+/// arbitrary mutated payload with a syntactically valid but unrelated hash.
+pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
+    let mut intents = plan.intents.clone();
+    intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
+    let unsigned = (
+        &plan.plan_id,
+        &plan.node_id,
+        &plan.operation_id,
+        &plan.schema_version,
+        &plan.resource_generations,
+        &intents,
+    );
+    let bytes = serde_json::to_vec(&unsigned).map_err(|_| NetworkPlanError::Serialization)?;
+    use sha2::{Digest, Sha256};
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn broadcast_address(prefix: o3k_domain::Ipv4Prefix) -> Option<Ipv4Addr> {
+    let host_bits = 32u32.saturating_sub(u32::from(prefix.prefix_len));
+    let size = 1u64.checked_shl(host_bits)?;
+    let value = u64::from(u32::from(prefix.network)) + size - 1;
+    u32::try_from(value).ok().map(Ipv4Addr::from)
+}
+
+fn valid_mac(value: &str) -> bool {
+    value.len() == 17
+        && value.split(':').count() == 6
+        && value
+            .split(':')
+            .all(|part| part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn require_capability(
     capabilities: &HashSet<NetworkCapability>,
     capability: NetworkCapability,
@@ -3509,6 +3946,23 @@ fn require_capability(
         .contains(&capability)
         .then_some(())
         .ok_or(NetworkPlanError::UnsupportedCapability(capability))
+}
+
+fn validate_policy_shape(policy: &PolicyIntent) -> Result<(), NetworkError> {
+    if policy.id.is_nil()
+        || policy.ports.is_some_and(|ports| ports.start > ports.end)
+        || policy.ports.is_some_and(|_| {
+            matches!(
+                policy.protocol,
+                NetworkProtocol::Any | NetworkProtocol::Icmp
+            )
+        })
+        || (matches!(policy.direction, PolicyDirection::Ingress) && policy.destination.is_some())
+        || (matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some())
+    {
+        return Err(NetworkError::InvalidRequest);
+    }
+    Ok(())
 }
 
 /// Canonical binding state of a port on its selected host.
@@ -3777,6 +4231,562 @@ impl NetworkService {
                 Err(map_store_error(error))
             }
         }
+    }
+
+    pub async fn list_security_groups_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<o3k_store::SecurityGroupRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_security_groups(project_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn get_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_security_group(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    pub async fn create_security_group_for_project(
+        &self,
+        project_id: &str,
+        name: String,
+        description: String,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        if project_id.trim().is_empty() || name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        let group = o3k_store::SecurityGroupRecord {
+            id: Uuid::now_v7(),
+            project_id: project_id.to_owned(),
+            name,
+            description,
+        };
+        self.inner
+            .repository
+            .insert_security_group(&group)
+            .await
+            .map_err(map_store_error)?;
+        Ok(group)
+    }
+
+    pub async fn update_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+        name: String,
+        description: String,
+    ) -> Result<o3k_store::SecurityGroupRecord, NetworkError> {
+        if name.trim().is_empty() {
+            return Err(NetworkError::InvalidRequest);
+        }
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .update_security_group(project_id, &id, &name, &description)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn delete_security_group_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_security_group(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_security_group_rules_for_project(
+        &self,
+        project_id: &str,
+        group_id: Uuid,
+    ) -> Result<Vec<o3k_store::SecurityGroupRuleRecord>, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_security_group(project_id, &group_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        self.inner
+            .repository
+            .list_security_group_rules(project_id, &group_id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn get_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
+        self.inner
+            .repository
+            .get_security_group_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)?
+            .ok_or(NetworkError::NotFound)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        group_id: Uuid,
+        direction: String,
+        protocol: String,
+        port_min: Option<u16>,
+        port_max: Option<u16>,
+        remote_ip_prefix: Option<String>,
+    ) -> Result<o3k_store::SecurityGroupRuleRecord, NetworkError> {
+        let direction = parse_security_group_direction(&direction)?;
+        let protocol_value = parse_security_group_protocol(&protocol)?;
+        if matches!(protocol_value, NetworkProtocol::Icmp | NetworkProtocol::Any)
+            && (port_min.is_some() || port_max.is_some())
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        match (port_min, port_max) {
+            (Some(start), Some(end)) if start <= end => {}
+            (None, None) => {}
+            _ => return Err(NetworkError::InvalidRequest),
+        }
+        if let Some(prefix) = remote_ip_prefix.as_deref() {
+            parse_security_group_prefix(prefix)?;
+        }
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_security_group(project_id, &group_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        let rule = o3k_store::SecurityGroupRuleRecord {
+            id: Uuid::now_v7(),
+            security_group_id: group_id,
+            project_id: project_id.to_owned(),
+            direction: match direction {
+                PolicyDirection::Ingress => "ingress",
+                PolicyDirection::Egress => "egress",
+            }
+            .to_owned(),
+            protocol,
+            port_min,
+            port_max,
+            remote_ip_prefix,
+        };
+        self.inner
+            .repository
+            .insert_security_group_rule(&rule)
+            .await
+            .map_err(map_store_error)?;
+        Ok(rule)
+    }
+
+    pub async fn delete_security_group_rule_for_project(
+        &self,
+        project_id: &str,
+        id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        self.inner
+            .repository
+            .delete_security_group_rule(project_id, &id)
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn list_security_group_bindings_for_project(
+        &self,
+        project_id: &str,
+        endpoint_id: Option<Uuid>,
+    ) -> Result<Vec<o3k_store::SecurityGroupBindingRecord>, NetworkError> {
+        self.inner
+            .repository
+            .list_security_group_bindings(project_id, endpoint_id.as_ref())
+            .await
+            .map_err(map_store_error)
+    }
+
+    pub async fn replace_security_group_bindings_for_project(
+        &self,
+        project_id: &str,
+        endpoint_id: Uuid,
+        group_ids: Vec<Uuid>,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        if self
+            .inner
+            .repository
+            .get_port(project_id, &endpoint_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        for group_id in &group_ids {
+            if self
+                .inner
+                .repository
+                .get_security_group(project_id, group_id)
+                .await
+                .map_err(map_store_error)?
+                .is_none()
+            {
+                return Err(NetworkError::NotFound);
+            }
+        }
+        self.inner
+            .repository
+            .replace_security_group_bindings(project_id, &endpoint_id, &group_ids)
+            .await
+            .map_err(map_store_error)
+    }
+
+    /// Returns the durable canonical policy rules for a network. A network
+    /// without policy state is intentionally an empty policy, not an implicit
+    /// provider default.
+    pub async fn list_policies_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<Vec<PolicyIntent>, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        let record = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?;
+        let mut policies = if let Some(record) = record {
+            let intent: NetworkIntent =
+                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+            if intent.id != network_id || intent.project_id != project_id {
+                return Err(NetworkError::InvalidRequest);
+            }
+            intent.policies
+        } else {
+            Vec::new()
+        };
+        for port in self
+            .inner
+            .repository
+            .list_ports_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let bindings = self
+                .inner
+                .repository
+                .list_security_group_bindings(project_id, Some(&port.id))
+                .await
+                .map_err(map_store_error)?;
+            for binding in bindings {
+                let Some(group) = self
+                    .inner
+                    .repository
+                    .get_security_group(project_id, &binding.security_group_id)
+                    .await
+                    .map_err(map_store_error)?
+                else {
+                    return Err(NetworkError::InvalidRequest);
+                };
+                for rule in self
+                    .inner
+                    .repository
+                    .list_security_group_rules(project_id, &group.id)
+                    .await
+                    .map_err(map_store_error)?
+                {
+                    let direction = parse_security_group_direction(&rule.direction)?;
+                    let remote = rule
+                        .remote_ip_prefix
+                        .as_deref()
+                        .map(parse_security_group_prefix)
+                        .transpose()?;
+                    let ports = match (rule.port_min, rule.port_max) {
+                        (Some(start), Some(end)) => Some(PortRange { start, end }),
+                        (None, None) => None,
+                        _ => return Err(NetworkError::InvalidRequest),
+                    };
+                    policies.push(PolicyIntent {
+                        id: rule.id,
+                        endpoint_id: port.id,
+                        direction,
+                        protocol: parse_security_group_protocol(&rule.protocol)?,
+                        ports,
+                        source: (direction == PolicyDirection::Ingress)
+                            .then_some(remote)
+                            .flatten(),
+                        destination: (direction == PolicyDirection::Egress)
+                            .then_some(remote)
+                            .flatten(),
+                        action: PolicyAction::Allow,
+                    });
+                }
+            }
+        }
+        policies.sort_by_key(|policy| policy.id);
+        Ok(policies)
+    }
+
+    /// Adds or replaces one canonical policy rule and persists the complete
+    /// network intent under one generation-fenced store record. The record is
+    /// keyed by the public network ID; provider-native rules are never stored.
+    pub async fn upsert_policy_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        policy: PolicyIntent,
+    ) -> Result<PolicyIntent, NetworkError> {
+        let _guard = self.lock().await;
+        let mut intent = self
+            .load_policy_intent_locked(project_id, network_id)
+            .await?;
+        if policy.endpoint_id.is_nil()
+            || !intent
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == policy.endpoint_id)
+            || intent.policies.iter().any(|existing| {
+                existing.id == policy.id && existing.endpoint_id != policy.endpoint_id
+            })
+        {
+            return Err(NetworkError::InvalidRequest);
+        }
+        validate_policy_shape(&policy)?;
+        intent.policies.retain(|existing| existing.id != policy.id);
+        intent.policies.push(policy.clone());
+        intent.policies.sort_by_key(|value| value.id);
+        intent.generation = intent.generation.saturating_add(1);
+        self.persist_policy_intent_locked(project_id, network_id, intent)
+            .await?;
+        Ok(policy)
+    }
+
+    pub async fn delete_policy_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        policy_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        let mut intent = self
+            .load_policy_intent_locked(project_id, network_id)
+            .await?;
+        let original = intent.policies.len();
+        intent.policies.retain(|policy| policy.id != policy_id);
+        if intent.policies.len() == original {
+            return Err(NetworkError::NotFound);
+        }
+        intent.generation = intent.generation.saturating_add(1);
+        self.persist_policy_intent_locked(project_id, network_id, intent)
+            .await
+    }
+
+    /// Projects a successful provider observation onto the durable intent.
+    /// Dispatch alone is not success; callers invoke this only after the
+    /// executor returned an observed terminal success.
+    pub async fn mark_network_intent_active_for_project(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<(), NetworkError> {
+        let _guard = self.lock().await;
+        let Some(record) = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        else {
+            return Err(NetworkError::NotFound);
+        };
+        let mut intent: NetworkIntent =
+            serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+        intent.state = o3k_domain::NetworkIntentState::Active;
+        intent.generation = intent.generation.saturating_add(1);
+        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
+        self.inner
+            .repository
+            .update_network_intent(
+                project_id,
+                &network_id,
+                record.generation,
+                &payload,
+                record.plan_fingerprint_sha256.as_deref(),
+                "active",
+            )
+            .await
+            .map_err(map_store_error)?;
+        Ok(())
+    }
+
+    async fn load_policy_intent_locked(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+    ) -> Result<NetworkIntent, NetworkError> {
+        if self
+            .inner
+            .repository
+            .get_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .is_none()
+        {
+            return Err(NetworkError::NotFound);
+        }
+        if let Some(record) = self
+            .inner
+            .repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            let intent: NetworkIntent =
+                serde_json::from_str(&record.payload).map_err(NetworkError::CorruptMetadata)?;
+            if intent.id != network_id || intent.project_id != project_id {
+                return Err(NetworkError::InvalidRequest);
+            }
+            return Ok(intent);
+        }
+        let subnet = self
+            .inner
+            .repository
+            .list_subnets_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+            .into_iter()
+            .next()
+            .ok_or(NetworkError::NotFound)?;
+        let (network, prefix_len) = subnet
+            .cidr
+            .split_once('/')
+            .ok_or(NetworkError::InvalidRequest)?;
+        let prefix = o3k_domain::Ipv4Prefix::new(
+            network.parse().map_err(|_| NetworkError::InvalidRequest)?,
+            prefix_len
+                .parse()
+                .map_err(|_| NetworkError::InvalidRequest)?,
+        )
+        .ok_or(NetworkError::InvalidRequest)?;
+        let ports = self
+            .inner
+            .repository
+            .list_ports_for_network(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?;
+        Ok(NetworkIntent {
+            id: network_id,
+            project_id: project_id.to_owned(),
+            realm: AddressRealm {
+                id: network_id,
+                project_id: project_id.to_owned(),
+                prefix,
+                overlapping_prefixes: false,
+            },
+            address_pools: vec![o3k_domain::AddressPool {
+                id: subnet.id,
+                realm_id: network_id,
+                project_id: project_id.to_owned(),
+                prefix,
+                gateway: Some(subnet.gateway_ip),
+                first_usable: subnet.allocation_start,
+                last_usable: subnet.allocation_end,
+            }],
+            endpoints: ports
+                .into_iter()
+                .map(|port| o3k_domain::EndpointIntent {
+                    id: port.id,
+                    project_id: port.project_id,
+                    mac: port.mac_address,
+                    fixed_ip: port.fixed_ip,
+                    generation: 1,
+                })
+                .collect(),
+            routes: Vec::new(),
+            gateways: Vec::new(),
+            egress: Vec::new(),
+            public_addresses: Vec::new(),
+            policies: Vec::new(),
+            generation: 1,
+            state: o3k_domain::NetworkIntentState::Requested,
+        })
+    }
+
+    async fn persist_policy_intent_locked(
+        &self,
+        project_id: &str,
+        network_id: Uuid,
+        intent: NetworkIntent,
+    ) -> Result<(), NetworkError> {
+        let payload = serde_json::to_string(&intent).map_err(|_| NetworkError::InvalidRequest)?;
+        let fingerprint = format!("policy-generation-{}", intent.generation);
+        let repository = self.inner.repository.as_ref();
+        if let Some(existing) = repository
+            .get_network_intent(project_id, &network_id)
+            .await
+            .map_err(map_store_error)?
+        {
+            repository
+                .update_network_intent(
+                    project_id,
+                    &network_id,
+                    existing.generation,
+                    &payload,
+                    Some(&fingerprint),
+                    existing.status.as_str(),
+                )
+                .await
+                .map_err(map_store_error)?;
+        } else {
+            repository
+                .insert_network_intent(&o3k_store::NetworkIntentRecord {
+                    id: network_id,
+                    project_id: project_id.to_owned(),
+                    generation: 1,
+                    payload,
+                    plan_fingerprint_sha256: Some(fingerprint),
+                    status: "requested".to_owned(),
+                })
+                .await
+                .map_err(map_store_error)?;
+        }
+        Ok(())
     }
 
     pub async fn list_networks(
@@ -4874,6 +5884,31 @@ async fn import_legacy_metadata(
     Ok(())
 }
 
+fn parse_security_group_prefix(value: &str) -> Result<Ipv4Prefix, NetworkError> {
+    let (address, length) = value.split_once('/').ok_or(NetworkError::InvalidRequest)?;
+    let address = address.parse().map_err(|_| NetworkError::InvalidRequest)?;
+    let length = length.parse().map_err(|_| NetworkError::InvalidRequest)?;
+    Ipv4Prefix::new(address, length).ok_or(NetworkError::InvalidRequest)
+}
+
+fn parse_security_group_direction(value: &str) -> Result<PolicyDirection, NetworkError> {
+    match value {
+        "ingress" => Ok(PolicyDirection::Ingress),
+        "egress" => Ok(PolicyDirection::Egress),
+        _ => Err(NetworkError::InvalidRequest),
+    }
+}
+
+fn parse_security_group_protocol(value: &str) -> Result<NetworkProtocol, NetworkError> {
+    match value {
+        "any" => Ok(NetworkProtocol::Any),
+        "tcp" => Ok(NetworkProtocol::Tcp),
+        "udp" => Ok(NetworkProtocol::Udp),
+        "icmp" => Ok(NetworkProtocol::Icmp),
+        _ => Err(NetworkError::InvalidRequest),
+    }
+}
+
 fn deterministic_port_mac(port_id: Uuid) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(port_id.as_bytes());
@@ -4886,6 +5921,7 @@ fn deterministic_port_mac(port_id: Uuid) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use o3k_domain::PolicyAction;
 
     fn auth(project_id: &str) -> AuthContext {
         AuthContext::new(
@@ -5788,6 +6824,197 @@ mod tests {
         assert_eq!(port2.network_id, net.id);
 
         let _ = fs::remove_dir_all(&path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn policy_intent_is_durable_generation_fenced_and_compiled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("policy-intent");
+        let _ = fs::remove_dir_all(&path);
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = NetworkService::open(&path, store.clone()).await?;
+        let project = "project-a";
+        let network = service
+            .create_network(&auth(project), "policy-net".to_owned())
+            .await?;
+        service
+            .create_subnet(
+                &auth(project),
+                network.id,
+                "policy-subnet".to_owned(),
+                "10.20.0.0/24".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port(&auth(project), network.id, "policy-port".to_owned())
+            .await?;
+        let policy_id = Uuid::now_v7();
+        let policy = PolicyIntent {
+            id: policy_id,
+            endpoint_id: port.id,
+            direction: PolicyDirection::Ingress,
+            protocol: NetworkProtocol::Tcp,
+            ports: Some(o3k_domain::PortRange {
+                start: 8080,
+                end: 8080,
+            }),
+            source: Some(
+                o3k_domain::Ipv4Prefix::new("198.51.100.0".parse()?, 24)
+                    .ok_or("invalid source prefix")?,
+            ),
+            destination: None,
+            action: PolicyAction::Deny,
+        };
+        service
+            .upsert_policy_for_project(project, network.id, policy.clone())
+            .await?;
+        assert_eq!(
+            service
+                .list_policies_for_project(project, network.id)
+                .await?,
+            vec![policy.clone()]
+        );
+        let record = store
+            .get_network_intent(project, &network.id)
+            .await?
+            .ok_or("policy intent not persisted")?;
+        assert_eq!(record.status, "requested");
+        assert!(record.payload.contains(&policy_id.to_string()));
+
+        let compiled = compile_attachment_plan(AttachmentPlanInput {
+            endpoint_id: port.id,
+            realm_id: network.id,
+            project_id: project,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: "10.20.0.0/24",
+            node_id: "network-agent-1",
+            operation_id: Uuid::now_v7(),
+            deadline_unix_ms: 1,
+            public_address: None,
+            external_realm_id: None,
+            policies: vec![policy.clone()],
+        })?;
+        assert!(compiled.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::Policy(value) if value == &policy
+        )));
+
+        service
+            .delete_policy_for_project(project, network.id, policy_id)
+            .await?;
+        assert!(
+            service
+                .list_policies_for_project(project, network.id)
+                .await?
+                .is_empty()
+        );
+        assert!(matches!(
+            service
+                .delete_policy_for_project("other-project", network.id, policy_id)
+                .await,
+            Err(NetworkError::NotFound)
+        ));
+        let _ = fs::remove_dir_all(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_plan_can_carry_operator_owned_routed_egress() -> Result<(), NetworkPlanError> {
+        let endpoint_id = Uuid::from_u128(11);
+        let external_realm_id = Uuid::from_u128(12);
+        let plan = compile_attachment_plan(AttachmentPlanInput {
+            endpoint_id,
+            realm_id: Uuid::from_u128(13),
+            project_id: "project-a",
+            mac: "02:00:00:00:00:0b",
+            fixed_ip: Ipv4Addr::new(10, 0, 0, 2),
+            subnet_cidr: "10.0.0.0/24",
+            node_id: "node-a",
+            operation_id: Uuid::from_u128(14),
+            deadline_unix_ms: 1,
+            public_address: None,
+            external_realm_id: Some(external_realm_id),
+            policies: Vec::new(),
+        })?;
+        assert!(plan.intents.iter().any(|intent| matches!(
+            intent,
+            NetworkPlanIntent::Egress(o3k_domain::EgressIntent {
+                external_realm_id: id,
+                enabled: true,
+                nat: true,
+            }) if *id == external_realm_id
+        )));
+        assert!(plan
+            .intents
+            .iter()
+            .any(|intent| matches!(intent, NetworkPlanIntent::EndpointAttachment { endpoint_id: id, .. } if *id == endpoint_id)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn security_group_rules_project_to_endpoint_policy_and_enforce_scope()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = root("security-groups");
+        let sqlite_path = format!("{}.sqlite", path.display());
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let store = Arc::new(o3k_store::testkit::open_file(Path::new(&sqlite_path)).await?);
+        let service = NetworkService::open(&path, store).await?;
+        let network = service
+            .create_network(&auth("project-a"), "net".to_owned())
+            .await?;
+        service
+            .create_subnet(
+                &auth("project-a"),
+                network.id,
+                "subnet".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = service
+            .create_port(&auth("project-a"), network.id, "port".to_owned())
+            .await?;
+        let group = service
+            .create_security_group_for_project("project-a", "web".to_owned(), String::new())
+            .await?;
+        let rule = service
+            .create_security_group_rule_for_project(
+                "project-a",
+                group.id,
+                "ingress".to_owned(),
+                "tcp".to_owned(),
+                Some(443),
+                Some(443),
+                Some("0.0.0.0/0".to_owned()),
+            )
+            .await?;
+        service
+            .replace_security_group_bindings_for_project("project-a", port.id, vec![group.id])
+            .await?;
+        let policies = service
+            .list_policies_for_project("project-a", network.id)
+            .await?;
+        assert!(policies.iter().any(|policy| policy.id == rule.id
+            && policy.endpoint_id == port.id
+            && policy.action == PolicyAction::Allow));
+        assert!(
+            service
+                .list_policies_for_project("project-b", network.id)
+                .await
+                .is_err()
+        );
+        let _ = fs::remove_dir_all(&path);
+        let _ = fs::remove_file(&sqlite_path);
+        let _ = fs::remove_file(format!("{sqlite_path}-wal"));
+        let _ = fs::remove_file(format!("{sqlite_path}-shm"));
         Ok(())
     }
 }

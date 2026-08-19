@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package o3k.network.v1;
+
+// Node-local execution protocol. The control plane remains the authority for
+// plans; this service only admits and realizes already-authenticated plans.
+service NetworkAgent {
+  rpc Control(stream ControlRequest) returns (stream ControlResponse);
+}
+
+message ControlRequest {
+  oneof body {
+    Register register = 1;
+    NetworkCommand command = 2;
+  }
+}
+
+message ControlResponse {
+  oneof body {
+    RegisterAck register = 1;
+    CommandResult result = 2;
+    ProtocolError error = 3;
+  }
+}
+
+message Register {
+  string agent_id = 1;
+  string agent_epoch = 2;
+}
+
+message RegisterAck {
+  string agent_id = 1;
+  string agent_epoch = 2;
+  uint32 protocol_major = 3;
+  uint32 protocol_minor = 4;
+}
+
+message NetworkCommand {
+  string command_id = 1;
+  string operation_id = 2;
+  string idempotency_key = 3;
+  string agent_id = 4;
+  string agent_epoch = 5;
+  string controller_id = 6;
+  string controller_epoch = 7;
+  uint64 fencing_token = 8;
+  uint64 deadline_unix_ms = 9;
+  string plan_json = 10;
+  bool remove = 11;
+}
+
+message CommandResult {
+  string command_id = 1;
+  string status = 2;
+  bool replayed = 3;
+  string error_code = 4;
+}
+
+message ProtocolError {
+  string code = 1;
+}

@@ -4,7 +4,8 @@ pub use network::{
     AddressPool, AddressRealm, EgressIntent, EndpointIntent, GatewayIntent, Ipv4Prefix,
     NetworkCapability, NetworkIntent, NetworkIntentState, NetworkPlanIntent, NetworkProtocol,
     PolicyAction, PolicyDirection, PolicyIntent, PortRange, PublicAddressBindingIntent,
-    RouteIntent,
+    RouteIntent, SecurityGroupBinding, SecurityGroupIntent, SecurityGroupRuleIntent,
+    SecurityGroupState,
 };
 
 use serde::{Deserialize, Serialize};

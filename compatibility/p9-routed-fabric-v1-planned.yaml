@@ -1,6 +1,6 @@
-# P9 compatibility records are traceability artifacts only. They are not
-# included by compatibility/openstack-targets.yaml and must not be advertised
-# until their operation-level implementation and evidence gates pass.
+# P9 compatibility records are operation-level traceability artifacts. Verified
+# records below are intentionally not release-advertised until the separate
+# human-approved release replan permits expanding the current TestLab target.
 schema_version: 1
 profile: p9-routed-fabric-v1
 status: planned
@@ -54,16 +54,16 @@ operations:
     api_version: neutron-v2
     microversion: null
     auth_scope: project
-    request_contract: planned
-    response_contract: planned
-    error_contract: planned
-    state_transition: planned
+    request_contract: neutron_floatingip_create_bounded_pool
+    response_contract: neutron_floatingip
+    error_contract: keystone_error
+    state_transition: durable_address_allocation
     dependencies: [address_allocation_store, authorization, network_quota]
     provider_capability: [public_address_realization]
-    evidence: [domain_store_planner]
-    known_deviations: [not_implemented, not_advertised]
-    status: planned
-    supported: false
+    evidence: [api_contract, real_libvirt_guest, cleanup, restart_replay]
+    known_deviations: [bounded_configured_ipv4_pool, not_advertised_until_release_replan]
+    status: verified
+    supported: true
   - id: neutron-floatingip-associate
     service: network
     method: PUT
@@ -73,32 +73,165 @@ operations:
     api_version: neutron-v2
     microversion: null
     auth_scope: project
-    request_contract: planned
-    response_contract: planned
-    error_contract: planned
-    state_transition: planned
+    request_contract: neutron_floatingip_association_bounded_port
+    response_contract: neutron_floatingip
+    error_contract: keystone_error
+    state_transition: durable_public_binding
     dependencies: [network_intent_store, address_allocation_store, authorization]
     provider_capability: [public_address_realization]
-    evidence: [domain_store_planner]
-    known_deviations: [not_implemented, not_advertised]
-    status: planned
-    supported: false
+    evidence: [api_contract, real_libvirt_guest, cleanup, restart_replay]
+    known_deviations: [one_fixed_ipv4_port_binding, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-floatingip-list
+    service: network
+    method: GET
+    path: /v2.0/floatingips
+    resource_type: network:address_allocation
+    action: network:ListAddressAllocations
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: neutron_floatingip_list_bounded_pool
+    response_contract: neutron_floatingip_list
+    error_contract: keystone_error
+    state_transition: read_only
+    dependencies: [address_allocation_store, authorization]
+    provider_capability: [public_address_realization]
+    evidence: [api_contract, real_libvirt_guest]
+    known_deviations: [bounded_configured_ipv4_pool, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-floatingip-show
+    service: network
+    method: GET
+    path: /v2.0/floatingips/{floatingip_id}
+    resource_type: network:address_allocation
+    action: network:ReadAddressAllocation
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: neutron_floatingip_show
+    response_contract: neutron_floatingip
+    error_contract: keystone_error
+    state_transition: read_only
+    dependencies: [address_allocation_store, authorization]
+    provider_capability: [public_address_realization]
+    evidence: [api_contract, real_libvirt_guest, restart_replay]
+    known_deviations: [bounded_configured_ipv4_pool, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-floatingip-delete
+    service: network
+    method: DELETE
+    path: /v2.0/floatingips/{floatingip_id}
+    resource_type: network:address_allocation
+    action: network:DeleteAddressAllocation
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: neutron_floatingip_delete
+    response_contract: empty_204
+    error_contract: keystone_error
+    state_transition: durable_address_release
+    dependencies: [address_allocation_store, authorization, cleanup_reconcile]
+    provider_capability: [public_address_realization]
+    evidence: [api_contract, real_libvirt_guest, cleanup]
+    known_deviations: [bounded_configured_ipv4_pool, not_advertised_until_release_replan]
+    status: verified
+    supported: true
   - id: neutron-security-group-create
     service: network
     method: POST
     path: /v2.0/security-groups
-    resource_type: network:network_intent
+    resource_type: network:security_group
     action: network:CreateNetworkIntent
     api_version: neutron-v2
     microversion: null
     auth_scope: project
-    request_contract: planned
-    response_contract: planned
-    error_contract: planned
-    state_transition: planned
-    dependencies: [network_intent_store, authorization, policy_capability]
+    request_contract: neutron_security_group_create_bounded
+    response_contract: neutron_security_group
+    error_contract: keystone_error
+    state_transition: durable_policy_create
+    dependencies: [security_group_store, authorization, policy_reconcile]
     provider_capability: [stateful_policy]
-    evidence: [domain_store_planner]
-    known_deviations: [not_implemented, not_advertised]
-    status: planned
-    supported: false
+    evidence: [api_contract, real_libvirt_guest, restart_replay, cleanup]
+    known_deviations: [IPv4_only, no_default_group_semantics, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-security-group-list
+    service: network
+    method: GET
+    path: /v2.0/security-groups
+    resource_type: network:security_group
+    action: network:ListSecurityGroups
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group
+    error_contract: keystone_error
+    state_transition: read_only
+    dependencies: [security_group_store, authorization]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_libvirt_guest_policy]
+    known_deviations: [IPv4_only, no_default_group_semantics, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-security-group-show-update-delete
+    service: network
+    method: GET_PUT_DELETE
+    path: /v2.0/security-groups/{id}
+    resource_type: network:security_group
+    action: network:ManageSecurityGroup
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_libvirt_guest_policy, restart_replay]
+    known_deviations: [IPv4_only, no_default_group_semantics, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-security-group-rule-create
+    service: network
+    method: POST
+    path: /v2.0/security-group-rules
+    resource_type: network:security_group_rule
+    action: network:CreateSecurityGroupRule
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: ipv4_allow_rule
+    response_contract: neutron_security_group_rule
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_libvirt_guest_policy, restart_replay]
+    known_deviations: [IPv4_only, no_remote_group_id, no_default_group_semantics, not_advertised_until_release_replan]
+    status: verified
+    supported: true
+  - id: neutron-security-group-rule-list-show-delete
+    service: network
+    method: GET_DELETE
+    path: /v2.0/security-group-rules/{id}
+    resource_type: network:security_group_rule
+    action: network:ReadDeleteSecurityGroupRule
+    api_version: neutron-v2
+    microversion: null
+    auth_scope: project
+    request_contract: bounded_ipv4
+    response_contract: neutron_security_group_rule
+    error_contract: keystone_error
+    state_transition: desired_policy_update
+    dependencies: [security_group_store, authorization, policy_reconcile]
+    provider_capability: [stateful_policy]
+    evidence: [api_contract, real_libvirt_guest_policy, cleanup]
+    known_deviations: [IPv4_only, no_remote_group_id, no_default_group_semantics, not_advertised_until_release_replan]
+    status: verified
+    supported: true

@@ -187,6 +187,9 @@ pub struct PortRange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyIntent {
+    /// Stable control-plane identity for update/delete/replay. Provider rule
+    /// names and handles are derived observations, never canonical identity.
+    pub id: Uuid,
     pub endpoint_id: Uuid,
     pub direction: PolicyDirection,
     pub protocol: NetworkProtocol,
@@ -194,6 +197,41 @@ pub struct PolicyIntent {
     pub source: Option<Ipv4Prefix>,
     pub destination: Option<Ipv4Prefix>,
     pub action: PolicyAction,
+}
+
+/// Durable compatibility projection for the bounded IPv4 security-group
+/// surface. These values are adapter state, not provider-native authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupIntent {
+    pub id: Uuid,
+    pub project_id: String,
+    pub name: String,
+    pub description: String,
+    pub rules: Vec<SecurityGroupRuleIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupRuleIntent {
+    pub id: Uuid,
+    pub security_group_id: Uuid,
+    pub direction: PolicyDirection,
+    pub protocol: NetworkProtocol,
+    pub ports: Option<PortRange>,
+    pub remote_ip_prefix: Option<Ipv4Prefix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SecurityGroupState {
+    pub project_id: String,
+    pub generation: u64,
+    pub groups: Vec<SecurityGroupIntent>,
+    pub bindings: Vec<SecurityGroupBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecurityGroupBinding {
+    pub endpoint_id: Uuid,
+    pub security_group_id: Uuid,
 }
 
 /// Bounded capability vocabulary used before a plan can be dispatched to an
@@ -217,6 +255,11 @@ pub enum NetworkCapability {
 /// Provider-independent intent carried by a node plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NetworkPlanIntent {
+    AddressRealm {
+        realm_id: Uuid,
+        prefix: Ipv4Prefix,
+        gateway: Ipv4Addr,
+    },
     EndpointAttachment {
         endpoint_id: Uuid,
         mac: String,

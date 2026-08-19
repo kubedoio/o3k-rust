@@ -1016,6 +1016,7 @@ dependencies = [
 name = "o3k-api"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "axum",
  "http",
  "o3k-cinder",
@@ -1258,6 +1259,8 @@ dependencies = [
 name = "o3k-network"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
+ "o3k-dhcp",
  "o3k-domain",
  "o3k-kernel",
  "o3k-store",
@@ -1267,6 +1270,38 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "o3k-network-bin"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "o3k-domain",
+ "o3k-network",
+ "o3k-network-protocol",
+ "prost",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "o3k-network-protocol"
+version = "0.4.0-alpha.1"
+dependencies = [
+ "prost",
+ "rustls",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -1368,6 +1403,7 @@ dependencies = [
  "o3k-identity",
  "o3k-image",
  "o3k-network",
+ "o3k-network-protocol",
  "o3k-placement",
  "o3k-provider",
  "o3k-provider-contract",

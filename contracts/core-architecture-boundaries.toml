@@ -35,6 +35,7 @@ non_application_crates = [
   "o3k-libvirt",
   "o3k-provider",
   "o3k-provider-contract",
+  "o3k-network-protocol",
   "o3k-store",
 ]
 

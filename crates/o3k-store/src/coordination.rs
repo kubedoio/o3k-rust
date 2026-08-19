@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::{PostgresStore, SqliteStore, StoreError};
+use crate::{PostgresStore, SqliteStore, StoreError, is_sqlite_busy};
 
 pub type FencingToken = u64;
 
@@ -146,6 +146,31 @@ pub trait CoordinationRepository: Send + Sync {
         controller_id: &ControllerId,
         controller_epoch: &ControllerEpoch,
         ttl: Duration,
+    ) -> Result<LeaseAcquireOutcome, StoreError> {
+        const MAX_BUSY_RETRIES: u32 = 5;
+        for attempt in 0..=MAX_BUSY_RETRIES {
+            match self
+                .acquire_work_lease_once(work_key, work_kind, controller_id, controller_epoch, ttl)
+                .await
+            {
+                Err(StoreError::Database(error))
+                    if is_sqlite_busy(&error) && attempt < MAX_BUSY_RETRIES =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt + 1))).await;
+                }
+                result => return result,
+            }
+        }
+        unreachable!("work-lease retry loop always returns")
+    }
+
+    async fn acquire_work_lease_once(
+        &self,
+        work_key: &str,
+        work_kind: &str,
+        controller_id: &ControllerId,
+        controller_epoch: &ControllerEpoch,
+        ttl: Duration,
     ) -> Result<LeaseAcquireOutcome, StoreError>;
 
     async fn renew_work_lease(
@@ -268,7 +293,7 @@ impl CoordinationRepository for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn acquire_work_lease(
+    async fn acquire_work_lease_once(
         &self,
         work_key: &str,
         work_kind: &str,
@@ -647,7 +672,7 @@ impl CoordinationRepository for SqliteStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn acquire_work_lease(
+    async fn acquire_work_lease_once(
         &self,
         work_key: &str,
         work_kind: &str,

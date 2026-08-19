@@ -17,6 +17,131 @@ struct DaemonCreateResolver {
     image: o3k_image::ImageService,
     network: o3k_network::NetworkService,
     config_drive: o3k_config_drive::ConfigDriveStore,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: o3k_network::NetworkControllerLease,
+    network_external_realm_id: Option<Uuid>,
+    network_agent: Option<o3k_network::NetworkAgentIdentity>,
+}
+
+/// Composition-root adapter for the bounded node-local network transport.
+/// The network application remains transport-independent; this adapter only
+/// maps its typed command envelope to the versioned mTLS wire protocol.
+#[derive(Clone)]
+struct NetworkAgentDispatcher {
+    endpoint: String,
+    server_name: String,
+    ca_certificate: PathBuf,
+    client_certificate: PathBuf,
+    client_key: PathBuf,
+}
+
+fn network_dispatcher_from_env()
+-> Result<Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>, Box<dyn std::error::Error>> {
+    let names = [
+        "O3K_NETWORK_AGENT_ENDPOINT",
+        "O3K_NETWORK_AGENT_SERVER_NAME",
+        "O3K_NETWORK_AGENT_CA",
+        "O3K_NETWORK_AGENT_CLIENT_CERT",
+        "O3K_NETWORK_AGENT_CLIENT_KEY",
+    ];
+    let values = names
+        .iter()
+        .map(|name| std::env::var(name).ok())
+        .collect::<Vec<_>>();
+    if values.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    if values.iter().any(Option::is_none) {
+        return Err("all O3K_NETWORK_AGENT_* transport variables are required".into());
+    }
+    let [
+        endpoint,
+        server_name,
+        ca_certificate,
+        client_certificate,
+        client_key,
+    ] = values
+        .try_into()
+        .map_err(|_| "invalid network agent transport configuration")?;
+    Ok(Some(Arc::new(NetworkAgentDispatcher {
+        endpoint: endpoint.ok_or("missing network agent endpoint")?,
+        server_name: server_name.ok_or("missing network agent server name")?,
+        ca_certificate: PathBuf::from(ca_certificate.ok_or("missing network agent CA")?),
+        client_certificate: PathBuf::from(
+            client_certificate.ok_or("missing network agent client certificate")?,
+        ),
+        client_key: PathBuf::from(client_key.ok_or("missing network agent client key")?),
+    })))
+}
+
+#[async_trait]
+impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
+    async fn dispatch(
+        &self,
+        command: o3k_network::NetworkPlanCommand,
+    ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+        let client = o3k_network_protocol::NetworkAgentClient::connect(
+            &self.endpoint,
+            &self.server_name,
+            &self.ca_certificate,
+            &self.client_certificate,
+            &self.client_key,
+        )
+        .await
+        .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+        let command_id = command.command_id.to_string();
+        let result = client
+            .execute(
+                o3k_network_protocol::proto::Register {
+                    agent_id: command.target.agent_id.clone(),
+                    agent_epoch: command.target.agent_epoch.clone(),
+                },
+                o3k_network_protocol::proto::NetworkCommand {
+                    command_id: command_id.clone(),
+                    operation_id: command.operation_id.to_string(),
+                    idempotency_key: command.idempotency_key,
+                    agent_id: command.target.agent_id,
+                    agent_epoch: command.target.agent_epoch,
+                    controller_id: command.controller.controller_id,
+                    controller_epoch: command.controller.controller_epoch,
+                    fencing_token: command.controller.fencing_token,
+                    deadline_unix_ms: command.deadline_unix_ms,
+                    plan_json: serde_json::to_string(&command.plan).map_err(|error| {
+                        o3k_network::NetworkDispatchError::Rejected(error.to_string())
+                    })?,
+                    remove: matches!(command.action, o3k_network::NetworkPlanAction::Remove),
+                },
+            )
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    command_id = %command_id,
+                    operation_id = %command.operation_id,
+                    error = %error,
+                    "network agent dispatch failed"
+                );
+                o3k_network::NetworkDispatchError::Transport(error.to_string())
+            })?;
+        tracing::debug!(
+            command_id = %command_id,
+            operation_id = %command.operation_id,
+            status = %result.status,
+            replayed = result.replayed,
+            error_code = %result.error_code,
+            "network agent dispatch completed"
+        );
+        match result.status.as_str() {
+            "succeeded" | "replayed" | "recovered" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
+            "unknown" | "requires_observation" => Ok(o3k_network::NetworkPlanStatus::Unknown),
+            other => Err(o3k_network::NetworkDispatchError::Rejected(
+                if result.error_code.is_empty() {
+                    other.to_owned()
+                } else {
+                    result.error_code
+                },
+            )),
+        }
+    }
 }
 
 fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String> {
@@ -30,12 +155,50 @@ fn placement_consumer_ids(resources: &[o3k_store::ResourceRecord]) -> Vec<String
     ids
 }
 
+fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+fn public_allocator_from_env(
+    data_dir: &std::path::Path,
+) -> Result<Option<o3k_network::PublicAddressAllocator>, Box<dyn std::error::Error>> {
+    let cidr = std::env::var("O3K_PUBLIC_POOL_CIDR").ok();
+    let first = std::env::var("O3K_PUBLIC_POOL_FIRST").ok();
+    let last = std::env::var("O3K_PUBLIC_POOL_LAST").ok();
+    if cidr.is_none() && first.is_none() && last.is_none() {
+        return Ok(None);
+    }
+    let cidr = cidr.ok_or("O3K_PUBLIC_POOL_CIDR is required")?;
+    let first = first.ok_or("O3K_PUBLIC_POOL_FIRST is required")?.parse()?;
+    let last = last.ok_or("O3K_PUBLIC_POOL_LAST is required")?.parse()?;
+    let (network, prefix_len) = cidr
+        .split_once('/')
+        .ok_or("O3K_PUBLIC_POOL_CIDR must be IPv4/prefix-length")?;
+    let prefix = o3k_domain::Ipv4Prefix::new(network.parse()?, prefix_len.parse()?)
+        .ok_or("O3K_PUBLIC_POOL_CIDR is invalid")?;
+    Ok(Some(o3k_network::PublicAddressAllocator::open(
+        data_dir.join("public-addresses"),
+        o3k_network::PublicAddressPool {
+            prefix,
+            first_usable: first,
+            last_usable: last,
+        },
+    )?))
+}
+
 /// Projects terminal compute outcomes into the durable port binding state of
 /// the network control plane. Wired only for the agent provider profile,
 /// where the resolver records binding intent at create dispatch.
 #[derive(Clone)]
 struct NetworkBindingProjector {
     network: o3k_network::NetworkService,
+    registry: Arc<dyn o3k_provider::AgentNodeRegistry>,
+    network_dispatcher: Option<Arc<dyn o3k_network::NetworkPlanDispatcher>>,
+    network_controller: o3k_network::NetworkControllerLease,
+    network_external_realm_id: Option<Uuid>,
+    network_agent: Option<o3k_network::NetworkAgentIdentity>,
 }
 
 #[async_trait]
@@ -57,6 +220,9 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
         } else {
             o3k_network::PortBindingState::Error
         };
+        if succeeded {
+            self.dispatch_unbound_port(project_id, port_id).await?;
+        }
         self.network
             .project_create_outcome(project_id, port_id, state)
             .await
@@ -76,11 +242,191 @@ impl o3k_compute::PortBindingProjector for NetworkBindingProjector {
                 format!("invalid port id {port_id:?}: {error}"),
             )
         })?;
+        let port = self
+            .network
+            .get_port_for_project(project_id, port_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if let (Some(dispatcher), Some(host)) = (
+            self.network_dispatcher.as_ref(),
+            port.binding_host.as_deref(),
+        ) {
+            let agent = if let Some(configured) = self.network_agent.as_ref() {
+                if configured.agent_id != host {
+                    return Err(
+                        std::io::Error::other("bound network agent identity changed").into(),
+                    );
+                }
+                configured.clone()
+            } else {
+                let snapshot =
+                    self.registry.snapshot(host).await.ok_or_else(|| {
+                        std::io::Error::other("network agent snapshot unavailable")
+                    })?;
+                o3k_network::NetworkAgentIdentity {
+                    agent_id: snapshot.agent_id,
+                    agent_epoch: snapshot.agent_epoch,
+                }
+            };
+            let subnet_id = port
+                .subnet_id
+                .ok_or_else(|| std::io::Error::other("bound port has no subnet"))?;
+            let subnet = self
+                .network
+                .get_subnet_for_project(project_id, subnet_id)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let policies = self
+                .network
+                .list_policies_for_project(project_id, port.network_id)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .into_iter()
+                .filter(|policy| policy.endpoint_id == port.id)
+                .collect();
+            let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+            let operation_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:network:remove:{project_id}:{port_id}").as_bytes(),
+            );
+            let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+                endpoint_id: port.id,
+                realm_id: port.network_id,
+                project_id,
+                mac: &port.mac_address,
+                fixed_ip: port.fixed_ip,
+                subnet_cidr: &subnet.cidr,
+                node_id: host,
+                operation_id,
+                deadline_unix_ms,
+                public_address: None,
+                external_realm_id: self.network_external_realm_id,
+                policies,
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let command_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_URL,
+                format!("o3k:network:remove-command:{operation_id}").as_bytes(),
+            );
+            let status = dispatcher
+                .dispatch(o3k_network::NetworkPlanCommand {
+                    command_id,
+                    operation_id,
+                    idempotency_key: format!("o3k:network:remove:{project_id}:{port_id}"),
+                    action: o3k_network::NetworkPlanAction::Remove,
+                    target: agent,
+                    controller: self.network_controller.clone(),
+                    deadline_unix_ms,
+                    plan,
+                })
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if status != o3k_network::NetworkPlanStatus::Succeeded {
+                return Err(std::io::Error::other(
+                    "network removal requires observation before unbinding",
+                )
+                .into());
+            }
+        }
         self.network
             .unbind_port(project_id, port_id)
             .await
             .map(|_| ())
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+}
+
+impl NetworkBindingProjector {
+    /// The agent-provider resolver dispatches before compute mutation.  Other
+    /// providers (notably the portable fake/TestLab provider) complete the
+    /// server operation without that resolver, so the terminal binding
+    /// projection is the safe point at which to admit their network plan.
+    /// This is deliberately limited to an explicitly configured network
+    /// agent; without one, the historical binding projection remains a
+    /// control-plane-only observation.
+    async fn dispatch_unbound_port(
+        &self,
+        project_id: &str,
+        port_id: Uuid,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(dispatcher) = self.network_dispatcher.as_ref() else {
+            return Ok(());
+        };
+        let Some(agent) = self.network_agent.as_ref() else {
+            return Ok(());
+        };
+        let port = self
+            .network
+            .get_port_for_project(project_id, port_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if port.binding_host.is_some() {
+            return Ok(());
+        }
+        let subnet_id = port
+            .subnet_id
+            .ok_or_else(|| std::io::Error::other("network port has no subnet"))?;
+        let subnet = self
+            .network
+            .get_subnet_for_project(project_id, subnet_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.network
+            .record_binding_intent(project_id, port_id, &agent.agent_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let policies = self
+            .network
+            .list_policies_for_project(project_id, port.network_id)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .into_iter()
+            .filter(|policy| policy.endpoint_id == port.id)
+            .collect();
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:network:terminal-binding:{project_id}:{port_id}").as_bytes(),
+        );
+        let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+        let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+            endpoint_id: port.id,
+            realm_id: port.network_id,
+            project_id,
+            mac: &port.mac_address,
+            fixed_ip: port.fixed_ip,
+            subnet_cidr: &subnet.cidr,
+            node_id: &agent.agent_id,
+            operation_id,
+            deadline_unix_ms,
+            public_address: None,
+            external_realm_id: self.network_external_realm_id,
+            policies,
+        })
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let command_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("o3k:network:terminal-binding-command:{operation_id}").as_bytes(),
+        );
+        let status = dispatcher
+            .dispatch(o3k_network::NetworkPlanCommand {
+                command_id,
+                operation_id,
+                idempotency_key: format!("o3k:network:terminal-binding:{project_id}:{port_id}"),
+                action: o3k_network::NetworkPlanAction::Apply,
+                target: agent.clone(),
+                controller: self.network_controller.clone(),
+                deadline_unix_ms,
+                plan,
+            })
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        if status != o3k_network::NetworkPlanStatus::Succeeded {
+            return Err(std::io::Error::other(
+                "network binding requires observed provider success",
+            )
+            .into());
+        }
         Ok(())
     }
 }
@@ -116,6 +462,7 @@ impl DaemonCreateResolver {
         &self,
         request: &CreateInstanceRequest,
         agent_id: &str,
+        agent_epoch: &str,
     ) -> Result<
         (
             Vec<o3k_compute_agent::NetworkAttachmentSpec>,
@@ -145,13 +492,88 @@ impl DaemonCreateResolver {
             // Record the selected-host intent only after the full attachment
             // resolved; a port whose subnet cannot be resolved is never
             // dispatched and must not carry a binding intent.
+            let network_agent_id = self
+                .network_agent
+                .as_ref()
+                .map_or(agent_id, |agent| agent.agent_id.as_str());
             self.network
-                .record_binding_intent(&request.project_id, port_id, agent_id)
+                .record_binding_intent(&request.project_id, port_id, network_agent_id)
                 .await
                 .map_err(|error| match error {
                     o3k_network::NetworkError::Conflict => ProviderError::Conflict,
                     _ => ProviderError::InvalidRequest,
                 })?;
+            if let Some(dispatcher) = &self.network_dispatcher {
+                let deadline_unix_ms = unix_time_millis().saturating_add(30_000);
+                let plan = o3k_network::compile_attachment_plan(o3k_network::AttachmentPlanInput {
+                    endpoint_id: port.id,
+                    realm_id: port.network_id,
+                    project_id: &request.project_id,
+                    mac: &port.mac_address,
+                    fixed_ip: port.fixed_ip,
+                    subnet_cidr: &subnet.cidr,
+                    // The network plan is owned by the network execution
+                    // agent, not by the selected compute host.  Keeping the
+                    // plan node bound to the network agent lets the executor
+                    // reject cross-agent replay without conflating compute
+                    // placement with network mutation authority.
+                    node_id: network_agent_id,
+                    operation_id: request.operation_id,
+                    deadline_unix_ms,
+                    public_address: None,
+                    external_realm_id: self.network_external_realm_id,
+                    policies: self
+                        .network
+                        .list_policies_for_project(&request.project_id, port.network_id)
+                        .await
+                        .map_err(|_| ProviderError::InvalidRequest)?
+                        .into_iter()
+                        .filter(|policy| policy.endpoint_id == port.id)
+                        .collect(),
+                })
+                .map_err(|_| ProviderError::InvalidRequest)?;
+                let command_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_URL,
+                    format!(
+                        "o3k:network:apply:{}:{}:{}",
+                        request.operation_id, port.id, plan.fingerprint_sha256
+                    )
+                    .as_bytes(),
+                );
+                let status = dispatcher
+                    .dispatch(o3k_network::NetworkPlanCommand {
+                        command_id,
+                        operation_id: request.operation_id,
+                        idempotency_key: format!("{}:network:{}", request.idempotency_key, port.id),
+                        action: o3k_network::NetworkPlanAction::Apply,
+                        target: self.network_agent.clone().unwrap_or_else(|| {
+                            o3k_network::NetworkAgentIdentity {
+                                agent_id: agent_id.to_owned(),
+                                agent_epoch: agent_epoch.to_owned(),
+                            }
+                        }),
+                        controller: self.network_controller.clone(),
+                        deadline_unix_ms,
+                        plan,
+                    })
+                    .await
+                    .map_err(|error| match error {
+                        o3k_network::NetworkDispatchError::Unavailable
+                        | o3k_network::NetworkDispatchError::Transport(_) => {
+                            ProviderError::UnknownOutcome {
+                                operation_id: request.operation_id,
+                            }
+                        }
+                        o3k_network::NetworkDispatchError::Rejected(_) => {
+                            ProviderError::InvalidRequest
+                        }
+                    })?;
+                if status == o3k_network::NetworkPlanStatus::Unknown {
+                    return Err(ProviderError::UnknownOutcome {
+                        operation_id: request.operation_id,
+                    });
+                }
+            }
             let port_id = port.id.to_string();
             let fixed_ip = port.fixed_ip.to_string();
             attachments.push(o3k_compute_agent::NetworkAttachmentSpec {
@@ -225,8 +647,9 @@ impl ResolvedCreateResolver for DaemonCreateResolver {
         agent: &AgentNodeSnapshot,
     ) -> Result<ResolvedCreateInputs, ProviderError> {
         let image = self.resolve_image(request).await?;
-        let (network_attachments, network_data) =
-            self.resolve_network(request, &agent.agent_id).await?;
+        let (network_attachments, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
         let (iso, _) = self.materialize_config_drive(request, network_data)?;
         let flavor_id = (!request.flavor_id.trim().is_empty())
             .then(|| request.flavor_id.clone())
@@ -268,7 +691,9 @@ impl CreateArtifactResolver for DaemonCreateResolver {
         if image.checksum != inputs.image_sha256 || image.format != inputs.image_format {
             return Err(ProviderError::Conflict);
         }
-        let (_, network_data) = self.resolve_network(request, &agent.agent_id).await?;
+        let (_, network_data) = self
+            .resolve_network(request, &agent.agent_id, &agent.agent_epoch)
+            .await?;
         let (iso, iso_bytes) = self.materialize_config_drive(request, network_data)?;
         if iso.fingerprint_sha256 != inputs.config_drive_sha256 {
             return Err(ProviderError::Conflict);
@@ -365,7 +790,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let controller_id = o3k_store::ControllerId::new(
         std::env::var("O3K_CONTROLLER_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
     );
-    let controller_epoch = o3k_store::ControllerEpoch::random();
+    let controller_epoch = std::env::var("O3K_CONTROLLER_EPOCH")
+        .map(o3k_store::ControllerEpoch::new)
+        .unwrap_or_else(|_| o3k_store::ControllerEpoch::random());
     let session = o3k_store::ControllerSession {
         controller_id: controller_id.clone(),
         controller_epoch: controller_epoch.clone(),
@@ -461,14 +888,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let scheduler = o3k_scheduler::Scheduler::new(placement.clone());
+    let network_dispatcher = network_dispatcher_from_env()?;
+    let public_allocator = public_allocator_from_env(&config.data_dir)?;
+    let network_controller = o3k_network::NetworkControllerLease {
+        controller_id: controller_id.to_string(),
+        controller_epoch: controller_epoch.to_string(),
+        fencing_token: std::env::var("O3K_NETWORK_FENCING_TOKEN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1),
+    };
+    let network_external_realm_id = std::env::var("O3K_NETWORK_EXTERNAL_REALM_ID")
+        .ok()
+        .map(|value| Uuid::parse_str(&value))
+        .transpose()?;
+    let network_agent_identity = match (
+        std::env::var("O3K_NETWORK_AGENT_ID").ok(),
+        std::env::var("O3K_NETWORK_AGENT_EPOCH").ok(),
+    ) {
+        (Some(agent_id), Some(agent_epoch)) => Some(o3k_network::NetworkAgentIdentity {
+            agent_id,
+            agent_epoch,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "O3K_NETWORK_AGENT_ID and O3K_NETWORK_AGENT_EPOCH must be set together".into(),
+            );
+        }
+    };
     let agent_control_enabled = config.compute_server_certificate.is_some()
         && config.compute_server_private_key.is_some()
         && config.compute_client_ca.is_some();
+    let binding_projector = Arc::new(NetworkBindingProjector {
+        network: network_service.clone(),
+        registry: Arc::new(registry.clone()),
+        network_dispatcher: network_dispatcher.clone(),
+        network_controller: network_controller.clone(),
+        network_external_realm_id,
+        network_agent: network_agent_identity.clone(),
+    });
     let mut compute_service = if config.provider == o3k_config::Provider::Agent {
         let resolver = Arc::new(DaemonCreateResolver {
             image: image_service.clone(),
             network: network_service.clone(),
             config_drive: config_drive_store.clone(),
+            network_dispatcher: network_dispatcher.clone(),
+            network_controller: network_controller.clone(),
+            network_external_realm_id,
+            network_agent: network_agent_identity.clone(),
         });
         o3k_compute::ComputeService::new(
             store.clone(),
@@ -481,9 +949,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_artifact_resolver(resolver),
             ),
         )
-        .with_binding_projector(Arc::new(NetworkBindingProjector {
-            network: network_service.clone(),
-        }))
+        .with_binding_projector(binding_projector.clone())
         .with_config_drive_cleaner(config_drive_store.clone())
     } else {
         match config.provider {
@@ -493,7 +959,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             o3k_config::Provider::Fake => o3k_compute::ComputeService::new(
                 store,
                 Arc::new(o3k_provider::FakeComputeProvider::new()),
-            ),
+            )
+            .with_binding_projector(binding_projector.clone()),
             o3k_config::Provider::CellHv => {
                 let provider = o3k_cellhv::CellHvProvider::connect(&o3k_cellhv::CellHvConfig {
                     endpoint: config
@@ -510,6 +977,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .await?;
                 o3k_compute::ComputeService::new(store, Arc::new(provider))
+                    .with_binding_projector(binding_projector.clone())
             }
             o3k_config::Provider::Agent => unreachable!("agent provider handled above"),
         }
@@ -636,7 +1104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
-    let state = if let Some(identity) = identity {
+    let mut state = if let Some(identity) = identity {
         o3k_api::AppState::new()
             .with_identity(identity)
             .with_image(image_service)
@@ -654,6 +1122,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
+    if let Some(allocator) = public_allocator {
+        state = state.with_public_allocator(allocator);
+    }
+    if let Some(realm_id) = network_external_realm_id {
+        state = state.with_network_external_realm(realm_id);
+    }
+    if let Some(dispatcher) = network_dispatcher {
+        state = state.with_network_dispatcher(dispatcher, network_controller);
+    }
+    if let Some(agent) = network_agent_identity {
+        state = state.with_network_agent_identity(agent);
+    }
     state.set_ready(compute_ready);
     let control_task = match (
         config.compute_server_certificate.clone(),
@@ -1024,6 +1504,25 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
+    #[derive(Clone, Default)]
+    struct RecordingNetworkDispatcher {
+        commands: Arc<std::sync::Mutex<Vec<o3k_network::NetworkPlanCommand>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl o3k_network::NetworkPlanDispatcher for RecordingNetworkDispatcher {
+        async fn dispatch(
+            &self,
+            command: o3k_network::NetworkPlanCommand,
+        ) -> Result<o3k_network::NetworkPlanStatus, o3k_network::NetworkDispatchError> {
+            self.commands
+                .lock()
+                .map_err(|_| o3k_network::NetworkDispatchError::Unavailable)?
+                .push(command);
+            Ok(o3k_network::NetworkPlanStatus::Succeeded)
+        }
+    }
+
     #[test]
     fn config_drive_iso_is_published_beside_owned_instance_directory() -> Result<(), String> {
         let server_id = Uuid::now_v7();
@@ -1190,6 +1689,14 @@ mod tests {
             image,
             network: network.clone(),
             config_drive,
+            network_dispatcher: None,
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "test-epoch".to_owned(),
+                fencing_token: 1,
+            },
+            network_agent: None,
+            network_external_realm_id: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())
@@ -1226,7 +1733,9 @@ mod tests {
             config_drive: None,
             idempotency_key: "test".to_owned(),
         };
-        let (attachments, _) = resolver.resolve_network(&request, "compute-1").await?;
+        let (attachments, _) = resolver
+            .resolve_network(&request, "compute-1", "epoch-1")
+            .await?;
         assert_eq!(attachments.len(), 1);
         assert_eq!(attachments[0].port_id, port.id.to_string());
         let bound = network.get_port_for_project("project-a", port.id).await?;
@@ -1264,7 +1773,9 @@ mod tests {
             config_drive: None,
             idempotency_key: "test".to_owned(),
         };
-        let failed = resolver.resolve_network(&unresolved, "compute-1").await;
+        let failed = resolver
+            .resolve_network(&unresolved, "compute-1", "epoch-1")
+            .await;
         assert!(failed.is_err());
         let after = network
             .get_port_for_project("project-a", unresolved_port.id)
@@ -1273,6 +1784,151 @@ mod tests {
         assert_eq!(after.binding_state, None);
         drop(resolver);
         drop(network);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_network_agent_owns_binding_target_separately_from_compute_host()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("o3kd-network-target-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let image = o3k_image::ImageService::open(
+            root.join("images"),
+            o3k_image::DEFAULT_MAX_UPLOAD_BYTES,
+            store.clone(),
+        )
+        .await?;
+        let config_drive = o3k_config_drive::ConfigDriveStore::open(root.join("config-drive"))?;
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+        let resolver = DaemonCreateResolver {
+            image,
+            network: network.clone(),
+            config_drive,
+            network_dispatcher: None,
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "test-epoch".to_owned(),
+                fencing_token: 1,
+            },
+            network_agent: Some(o3k_network::NetworkAgentIdentity {
+                agent_id: "network-agent-1".to_owned(),
+                agent_epoch: "network-epoch-1".to_owned(),
+            }),
+            network_external_realm_id: None,
+        };
+        let net = network
+            .create_network_for_project("project-a", "flat".to_owned())
+            .await?;
+        network
+            .create_subnet_for_project(
+                "project-a",
+                net.id,
+                "lab".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = network
+            .create_port_for_project("project-a", net.id, "one".to_owned())
+            .await?;
+        let request = o3k_provider::CreateInstanceRequest {
+            operation_id: Uuid::now_v7(),
+            o3k_server_id: Uuid::now_v7(),
+            project_id: "project-a".to_owned(),
+            name: "server".to_owned(),
+            vcpus: 1,
+            memory_mib: 512,
+            flavor_id: String::new(),
+            disk_gib: 1,
+            image_id: None,
+            key_name: None,
+            keypair_id: None,
+            network_ids: vec![port.id.to_string()],
+            placement_provider_id: None,
+            placement_allocation_id: None,
+            config_drive: None,
+            idempotency_key: "test-network-agent-target".to_owned(),
+        };
+        let (attachments, _) = resolver
+            .resolve_network(&request, "compute-agent-1", "compute-epoch-1")
+            .await?;
+        assert_eq!(attachments[0].port_id, port.id.to_string());
+        let bound = network.get_port_for_project("project-a", port.id).await?;
+        assert_eq!(bound.binding_host.as_deref(), Some("network-agent-1"));
+        assert_eq!(bound.binding_state.as_deref(), Some("binding"));
+        drop(resolver);
+        drop(network);
+        std::fs::remove_dir_all(&root)?;
+        let _ = std::fs::remove_file(&sqlite_path);
+        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path.display()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_fake_provider_outcome_dispatches_unbound_network_once()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let root = std::env::temp_dir().join(format!("o3kd-terminal-binding-{}", Uuid::now_v7()));
+        let sqlite_path = root.with_extension("sqlite");
+        std::fs::create_dir_all(&root)?;
+        let store = Arc::new(o3k_store::testkit::open_file(&sqlite_path).await?);
+        let network_repository: Arc<dyn o3k_store::NetworkRepository> = store.clone();
+        let network =
+            o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
+        let net = network
+            .create_network_for_project("project-a", "terminal".to_owned())
+            .await?;
+        network
+            .create_subnet_for_project(
+                "project-a",
+                net.id,
+                "subnet".to_owned(),
+                "192.0.2.0/29".to_owned(),
+                None,
+                None,
+                None,
+            )
+            .await?;
+        let port = network
+            .create_port_for_project("project-a", net.id, "endpoint".to_owned())
+            .await?;
+        let dispatcher = RecordingNetworkDispatcher::default();
+        let commands = dispatcher.commands.clone();
+        let projector = NetworkBindingProjector {
+            network: network.clone(),
+            registry: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            network_dispatcher: Some(Arc::new(dispatcher)),
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "controller".to_owned(),
+                controller_epoch: "epoch".to_owned(),
+                fencing_token: 1,
+            },
+            network_external_realm_id: None,
+            network_agent: Some(o3k_network::NetworkAgentIdentity {
+                agent_id: "network-agent".to_owned(),
+                agent_epoch: "agent-epoch".to_owned(),
+            }),
+        };
+        projector
+            .project_create_outcome("project-a", &port.id.to_string(), true)
+            .await?;
+        projector
+            .project_create_outcome("project-a", &port.id.to_string(), true)
+            .await?;
+        let bound = network.get_port_for_project("project-a", port.id).await?;
+        assert_eq!(bound.binding_host.as_deref(), Some("network-agent"));
+        assert_eq!(bound.binding_state.as_deref(), Some("bound"));
+        assert_eq!(commands.lock().map_err(|_| "commands poisoned")?.len(), 1);
         std::fs::remove_dir_all(&root)?;
         let _ = std::fs::remove_file(&sqlite_path);
         let _ = std::fs::remove_file(format!("{}-wal", sqlite_path.display()));
@@ -1292,6 +1948,15 @@ mod tests {
             o3k_network::NetworkService::open(root.join("network"), network_repository).await?;
         let projector = NetworkBindingProjector {
             network: network.clone(),
+            registry: Arc::new(o3k_compute_agent::NodeRegistry::default()),
+            network_dispatcher: None,
+            network_controller: o3k_network::NetworkControllerLease {
+                controller_id: "test-controller".to_owned(),
+                controller_epoch: "test-epoch".to_owned(),
+                fencing_token: 1,
+            },
+            network_agent: None,
+            network_external_realm_id: None,
         };
         let net = network
             .create_network_for_project("project-a", "flat".to_owned())

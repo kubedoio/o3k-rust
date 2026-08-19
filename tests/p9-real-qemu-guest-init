@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+exec >/dev/console 2>&1
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+
+ip link set lo up
+ip link set eth0 up
+ip addr add 10.0.0.2/24 dev eth0
+ip route add default via 10.0.0.1
+
+external_port=8081
+hold_seconds=30
+case "$(cat /proc/cmdline)" in
+    *o3k-recovery=1*)
+        external_port=8082
+        hold_seconds=1
+        ;;
+esac
+
+mkdir -p /tmp/www
+printf 'o3k-p9-real-qemu-guest\n' >/tmp/www/index.html
+httpd -f -p 8080 -h /tmp/www &
+
+echo O3K_GUEST_READY
+wget -q -T 3 -O /dev/null "http://198.51.100.2:${external_port}/"
+echo O3K_GUEST_EGRESS_OK
+
+# The host inserts the policy deny after observing the successful egress
+# marker. The long bounded wait also lets the host terminate this VM
+# abruptly and relaunch it with the same fixed identity before testing deny.
+sleep "$hold_seconds"
+if wget -q -T 2 -O /dev/null "http://198.51.100.2:${external_port}/"; then
+    echo O3K_GUEST_DENY_FAILED
+    poweroff -f
+    exit 1
+fi
+echo O3K_GUEST_DENY_OK
+poweroff -f
