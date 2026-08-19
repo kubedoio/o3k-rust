@@ -480,6 +480,7 @@ impl NodeRegistry {
                 )
                 .await
                 .map_err(|e| {
+                    tracing::warn!(agent_id = %agent_id, error = ?e, "failed to acquire agent stream lease");
                     Status::internal(format!("failed to acquire agent stream lease: {e}"))
                 })?;
             match outcome {

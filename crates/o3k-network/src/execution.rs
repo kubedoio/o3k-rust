@@ -133,7 +133,7 @@ pub enum NetworkExecutionError {
     #[error("network plan identity was replayed with a different payload")]
     ConflictingReplay,
     #[error("network mutation outcome is unknown and requires observation")]
-    MutationOutcomeUnknown,
+    MutationOutcomeUnknown(String),
     #[error("network command is not present in the durable journal")]
     UnknownCommand,
 }
@@ -285,7 +285,10 @@ impl NetworkPlanExecutor {
         command: &NetworkPlanCommand,
         now_unix_ms: u64,
         realizer: &mut R,
-    ) -> Result<PlanAdmission, NetworkExecutionError> {
+    ) -> Result<PlanAdmission, NetworkExecutionError>
+    where
+        R::Error: std::fmt::Display,
+    {
         let admission = self.admit(command, now_unix_ms)?;
         if admission != PlanAdmission::Accepted {
             return Ok(admission);
@@ -300,9 +303,11 @@ impl NetworkPlanExecutor {
                 self.set_status(command.command_id, NetworkPlanStatus::Succeeded)?;
                 Ok(PlanAdmission::Accepted)
             }
-            Err(_) => {
+            Err(error) => {
                 self.set_status(command.command_id, NetworkPlanStatus::Unknown)?;
-                Err(NetworkExecutionError::MutationOutcomeUnknown)
+                Err(NetworkExecutionError::MutationOutcomeUnknown(
+                    error.to_string(),
+                ))
             }
         }
     }
@@ -475,11 +480,28 @@ impl FlatNetworkRealizer {
         dhcp_root: impl Into<PathBuf>,
         dnsmasq_binary: impl Into<PathBuf>,
     ) -> Result<Self, FlatNetworkError> {
+        Self::open_with_tap_access(
+            network,
+            network_ownership_root,
+            dhcp_root,
+            dnsmasq_binary,
+            None,
+        )
+    }
+
+    pub fn open_with_tap_access(
+        network: HostNetworkConfig,
+        network_ownership_root: impl Into<PathBuf>,
+        dhcp_root: impl Into<PathBuf>,
+        dnsmasq_binary: impl Into<PathBuf>,
+        tap_access: Option<crate::TapAccess>,
+    ) -> Result<Self, FlatNetworkError> {
         let dnsmasq_binary = dnsmasq_binary.into();
         let dhcp = DhcpService::open(dhcp_root)?;
         let supervisor = dhcp.adopt_supervisor(&dnsmasq_binary)?;
         Ok(Self {
-            network: HostNetworkManager::with_ownership_root(network, network_ownership_root)?,
+            network: HostNetworkManager::with_ownership_root(network, network_ownership_root)?
+                .with_tap_access(tap_access)?,
             dhcp,
             dnsmasq_binary,
             supervisor,
@@ -869,7 +891,7 @@ mod tests {
         let mut realizer = FailingRealizer { observed: false };
         assert!(matches!(
             executor.execute(&command, 1, &mut realizer),
-            Err(NetworkExecutionError::MutationOutcomeUnknown)
+            Err(NetworkExecutionError::MutationOutcomeUnknown(_))
         ));
         assert_eq!(
             executor.admit(&command, 2)?,
@@ -915,7 +937,7 @@ mod tests {
         let mut realizer = InterruptedRealizer { observed: false };
         assert!(matches!(
             executor.execute(&command, 1, &mut realizer),
-            Err(NetworkExecutionError::MutationOutcomeUnknown)
+            Err(NetworkExecutionError::MutationOutcomeUnknown(_))
         ));
         drop(executor);
         let mut takeover = command.controller.clone();

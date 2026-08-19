@@ -5,7 +5,7 @@ use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
     FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider, NetworkAgentIdentity,
     NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan,
-    PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig, StatefulPolicyProvider,
+    PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig, StatefulPolicyProvider, TapAccess,
 };
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
@@ -68,7 +68,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             fencing_token,
         },
     )?;
-    let flat = FlatNetworkRealizer::open(
+    let tap_access = match (
+        env::var("O3K_NETWORK_TAP_USER")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        env::var("O3K_NETWORK_TAP_GROUP")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+    ) {
+        (None, None) => None,
+        (Some(user), Some(group)) => Some(TapAccess { user, group }),
+        _ => {
+            return Err(
+                "O3K_NETWORK_TAP_USER and O3K_NETWORK_TAP_GROUP must be set together".into(),
+            );
+        }
+    };
+    let flat = FlatNetworkRealizer::open_with_tap_access(
         HostNetworkConfig {
             bridge_name,
             uplink: flat_uplink,
@@ -76,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ownership_root,
         dhcp_root,
         dnsmasq,
+        tap_access,
     )?;
     let routed = match external_realm {
         Some(realm) => Some(LinuxRoutedProvider::open(

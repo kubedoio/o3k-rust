@@ -62,6 +62,14 @@ pub struct HostNetworkConfig {
     pub uplink: Option<String>,
 }
 
+/// Optional kernel TAP access identity for consumers such as libvirt that
+/// open a pre-created `managed="no"` interface themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapAccess {
+    pub user: String,
+    pub group: String,
+}
+
 /// Stable shared vocabulary for the P9 control-plane boundary. These values
 /// are used by authorization, quota, audit, and compatibility projections;
 /// provider-native names never become part of this vocabulary.
@@ -2274,6 +2282,7 @@ pub struct HostNetworkManager {
     command: Arc<dyn NetworkCommand>,
     ownership: Option<Mutex<OwnershipStore>>,
     set_stable_bridge_mac: bool,
+    tap_access: Option<TapAccess>,
 }
 
 struct OwnershipStore {
@@ -2289,6 +2298,7 @@ impl HostNetworkManager {
             command: Arc::new(SystemNetworkCommand),
             ownership: None,
             set_stable_bridge_mac: true,
+            tap_access: None,
         })
     }
 
@@ -2312,6 +2322,7 @@ impl HostNetworkManager {
             command: Arc::new(SystemNetworkCommand),
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
             set_stable_bridge_mac: true,
+            tap_access: None,
         })
     }
 
@@ -2326,6 +2337,7 @@ impl HostNetworkManager {
             command,
             ownership: None,
             set_stable_bridge_mac: false,
+            tap_access: None,
         })
     }
 
@@ -2346,7 +2358,22 @@ impl HostNetworkManager {
             command,
             ownership: Some(Mutex::new(OwnershipStore { path, manifest })),
             set_stable_bridge_mac: false,
+            tap_access: None,
         })
+    }
+
+    /// Configures the kernel identity allowed to open newly created TAPs.
+    /// This is intentionally explicit and optional; ordinary host consumers
+    /// retain the historical root-owned TAP behavior.
+    pub fn with_tap_access(mut self, access: Option<TapAccess>) -> Result<Self, HostNetworkError> {
+        if access
+            .as_ref()
+            .is_some_and(|value| value.user.trim().is_empty() || value.group.trim().is_empty())
+        {
+            return Err(HostNetworkError::InvalidConfiguration);
+        }
+        self.tap_access = access;
+        Ok(self)
     }
     pub fn tap_name(port_id: &str) -> Result<String, HostNetworkError> {
         if port_id.trim().is_empty() {
@@ -2616,7 +2643,11 @@ impl HostNetworkManager {
         // recording otherwise orphaned a deterministic-name TAP that wedged
         // every later create on the network).
         let temp_name = Self::partial_tap_name();
-        let created_tap = self.run_ip(["tuntap", "add", "dev", &temp_name, "mode", "tap"]);
+        let mut tuntap_args = vec!["tuntap", "add", "dev", &temp_name, "mode", "tap"];
+        if let Some(access) = &self.tap_access {
+            tuntap_args.extend(["user", access.user.as_str(), "group", access.group.as_str()]);
+        }
+        let created_tap = self.run_ip(tuntap_args);
         if let Err(error) = created_tap {
             return Err(if bridge_created {
                 self.rollback_bridge(error)
@@ -2849,6 +2880,11 @@ impl HostNetworkManager {
     /// current kernel interface both prove the requested instance/port/MAC
     /// binding. A deterministic TAP name alone is not sufficient evidence.
     pub fn resolve_owned_tap(&self, spec: &TapSpec) -> Result<String, HostNetworkError> {
+        // The ownership manifest may be written by the bounded network
+        // executor after a compute agent has opened its manager. Refresh the
+        // durable snapshot before a cross-process read so a valid externally
+        // realized TAP is not mistaken for a foreign interface.
+        self.refresh_ownership()?;
         validate_reference(&spec.instance_id)?;
         validate_reference(&spec.port_id)?;
         validate_mac(&spec.mac)?;
@@ -2885,6 +2921,27 @@ impl HostNetworkManager {
         self.ownership
             .as_ref()
             .and_then(|store| store.lock().ok().map(|guard| guard.path.clone()))
+    }
+
+    /// Reloads the manager-owned manifest after another O3K process has
+    /// durably changed it. The atomic manifest replacement makes this read
+    /// safe across the network executor and compute agent boundary.
+    pub fn refresh_ownership(&self) -> Result<(), HostNetworkError> {
+        let Some(ownership) = &self.ownership else {
+            return Ok(());
+        };
+        let path = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?
+            .path
+            .clone();
+        let manifest = load_ownership(&path)?;
+        validate_manifest(&self.config, &manifest)?;
+        let mut guard = ownership
+            .lock()
+            .map_err(|_| HostNetworkError::OwnershipConflict)?;
+        guard.manifest = manifest;
+        Ok(())
     }
 
     /// Returns the configured bridge identity for bounded execution adapters.

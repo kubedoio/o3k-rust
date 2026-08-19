@@ -1059,7 +1059,13 @@ fn resolve_committed_create_inputs(
                 port_id: attachment.port_id.clone(),
                 mac: attachment.mac.clone(),
             })
-            .map_err(|_| AgentError::Protocol("owned TAP is unavailable".to_owned()))?;
+            .map_err(|error| {
+                let managed_taps = network.discover_managed().unwrap_or_default();
+                AgentError::Protocol(format!(
+                    "owned TAP is unavailable for port {}: {error}; managed_taps={managed_taps:?}",
+                    attachment.port_id,
+                ))
+            })?;
         owned_taps.push(OwnedTap {
             port_id: attachment.port_id.clone(),
             tap_name,
@@ -2737,7 +2743,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|_| "o3k-br0".to_owned()),
             uplink: env::var("O3K_COMPUTE_UPLINK").ok(),
         },
-        network_root,
+        network_root.clone(),
     )?);
     let network_owned_by_external_agent = matches!(
         env::var("O3K_COMPUTE_NETWORK_EXTERNAL").as_deref(),
@@ -2751,7 +2757,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dhcp = Arc::new(Mutex::new(DhcpRuntime::open(
         service_root.join("dhcp"),
         env::var("O3K_COMPUTE_DHCP_BINARY").unwrap_or_else(|_| "dnsmasq".to_owned()),
-        bridge_name,
+        bridge_name.clone(),
     )?));
     // Startup residue cleanup (issue #87 S3 rerun #5, issue #88 S3/S4
     // reruns): the stale-network reap removes the persisted DHCP bindings
@@ -2854,7 +2860,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_disk_gb: config.capabilities.max_disk_gb,
         network_owned_by_external_agent,
     });
-    info!(endpoint = %config.endpoint, host_label = %config.host_label, "o3k-compute starting");
+    info!(
+        endpoint = %config.endpoint,
+        host_label = %config.host_label,
+        bridge = %bridge_name,
+        network_root = %network_root.display(),
+        network_owned_by_external_agent,
+        "o3k-compute starting"
+    );
     let health_addr = env::var("O3K_COMPUTE_HEALTH_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9100".to_owned())
         .parse::<SocketAddr>()?;

@@ -97,7 +97,7 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
                     agent_epoch: command.target.agent_epoch.clone(),
                 },
                 o3k_network_protocol::proto::NetworkCommand {
-                    command_id,
+                    command_id: command_id.clone(),
                     operation_id: command.operation_id.to_string(),
                     idempotency_key: command.idempotency_key,
                     agent_id: command.target.agent_id,
@@ -113,7 +113,23 @@ impl o3k_network::NetworkPlanDispatcher for NetworkAgentDispatcher {
                 },
             )
             .await
-            .map_err(|error| o3k_network::NetworkDispatchError::Transport(error.to_string()))?;
+            .map_err(|error| {
+                tracing::warn!(
+                    command_id = %command_id,
+                    operation_id = %command.operation_id,
+                    error = %error,
+                    "network agent dispatch failed"
+                );
+                o3k_network::NetworkDispatchError::Transport(error.to_string())
+            })?;
+        tracing::debug!(
+            command_id = %command_id,
+            operation_id = %command.operation_id,
+            status = %result.status,
+            replayed = result.replayed,
+            error_code = %result.error_code,
+            "network agent dispatch completed"
+        );
         match result.status.as_str() {
             "succeeded" | "replayed" | "recovered" => Ok(o3k_network::NetworkPlanStatus::Succeeded),
             "unknown" | "requires_observation" => Ok(o3k_network::NetworkPlanStatus::Unknown),
@@ -496,7 +512,12 @@ impl DaemonCreateResolver {
                     mac: &port.mac_address,
                     fixed_ip: port.fixed_ip,
                     subnet_cidr: &subnet.cidr,
-                    node_id: agent_id,
+                    // The network plan is owned by the network execution
+                    // agent, not by the selected compute host.  Keeping the
+                    // plan node bound to the network agent lets the executor
+                    // reject cross-agent replay without conflating compute
+                    // placement with network mutation authority.
+                    node_id: network_agent_id,
                     operation_id: request.operation_id,
                     deadline_unix_ms,
                     public_address: None,

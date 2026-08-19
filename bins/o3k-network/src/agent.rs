@@ -105,7 +105,10 @@ where
         })
     }
 
-    fn execute(&self, command: &proto::NetworkCommand) -> Result<CommandResult, NetworkAgentError> {
+    fn execute(&self, command: &proto::NetworkCommand) -> Result<CommandResult, NetworkAgentError>
+    where
+        R::Error: std::fmt::Display,
+    {
         let command_id = parse_uuid(&command.command_id, "command_id")?;
         let operation_id = parse_uuid(&command.operation_id, "operation_id")?;
         let plan =
@@ -149,7 +152,13 @@ where
         }
         let admission = match executor.execute(&internal, now, realizer) {
             Ok(admission) => admission,
-            Err(NetworkExecutionError::MutationOutcomeUnknown) => {
+            Err(NetworkExecutionError::MutationOutcomeUnknown(reason)) => {
+                tracing::warn!(
+                    command_id = %command.command_id,
+                    operation_id = %command.operation_id,
+                    %reason,
+                    "network mutation outcome is unknown"
+                );
                 return Ok(CommandResult {
                     command_id: command.command_id.clone(),
                     status: "unknown".to_owned(),
@@ -157,7 +166,16 @@ where
                     error_code: "mutation_outcome_unknown".to_owned(),
                 });
             }
-            Err(error) => return Err(NetworkAgentError::Execution(execution_error_code(&error))),
+            Err(error) => {
+                tracing::warn!(
+                    command_id = %command.command_id,
+                    operation_id = %command.operation_id,
+                    error = ?error,
+                    error_code = execution_error_code(&error),
+                    "network plan execution failed"
+                );
+                return Err(NetworkAgentError::Execution(execution_error_code(&error)));
+            }
         };
         let (status, replayed) = match admission {
             PlanAdmission::Accepted => ("succeeded", false),
@@ -184,6 +202,7 @@ where
 impl<R> NetworkAgent for NetworkAgentService<R>
 where
     R: NetworkPlanRealizer + Send + 'static,
+    R::Error: std::fmt::Display,
 {
     type ControlStream = ReceiverStream<Result<ControlResponse, Status>>;
 
@@ -262,7 +281,7 @@ fn execution_error_code(error: &NetworkExecutionError) -> &'static str {
         NetworkExecutionError::StaleControllerLease => "stale_controller_lease",
         NetworkExecutionError::DeadlineExpired => "deadline_expired",
         NetworkExecutionError::ConflictingReplay => "conflicting_replay",
-        NetworkExecutionError::MutationOutcomeUnknown => "mutation_outcome_unknown",
+        NetworkExecutionError::MutationOutcomeUnknown(_) => "mutation_outcome_unknown",
         NetworkExecutionError::UnknownCommand => "unknown_command",
     }
 }

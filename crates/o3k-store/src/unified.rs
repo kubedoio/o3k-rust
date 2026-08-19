@@ -1467,7 +1467,7 @@ impl CoordinationRepository for O3kStore {
         }
     }
 
-    async fn acquire_work_lease(
+    async fn acquire_work_lease_once(
         &self,
         work_key: &str,
         work_kind: &str,
