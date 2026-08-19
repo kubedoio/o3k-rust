@@ -32,6 +32,8 @@ enum NetworkAgentError {
     Malformed(&'static str),
     #[error("network plan payload is invalid")]
     InvalidPlan,
+    #[error("network plan execution rejected: {0}")]
+    Execution(&'static str),
 }
 
 struct Runtime<R> {
@@ -155,7 +157,7 @@ where
                     error_code: "mutation_outcome_unknown".to_owned(),
                 });
             }
-            Err(_) => return Err(NetworkAgentError::Malformed("command rejected")),
+            Err(error) => return Err(NetworkAgentError::Execution(execution_error_code(&error))),
         };
         let (status, replayed) = match admission {
             PlanAdmission::Accepted => ("succeeded", false),
@@ -247,6 +249,21 @@ fn error_code(error: &NetworkAgentError) -> &'static str {
         NetworkAgentError::Poisoned => "runtime_poisoned",
         NetworkAgentError::Malformed(code) => code,
         NetworkAgentError::InvalidPlan => "invalid_plan",
+        NetworkAgentError::Execution(code) => code,
+    }
+}
+
+fn execution_error_code(error: &NetworkExecutionError) -> &'static str {
+    match error {
+        NetworkExecutionError::Io(_) => "journal_io",
+        NetworkExecutionError::CorruptJournal => "corrupt_journal",
+        NetworkExecutionError::InvalidCommand => "invalid_command",
+        NetworkExecutionError::StaleAgentEpoch => "stale_agent_epoch",
+        NetworkExecutionError::StaleControllerLease => "stale_controller_lease",
+        NetworkExecutionError::DeadlineExpired => "deadline_expired",
+        NetworkExecutionError::ConflictingReplay => "conflicting_replay",
+        NetworkExecutionError::MutationOutcomeUnknown => "mutation_outcome_unknown",
+        NetworkExecutionError::UnknownCommand => "unknown_command",
     }
 }
 

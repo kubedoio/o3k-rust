@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--test" ]; then
+    exit 0
+fi
+
+trap 'exit 0' TERM INT
+while :; do
+    sleep 1
+done
