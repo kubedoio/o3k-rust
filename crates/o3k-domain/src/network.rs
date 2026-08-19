@@ -636,6 +636,7 @@ fn canonical_mac(value: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
 mod endpoint_directory_tests {
     use super::*;
 
