@@ -399,42 +399,66 @@ impl LinuxP11FabricBackend {
             if plan.local_fabric_transport_ip != fabric.fabric_transport_ip {
                 return Err(LinuxP11Error::OwnershipConflict);
             }
-            return Ok(());
+            let (wg_exists, _) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "show",
+                        "dev",
+                        &self.config.fabric_interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if !wg_exists {
+                let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
+                let _ = self
+                    .command
+                    .run("ip", &["netns", "del", &self.config.fabric_namespace]);
+                self.state.fabric = None;
+            } else {
+                return Ok(());
+            }
         }
         let private_key_path = self.config.root.join("wireguard-private.key");
-        let (exists, _) = self
+        let (ns_exists, _) = self
             .command
             .output(
                 "ip",
                 &["netns", "exec", &self.config.fabric_namespace, "true"],
             )
             .map_err(LinuxP11Error::Storage)?;
-        if exists {
+        if ns_exists {
             return Err(LinuxP11Error::ForeignState);
         }
-        let (interface_exists, _) = self
+        let (if_exists, _) = self
             .command
             .output(
                 "ip",
                 &["link", "show", "dev", &self.config.fabric_interface],
             )
             .map_err(LinuxP11Error::Storage)?;
-        if interface_exists {
+        if if_exists {
             return Err(LinuxP11Error::ForeignState);
         }
+        // The key file is provisioned host identity material (like the TLS
+        // keys under /opt/o3k/pki): the controller generates the keypair so
+        // that planned FabricPeer public keys match this host. A valid
+        // pre-provisioned key is adopted as-is; a missing file is generated
+        // here, and anything invalid is foreign state that is never
+        // overwritten. The file intentionally survives fabric teardown and
+        // crash recovery so planned peer public keys stay valid.
         if private_key_path.exists() {
-            return Err(LinuxP11Error::ForeignState);
+            validate_private_key_file(&private_key_path)?;
+        } else {
+            write_private_key(&private_key_path, &self.command)?;
         }
-        write_private_key(&private_key_path, &self.command)?;
-        self.state.fabric = Some(FabricOwnership {
-            namespace: self.config.fabric_namespace.clone(),
-            interface: self.config.fabric_interface.clone(),
-            private_key_path: private_key_path.display().to_string(),
-            fabric_transport_ip: plan.local_fabric_transport_ip,
-            fabric_generation: plan.local_fabric_generation,
-            managed_peers: BTreeSet::new(),
-        });
-        store_state(&self.state_path, &self.state)?;
+        // Create the fabric namespace and wg-o3k inside it.
         if !self
             .command
             .run("ip", &["netns", "add", &self.config.fabric_namespace])
@@ -468,6 +492,7 @@ impl LinuxP11FabricBackend {
         {
             return Err(LinuxP11Error::CommandFailed);
         }
+        let transport_ip = format!("{}/32", plan.local_fabric_transport_ip);
         if !self
             .command
             .run(
@@ -488,49 +513,191 @@ impl LinuxP11FabricBackend {
                 ],
             )
             .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "set",
+                        &self.config.fabric_interface,
+                        "up",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "addr",
+                        "replace",
+                        &transport_ip,
+                        "dev",
+                        &self.config.fabric_interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
         {
             return Err(LinuxP11Error::CommandFailed);
         }
+        // Veth pair to connect fabric namespace to the host default namespace
+        // so WireGuard encrypted traffic can traverse to/from the underlay.
+        let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
         if !self
             .command
             .run(
                 "ip",
                 &[
-                    "netns",
-                    "exec",
-                    &self.config.fabric_namespace,
-                    "ip",
-                    "link",
-                    "set",
-                    &self.config.fabric_interface,
-                    "up",
+                    "link", "add", "o3k-u", "type", "veth", "peer", "name", "o3k-v",
                 ],
             )
             .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "link",
+                        "set",
+                        "o3k-v",
+                        "netns",
+                        &self.config.fabric_namespace,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run("ip", &["link", "set", "o3k-u", "up"])
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "set",
+                        "o3k-v",
+                        "up",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "addr",
+                        "replace",
+                        "169.254.253.2/30",
+                        "dev",
+                        "o3k-v",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &["addr", "replace", "169.254.253.1/30", "dev", "o3k-u"],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            || !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "route",
+                        "replace",
+                        "default",
+                        "via",
+                        "169.254.253.1",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
         {
             return Err(LinuxP11Error::CommandFailed);
         }
-        let transport_ip = format!("{}/32", plan.local_fabric_transport_ip);
-        if !self
+        // Disable rp_filter on the veth interfaces so forwarded packets with
+        // source IPs from the fabric namespace are not dropped in the host ns.
+        let _ = self
             .command
-            .run(
-                "ip",
-                &[
-                    "netns",
-                    "exec",
-                    &self.config.fabric_namespace,
-                    "ip",
-                    "addr",
-                    "replace",
-                    &transport_ip,
-                    "dev",
-                    &self.config.fabric_interface,
-                ],
-            )
-            .map_err(LinuxP11Error::Storage)?
-        {
-            return Err(LinuxP11Error::CommandFailed);
-        }
+            .run("sysctl", &["-w", "net.ipv4.conf.o3k-u.rp_filter=0"]);
+        let _ = self.command.run(
+            "ip",
+            &[
+                "netns",
+                "exec",
+                &self.config.fabric_namespace,
+                "sysctl",
+                "-w",
+                "net.ipv4.conf.o3k-v.rp_filter=0",
+            ],
+        );
+        // SNAT fabric namespace traffic to the host IP.
+        let _ = self.command.run(
+            "iptables",
+            &[
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-s",
+                "169.254.253.0/30",
+                "-j",
+                "MASQUERADE",
+            ],
+        );
+        // DNAT incoming WireGuard UDP to the fabric namespace.
+        let _ = self.command.run(
+            "iptables",
+            &[
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "!",
+                "-i",
+                "o3k-u",
+                "-p",
+                "udp",
+                "--dport",
+                "51820",
+                "-j",
+                "DNAT",
+                "--to-destination",
+                "169.254.253.2",
+            ],
+        );
+        self.state.fabric = Some(FabricOwnership {
+            namespace: self.config.fabric_namespace.clone(),
+            interface: self.config.fabric_interface.clone(),
+            private_key_path: private_key_path.display().to_string(),
+            fabric_transport_ip: plan.local_fabric_transport_ip,
+            fabric_generation: plan.local_fabric_generation,
+            managed_peers: BTreeSet::new(),
+        });
+        store_state(&self.state_path, &self.state)?;
         Ok(())
     }
 
@@ -568,6 +735,22 @@ impl LinuxP11FabricBackend {
                 || plan.local_fabric_generation < existing.local_fabric_generation)
         {
             return Err(LinuxP11Error::OwnershipConflict);
+        }
+        // If state says we own this realm but the bridge is gone (e.g. after a
+        // crash or test fabric-interruption), clean up stale state so the
+        // creation block below runs and recreates everything from scratch.
+        if self.state.realms.contains_key(&plan.realm_id) {
+            let (bridge_exists, _) = self
+                .command
+                .output("ip", &["link", "show", "dev", &ownership.bridge])
+                .map_err(LinuxP11Error::Storage)?;
+            if !bridge_exists {
+                let _ = self
+                    .command
+                    .run("ip", &["netns", "delete", &ownership.namespace]);
+                self.state.realms.remove(&plan.realm_id);
+                store_state(&self.state_path, &self.state)?;
+            }
         }
         if !self.state.realms.contains_key(&plan.realm_id) {
             let (exists, _) = self
@@ -742,6 +925,15 @@ impl LinuxP11FabricBackend {
         {
             return Err(LinuxP11Error::CommandFailed);
         }
+        // Enable proxy ARP on the gateway so tenant VMs can reach remote realm
+        // endpoints (hosted on other physical hosts) through the gateway.
+        let _ = self.command.run(
+            "sysctl",
+            &[
+                "-w",
+                &format!("net.ipv4.conf.{}.proxy_arp=1", ownership.realm_veth),
+            ],
+        );
         for interface in [&ownership.bridge, &ownership.host_veth] {
             if !self
                 .command
@@ -1299,17 +1491,8 @@ impl LinuxP11FabricBackend {
                 .run(
                     "ip",
                     &[
-                        "netns",
-                        "exec",
-                        fabric_ns,
-                        "bridge",
-                        "fdb",
-                        "replace",
-                        mac,
-                        "dev",
-                        device,
-                        "master",
-                        "permanent",
+                        "netns", "exec", fabric_ns, "bridge", "fdb", "replace", mac, "dev", device,
+                        "master", "static",
                     ],
                 )
                 .map_err(LinuxP11Error::Storage)?
@@ -1517,7 +1700,7 @@ impl LinuxP11FabricBackend {
                     EndpointTapOwnership {
                         endpoint_id: entry.endpoint_id,
                         interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
-                        mac: entry.mac.clone(),
+                        mac: endpoint_tap_mac(plan.realm_id, entry.endpoint_id),
                     },
                 )
             })
@@ -2599,26 +2782,26 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::OwnershipConflict);
             }
-            let mut args = vec![
-                "netns".to_owned(),
-                "exec".to_owned(),
-                fabric.namespace.clone(),
-                "wg".to_owned(),
-                "set".to_owned(),
-                fabric.interface.clone(),
-                "peer".to_owned(),
-                peer.public_key.clone(),
-                "endpoint".to_owned(),
-                peer.underlay_endpoint.clone(),
-            ];
-            args.extend([
-                "allowed-ips".to_owned(),
-                format!("{}/32", peer.fabric_transport_ip),
-            ]);
-            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            // wg-o3k is in the fabric namespace.
             if !self
                 .command
-                .run("ip", &refs)
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &fabric.namespace,
+                        "wg",
+                        "set",
+                        &fabric.interface,
+                        "peer",
+                        &peer.public_key,
+                        "endpoint",
+                        &peer.underlay_endpoint,
+                        "allowed-ips",
+                        &format!("{}/32", peer.fabric_transport_ip),
+                    ],
+                )
                 .map_err(LinuxP11Error::Storage)?
             {
                 return Err(LinuxP11Error::CommandFailed);
@@ -2680,12 +2863,13 @@ impl LinuxP11FabricBackend {
         if generation < fabric.fabric_generation {
             return Err(LinuxP11Error::OwnershipConflict);
         }
-        let (namespace_exists, _) = self
+        // wg-o3k is in the fabric namespace.
+        let (ns_exists, _) = self
             .command
             .output("ip", &["netns", "exec", &fabric.namespace, "true"])
             .map_err(LinuxP11Error::Storage)?;
-        if namespace_exists {
-            let (interface_exists, _) = self
+        if ns_exists {
+            let (wg_exists, _) = self
                 .command
                 .output(
                     "ip",
@@ -2701,7 +2885,7 @@ impl LinuxP11FabricBackend {
                     ],
                 )
                 .map_err(LinuxP11Error::Storage)?;
-            if interface_exists
+            if wg_exists
                 && !self
                     .command
                     .run(
@@ -2720,21 +2904,60 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::CommandFailed);
             }
-            if !self
-                .command
-                .run("ip", &["netns", "del", &fabric.namespace])
-                .map_err(LinuxP11Error::Storage)?
-            {
-                return Err(LinuxP11Error::CommandFailed);
-            }
         }
-        fs::remove_file(&fabric.private_key_path).or_else(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        })?;
+        let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
+        let _ = self.command.run(
+            "iptables",
+            &[
+                "-t",
+                "nat",
+                "-D",
+                "POSTROUTING",
+                "-s",
+                "169.254.253.0/30",
+                "-j",
+                "MASQUERADE",
+            ],
+        );
+        for rule in [
+            vec![
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "!",
+                "-i",
+                "o3k-u",
+                "-p",
+                "udp",
+                "--dport",
+                "51820",
+                "-j",
+                "DNAT",
+                "--to-destination",
+                "169.254.253.2",
+            ],
+            vec![
+                "-t",
+                "nat",
+                "-D",
+                "PREROUTING",
+                "-p",
+                "udp",
+                "--dport",
+                "51820",
+                "-j",
+                "DNAT",
+                "--to-destination",
+                "169.254.253.2",
+            ],
+        ] {
+            let _ = self.command.run("iptables", &rule);
+        }
+        let _ = self.command.run("ip", &["netns", "del", &fabric.namespace]);
+        // The WireGuard private key is provisioned host identity material
+        // and intentionally survives fabric removal so planned peer public
+        // keys stay valid across teardown and crash recovery.
         self.state.fabric = None;
         store_state(&self.state_path, &self.state)?;
         Ok(())
@@ -3042,6 +3265,26 @@ fn endpoint_tap_name(realm_id: Uuid, endpoint_id: Uuid) -> String {
     format!(
         "o3k-t-{:02x}{:02x}{:02x}{:02x}",
         bytes[4], bytes[5], bytes[6], bytes[7]
+    )
+}
+
+fn endpoint_tap_mac(realm_id: Uuid, endpoint_id: Uuid) -> String {
+    // The TAP must not share a MAC with the guest NIC, otherwise the Linux
+    // bridge drops frames from the guest as "own address" loops.  Use a
+    // deterministic locally-administered MAC that is distinct from the
+    // endpoint MAC carried by the guest.
+    let bytes = realm_id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(endpoint_id.as_bytes().iter().copied())
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+        .to_be_bytes();
+    format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[2], bytes[3], bytes[4], bytes[5], bytes[6]
     )
 }
 
@@ -3369,6 +3612,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_uses_static_fdb_entries_not_permanent() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        provider.apply(&plan()).expect("apply");
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let remote_mac = tunnel_mac(plan().realm_id, "host-b");
+        let local_mac = tunnel_mac(plan().realm_id, "host-a");
+        // Every bridge FDB replace must use "static" not "permanent",
+        // because "permanent" on a bridge port's own MAC creates a local
+        // entry that consumes frames instead of forwarding them.
+        let bridge_calls: Vec<_> = calls
+            .iter()
+            .filter(|(prog, args)| {
+                prog == "ip"
+                    && args.contains(&"bridge".to_owned())
+                    && args.contains(&"fdb".to_owned())
+                    && args.contains(&"replace".to_owned())
+                    && (args.iter().any(|a| a == remote_mac.as_str())
+                        || args.iter().any(|a| a == local_mac.as_str()))
+            })
+            .collect();
+        assert!(!bridge_calls.is_empty(), "no bridge fdb calls found");
+        for (_, args) in &bridge_calls {
+            assert!(
+                args.contains(&"static".to_owned()),
+                "bridge FDB uses permanent instead of static — run 45 regression"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn provider_realizes_realm_scoped_policy_with_owned_marker() {
         let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
@@ -3517,7 +3799,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_fences_generation_changes_and_cleans_owned_key() {
+    fn provider_fences_generation_changes_and_retains_host_key() {
         let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
         let command = Arc::new(FakeCommand {
             calls: Mutex::new(Vec::new()),
@@ -3536,7 +3818,69 @@ mod tests {
         ));
         provider.remove(&current).expect("remove");
         assert!(provider.observe_removed(&current).expect("removed"));
-        assert!(!root.join("wireguard-private.key").exists());
+        // The private key is provisioned host identity material and must
+        // survive fabric removal.
+        assert!(root.join("wireguard-private.key").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_adopts_preprovisioned_host_key() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        let key_path = root.join("wireguard-private.key");
+        let provisioned = format!("{}\n", "C".repeat(43) + "=");
+        fs::write(&key_path, &provisioned).expect("key");
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        provider.apply(&plan()).expect("apply");
+        assert_eq!(fs::read_to_string(&key_path).expect("key"), provisioned);
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(
+            !calls
+                .iter()
+                .any(|(program, args)| program == "wg" && args == &["genkey"])
+        );
+        let key_path_argument = key_path.to_str().expect("path").to_owned();
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(2)
+                    .any(|window| window == ["private-key", key_path_argument.as_str()])
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_rejects_invalid_preprovisioned_host_key() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        let key_path = root.join("wireguard-private.key");
+        fs::write(&key_path, "not-a-wireguard-key\n").expect("key");
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        assert!(matches!(
+            provider.apply(&plan()),
+            Err(P11FabricError::Backend(message)) if message.contains("foreign")
+        ));
+        // Operator-provisioned material is never overwritten.
+        assert_eq!(
+            fs::read_to_string(&key_path).expect("key"),
+            "not-a-wireguard-key\n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }
