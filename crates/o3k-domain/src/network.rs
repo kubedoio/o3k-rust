@@ -226,6 +226,45 @@ pub struct RealmEncapsulationBinding {
     pub binding_generation: u64,
 }
 
+/// Provider-independent metadata that a Geneve executor must authenticate and
+/// validate before accepting or emitting a known-unicast packet. The inner IP
+/// is deliberately accompanied by realm, endpoint, placement, and transport
+/// identity; it is never sufficient on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenevePacketMetadata {
+    pub realm_id: Uuid,
+    pub vni: u32,
+    pub source_endpoint_id: Uuid,
+    pub source_ip: Ipv4Addr,
+    pub source_mac: String,
+    pub source_host: String,
+    pub source_fabric_transport_ip: Ipv4Addr,
+    pub source_fabric_generation: u64,
+    pub source_endpoint_generation: u64,
+    pub source_placement_generation: u64,
+    pub destination_ip: Ipv4Addr,
+    pub destination_host: String,
+    pub destination_fabric_transport_ip: Ipv4Addr,
+    pub destination_fabric_generation: u64,
+    pub destination_endpoint_generation: u64,
+    pub destination_placement_generation: u64,
+    pub realm_binding_generation: u64,
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum GenevePacketValidationError {
+    #[error("Geneve packet realm binding is invalid")]
+    InvalidBinding,
+    #[error("Geneve packet source endpoint is not current local authority")]
+    InvalidSource,
+    #[error("Geneve packet destination is not current realm authority")]
+    InvalidDestination,
+    #[error("Geneve packet route or host transport identity is stale")]
+    StaleRoute,
+    #[error("Geneve packet endpoint or host identity is ambiguous")]
+    AmbiguousIdentity,
+}
+
 impl RealmEncapsulationBinding {
     pub fn validate(&self) -> Result<(), RealmBindingError> {
         if self.fabric_domain_id == Uuid::nil() || self.realm_id == Uuid::nil() {
@@ -265,6 +304,130 @@ pub enum RealmBindingError {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RealmEncapsulationRegistry {
     pub bindings: Vec<RealmEncapsulationBinding>,
+}
+
+impl NamespacedRoutedFabricPlan {
+    fn validate_packet_binding(
+        &self,
+        packet: &GenevePacketMetadata,
+    ) -> Result<(), GenevePacketValidationError> {
+        if packet.realm_id != self.realm_id
+            || packet.vni != self.encapsulation.provider_segment_id
+            || packet.realm_binding_generation != self.encapsulation.binding_generation
+        {
+            return Err(GenevePacketValidationError::InvalidBinding);
+        }
+        self.encapsulation
+            .validate()
+            .map_err(|_| GenevePacketValidationError::InvalidBinding)
+    }
+
+    /// Validates a known-unicast Geneve packet before egress encapsulation.
+    /// NetworkPolicy is an additional required authorization input at the
+    /// caller; this method proves only the realm/endpoint/placement authority
+    /// boundary.
+    pub fn validate_geneve_egress(
+        &self,
+        packet: &GenevePacketMetadata,
+    ) -> Result<(), GenevePacketValidationError> {
+        self.validate_packet_binding(packet)?;
+        let source = self
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.endpoint_id == packet.source_endpoint_id)
+            .collect::<Vec<_>>();
+        if source.len() != 1 {
+            return Err(GenevePacketValidationError::AmbiguousIdentity);
+        }
+        let source = source[0];
+        if source.selected_host != self.local_host
+            || source.fixed_ip != packet.source_ip
+            || source.mac
+                != canonical_mac(&packet.source_mac)
+                    .ok_or(GenevePacketValidationError::InvalidSource)?
+            || packet.source_host != self.local_host
+            || packet.source_fabric_generation != self.local_fabric_generation
+            || packet.source_endpoint_generation != source.endpoint_generation
+            || packet.source_placement_generation != source.placement_generation
+        {
+            return Err(GenevePacketValidationError::InvalidSource);
+        }
+        let Some(route) = self.routes.iter().find(|route| {
+            route.destination.network == packet.destination_ip
+                && route.target_host == packet.destination_host
+                && route.target_fabric_transport_ip == packet.destination_fabric_transport_ip
+        }) else {
+            return Err(GenevePacketValidationError::InvalidDestination);
+        };
+        if route.fabric_generation != packet.destination_fabric_generation
+            || route.realm_id != packet.realm_id
+            || route.realm_binding_generation != packet.realm_binding_generation
+            || route.endpoint_generation != packet.destination_endpoint_generation
+            || route.placement_generation != packet.destination_placement_generation
+        {
+            return Err(GenevePacketValidationError::StaleRoute);
+        }
+        Ok(())
+    }
+
+    /// Validates a known-unicast Geneve packet after host transport
+    /// authentication and before delivery to a local endpoint.
+    pub fn validate_geneve_ingress(
+        &self,
+        packet: &GenevePacketMetadata,
+    ) -> Result<(), GenevePacketValidationError> {
+        self.validate_packet_binding(packet)?;
+        let Some(peer) = self.peers.iter().find(|peer| {
+            peer.host_id == packet.source_host
+                && peer.fabric_transport_ip == packet.source_fabric_transport_ip
+        }) else {
+            return Err(GenevePacketValidationError::InvalidSource);
+        };
+        if peer.fabric_generation != packet.source_fabric_generation {
+            return Err(GenevePacketValidationError::StaleRoute);
+        }
+        let destinations = self
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.fixed_ip == packet.destination_ip)
+            .collect::<Vec<_>>();
+        if destinations.len() != 1 {
+            return Err(GenevePacketValidationError::AmbiguousIdentity);
+        }
+        let destination = destinations[0];
+        if destination.selected_host != self.local_host
+            || packet.destination_host != self.local_host
+            || packet.destination_fabric_transport_ip != self.local_fabric_transport_ip
+            || destination.endpoint_generation != packet.destination_endpoint_generation
+            || destination.placement_generation != packet.destination_placement_generation
+            || packet.destination_fabric_generation != self.local_fabric_generation
+        {
+            return Err(GenevePacketValidationError::InvalidDestination);
+        }
+        let source = self
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.endpoint_id == packet.source_endpoint_id)
+            .collect::<Vec<_>>();
+        if source.len() != 1 {
+            return Err(GenevePacketValidationError::AmbiguousIdentity);
+        }
+        let source = source[0];
+        if source.selected_host != packet.source_host
+            || source.fixed_ip != packet.source_ip
+            || source.mac
+                != canonical_mac(&packet.source_mac)
+                    .ok_or(GenevePacketValidationError::InvalidSource)?
+            || source.endpoint_generation != packet.source_endpoint_generation
+            || source.placement_generation != packet.source_placement_generation
+        {
+            return Err(GenevePacketValidationError::InvalidSource);
+        }
+        Ok(())
+    }
 }
 
 impl RealmEncapsulationRegistry {
@@ -871,7 +1034,8 @@ mod endpoint_directory_tests {
             provider_segment_id: 101,
             binding_generation: 1,
         };
-        let plan = directory.compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding);
+        let plan =
+            directory.compile_fabric_plan(&local, &[local.clone(), remote.clone()], 1400, &binding);
         assert!(plan.is_ok());
         let Some(plan) = plan.ok() else {
             return;
@@ -895,6 +1059,49 @@ mod endpoint_directory_tests {
         assert_eq!(
             directory.compile_fabric_plan(&local, std::slice::from_ref(&local), 1501, &binding),
             Err(EndpointDirectoryError::InvalidMtu)
+        );
+
+        let packet = GenevePacketMetadata {
+            realm_id: directory.realm_id,
+            vni: binding.provider_segment_id,
+            source_endpoint_id: Uuid::from_u128(1),
+            source_ip: Ipv4Addr::new(10, 40, 1, 10),
+            source_mac: "02:00:00:00:00:10".to_owned(),
+            source_host: "host-01".to_owned(),
+            source_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
+            source_fabric_generation: 8,
+            source_endpoint_generation: 1,
+            source_placement_generation: 1,
+            destination_ip: Ipv4Addr::new(10, 40, 1, 12),
+            destination_host: "host-07".to_owned(),
+            destination_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 7),
+            destination_fabric_generation: 9,
+            destination_endpoint_generation: 1,
+            destination_placement_generation: 1,
+            realm_binding_generation: 1,
+        };
+        assert_eq!(plan.validate_geneve_egress(&packet), Ok(()));
+        let remote_plan = directory
+            .compile_fabric_plan(&remote, &[local, remote.clone()], 1400, &binding)
+            .expect("remote plan");
+        assert_eq!(remote_plan.validate_geneve_ingress(&packet), Ok(()));
+        let mut wrong_vni = packet.clone();
+        wrong_vni.vni += 1;
+        assert_eq!(
+            plan.validate_geneve_egress(&wrong_vni),
+            Err(GenevePacketValidationError::InvalidBinding)
+        );
+        let mut spoofed_source = packet.clone();
+        spoofed_source.source_ip = Ipv4Addr::new(10, 40, 1, 99);
+        assert_eq!(
+            plan.validate_geneve_egress(&spoofed_source),
+            Err(GenevePacketValidationError::InvalidSource)
+        );
+        let mut spoofed_transport = packet;
+        spoofed_transport.source_fabric_transport_ip = Ipv4Addr::new(198, 18, 0, 99);
+        assert_eq!(
+            remote_plan.validate_geneve_ingress(&spoofed_transport),
+            Err(GenevePacketValidationError::InvalidSource)
         );
     }
 
