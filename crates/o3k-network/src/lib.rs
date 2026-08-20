@@ -156,6 +156,13 @@ mod p9_plan_tests {
         .collect()
     }
 
+    fn overlapping_capabilities() -> HashSet<NetworkCapability> {
+        let mut capabilities = capabilities();
+        capabilities.insert(NetworkCapability::OverlappingAddressRealms);
+        capabilities.insert(NetworkCapability::EncapsulationModes);
+        capabilities
+    }
+
     fn intent() -> NetworkIntent {
         let id = Uuid::from_u128(1);
         NetworkIntent {
@@ -346,6 +353,51 @@ mod p9_plan_tests {
                 123,
                 &capabilities(),
                 &[existing],
+            ),
+            Err(NetworkPlanError::OverlappingRealm)
+        );
+    }
+
+    #[test]
+    fn geneve_capability_allows_overlap_only_when_realm_and_provider_opt_in() {
+        let existing = AddressRealm {
+            id: Uuid::from_u128(7),
+            project_id: "project-b".to_owned(),
+            prefix: prefix("10.0.0.0", 16),
+            overlapping_prefixes: false,
+        };
+        let mut overlapping = intent();
+        overlapping.realm.overlapping_prefixes = true;
+        let plan = compile_node_network_plan(
+            &overlapping,
+            "node-a",
+            Uuid::from_u128(6),
+            123,
+            &overlapping_capabilities(),
+            &[existing],
+        )
+        .expect("overlap-capable provider plan");
+        assert!(
+            plan.intents
+                .iter()
+                .any(|item| matches!(item, NetworkPlanIntent::AddressRealm { .. }))
+        );
+
+        let mut missing_encapsulation = overlapping_capabilities();
+        missing_encapsulation.remove(&NetworkCapability::EncapsulationModes);
+        assert_eq!(
+            compile_node_network_plan(
+                &overlapping,
+                "node-a",
+                Uuid::from_u128(6),
+                123,
+                &missing_encapsulation,
+                &[AddressRealm {
+                    id: Uuid::from_u128(7),
+                    project_id: "project-b".to_owned(),
+                    prefix: prefix("10.0.0.0", 16),
+                    overlapping_prefixes: false,
+                }],
             ),
             Err(NetworkPlanError::OverlappingRealm)
         );
@@ -3885,12 +3937,13 @@ pub fn compile_node_network_plan(
     if node_id.is_empty() || intent.realm.project_id != intent.project_id {
         return Err(NetworkPlanError::OwnershipViolation);
     }
-    if !intent.realm.overlapping_prefixes
-        && realms.iter().any(|realm| {
-            realm.id != intent.realm.id
-                && !realm.overlapping_prefixes
-                && realm.prefix.overlaps(intent.realm.prefix)
-        })
+    let overlaps_existing_realm = realms
+        .iter()
+        .any(|realm| realm.id != intent.realm.id && realm.prefix.overlaps(intent.realm.prefix));
+    if overlaps_existing_realm
+        && (!intent.realm.overlapping_prefixes
+            || !capabilities.contains(&NetworkCapability::OverlappingAddressRealms)
+            || !capabilities.contains(&NetworkCapability::EncapsulationModes))
     {
         return Err(NetworkPlanError::OverlappingRealm);
     }
