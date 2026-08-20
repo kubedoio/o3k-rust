@@ -111,8 +111,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("provider did not assign the local fabric transport address".into());
     }
+    let attachments = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            "o3k-fabric",
+            "ip",
+            "-d",
+            "link",
+            "show",
+            "type",
+            "bridge",
+        ])
+        .output()?;
+    if !attachments.status.success()
+        || !String::from_utf8_lossy(&attachments.stdout).contains("o3k-c-")
+    {
+        return Err("provider did not realize the isolated Geneve attachment bridge".into());
+    }
+    let realm_attachment = Command::new("ip")
+        .args(["netns", "exec", "o3k-r-00000000", "ip", "link", "show"])
+        .output()?;
+    if !realm_attachment.status.success()
+        || !String::from_utf8_lossy(&realm_attachment.stdout).contains("o3k-e-")
+    {
+        return Err("provider did not realize the realm-side Geneve attachment".into());
+    }
     println!("p11-linux-smoke: host-transport-address=passed");
     println!("p11-linux-smoke: geneve-realization=passed");
+    println!("p11-linux-smoke: isolated-attachment=passed");
     provider.remove(&plan)?;
     if !provider.observe_removed(&plan)? {
         return Err("provider did not observe cleanup".into());

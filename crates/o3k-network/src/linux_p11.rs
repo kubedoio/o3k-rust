@@ -19,7 +19,7 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
-const STATE_VERSION: u32 = 1;
+const STATE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxP11Config {
@@ -121,6 +121,11 @@ struct RealmOwnership {
     fabric_realm_veth: String,
     #[serde(default)]
     geneve: BTreeMap<String, GeneveOwnership>,
+    /// One isolated L2 attachment exists for every remote target host.  The
+    /// shared fabric namespace therefore never needs a tenant-IP route table;
+    /// overlapping realms are selected by their attachment and Geneve VNI.
+    #[serde(default)]
+    attachments: BTreeMap<String, FabricAttachmentOwnership>,
     directory_generation: u64,
     local_fabric_generation: u64,
 }
@@ -132,8 +137,23 @@ struct GeneveOwnership {
     remote_transport_ip: std::net::Ipv4Addr,
     vni: u32,
     binding_generation: u64,
+    local_tunnel_mac: String,
+    remote_tunnel_mac: String,
+    bridge: String,
+    realm_veth: String,
+    fabric_veth: String,
     #[serde(default)]
     realized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FabricAttachmentOwnership {
+    target_host: String,
+    bridge: String,
+    realm_veth: String,
+    fabric_veth: String,
+    local_tunnel_mac: String,
+    remote_tunnel_mac: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,10 +261,27 @@ impl LinuxP11FabricBackend {
                     || geneve.binding_generation == 0
                     || geneve.vni != plan.encapsulation.provider_segment_id
                     || geneve.binding_generation != plan.encapsulation.binding_generation
+                    || !valid_mac(&geneve.local_tunnel_mac)
+                    || !valid_mac(&geneve.remote_tunnel_mac)
+                    || !valid_name(&geneve.bridge)
+                    || !valid_name(&geneve.realm_veth)
+                    || !valid_name(&geneve.fabric_veth)
                     || !plan.peers.iter().any(|peer| {
                         peer.host_id == geneve.target_host
                             && peer.fabric_transport_ip == geneve.remote_transport_ip
                     })
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            for (target_host, attachment) in &ownership.attachments {
+                if target_host != &attachment.target_host
+                    || !valid_name(&attachment.bridge)
+                    || !valid_name(&attachment.realm_veth)
+                    || !valid_name(&attachment.fabric_veth)
+                    || !valid_mac(&attachment.local_tunnel_mac)
+                    || !valid_mac(&attachment.remote_tunnel_mac)
+                    || !ownership.geneve.contains_key(target_host)
                 {
                     return Err(LinuxP11Error::CorruptState);
                 }
@@ -264,6 +301,7 @@ impl LinuxP11FabricBackend {
             fabric_veth: format!("o3k-f-{}", &suffix[..8]),
             fabric_realm_veth: format!("o3k-x-{}", &suffix[..8]),
             geneve: BTreeMap::new(),
+            attachments: BTreeMap::new(),
             directory_generation: plan.directory_generation,
             local_fabric_generation: plan.local_fabric_generation,
         }
@@ -416,6 +454,7 @@ impl LinuxP11FabricBackend {
         let mut ownership = self.realm_ownership(plan);
         if let Some(existing) = self.state.realms.get(&plan.realm_id) {
             ownership.geneve = existing.geneve.clone();
+            ownership.attachments = existing.attachments.clone();
         }
         if let Some(existing) = self.state.realms.get(&plan.realm_id)
             && (existing.namespace != ownership.namespace
@@ -616,13 +655,15 @@ impl LinuxP11FabricBackend {
                 return Err(LinuxP11Error::CommandFailed);
             }
         }
-        self.realize_routes(plan, &ownership)
+        Ok(())
     }
 
-    /// Creates one provider-owned known-unicast Geneve device per current
-    /// remote host for this realm. The device lives in the shared fabric
-    /// namespace and carries only the current realm VNI; no kernel discovery
-    /// is used as ownership or placement authority.
+    /// Creates one provider-owned known-unicast Geneve device and one isolated
+    /// L2 attachment per current remote host for this realm. The attachment
+    /// is deliberately one-to-one: the shared fabric namespace forwards by a
+    /// provider tunnel MAC, while all tenant IP routes remain in the realm
+    /// namespace. This is what keeps overlapping realms out of one shared
+    /// tenant-IP route table.
     fn ensure_geneve(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
         if self.plans.values().any(|other| {
             other.realm_id != plan.realm_id
@@ -644,6 +685,9 @@ impl LinuxP11FabricBackend {
                 continue;
             }
             let interface = geneve_name(plan.realm_id, &peer.host_id);
+            let bridge = geneve_bridge_name(plan.realm_id, &peer.host_id);
+            let realm_veth = geneve_realm_veth_name(plan.realm_id, &peer.host_id);
+            let fabric_veth = geneve_fabric_veth_name(plan.realm_id, &peer.host_id);
             desired.insert(
                 peer.host_id.clone(),
                 GeneveOwnership {
@@ -652,6 +696,11 @@ impl LinuxP11FabricBackend {
                     remote_transport_ip: peer.fabric_transport_ip,
                     vni: plan.encapsulation.provider_segment_id,
                     binding_generation: plan.encapsulation.binding_generation,
+                    local_tunnel_mac: tunnel_mac(plan.realm_id, &plan.local_host),
+                    remote_tunnel_mac: tunnel_mac(plan.realm_id, &peer.host_id),
+                    bridge,
+                    realm_veth,
+                    fabric_veth,
                     realized: current
                         .geneve
                         .get(&peer.host_id)
@@ -663,6 +712,7 @@ impl LinuxP11FabricBackend {
             if desired.contains_key(target_host) {
                 continue;
             }
+            self.remove_geneve_attachment(old, &current.namespace)?;
             let (exists, output) = self
                 .command
                 .output(
@@ -710,7 +760,12 @@ impl LinuxP11FabricBackend {
                     || existing.interface != wanted.interface
                     || existing.remote_transport_ip != wanted.remote_transport_ip
                     || existing.vni != wanted.vni
-                    || existing.binding_generation != wanted.binding_generation)
+                    || existing.binding_generation != wanted.binding_generation
+                    || existing.local_tunnel_mac != wanted.local_tunnel_mac
+                    || existing.remote_tunnel_mac != wanted.remote_tunnel_mac
+                    || existing.bridge != wanted.bridge
+                    || existing.realm_veth != wanted.realm_veth
+                    || existing.fabric_veth != wanted.fabric_veth)
             {
                 return Err(LinuxP11Error::OwnershipConflict);
             }
@@ -737,47 +792,30 @@ impl LinuxP11FabricBackend {
             if !exists {
                 wanted.realized = false;
             }
-            if exists
-                && current
-                    .geneve
-                    .get(target_host)
-                    .is_none_or(|existing| existing.realized)
-            {
-                let tenant_mtu = plan.tenant_mtu.to_string();
-                if !self
-                    .command
-                    .run(
-                        "ip",
-                        &[
-                            "netns",
-                            "exec",
-                            &self.config.fabric_namespace,
-                            "ip",
-                            "link",
-                            "set",
-                            "dev",
-                            &wanted.interface,
-                            "mtu",
-                            &tenant_mtu,
-                        ],
-                    )
-                    .map_err(LinuxP11Error::Storage)?
-                {
-                    return Err(LinuxP11Error::CommandFailed);
-                }
-                continue;
-            }
         }
         let mut next = current.clone();
         next.geneve = desired.clone();
+        next.attachments = desired
+            .values()
+            .map(|geneve| {
+                (
+                    geneve.target_host.clone(),
+                    FabricAttachmentOwnership {
+                        target_host: geneve.target_host.clone(),
+                        bridge: geneve.bridge.clone(),
+                        realm_veth: geneve.realm_veth.clone(),
+                        fabric_veth: geneve.fabric_veth.clone(),
+                        local_tunnel_mac: geneve.local_tunnel_mac.clone(),
+                        remote_tunnel_mac: geneve.remote_tunnel_mac.clone(),
+                    },
+                )
+            })
+            .collect();
         if next != current {
             self.state.realms.insert(plan.realm_id, next);
             store_state(&self.state_path, &self.state)?;
         }
         for (target_host, wanted) in &desired {
-            if wanted.realized {
-                continue;
-            }
             let vni = wanted.vni.to_string();
             let remote = wanted.remote_transport_ip.to_string();
             let port = self.config.geneve_port.to_string();
@@ -825,6 +863,41 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::CommandFailed);
             }
+            let tenant_mtu = plan.tenant_mtu.to_string();
+            for args in [
+                vec![
+                    "netns",
+                    "exec",
+                    self.config.fabric_namespace.as_str(),
+                    "ip",
+                    "link",
+                    "set",
+                    "dev",
+                    wanted.interface.as_str(),
+                    "address",
+                    wanted.local_tunnel_mac.as_str(),
+                ],
+                vec![
+                    "netns",
+                    "exec",
+                    self.config.fabric_namespace.as_str(),
+                    "ip",
+                    "link",
+                    "set",
+                    "dev",
+                    wanted.interface.as_str(),
+                    "mtu",
+                    tenant_mtu.as_str(),
+                ],
+            ] {
+                if !self
+                    .command
+                    .run("ip", &args)
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
             if !self
                 .command
                 .run(
@@ -844,28 +917,7 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::CommandFailed);
             }
-            let tenant_mtu = plan.tenant_mtu.to_string();
-            if !self
-                .command
-                .run(
-                    "ip",
-                    &[
-                        "netns",
-                        "exec",
-                        &self.config.fabric_namespace,
-                        "ip",
-                        "link",
-                        "set",
-                        "dev",
-                        &wanted.interface,
-                        "mtu",
-                        &tenant_mtu,
-                    ],
-                )
-                .map_err(LinuxP11Error::Storage)?
-            {
-                return Err(LinuxP11Error::CommandFailed);
-            }
+            self.ensure_geneve_attachment(plan, wanted)?;
             if let Some(realized) = self
                 .state
                 .realms
@@ -879,12 +931,383 @@ impl LinuxP11FabricBackend {
         Ok(())
     }
 
+    fn ensure_geneve_attachment(
+        &self,
+        plan: &NamespacedRoutedFabricPlan,
+        geneve: &GeneveOwnership,
+    ) -> Result<(), LinuxP11Error> {
+        let fabric_ns = self.config.fabric_namespace.as_str();
+        let realm_ns = self
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .ok_or(LinuxP11Error::CorruptState)?
+            .namespace
+            .clone();
+        let (bridge_exists, bridge_output) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    fabric_ns,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    &geneve.bridge,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if bridge_exists && !bridge_output.contains("bridge") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if !bridge_exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric_ns,
+                        "ip",
+                        "link",
+                        "add",
+                        &geneve.bridge,
+                        "type",
+                        "bridge",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        for args in [
+            vec![
+                "netns",
+                "exec",
+                fabric_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                geneve.bridge.as_str(),
+                "up",
+            ],
+            vec![
+                "netns",
+                "exec",
+                fabric_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                geneve.interface.as_str(),
+                "master",
+                geneve.bridge.as_str(),
+            ],
+        ] {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        let (realm_exists, realm_output) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    &realm_ns,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    &geneve.realm_veth,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if realm_exists && !realm_output.contains("veth") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        let (fabric_exists, fabric_output) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    fabric_ns,
+                    "ip",
+                    "-d",
+                    "link",
+                    "show",
+                    "dev",
+                    &geneve.fabric_veth,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if fabric_exists && !fabric_output.contains("veth") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if !realm_exists
+            && (!self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "link",
+                        "add",
+                        &geneve.realm_veth,
+                        "type",
+                        "veth",
+                        "peer",
+                        "name",
+                        &geneve.fabric_veth,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+                || !self
+                    .command
+                    .run(
+                        "ip",
+                        &["link", "set", &geneve.realm_veth, "netns", &realm_ns],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                || !self
+                    .command
+                    .run(
+                        "ip",
+                        &["link", "set", &geneve.fabric_veth, "netns", fabric_ns],
+                    )
+                    .map_err(LinuxP11Error::Storage)?)
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        for args in [
+            vec![
+                "netns",
+                "exec",
+                &realm_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                &geneve.realm_veth,
+                "address",
+                &geneve.local_tunnel_mac,
+            ],
+            vec![
+                "netns",
+                "exec",
+                &realm_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                &geneve.realm_veth,
+                "up",
+            ],
+            vec![
+                "netns",
+                "exec",
+                fabric_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                &geneve.fabric_veth,
+                "address",
+                &geneve.local_tunnel_mac,
+            ],
+            vec![
+                "netns",
+                "exec",
+                fabric_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                &geneve.fabric_veth,
+                "master",
+                &geneve.bridge,
+            ],
+            vec![
+                "netns",
+                "exec",
+                fabric_ns,
+                "ip",
+                "link",
+                "set",
+                "dev",
+                &geneve.fabric_veth,
+                "up",
+            ],
+        ] {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for mac in [
+            geneve.remote_tunnel_mac.as_str(),
+            geneve.local_tunnel_mac.as_str(),
+        ] {
+            let device = if mac == geneve.remote_tunnel_mac {
+                geneve.interface.as_str()
+            } else {
+                geneve.fabric_veth.as_str()
+            };
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric_ns,
+                        "bridge",
+                        "fdb",
+                        "replace",
+                        mac,
+                        "dev",
+                        device,
+                        "master",
+                        "permanent",
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_geneve_attachment(
+        &self,
+        geneve: &GeneveOwnership,
+        realm_ns: &str,
+    ) -> Result<(), LinuxP11Error> {
+        let fabric_ns = self.config.fabric_namespace.as_str();
+        let (exists, output) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    fabric_ns,
+                    "ip",
+                    "-d",
+                    "link",
+                    "show",
+                    "dev",
+                    &geneve.bridge,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if exists && !output.contains("bridge") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if exists {
+            let (ports_exist, ports) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric_ns,
+                        "ip",
+                        "-o",
+                        "link",
+                        "show",
+                        "master",
+                        &geneve.bridge,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if ports_exist && !bridge_ports_are_owned(&ports, geneve) {
+                return Err(LinuxP11Error::ForeignState);
+            }
+        }
+        if exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        fabric_ns,
+                        "ip",
+                        "link",
+                        "del",
+                        &geneve.bridge,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let (realm_veth_exists, _) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    realm_ns,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    &geneve.realm_veth,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if realm_veth_exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        realm_ns,
+                        "ip",
+                        "link",
+                        "del",
+                        &geneve.realm_veth,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        Ok(())
+    }
+
     fn realize_routes(
         &self,
         plan: &NamespacedRoutedFabricPlan,
         ownership: &RealmOwnership,
     ) -> Result<(), LinuxP11Error> {
         for route in &plan.routes {
+            let attachment = ownership
+                .attachments
+                .get(&route.target_host)
+                .ok_or(LinuxP11Error::CorruptState)?;
             let destination = format!("{}/32", route.destination.network);
             if !self
                 .command
@@ -899,7 +1322,7 @@ impl LinuxP11FabricBackend {
                         "replace",
                         &destination,
                         "dev",
-                        &ownership.fabric_veth,
+                        &attachment.realm_veth,
                     ],
                 )
                 .map_err(LinuxP11Error::Storage)?
@@ -916,11 +1339,11 @@ impl LinuxP11FabricBackend {
                             "replace",
                             &route.destination.network.to_string(),
                             "lladdr",
-                            &plan.proxy_mac,
+                            &attachment.remote_tunnel_mac,
                             "nud",
                             "permanent",
                             "dev",
-                            &ownership.fabric_veth,
+                            &attachment.realm_veth,
                         ],
                     )
                     .map_err(LinuxP11Error::Storage)?
@@ -944,10 +1367,31 @@ impl LinuxP11FabricBackend {
                             "replace",
                             &destination,
                             "dev",
-                            &ownership.fabric_realm_veth,
+                            &ownership.realm_veth,
                         ],
                     )
                     .map_err(LinuxP11Error::Storage)?
+                    || !self
+                        .command
+                        .run(
+                            "ip",
+                            &[
+                                "netns",
+                                "exec",
+                                &ownership.namespace,
+                                "ip",
+                                "neigh",
+                                "replace",
+                                &entry.fixed_ip.to_string(),
+                                "lladdr",
+                                &entry.mac,
+                                "nud",
+                                "permanent",
+                                "dev",
+                                &ownership.realm_veth,
+                            ],
+                        )
+                        .map_err(LinuxP11Error::Storage)?
                 {
                     return Err(LinuxP11Error::CommandFailed);
                 }
@@ -1170,8 +1614,15 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         self.ensure_fabric(plan)?;
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
-        self.ensure_geneve(plan)?;
         self.configure_peers()?;
+        self.ensure_geneve(plan)?;
+        let ownership = self
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .cloned()
+            .ok_or(LinuxP11Error::CorruptState)?;
+        self.realize_routes(plan, &ownership)?;
         Ok(())
     }
 
@@ -1186,6 +1637,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             return Err(P11FabricError::StaleGeneration);
         }
         for geneve in ownership.geneve.values() {
+            self.remove_geneve_attachment(geneve, &ownership.namespace)?;
             let (exists, output) = self
                 .command
                 .output(
@@ -1288,6 +1740,14 @@ fn valid_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
+fn valid_mac(value: &str) -> bool {
+    let octets = value.split(':').collect::<Vec<_>>();
+    octets.len() == 6
+        && octets
+            .iter()
+            .all(|octet| octet.len() == 2 && octet.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
 fn geneve_name(realm_id: Uuid, target_host: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in realm_id
@@ -1300,6 +1760,59 @@ fn geneve_name(realm_id: Uuid, target_host: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("o3k-g-{:08x}", hash as u32)
+}
+
+fn provider_name(prefix: &str, realm_id: Uuid, target_host: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in prefix
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(realm_id.as_bytes().iter().copied())
+        .chain(target_host.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("o3k-{}-{:08x}", prefix, hash as u32)
+}
+
+fn geneve_bridge_name(realm_id: Uuid, target_host: &str) -> String {
+    provider_name("c", realm_id, target_host)
+}
+
+fn geneve_realm_veth_name(realm_id: Uuid, target_host: &str) -> String {
+    provider_name("e", realm_id, target_host)
+}
+
+fn geneve_fabric_veth_name(realm_id: Uuid, target_host: &str) -> String {
+    provider_name("i", realm_id, target_host)
+}
+
+fn tunnel_mac(realm_id: Uuid, host_id: &str) -> String {
+    let bytes = realm_id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(host_id.as_bytes().iter().copied())
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+        .to_be_bytes();
+    format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        bytes[2], bytes[3], bytes[4], bytes[5], bytes[6]
+    )
+}
+
+fn bridge_ports_are_owned(output: &str, geneve: &GeneveOwnership) -> bool {
+    let names = output
+        .lines()
+        .filter_map(|line| line.split_once(": ").map(|(_, rest)| rest))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(|name| name.trim_end_matches(':').split('@').next().unwrap_or(name))
+        .collect::<BTreeSet<_>>();
+    names == BTreeSet::from([geneve.interface.as_str(), geneve.fabric_veth.as_str()])
 }
 
 fn geneve_link_matches(output: &str, ownership: &GeneveOwnership, port: u16) -> bool {
@@ -1565,14 +2078,26 @@ mod tests {
             args.windows(2)
                 .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
         }));
-        let ownership = provider.realm_ownership(&plan());
-        let proxy_mac = plan().proxy_mac;
+        let remote_tunnel_mac = tunnel_mac(plan().realm_id, "host-b");
+        let attachment = provider
+            .state
+            .realms
+            .get(&plan().realm_id)
+            .and_then(|realm| realm.attachments.get("host-b"))
+            .expect("remote attachment");
         assert!(calls.iter().any(|(program, args)| {
             program == "ip"
+                && args.windows(4).any(|window| {
+                    window == ["lladdr", remote_tunnel_mac.as_str(), "nud", "permanent"]
+                })
+                && args.last() == Some(&attachment.realm_veth)
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.contains(&"bridge".to_owned())
                 && args
-                    .windows(4)
-                    .any(|window| window == ["lladdr", proxy_mac.as_str(), "nud", "permanent"])
-                && args.last() == Some(&ownership.fabric_veth)
+                    .windows(2)
+                    .any(|window| window == ["replace", remote_tunnel_mac.as_str()])
         }));
         assert!(calls.iter().any(|(program, args)| {
             program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
