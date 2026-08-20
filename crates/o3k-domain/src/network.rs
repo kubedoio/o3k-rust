@@ -331,6 +331,7 @@ impl RealmEncapsulationRegistry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamespacedRoutedFabricPlan {
     pub local_host: String,
+    pub local_fabric_transport_ip: Ipv4Addr,
     pub local_fabric_generation: u64,
     pub local_underlay_mtu: u16,
     pub local_fabric_mtu: u16,
@@ -579,6 +580,7 @@ impl RealmEndpointDirectory {
         peers.sort_by_key(|peer| peer.host_id.clone());
         Ok(NamespacedRoutedFabricPlan {
             local_host: local_identity.host_id.clone(),
+            local_fabric_transport_ip: local_identity.fabric_transport_ip,
             local_fabric_generation: local_identity.fabric_generation,
             local_underlay_mtu: local_identity.underlay_mtu,
             local_fabric_mtu: local_identity.fabric_mtu,

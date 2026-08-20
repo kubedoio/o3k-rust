@@ -8,7 +8,7 @@ use o3k_domain::{
     RealmEncapsulationBinding, RealmEndpointDirectory,
 };
 use o3k_network::{LinuxP11Config, LinuxP11FabricBackend, P11FabricBackend};
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, process::Command};
 use uuid::Uuid;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,6 +72,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !provider.observe(&plan)? {
         return Err("provider did not observe its applied state".into());
     }
+    let geneve = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            "o3k-fabric",
+            "ip",
+            "-d",
+            "link",
+            "show",
+            "type",
+            "geneve",
+        ])
+        .output()?;
+    let geneve_output = String::from_utf8_lossy(&geneve.stdout);
+    if !geneve.status.success()
+        || !geneve_output.contains("geneve")
+        || !geneve_output.contains("id 101")
+        || !geneve_output.contains("remote 198.18.0.2")
+    {
+        return Err("provider did not realize the expected Geneve object".into());
+    }
+    let transport = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            "o3k-fabric",
+            "ip",
+            "-4",
+            "addr",
+            "show",
+            "dev",
+            "wg-o3k",
+        ])
+        .output()?;
+    if !transport.status.success()
+        || !String::from_utf8_lossy(&transport.stdout).contains("198.18.0.1/32")
+    {
+        return Err("provider did not assign the local fabric transport address".into());
+    }
+    println!("p11-linux-smoke: host-transport-address=passed");
+    println!("p11-linux-smoke: geneve-realization=passed");
     provider.remove(&plan)?;
     if !provider.observe_removed(&plan)? {
         return Err("provider did not observe cleanup".into());

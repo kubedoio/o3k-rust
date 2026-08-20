@@ -245,6 +245,7 @@ mod p9_plan_tests {
         let destination = prefix("10.0.0.3", 32);
         let fabric = NamespacedRoutedFabricPlan {
             local_host: "node-a".to_owned(),
+            local_fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             local_fabric_generation: 2,
             local_underlay_mtu: 1500,
             local_fabric_mtu: 1420,
@@ -3675,6 +3676,8 @@ impl NodeNetworkPlan {
         };
         if fabric.local_host != self.node_id
             || fabric.local_host.is_empty()
+            || fabric.local_fabric_transport_ip.is_unspecified()
+            || fabric.local_fabric_transport_ip.is_loopback()
             || fabric.local_fabric_generation == 0
             || fabric.local_underlay_mtu == 0
             || fabric.local_fabric_mtu == 0
