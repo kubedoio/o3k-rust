@@ -282,6 +282,8 @@ mod p9_plan_tests {
             },
             proxy_mac: "02:11:22:33:44:55".to_owned(),
             tenant_mtu: 1400,
+            policy_generation: 1,
+            policies: Vec::new(),
             routes: vec![FabricEndpointRoute {
                 realm_id: Uuid::from_u128(2),
                 destination,
@@ -3737,6 +3739,7 @@ impl NodeNetworkPlan {
             || fabric.directory_generation == 0
             || fabric.tenant_mtu == 0
             || fabric.tenant_mtu > fabric.local_fabric_mtu
+            || fabric.policy_generation == 0
             || fabric.proxy_mac.len() != 17
             || fabric.encapsulation.realm_id != fabric.realm_id
             || fabric.encapsulation.validate().is_err()
@@ -3745,6 +3748,20 @@ impl NodeNetworkPlan {
             || fabric.directory.proxy_mac != fabric.proxy_mac
         {
             return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        let mut policy_ids = BTreeSet::new();
+        for policy in &fabric.policies {
+            if policy.id == Uuid::nil()
+                || policy.endpoint_id == Uuid::nil()
+                || !policy_ids.insert(policy.id)
+                || fabric
+                    .directory
+                    .entries
+                    .iter()
+                    .all(|entry| entry.endpoint_id != policy.endpoint_id)
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
         }
         let mut route_destinations = BTreeSet::new();
         let mut route_endpoints = BTreeSet::new();

@@ -249,6 +249,10 @@ pub struct GenevePacketMetadata {
     pub destination_endpoint_generation: u64,
     pub destination_placement_generation: u64,
     pub realm_binding_generation: u64,
+    pub policy_generation: u64,
+    pub protocol: NetworkProtocol,
+    pub source_port: Option<u16>,
+    pub destination_port: Option<u16>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -263,6 +267,10 @@ pub enum GenevePacketValidationError {
     StaleRoute,
     #[error("Geneve packet endpoint or host identity is ambiguous")]
     AmbiguousIdentity,
+    #[error("Geneve packet NetworkPolicy generation is stale")]
+    StalePolicy,
+    #[error("Geneve packet is denied by NetworkPolicy")]
+    PolicyDenied,
 }
 
 impl RealmEncapsulationBinding {
@@ -307,6 +315,32 @@ pub struct RealmEncapsulationRegistry {
 }
 
 impl NamespacedRoutedFabricPlan {
+    /// Replaces the policy snapshot with the accepted canonical generation.
+    /// Policy rules remain semantic input; no provider rule names or kernel
+    /// handles are accepted here.
+    pub fn with_policy_snapshot(
+        mut self,
+        policy_generation: u64,
+        policies: Vec<PolicyIntent>,
+    ) -> Result<Self, EndpointDirectoryError> {
+        if policy_generation == 0
+            || policies.iter().any(|policy| {
+                policy.id == Uuid::nil()
+                    || policy.endpoint_id == Uuid::nil()
+                    || !self
+                        .directory
+                        .entries
+                        .iter()
+                        .any(|entry| entry.endpoint_id == policy.endpoint_id)
+            })
+        {
+            return Err(EndpointDirectoryError::InvalidPolicy);
+        }
+        self.policy_generation = policy_generation;
+        self.policies = policies;
+        Ok(self)
+    }
+
     fn validate_packet_binding(
         &self,
         packet: &GenevePacketMetadata,
@@ -322,10 +356,52 @@ impl NamespacedRoutedFabricPlan {
             .map_err(|_| GenevePacketValidationError::InvalidBinding)
     }
 
+    fn validate_packet_policy(
+        &self,
+        packet: &GenevePacketMetadata,
+        destination_endpoint_id: Uuid,
+    ) -> Result<(), GenevePacketValidationError> {
+        if packet.policy_generation != self.policy_generation || self.policy_generation == 0 {
+            return Err(GenevePacketValidationError::StalePolicy);
+        }
+
+        for policy in &self.policies {
+            let (endpoint_id, direction, address) = if policy.direction == PolicyDirection::Egress {
+                (
+                    packet.source_endpoint_id,
+                    PolicyDirection::Egress,
+                    packet.destination_ip,
+                )
+            } else {
+                (
+                    destination_endpoint_id,
+                    PolicyDirection::Ingress,
+                    packet.source_ip,
+                )
+            };
+            if policy.endpoint_id != endpoint_id || policy.direction != direction {
+                continue;
+            }
+            if !policy.protocol_matches(packet.protocol)
+                || !policy.ports_match(packet.destination_port)
+                || !policy.prefix_matches(address)
+            {
+                continue;
+            }
+            if policy.action == PolicyAction::Deny {
+                return Err(GenevePacketValidationError::PolicyDenied);
+            }
+        }
+
+        // The existing bounded provider is stateful-allow by default: policy
+        // rules add targeted denies/allows, while established/related state is
+        // handled by the execution provider. A matching deny always wins.
+        Ok(())
+    }
+
     /// Validates a known-unicast Geneve packet before egress encapsulation.
-    /// NetworkPolicy is an additional required authorization input at the
-    /// caller; this method proves only the realm/endpoint/placement authority
-    /// boundary.
+    /// The canonical policy snapshot is checked after realm/endpoint/placement
+    /// authority and before a provider may emit the packet.
     pub fn validate_geneve_egress(
         &self,
         packet: &GenevePacketMetadata,
@@ -368,6 +444,19 @@ impl NamespacedRoutedFabricPlan {
         {
             return Err(GenevePacketValidationError::StaleRoute);
         }
+        let destination_endpoint = self
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.fixed_ip == packet.destination_ip
+                    && entry.selected_host == packet.destination_host
+            })
+            .collect::<Vec<_>>();
+        if destination_endpoint.len() != 1 {
+            return Err(GenevePacketValidationError::AmbiguousIdentity);
+        }
+        self.validate_packet_policy(packet, destination_endpoint[0].endpoint_id)?;
         Ok(())
     }
 
@@ -426,6 +515,7 @@ impl NamespacedRoutedFabricPlan {
         {
             return Err(GenevePacketValidationError::InvalidSource);
         }
+        self.validate_packet_policy(packet, destination.endpoint_id)?;
         Ok(())
     }
 }
@@ -504,8 +594,19 @@ pub struct NamespacedRoutedFabricPlan {
     pub directory: RealmEndpointDirectory,
     pub proxy_mac: String,
     pub tenant_mtu: u16,
+    /// Canonical policy generation and rules compiled for this realm. Provider
+    /// implementations may derive nftables/nft flow state from this snapshot,
+    /// but may not authorize a packet from provider observations alone.
+    #[serde(default = "default_policy_generation")]
+    pub policy_generation: u64,
+    #[serde(default)]
+    pub policies: Vec<PolicyIntent>,
     pub routes: Vec<FabricEndpointRoute>,
     pub peers: Vec<FabricPeer>,
+}
+
+fn default_policy_generation() -> u64 {
+    1
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -538,6 +639,8 @@ pub enum EndpointDirectoryError {
     MissingLocalFabricIdentity,
     #[error("fabric plan has an invalid or unsafe tenant MTU")]
     InvalidMtu,
+    #[error("NetworkPolicy snapshot is invalid or references an unknown endpoint")]
+    InvalidPolicy,
 }
 
 impl RealmEndpointDirectory {
@@ -693,8 +796,8 @@ impl RealmEndpointDirectory {
 
     /// Compiles the accepted directory and public host identities into one
     /// host/realm semantic plan. The local host is never emitted as a fabric
-    /// peer, and remote peer AllowedIPs are exactly the current endpoint
-    /// /32 routes for that peer.
+    /// peer; peer transport identity is the unique host-fabric address, while
+    /// endpoint /32 routes remain realm-scoped Geneve destinations.
     pub fn compile_fabric_plan(
         &self,
         local_identity: &FabricHostIdentity,
@@ -753,6 +856,8 @@ impl RealmEndpointDirectory {
             directory: self.clone(),
             proxy_mac: self.proxy_mac.clone(),
             tenant_mtu,
+            policy_generation: default_policy_generation(),
+            policies: Vec::new(),
             routes,
             peers,
         })
@@ -1079,6 +1184,10 @@ mod endpoint_directory_tests {
             destination_endpoint_generation: 1,
             destination_placement_generation: 1,
             realm_binding_generation: 1,
+            policy_generation: 1,
+            protocol: NetworkProtocol::Icmp,
+            source_port: None,
+            destination_port: None,
         };
         assert_eq!(plan.validate_geneve_egress(&packet), Ok(()));
         let remote_plan = directory
@@ -1097,11 +1206,60 @@ mod endpoint_directory_tests {
             plan.validate_geneve_egress(&spoofed_source),
             Err(GenevePacketValidationError::InvalidSource)
         );
-        let mut spoofed_transport = packet;
+        let mut spoofed_transport = packet.clone();
         spoofed_transport.source_fabric_transport_ip = Ipv4Addr::new(198, 18, 0, 99);
         assert_eq!(
             remote_plan.validate_geneve_ingress(&spoofed_transport),
             Err(GenevePacketValidationError::InvalidSource)
+        );
+
+        let deny_plan = plan
+            .clone()
+            .with_policy_snapshot(
+                2,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(900),
+                    endpoint_id: Uuid::from_u128(1),
+                    direction: PolicyDirection::Egress,
+                    protocol: NetworkProtocol::Icmp,
+                    ports: None,
+                    source: None,
+                    destination: Ipv4Prefix::new(Ipv4Addr::new(10, 40, 1, 0), 24),
+                    action: PolicyAction::Deny,
+                }],
+            )
+            .expect("policy snapshot");
+        let mut denied_packet = packet.clone();
+        denied_packet.policy_generation = 2;
+        assert_eq!(
+            deny_plan.validate_geneve_egress(&denied_packet),
+            Err(GenevePacketValidationError::PolicyDenied)
+        );
+        let mut stale_policy = denied_packet;
+        stale_policy.policy_generation = 1;
+        assert_eq!(
+            deny_plan.validate_geneve_egress(&stale_policy),
+            Err(GenevePacketValidationError::StalePolicy)
+        );
+        assert_eq!(
+            plan.clone().with_policy_snapshot(0, Vec::new(),),
+            Err(EndpointDirectoryError::InvalidPolicy)
+        );
+        assert_eq!(
+            plan.with_policy_snapshot(
+                3,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(901),
+                    endpoint_id: Uuid::from_u128(999),
+                    direction: PolicyDirection::Ingress,
+                    protocol: NetworkProtocol::Any,
+                    ports: None,
+                    source: None,
+                    destination: None,
+                    action: PolicyAction::Deny,
+                }],
+            ),
+            Err(EndpointDirectoryError::InvalidPolicy)
         );
     }
 
@@ -1273,6 +1431,25 @@ pub struct PolicyIntent {
     pub source: Option<Ipv4Prefix>,
     pub destination: Option<Ipv4Prefix>,
     pub action: PolicyAction,
+}
+
+impl PolicyIntent {
+    fn protocol_matches(&self, protocol: NetworkProtocol) -> bool {
+        self.protocol == NetworkProtocol::Any || self.protocol == protocol
+    }
+
+    fn ports_match(&self, destination_port: Option<u16>) -> bool {
+        let Some(ports) = self.ports else {
+            return true;
+        };
+        destination_port.is_some_and(|port| ports.start <= port && port <= ports.end)
+    }
+
+    fn prefix_matches(&self, address: Ipv4Addr) -> bool {
+        self.source
+            .or(self.destination)
+            .is_none_or(|prefix| prefix.contains(address))
+    }
 }
 
 /// Durable compatibility projection for the bounded IPv4 security-group
