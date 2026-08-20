@@ -11,6 +11,10 @@ flat bridge. The provider realizes local endpoint TAPs on the realm-scoped
 bridge, remote realm proxy-neighbor entries, Geneve attachments, and the
 shared WireGuard host transport.
 
+The fabric plan now carries the accepted realm prefix into the provider. The
+provider derives the realm-local gateway on the realm veth, so overlapping
+realms can use the same tenant prefix without a shared host route table.
+
 Provider ownership records include endpoint TAP state and a durable pending
 TAP set written before link mutation. Existing links without a matching
 durable ownership record are rejected as foreign. Private WireGuard key bytes

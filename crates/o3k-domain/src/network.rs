@@ -151,6 +151,10 @@ pub struct EndpointLocation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealmEndpointDirectory {
     pub realm_id: Uuid,
+    /// Accepted tenant prefix carried into the provider plan. Providers use
+    /// it to build realm-local routes; they never reconstruct it from kernel
+    /// observations.
+    pub prefix: Ipv4Prefix,
     pub directory_generation: u64,
     pub proxy_mac: String,
     pub entries: Vec<EndpointLocation>,
@@ -589,6 +593,7 @@ pub struct NamespacedRoutedFabricPlan {
     pub local_underlay_mtu: u16,
     pub local_fabric_mtu: u16,
     pub realm_id: Uuid,
+    pub realm_prefix: Ipv4Prefix,
     pub encapsulation: RealmEncapsulationBinding,
     pub directory_generation: u64,
     pub directory: RealmEndpointDirectory,
@@ -697,6 +702,7 @@ impl RealmEndpointDirectory {
         entries.sort_by_key(|entry| (entry.fixed_ip, entry.endpoint_id));
         Ok(Self {
             realm_id: realm.id,
+            prefix: realm.prefix,
             directory_generation,
             proxy_mac,
             entries,
@@ -851,6 +857,7 @@ impl RealmEndpointDirectory {
             local_underlay_mtu: local_identity.underlay_mtu,
             local_fabric_mtu: local_identity.fabric_mtu,
             realm_id: self.realm_id,
+            realm_prefix: self.prefix,
             encapsulation: binding.clone(),
             directory_generation: self.directory_generation,
             directory: self.clone(),
