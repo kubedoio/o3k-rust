@@ -156,6 +156,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("provider did not realize the local endpoint TAP".into());
     }
+    let gateway = Command::new("ip")
+        .args([
+            "netns",
+            "exec",
+            "o3k-r-00000000",
+            "ip",
+            "-4",
+            "addr",
+            "show",
+            "dev",
+            "o3k-n-00000000",
+        ])
+        .output()?;
+    if !gateway.status.success()
+        || !String::from_utf8_lossy(&gateway.stdout).contains("10.250.1.1/24")
+    {
+        return Err("provider did not realize the realm-local gateway".into());
+    }
     println!("p11-linux-smoke: host-transport-address=passed");
     println!("p11-linux-smoke: geneve-realization=passed");
     println!("p11-linux-smoke: isolated-attachment=passed");

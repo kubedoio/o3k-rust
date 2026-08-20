@@ -257,6 +257,7 @@ mod p9_plan_tests {
             local_underlay_mtu: 1500,
             local_fabric_mtu: 1420,
             realm_id: Uuid::from_u128(2),
+            realm_prefix: prefix("10.0.0.0", 24),
             encapsulation: RealmEncapsulationBinding {
                 fabric_domain_id: Uuid::from_u128(100),
                 realm_id: Uuid::from_u128(2),
@@ -267,6 +268,7 @@ mod p9_plan_tests {
             directory_generation: 3,
             directory: o3k_domain::RealmEndpointDirectory {
                 realm_id: Uuid::from_u128(2),
+                prefix: prefix("10.0.0.0", 24),
                 directory_generation: 3,
                 proxy_mac: "02:11:22:33:44:55".to_owned(),
                 entries: vec![EndpointLocation {
@@ -3744,8 +3746,17 @@ impl NodeNetworkPlan {
             || fabric.encapsulation.realm_id != fabric.realm_id
             || fabric.encapsulation.validate().is_err()
             || fabric.directory.realm_id != fabric.realm_id
+            || fabric.directory.prefix != fabric.realm_prefix
             || fabric.directory.directory_generation != fabric.directory_generation
             || fabric.directory.proxy_mac != fabric.proxy_mac
+        {
+            return Err(NetworkPlanError::InvalidFabricPlan);
+        }
+        if fabric
+            .directory
+            .entries
+            .iter()
+            .any(|entry| !fabric.realm_prefix.contains(entry.fixed_ip))
         {
             return Err(NetworkPlanError::InvalidFabricPlan);
         }

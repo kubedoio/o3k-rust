@@ -648,6 +648,32 @@ impl LinuxP11FabricBackend {
         }
         let tenant_mtu = plan.tenant_mtu.to_string();
         let fabric_mtu = plan.local_fabric_mtu.to_string();
+        let gateway = u32::from(plan.realm_prefix.network)
+            .checked_add(1)
+            .map(std::net::Ipv4Addr::from)
+            .filter(|gateway| plan.realm_prefix.contains(*gateway))
+            .ok_or(LinuxP11Error::OwnershipConflict)?;
+        let gateway_cidr = format!("{gateway}/{}", plan.realm_prefix.prefix_len);
+        if !self
+            .command
+            .run(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    &ownership.namespace,
+                    "ip",
+                    "addr",
+                    "replace",
+                    &gateway_cidr,
+                    "dev",
+                    &ownership.realm_veth,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
         for interface in [&ownership.bridge, &ownership.host_veth] {
             if !self
                 .command
