@@ -47,6 +47,11 @@ The local `o3kd` process was also started with an isolated temporary data
 directory on `127.0.0.1:18080`; `/healthz` returned `{"status":"ok"}` and
 `/readyz` returned `{"status":"ready"}`.
 
+The portable public-address provider regression also accepts two independent
+AddressRealms containing `10.0.0.10` and persists distinct realm-scoped NAT
+binding identities. This proves provider-state identity separation only; it is
+not real external FIP traffic evidence.
+
 ## Explicit limits
 
 Linux namespaces are not three independent KVM/libvirt hypervisors. This

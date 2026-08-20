@@ -65,6 +65,8 @@ pub enum PublicAddressError {
     Storage(#[from] io::Error),
     #[error("public binding has no accepted private endpoint address")]
     MissingEndpoint,
+    #[error("public binding has no accepted AddressRealm identity")]
+    MissingRealm,
     #[error("public provider found foreign nftables state")]
     ForeignProviderState,
     #[error("public provider command failed")]
@@ -322,6 +324,7 @@ pub struct PublicAddressRealizer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct OwnedBinding {
+    realm_id: Uuid,
     endpoint_id: Uuid,
     private_address: Ipv4Addr,
     public_address: Ipv4Addr,
@@ -364,6 +367,7 @@ impl PublicAddressRealizer {
         let owned = root.join("ownership").exists();
         let owned_addresses = load_owned_addresses(&root.join(OWNED_ADDRESS_FILE))?;
         let owned_bindings = load_owned_bindings(&root.join(OWNED_BINDING_FILE))?;
+        validate_owned_bindings(&owned_bindings)?;
         Ok(Self {
             root,
             uplink,
@@ -409,26 +413,28 @@ impl PublicAddressRealizer {
         if requested.is_empty() {
             return Ok(());
         }
+        let realm_id = plan_realm_id(intents)?;
         let mut bindings = self.owned_bindings.clone();
         for (endpoint_id, public_address) in requested {
             let binding = OwnedBinding {
+                realm_id,
                 endpoint_id,
                 private_address: *endpoint_addresses
                     .get(&endpoint_id)
                     .ok_or(PublicAddressError::MissingEndpoint)?,
                 public_address,
             };
-            if let Some(existing) = bindings
-                .iter_mut()
-                .find(|existing| existing.endpoint_id == binding.endpoint_id)
-            {
+            if let Some(existing) = bindings.iter_mut().find(|existing| {
+                existing.realm_id == binding.realm_id && existing.endpoint_id == binding.endpoint_id
+            }) {
                 if existing.public_address != binding.public_address {
                     return Err(PublicAddressError::AssociationConflict);
                 }
                 *existing = binding;
             } else if bindings.iter().any(|existing| {
                 existing.public_address == binding.public_address
-                    || existing.endpoint_id == binding.endpoint_id
+                    || (existing.realm_id == binding.realm_id
+                        && existing.endpoint_id == binding.endpoint_id)
             }) {
                 return Err(PublicAddressError::AssociationConflict);
             } else {
@@ -440,6 +446,7 @@ impl PublicAddressRealizer {
                 return Err(PublicAddressError::AssociationConflict);
             }
         }
+        validate_owned_bindings(&bindings)?;
         self.realize_bindings(&bindings)
     }
 
@@ -592,7 +599,10 @@ impl PublicAddressRealizer {
             let private_address = binding.private_address.to_string();
             let public_address = binding.public_address.to_string();
             let uplink = format!("\"{}\"", self.uplink);
-            let comment = format!("\"{}:{}\"", PUBLIC_MARKER, binding.endpoint_id);
+            let comment = format!(
+                "\"{}:{}:{}\"",
+                PUBLIC_MARKER, binding.realm_id, binding.endpoint_id
+            );
             if !self
                 .command
                 .run(
@@ -660,10 +670,13 @@ impl PublicAddressRealizer {
         if targets.is_empty() {
             return Ok(());
         }
+        let realm_id = plan_realm_id(intents)?;
         let retained: Vec<OwnedBinding> = self
             .owned_bindings
             .iter()
-            .filter(|binding| !targets.contains(&binding.endpoint_id))
+            .filter(|binding| {
+                !(binding.realm_id == realm_id && targets.contains(&binding.endpoint_id))
+            })
             .cloned()
             .collect();
         self.realize_bindings(&retained)
@@ -931,6 +944,23 @@ impl PublicAddressRealizer {
     }
 }
 
+fn plan_realm_id(intents: &[NetworkPlanIntent]) -> Result<Uuid, PublicAddressError> {
+    let realms = intents
+        .iter()
+        .filter_map(|intent| match intent {
+            NetworkPlanIntent::AddressRealm { realm_id, .. } => Some(*realm_id),
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if realms.len() != 1 || realms.first().is_none_or(Uuid::is_nil) {
+        return Err(PublicAddressError::MissingRealm);
+    }
+    realms
+        .into_iter()
+        .next()
+        .ok_or(PublicAddressError::MissingRealm)
+}
+
 fn load_owned_addresses(path: &Path) -> Result<Vec<Ipv4Addr>, PublicAddressError> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| PublicAddressError::CorruptState),
@@ -945,6 +975,21 @@ fn load_owned_bindings(path: &Path) -> Result<Vec<OwnedBinding>, PublicAddressEr
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn validate_owned_bindings(bindings: &[OwnedBinding]) -> Result<(), PublicAddressError> {
+    let mut identities = std::collections::BTreeSet::new();
+    let mut public_addresses = std::collections::BTreeSet::new();
+    for binding in bindings {
+        if binding.realm_id.is_nil()
+            || binding.endpoint_id.is_nil()
+            || !identities.insert((binding.realm_id, binding.endpoint_id))
+            || !public_addresses.insert(binding.public_address)
+        {
+            return Err(PublicAddressError::CorruptState);
+        }
+    }
+    Ok(())
 }
 
 fn store_owned_addresses(path: &Path, addresses: &[Ipv4Addr]) -> Result<(), PublicAddressError> {
@@ -1094,15 +1139,20 @@ mod tests {
     }
 
     fn public_intents(endpoint_id: Uuid) -> Vec<NetworkPlanIntent> {
-        vec![NetworkPlanIntent::PublicAddressBinding(
-            o3k_domain::PublicAddressBindingIntent {
+        vec![
+            NetworkPlanIntent::AddressRealm {
+                realm_id: Uuid::from_u128(1),
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("realm prefix"),
+                gateway: Ipv4Addr::new(10, 0, 0, 1),
+            },
+            NetworkPlanIntent::PublicAddressBinding(o3k_domain::PublicAddressBindingIntent {
                 id: Uuid::from_u128(3),
                 project_id: "project-a".to_owned(),
                 public_address: Ipv4Addr::new(198, 51, 100, 2),
                 endpoint_id,
                 generation: 1,
-            },
-        )]
+            }),
+        ]
     }
 
     #[test]
@@ -1128,6 +1178,35 @@ mod tests {
     }
 
     #[test]
+    fn public_realization_rejects_missing_realm_before_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            interface_listing: String::new(),
+            fail_on: None,
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let endpoint = Uuid::from_u128(9);
+        let mut intents = vec![NetworkPlanIntent::AddressAssignment {
+            endpoint_id: endpoint,
+            address: Ipv4Addr::new(10, 0, 0, 10),
+            generation: 1,
+        }];
+        intents.push(public_intents(endpoint)[1].clone());
+        assert!(matches!(
+            provider.apply(&intents),
+            Err(PublicAddressError::MissingRealm)
+        ));
+        assert!(command.calls.lock().expect("calls").is_empty());
+    }
+
+    #[test]
     fn public_realization_never_adopts_foreign_table() {
         let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
         let command = Arc::new(FakePublicCommand {
@@ -1145,12 +1224,13 @@ mod tests {
         let endpoint = Uuid::from_u128(9);
         let intents = public_intents(endpoint);
         let intents = [
+            intents[0].clone(),
             NetworkPlanIntent::AddressAssignment {
                 endpoint_id: endpoint,
                 address: Ipv4Addr::new(10, 0, 0, 2),
                 generation: 1,
             },
-            intents[0].clone(),
+            intents[1].clone(),
         ];
         assert!(matches!(
             provider.apply(&intents),
@@ -1229,15 +1309,25 @@ mod tests {
         let first = Uuid::from_u128(9);
         let second = Uuid::from_u128(10);
         let first_intents = [
+            NetworkPlanIntent::AddressRealm {
+                realm_id: Uuid::from_u128(1),
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("realm prefix"),
+                gateway: Ipv4Addr::new(10, 0, 0, 1),
+            },
             NetworkPlanIntent::AddressAssignment {
                 endpoint_id: first,
                 address: Ipv4Addr::new(10, 0, 0, 2),
                 generation: 1,
             },
-            public_intents(first)[0].clone(),
+            public_intents(first)[1].clone(),
         ];
         provider.apply(&first_intents).expect("first binding");
         let second_intents = [
+            NetworkPlanIntent::AddressRealm {
+                realm_id: Uuid::from_u128(2),
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("realm prefix"),
+                gateway: Ipv4Addr::new(10, 0, 0, 1),
+            },
             NetworkPlanIntent::AddressAssignment {
                 endpoint_id: second,
                 address: Ipv4Addr::new(10, 0, 0, 3),
@@ -1291,6 +1381,90 @@ mod tests {
             Err(PublicAddressError::ProviderCommandFailed)
         ));
         assert!(root.join("ownership").exists());
+    }
+
+    #[test]
+    fn overlapping_private_addresses_remain_realm_scoped() {
+        let root = std::env::temp_dir().join(format!("o3k-public-provider-{}", Uuid::now_v7()));
+        let command = Arc::new(FakePublicCommand {
+            calls: Mutex::new(Vec::new()),
+            listing: String::new(),
+            interface_listing: String::new(),
+            fail_on: None,
+        });
+        let mut provider = PublicAddressRealizer::with_command(
+            &root,
+            "eth0".to_owned(),
+            Arc::clone(&command) as Arc<dyn PublicCommand>,
+        )
+        .expect("provider");
+        let endpoint_a = Uuid::from_u128(20);
+        let endpoint_b = Uuid::from_u128(21);
+        let realm_a = Uuid::from_u128(30);
+        let realm_b = Uuid::from_u128(31);
+        let realm_intent = |realm_id| NetworkPlanIntent::AddressRealm {
+            realm_id,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24).expect("realm prefix"),
+            gateway: Ipv4Addr::new(10, 0, 0, 1),
+        };
+        let binding_intent = |endpoint_id, public_address| {
+            NetworkPlanIntent::PublicAddressBinding(o3k_domain::PublicAddressBindingIntent {
+                id: Uuid::now_v7(),
+                project_id: "project-a".to_owned(),
+                public_address,
+                endpoint_id,
+                generation: 1,
+            })
+        };
+        provider
+            .apply(&[
+                realm_intent(realm_a),
+                NetworkPlanIntent::AddressAssignment {
+                    endpoint_id: endpoint_a,
+                    address: Ipv4Addr::new(10, 0, 0, 10),
+                    generation: 1,
+                },
+                binding_intent(endpoint_a, Ipv4Addr::new(198, 51, 100, 2)),
+            ])
+            .expect("realm A binding");
+        provider
+            .apply(&[
+                realm_intent(realm_b),
+                NetworkPlanIntent::AddressAssignment {
+                    endpoint_id: endpoint_b,
+                    address: Ipv4Addr::new(10, 0, 0, 10),
+                    generation: 1,
+                },
+                binding_intent(endpoint_b, Ipv4Addr::new(198, 51, 100, 3)),
+            ])
+            .expect("realm B binding");
+
+        assert_eq!(provider.owned_bindings.len(), 2);
+        assert!(
+            provider
+                .owned_bindings
+                .iter()
+                .any(|binding| binding.realm_id == realm_a && binding.endpoint_id == endpoint_a)
+        );
+        assert!(
+            provider
+                .owned_bindings
+                .iter()
+                .any(|binding| binding.realm_id == realm_b && binding.endpoint_id == endpoint_b)
+        );
+        let calls = command.calls.lock().expect("calls");
+        assert!(calls.iter().any(|call| {
+            call.iter().any(|value| value == "198.51.100.2")
+                && call
+                    .iter()
+                    .any(|value| value.contains(&realm_a.to_string()))
+        }));
+        assert!(calls.iter().any(|call| {
+            call.iter().any(|value| value == "198.51.100.3")
+                && call
+                    .iter()
+                    .any(|value| value.contains(&realm_b.to_string()))
+        }));
     }
 
     #[test]

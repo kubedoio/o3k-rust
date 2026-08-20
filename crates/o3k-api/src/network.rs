@@ -1208,9 +1208,9 @@ fn public_error(error: PublicAddressError) -> axum::response::Response {
         | PublicAddressError::AssociationConflict
         | PublicAddressError::InUse
         | PublicAddressError::Exhausted => (StatusCode::CONFLICT, "Conflict"),
-        PublicAddressError::InvalidPool | PublicAddressError::MissingEndpoint => {
-            (StatusCode::BAD_REQUEST, "Bad Request")
-        }
+        PublicAddressError::InvalidPool
+        | PublicAddressError::MissingEndpoint
+        | PublicAddressError::MissingRealm => (StatusCode::BAD_REQUEST, "Bad Request"),
         PublicAddressError::CorruptState
         | PublicAddressError::Storage(_)
         | PublicAddressError::ForeignProviderState
