@@ -574,6 +574,48 @@ impl LinuxP11FabricBackend {
             self.state.realms.insert(plan.realm_id, ownership.clone());
             store_state(&self.state_path, &self.state)?;
         }
+        let tenant_mtu = plan.tenant_mtu.to_string();
+        let fabric_mtu = plan.local_fabric_mtu.to_string();
+        for interface in [&ownership.bridge, &ownership.host_veth] {
+            if !self
+                .command
+                .run("ip", &["link", "set", "dev", interface, "mtu", &tenant_mtu])
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for (namespace, interface, mtu) in [
+            (
+                ownership.namespace.as_str(),
+                ownership.realm_veth.as_str(),
+                tenant_mtu.as_str(),
+            ),
+            (
+                ownership.namespace.as_str(),
+                ownership.fabric_veth.as_str(),
+                fabric_mtu.as_str(),
+            ),
+            (
+                self.config.fabric_namespace.as_str(),
+                ownership.fabric_realm_veth.as_str(),
+                fabric_mtu.as_str(),
+            ),
+        ] {
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "ip", "link", "set", "dev", interface, "mtu",
+                        mtu,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
         self.realize_routes(plan, &ownership)
     }
 
@@ -701,6 +743,28 @@ impl LinuxP11FabricBackend {
                     .get(target_host)
                     .is_none_or(|existing| existing.realized)
             {
+                let tenant_mtu = plan.tenant_mtu.to_string();
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "set",
+                            "dev",
+                            &wanted.interface,
+                            "mtu",
+                            &tenant_mtu,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
                 continue;
             }
         }
@@ -780,6 +844,28 @@ impl LinuxP11FabricBackend {
             {
                 return Err(LinuxP11Error::CommandFailed);
             }
+            let tenant_mtu = plan.tenant_mtu.to_string();
+            if !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "link",
+                        "set",
+                        "dev",
+                        &wanted.interface,
+                        "mtu",
+                        &tenant_mtu,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
             if let Some(realized) = self
                 .state
                 .realms
@@ -834,7 +920,7 @@ impl LinuxP11FabricBackend {
                             "nud",
                             "permanent",
                             "dev",
-                            &ownership.realm_veth,
+                            &ownership.fabric_veth,
                         ],
                     )
                     .map_err(LinuxP11Error::Storage)?
@@ -1478,6 +1564,18 @@ mod tests {
         assert!(!calls.iter().any(|(_, args)| {
             args.windows(2)
                 .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
+        }));
+        let ownership = provider.realm_ownership(&plan());
+        let proxy_mac = plan().proxy_mac;
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(4)
+                    .any(|window| window == ["lladdr", proxy_mac.as_str(), "nud", "permanent"])
+                && args.last() == Some(&ownership.fabric_veth)
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
         }));
         let _ = fs::remove_dir_all(root);
     }
