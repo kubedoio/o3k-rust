@@ -159,11 +159,22 @@ where
                     %reason,
                     "network mutation outcome is unknown"
                 );
+                let code = reason
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .take(120)
+                    .collect::<String>();
                 return Ok(CommandResult {
                     command_id: command.command_id.clone(),
                     status: "unknown".to_owned(),
                     replayed: false,
-                    error_code: "mutation_outcome_unknown".to_owned(),
+                    error_code: code,
                 });
             }
             Err(error) => {

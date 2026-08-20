@@ -201,6 +201,7 @@ impl NetworkPlanExecutor {
         if journal.plans.iter().any(|existing| {
             existing.operation_id == command.operation_id
                 && existing.plan.plan_id == command.plan.plan_id
+                && existing.action == command.action
         }) {
             return Err(NetworkExecutionError::ConflictingReplay);
         }
