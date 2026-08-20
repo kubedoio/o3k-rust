@@ -345,6 +345,16 @@ impl NamespacedRoutedFabricPlan {
         Ok(self)
     }
 
+    /// Replaces the canonical public-address snapshot for this realm.
+    pub fn with_public_snapshot(
+        mut self,
+        bindings: Vec<PublicAddressBindingIntent>,
+    ) -> Result<Self, EndpointDirectoryError> {
+        validate_public_bindings(&self.directory, &bindings)?;
+        self.public_bindings = bindings;
+        Ok(self)
+    }
+
     fn validate_packet_binding(
         &self,
         packet: &GenevePacketMetadata,
@@ -606,6 +616,11 @@ pub struct NamespacedRoutedFabricPlan {
     pub policy_generation: u64,
     #[serde(default)]
     pub policies: Vec<PolicyIntent>,
+    /// Canonical public-address bindings admitted for this realm. Public
+    /// addresses are provider input; the provider derives all NAT state and
+    /// never keys tenant ownership by private IP alone.
+    #[serde(default)]
+    pub public_bindings: Vec<PublicAddressBindingIntent>,
     pub routes: Vec<FabricEndpointRoute>,
     pub peers: Vec<FabricPeer>,
 }
@@ -646,6 +661,29 @@ pub enum EndpointDirectoryError {
     InvalidMtu,
     #[error("NetworkPolicy snapshot is invalid or references an unknown endpoint")]
     InvalidPolicy,
+}
+
+fn validate_public_bindings(
+    directory: &RealmEndpointDirectory,
+    bindings: &[PublicAddressBindingIntent],
+) -> Result<(), EndpointDirectoryError> {
+    let mut public_addresses = std::collections::BTreeSet::new();
+    let mut endpoints = std::collections::BTreeSet::new();
+    for binding in bindings {
+        if binding.id.is_nil()
+            || binding.project_id.is_empty()
+            || binding.generation == 0
+            || binding.public_address.is_unspecified()
+            || !directory
+                .location(binding.endpoint_id)
+                .is_some_and(|endpoint| endpoint.project_id == binding.project_id)
+            || !public_addresses.insert(binding.public_address)
+            || !endpoints.insert(binding.endpoint_id)
+        {
+            return Err(EndpointDirectoryError::InvalidPolicy);
+        }
+    }
+    Ok(())
 }
 
 impl RealmEndpointDirectory {
@@ -865,6 +903,7 @@ impl RealmEndpointDirectory {
             tenant_mtu,
             policy_generation: default_policy_generation(),
             policies: Vec::new(),
+            public_bindings: Vec::new(),
             routes,
             peers,
         })
@@ -1158,6 +1197,26 @@ mod endpoint_directory_tests {
         assert_eq!(plan.routes.len(), 1);
         assert_eq!(plan.peers.len(), 1);
         assert_eq!(plan.peers[0].host_id, "host-07");
+        let public_binding = PublicAddressBindingIntent {
+            id: Uuid::from_u128(200),
+            project_id: "project-a".to_owned(),
+            public_address: Ipv4Addr::new(203, 0, 113, 10),
+            endpoint_id: Uuid::from_u128(1),
+            generation: 1,
+        };
+        let plan = plan
+            .clone()
+            .with_public_snapshot(vec![public_binding.clone()])
+            .expect("public binding snapshot");
+        assert_eq!(plan.public_bindings, vec![public_binding]);
+        let mut foreign = plan.clone();
+        foreign.public_bindings[0].project_id = "project-b".to_owned();
+        assert_eq!(
+            foreign
+                .clone()
+                .with_public_snapshot(foreign.public_bindings.clone()),
+            Err(EndpointDirectoryError::InvalidPolicy)
+        );
         assert_eq!(
             plan.peers[0].fabric_transport_ip,
             Ipv4Addr::new(198, 18, 0, 7)

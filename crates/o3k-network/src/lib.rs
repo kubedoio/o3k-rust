@@ -286,6 +286,7 @@ mod p9_plan_tests {
             tenant_mtu: 1400,
             policy_generation: 1,
             policies: Vec::new(),
+            public_bindings: Vec::new(),
             routes: vec![FabricEndpointRoute {
                 realm_id: Uuid::from_u128(2),
                 destination,
@@ -3770,6 +3771,25 @@ impl NodeNetworkPlan {
                     .entries
                     .iter()
                     .all(|entry| entry.endpoint_id != policy.endpoint_id)
+            {
+                return Err(NetworkPlanError::InvalidFabricPlan);
+            }
+        }
+        let mut public_ids = BTreeSet::new();
+        let mut public_addresses = BTreeSet::new();
+        let mut public_endpoints = BTreeSet::new();
+        for binding in &fabric.public_bindings {
+            if binding.id.is_nil()
+                || binding.project_id.is_empty()
+                || binding.generation == 0
+                || binding.public_address.is_unspecified()
+                || !public_ids.insert(binding.id)
+                || !public_addresses.insert(binding.public_address)
+                || !public_endpoints.insert(binding.endpoint_id)
+                || !fabric
+                    .directory
+                    .location(binding.endpoint_id)
+                    .is_some_and(|endpoint| endpoint.project_id == binding.project_id)
             {
                 return Err(NetworkPlanError::InvalidFabricPlan);
             }
