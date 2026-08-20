@@ -15,6 +15,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::{self, Write},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -23,6 +24,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 const STATE_VERSION: u32 = 2;
+const P11_PUBLIC_MARKER: &str = "o3k-p11-public";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxP11Config {
@@ -31,6 +33,7 @@ pub struct LinuxP11Config {
     pub fabric_interface: String,
     pub wireguard_port: u16,
     pub geneve_port: u16,
+    pub public_uplink: Option<String>,
 }
 
 impl LinuxP11Config {
@@ -42,7 +45,14 @@ impl LinuxP11Config {
             fabric_interface: "wg-o3k".to_owned(),
             wireguard_port: 51_820,
             geneve_port: 6_081,
+            public_uplink: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_public_uplink(mut self, uplink: impl Into<String>) -> Self {
+        self.public_uplink = Some(uplink.into());
+        self
     }
 
     fn validate(&self) -> Result<(), LinuxP11Error> {
@@ -52,6 +62,10 @@ impl LinuxP11Config {
             || !valid_name(&self.fabric_interface)
             || self.wireguard_port == 0
             || self.geneve_port == 0
+            || self
+                .public_uplink
+                .as_deref()
+                .is_some_and(|uplink| !valid_name(uplink))
         {
             return Err(LinuxP11Error::InvalidConfiguration);
         }
@@ -123,6 +137,10 @@ struct RealmOwnership {
     fabric_veth: String,
     fabric_realm_veth: String,
     #[serde(default)]
+    public_host_veth: String,
+    #[serde(default)]
+    public_realm_veth: String,
+    #[serde(default)]
     geneve: BTreeMap<String, GeneveOwnership>,
     /// One isolated L2 attachment exists for every remote target host.  The
     /// shared fabric namespace therefore never needs a tenant-IP route table;
@@ -137,6 +155,16 @@ struct RealmOwnership {
     policy_generation: u64,
     #[serde(default)]
     policy_fingerprint: String,
+    #[serde(default)]
+    public_generation: u64,
+    #[serde(default)]
+    public_fingerprint: String,
+    #[serde(default)]
+    public_mark: u32,
+    #[serde(default)]
+    public_route_table: u32,
+    #[serde(default)]
+    public_addresses: Vec<Ipv4Addr>,
     directory_generation: u64,
     local_fabric_generation: u64,
 }
@@ -325,6 +353,12 @@ impl LinuxP11FabricBackend {
             if ownership.policy_generation == 0 && !ownership.policy_fingerprint.is_empty() {
                 return Err(LinuxP11Error::CorruptState);
             }
+            if ownership.public_generation == 0 && !ownership.public_fingerprint.is_empty()
+                || ownership.public_generation != 0
+                    && (ownership.public_mark == 0 || ownership.public_route_table == 0)
+            {
+                return Err(LinuxP11Error::CorruptState);
+            }
         }
         Ok(())
     }
@@ -339,12 +373,19 @@ impl LinuxP11FabricBackend {
             realm_veth: format!("o3k-n-{}", &suffix[..8]),
             fabric_veth: format!("o3k-f-{}", &suffix[..8]),
             fabric_realm_veth: format!("o3k-x-{}", &suffix[..8]),
+            public_host_veth: format!("o3k-p-{}", &suffix[..8]),
+            public_realm_veth: format!("o3k-q-{}", &suffix[..8]),
             geneve: BTreeMap::new(),
             attachments: BTreeMap::new(),
             endpoint_taps: BTreeMap::new(),
             pending_endpoint_taps: BTreeMap::new(),
             policy_generation: 0,
             policy_fingerprint: String::new(),
+            public_generation: 0,
+            public_fingerprint: String::new(),
+            public_mark: 0,
+            public_route_table: 0,
+            public_addresses: Vec::new(),
             directory_generation: plan.directory_generation,
             local_fabric_generation: plan.local_fabric_generation,
         }
@@ -502,6 +543,17 @@ impl LinuxP11FabricBackend {
             ownership.pending_endpoint_taps = existing.pending_endpoint_taps.clone();
             ownership.policy_generation = existing.policy_generation;
             ownership.policy_fingerprint = existing.policy_fingerprint.clone();
+            if !existing.public_host_veth.is_empty() {
+                ownership.public_host_veth = existing.public_host_veth.clone();
+            }
+            if !existing.public_realm_veth.is_empty() {
+                ownership.public_realm_veth = existing.public_realm_veth.clone();
+            }
+            ownership.public_generation = existing.public_generation;
+            ownership.public_fingerprint = existing.public_fingerprint.clone();
+            ownership.public_mark = existing.public_mark;
+            ownership.public_route_table = existing.public_route_table;
+            ownership.public_addresses = existing.public_addresses.clone();
         }
         if let Some(existing) = self.state.realms.get(&plan.realm_id)
             && (existing.namespace != ownership.namespace
@@ -510,6 +562,8 @@ impl LinuxP11FabricBackend {
                 || existing.realm_veth != ownership.realm_veth
                 || existing.fabric_veth != ownership.fabric_veth
                 || existing.fabric_realm_veth != ownership.fabric_realm_veth
+                || existing.public_host_veth != ownership.public_host_veth
+                || existing.public_realm_veth != ownership.public_realm_veth
                 || plan.directory_generation < existing.directory_generation
                 || plan.local_fabric_generation < existing.local_fabric_generation)
         {
@@ -1735,6 +1789,672 @@ impl LinuxP11FabricBackend {
         Ok(())
     }
 
+    fn ensure_public(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        if plan.public_bindings.is_empty() {
+            return self.remove_public(plan);
+        }
+        let uplink = self
+            .config
+            .public_uplink
+            .as_deref()
+            .ok_or(LinuxP11Error::InvalidConfiguration)?;
+        validate_public_plan(plan)?;
+        if self.state.realms.iter().any(|(realm_id, ownership)| {
+            *realm_id != plan.realm_id
+                && plan
+                    .public_bindings
+                    .iter()
+                    .any(|binding| ownership.public_addresses.contains(&binding.public_address))
+        }) {
+            return Err(LinuxP11Error::OwnershipConflict);
+        }
+        let current = self
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .cloned()
+            .ok_or(LinuxP11Error::CorruptState)?;
+        let fingerprint = public_fingerprint(plan);
+        let mark = public_mark(plan.realm_id);
+        let route_table = public_route_table(plan.realm_id);
+        let root_table = public_root_table_name(plan.realm_id);
+        let realm_table = public_realm_table_name(plan.realm_id);
+        let (root_table_exists, root_listing) = self
+            .command
+            .output("nft", &["list", "table", "ip", &root_table])
+            .map_err(LinuxP11Error::Storage)?;
+        if root_table_exists && !root_listing.contains(P11_PUBLIC_MARKER) {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        let (realm_table_exists, realm_listing) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    &current.namespace,
+                    "nft",
+                    "list",
+                    "table",
+                    "ip",
+                    &realm_table,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if realm_table_exists && !realm_listing.contains(P11_PUBLIC_MARKER) {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        let mut next = current.clone();
+        next.public_generation = plan
+            .public_bindings
+            .iter()
+            .map(|binding| binding.generation)
+            .max()
+            .ok_or(LinuxP11Error::OwnershipConflict)?;
+        next.public_fingerprint = fingerprint.clone();
+        next.public_mark = mark;
+        next.public_route_table = route_table;
+        next.public_addresses = plan
+            .public_bindings
+            .iter()
+            .map(|binding| binding.public_address)
+            .collect();
+        self.state.realms.insert(plan.realm_id, next.clone());
+        store_state(&self.state_path, &self.state)?;
+
+        self.ensure_public_veth(&next)?;
+        let (root_transit, realm_transit) = public_transit_addresses(plan.realm_id);
+        for args in [
+            vec![
+                "addr",
+                "replace",
+                &format!("{root_transit}/30"),
+                "dev",
+                next.public_host_veth.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                next.namespace.as_str(),
+                "ip",
+                "addr",
+                "replace",
+                &format!("{realm_transit}/30"),
+                "dev",
+                next.public_realm_veth.as_str(),
+            ],
+            vec![
+                "netns",
+                "exec",
+                next.namespace.as_str(),
+                "ip",
+                "route",
+                "replace",
+                "default",
+                "via",
+                &root_transit.to_string(),
+                "dev",
+                next.public_realm_veth.as_str(),
+            ],
+        ] {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for binding in &plan.public_bindings {
+            let address = format!("{}/32", binding.public_address);
+            let public_string = binding.public_address.to_string();
+            for args in [
+                vec![
+                    "route",
+                    "replace",
+                    "table",
+                    &route_table.to_string(),
+                    address.as_str(),
+                    "via",
+                    &realm_transit.to_string(),
+                    "dev",
+                    next.public_host_veth.as_str(),
+                ],
+                vec![
+                    "neigh",
+                    "replace",
+                    "proxy",
+                    public_string.as_str(),
+                    "dev",
+                    uplink,
+                ],
+            ] {
+                if !self
+                    .command
+                    .run("ip", &args)
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
+        }
+        for key in [
+            "net.ipv4.ip_forward=1".to_owned(),
+            format!("net.ipv4.conf.{uplink}.proxy_arp=1"),
+        ] {
+            if !self
+                .command
+                .run("sysctl", &["-w", key.as_str()])
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        let rule_listing = self
+            .command
+            .output("ip", &["rule", "list"])
+            .map_err(LinuxP11Error::Storage)?;
+        let rule = format!("fwmark {mark} lookup {route_table}");
+        if (!rule_listing.0 || !rule_listing.1.contains(&rule))
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "rule",
+                        "add",
+                        "fwmark",
+                        &mark.to_string(),
+                        "table",
+                        &route_table.to_string(),
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        if root_table_exists
+            && !self
+                .command
+                .run("nft", &["delete", "table", "ip", &root_table])
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        if realm_table_exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        next.namespace.as_str(),
+                        "nft",
+                        "delete",
+                        "table",
+                        "ip",
+                        &realm_table,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let marker = format!("\"{P11_PUBLIC_MARKER}:{fingerprint}\"");
+        for args in [
+            vec![
+                "add",
+                "table",
+                "ip",
+                root_table.as_str(),
+                "{",
+                "comment",
+                marker.as_str(),
+                ";",
+                "}",
+            ],
+            vec![
+                "add",
+                "chain",
+                "ip",
+                root_table.as_str(),
+                "prerouting",
+                "{",
+                "type",
+                "filter",
+                "hook",
+                "prerouting",
+                "priority",
+                "-150",
+                ";",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
+        ] {
+            if !self
+                .command
+                .run("nft", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for binding in &plan.public_bindings {
+            let public_address = binding.public_address.to_string();
+            let comment = format!(
+                "\"{P11_PUBLIC_MARKER}:{}:{}\"",
+                plan.realm_id, binding.endpoint_id
+            );
+            if !self
+                .command
+                .run(
+                    "nft",
+                    &[
+                        "add",
+                        "rule",
+                        "ip",
+                        &root_table,
+                        "prerouting",
+                        "iifname",
+                        uplink,
+                        "ip",
+                        "daddr",
+                        &public_address,
+                        "meta",
+                        "mark",
+                        "set",
+                        &mark.to_string(),
+                        "comment",
+                        &comment,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for args in [
+            vec![
+                "netns",
+                "exec",
+                next.namespace.as_str(),
+                "nft",
+                "add",
+                "table",
+                "ip",
+                realm_table.as_str(),
+                "{",
+                "comment",
+                marker.as_str(),
+                ";",
+                "}",
+            ],
+            vec![
+                "netns",
+                "exec",
+                next.namespace.as_str(),
+                "nft",
+                "add",
+                "chain",
+                "ip",
+                realm_table.as_str(),
+                "prerouting",
+                "{",
+                "type",
+                "nat",
+                "hook",
+                "prerouting",
+                "priority",
+                "-100",
+                ";",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
+            vec![
+                "netns",
+                "exec",
+                next.namespace.as_str(),
+                "nft",
+                "add",
+                "chain",
+                "ip",
+                realm_table.as_str(),
+                "postrouting",
+                "{",
+                "type",
+                "nat",
+                "hook",
+                "postrouting",
+                "priority",
+                "100",
+                ";",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
+        ] {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for binding in &plan.public_bindings {
+            let endpoint = plan
+                .directory
+                .location(binding.endpoint_id)
+                .ok_or(LinuxP11Error::OwnershipConflict)?;
+            let public_address = binding.public_address.to_string();
+            let private_address = endpoint.fixed_ip.to_string();
+            let comment = format!(
+                "\"{P11_PUBLIC_MARKER}:{}:{}\"",
+                plan.realm_id, binding.endpoint_id
+            );
+            for args in [
+                vec![
+                    "netns",
+                    "exec",
+                    next.namespace.as_str(),
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    realm_table.as_str(),
+                    "prerouting",
+                    "ip",
+                    "daddr",
+                    public_address.as_str(),
+                    "dnat",
+                    "to",
+                    private_address.as_str(),
+                    "comment",
+                    comment.as_str(),
+                ],
+                vec![
+                    "netns",
+                    "exec",
+                    next.namespace.as_str(),
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    realm_table.as_str(),
+                    "postrouting",
+                    "oifname",
+                    next.public_realm_veth.as_str(),
+                    "ip",
+                    "saddr",
+                    private_address.as_str(),
+                    "snat",
+                    "to",
+                    public_address.as_str(),
+                    "comment",
+                    comment.as_str(),
+                ],
+            ] {
+                if !self
+                    .command
+                    .run("ip", &args)
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_public_veth(&self, ownership: &RealmOwnership) -> Result<(), LinuxP11Error> {
+        let (host_exists, _) = self
+            .command
+            .output("ip", &["link", "show", "dev", &ownership.public_host_veth])
+            .map_err(LinuxP11Error::Storage)?;
+        let (realm_exists, _) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    &ownership.namespace,
+                    "ip",
+                    "link",
+                    "show",
+                    "dev",
+                    &ownership.public_realm_veth,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if host_exists != realm_exists {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if !host_exists {
+            for args in [
+                vec![
+                    "link",
+                    "add",
+                    &ownership.public_host_veth,
+                    "type",
+                    "veth",
+                    "peer",
+                    "name",
+                    &ownership.public_realm_veth,
+                ],
+                vec![
+                    "link",
+                    "set",
+                    &ownership.public_realm_veth,
+                    "netns",
+                    &ownership.namespace,
+                ],
+                vec!["link", "set", "dev", &ownership.public_host_veth, "up"],
+                vec![
+                    "netns",
+                    "exec",
+                    &ownership.namespace,
+                    "ip",
+                    "link",
+                    "set",
+                    "dev",
+                    &ownership.public_realm_veth,
+                    "up",
+                ],
+            ] {
+                if !self
+                    .command
+                    .run("ip", &args)
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_public(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
+            return Ok(());
+        };
+        if current.public_fingerprint.is_empty() {
+            return Ok(());
+        }
+        let uplink = self
+            .config
+            .public_uplink
+            .as_deref()
+            .ok_or(LinuxP11Error::InvalidConfiguration)?;
+        let root_table = public_root_table_name(plan.realm_id);
+        let realm_table = public_realm_table_name(plan.realm_id);
+        let (root_exists, root_listing) = self
+            .command
+            .output("nft", &["list", "table", "ip", &root_table])
+            .map_err(LinuxP11Error::Storage)?;
+        if root_exists && !root_listing.contains(P11_PUBLIC_MARKER) {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if root_exists
+            && !self
+                .command
+                .run("nft", &["delete", "table", "ip", &root_table])
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let realm_list_args = [
+            "netns",
+            "exec",
+            current.namespace.as_str(),
+            "nft",
+            "list",
+            "table",
+            "ip",
+            realm_table.as_str(),
+        ];
+        let (realm_exists, realm_listing) = self
+            .command
+            .output("ip", &realm_list_args)
+            .map_err(LinuxP11Error::Storage)?;
+        if realm_exists && !realm_listing.contains(P11_PUBLIC_MARKER) {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if realm_exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        current.namespace.as_str(),
+                        "nft",
+                        "delete",
+                        "table",
+                        "ip",
+                        &realm_table,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let route_listing = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "route",
+                    "show",
+                    "table",
+                    &current.public_route_table.to_string(),
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if route_listing.0 {
+            let public_addresses = if current.public_addresses.is_empty() {
+                plan.public_bindings
+                    .iter()
+                    .map(|binding| binding.public_address)
+                    .collect::<Vec<_>>()
+            } else {
+                current.public_addresses.clone()
+            };
+            for public_address in public_addresses {
+                let address = format!("{public_address}/32");
+                if route_listing.1.contains(&address)
+                    && !self
+                        .command
+                        .run(
+                            "ip",
+                            &[
+                                "route",
+                                "del",
+                                "table",
+                                &current.public_route_table.to_string(),
+                                &address,
+                                "dev",
+                                &current.public_host_veth,
+                            ],
+                        )
+                        .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "neigh",
+                            "del",
+                            "proxy",
+                            &public_address.to_string(),
+                            "dev",
+                            uplink,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(LinuxP11Error::CommandFailed);
+                }
+            }
+        }
+        let rule_listing = self
+            .command
+            .output("ip", &["rule", "list"])
+            .map_err(LinuxP11Error::Storage)?;
+        if rule_listing.0
+            && rule_listing
+                .1
+                .contains(&format!("fwmark {}", current.public_mark))
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "rule",
+                        "del",
+                        "fwmark",
+                        &current.public_mark.to_string(),
+                        "table",
+                        &current.public_route_table.to_string(),
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let (host_exists, _) = self
+            .command
+            .output("ip", &["link", "show", "dev", &current.public_host_veth])
+            .map_err(LinuxP11Error::Storage)?;
+        if host_exists
+            && !self
+                .command
+                .run("ip", &["link", "del", &current.public_host_veth])
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let mut cleared = current;
+        cleared.public_generation = 0;
+        cleared.public_fingerprint.clear();
+        cleared.public_mark = 0;
+        cleared.public_route_table = 0;
+        cleared.public_addresses.clear();
+        self.state.realms.insert(plan.realm_id, cleared);
+        store_state(&self.state_path, &self.state)
+    }
+
     fn remove_policy(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
             return Ok(());
@@ -2024,6 +2744,7 @@ impl LinuxP11FabricBackend {
 impl P11FabricBackend for LinuxP11FabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
         validate_policy_plan(plan)?;
+        validate_public_plan(plan)?;
         self.ensure_fabric(plan)?;
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
@@ -2031,6 +2752,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         self.ensure_geneve(plan)?;
         self.ensure_endpoint_taps(plan)?;
         self.ensure_policy(plan)?;
+        self.ensure_public(plan)?;
         let ownership = self
             .state
             .realms
@@ -2051,6 +2773,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         {
             return Err(P11FabricError::StaleGeneration);
         }
+        self.remove_public(plan)?;
         self.remove_policy(plan)?;
         for tap in ownership.endpoint_taps.values() {
             self.remove_endpoint_tap(tap, &ownership.bridge)?;
@@ -2205,6 +2928,14 @@ fn policy_table_name(realm_id: Uuid) -> String {
     provider_name("p", realm_id, "policy")
 }
 
+fn public_root_table_name(realm_id: Uuid) -> String {
+    provider_name("u", realm_id, "public")
+}
+
+fn public_realm_table_name(realm_id: Uuid) -> String {
+    provider_name("n", realm_id, "public")
+}
+
 fn policy_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
     let bytes = serde_json::to_vec(&(plan.policy_generation, &plan.policies)).unwrap_or_default();
     format!("{:x}", Sha256::digest(bytes))
@@ -2233,6 +2964,29 @@ fn validate_policy_plan(plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP1
     Ok(())
 }
 
+fn validate_public_plan(plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+    let mut ids = BTreeSet::new();
+    let mut addresses = BTreeSet::new();
+    let mut endpoints = BTreeSet::new();
+    for binding in &plan.public_bindings {
+        if binding.id.is_nil()
+            || binding.project_id.is_empty()
+            || binding.generation == 0
+            || binding.public_address.is_unspecified()
+            || !ids.insert(binding.id)
+            || !addresses.insert(binding.public_address)
+            || !endpoints.insert(binding.endpoint_id)
+            || !plan
+                .directory
+                .location(binding.endpoint_id)
+                .is_some_and(|endpoint| endpoint.project_id == binding.project_id)
+        {
+            return Err(LinuxP11Error::OwnershipConflict);
+        }
+    }
+    Ok(())
+}
+
 fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str> {
     match protocol {
         NetworkProtocol::Any => None,
@@ -2240,6 +2994,27 @@ fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str> {
         NetworkProtocol::Udp => Some("udp"),
         NetworkProtocol::Icmp => Some("icmp"),
     }
+}
+
+fn public_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
+    let bytes = serde_json::to_vec(&plan.public_bindings).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn public_mark(realm_id: Uuid) -> u32 {
+    let digest = Sha256::digest(realm_id.as_bytes());
+    u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) | 1
+}
+
+fn public_route_table(realm_id: Uuid) -> u32 {
+    20_000 + (public_mark(realm_id) % 10_000)
+}
+
+fn public_transit_addresses(realm_id: Uuid) -> (Ipv4Addr, Ipv4Addr) {
+    let digest = Sha256::digest(realm_id.as_bytes());
+    let subnet = u16::from_be_bytes([digest[0], digest[1]]) % 16_000;
+    let base = 0x6440_0000u32 + u32::from(subnet) * 4;
+    (Ipv4Addr::from(base + 1), Ipv4Addr::from(base + 2))
 }
 
 fn geneve_bridge_name(realm_id: Uuid, target_host: &str) -> String {
@@ -2400,7 +3175,7 @@ mod tests {
     use o3k_domain::{
         AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
         NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
-        RealmEncapsulationBinding, RealmEndpointDirectory,
+        PublicAddressBindingIntent, RealmEncapsulationBinding, RealmEndpointDirectory,
     };
     use std::{os::unix::fs::PermissionsExt, sync::Mutex};
 
@@ -2688,6 +3463,56 @@ mod tests {
                 .expect("calls")
                 .is_empty()
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_realizes_realm_scoped_public_binding_without_bare_ip_nat() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider = LinuxP11FabricBackend::with_command(
+            LinuxP11Config::for_root(&root).with_public_uplink("eth-public"),
+            command,
+        )
+        .expect("provider");
+        let current = plan()
+            .with_public_snapshot(vec![PublicAddressBindingIntent {
+                id: Uuid::from_u128(15),
+                project_id: "project-a".to_owned(),
+                public_address: "203.0.113.10".parse().expect("ip"),
+                endpoint_id: Uuid::from_u128(12),
+                generation: 4,
+            }])
+            .expect("public plan");
+        provider.apply(&current).expect("apply");
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "dnat")
+                && args.iter().any(|arg| arg == "10.40.1.12")
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "snat")
+                && args.iter().any(|arg| arg == "203.0.113.10")
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.iter().any(|arg| arg == "meta")
+                && args.iter().any(|arg| arg == "mark")
+        }));
+        let ownership = provider.state.realms.get(&current.realm_id).expect("realm");
+        assert_eq!(
+            ownership.public_addresses,
+            vec!["203.0.113.10".parse::<Ipv4Addr>().expect("ip")]
+        );
+        drop(calls);
+        provider.remove(&current).expect("remove");
+        assert!(provider.observe_removed(&current).expect("removed"));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -119,7 +119,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let p11 = match env::var("O3K_NETWORK_P11_ROOT") {
         Ok(root) => Some(P11FabricRealizer::new(
-            o3k_network::LinuxP11FabricBackend::open(o3k_network::LinuxP11Config::for_root(root))?,
+            o3k_network::LinuxP11FabricBackend::open(
+                o3k_network::LinuxP11Config::for_root(root)
+                    .with_public_uplink(required("O3K_NETWORK_UPLINK")?),
+            )?,
         )),
         Err(_) => None,
     };
@@ -188,7 +191,7 @@ impl NetworkPlanRealizer for CompositeRealizer {
         if plan.p11_fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
-                    || is_public_intent(intent)
+                    || (is_public_intent(intent) && !p11_public_intents_match(plan))
                     || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
             }) {
                 return Err(CompositeRealizerError::P11UnsupportedIntent);
@@ -228,7 +231,7 @@ impl NetworkPlanRealizer for CompositeRealizer {
         if plan.p11_fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
-                    || is_public_intent(intent)
+                    || (is_public_intent(intent) && !p11_public_intents_match(plan))
                     || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
             }) {
                 return Err(CompositeRealizerError::P11UnsupportedIntent);
@@ -337,6 +340,21 @@ fn p11_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
         })
         .collect::<Vec<_>>();
     policies == fabric.policies
+}
+
+fn p11_public_intents_match(plan: &NodeNetworkPlan) -> bool {
+    let Some(fabric) = &plan.p11_fabric else {
+        return false;
+    };
+    let bindings = plan
+        .intents
+        .iter()
+        .filter_map(|intent| match intent {
+            NetworkPlanIntent::PublicAddressBinding(binding) => Some(binding.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    bindings == fabric.public_bindings
 }
 
 fn is_public_intent(intent: &NetworkPlanIntent) -> bool {
