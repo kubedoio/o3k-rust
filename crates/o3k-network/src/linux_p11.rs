@@ -126,8 +126,19 @@ struct RealmOwnership {
     /// overlapping realms are selected by their attachment and Geneve VNI.
     #[serde(default)]
     attachments: BTreeMap<String, FabricAttachmentOwnership>,
+    #[serde(default)]
+    endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
+    #[serde(default)]
+    pending_endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
     directory_generation: u64,
     local_fabric_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct EndpointTapOwnership {
+    endpoint_id: Uuid,
+    interface: String,
+    mac: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,6 +297,24 @@ impl LinuxP11FabricBackend {
                     return Err(LinuxP11Error::CorruptState);
                 }
             }
+            for (endpoint_id, tap) in &ownership.endpoint_taps {
+                if endpoint_id != &tap.endpoint_id
+                    || !valid_name(&tap.interface)
+                    || !valid_mac(&tap.mac)
+                    || !tap.interface.starts_with("o3k-t-")
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            for (endpoint_id, tap) in &ownership.pending_endpoint_taps {
+                if endpoint_id != &tap.endpoint_id
+                    || !valid_name(&tap.interface)
+                    || !valid_mac(&tap.mac)
+                    || !tap.interface.starts_with("o3k-t-")
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
         }
         Ok(())
     }
@@ -302,6 +331,8 @@ impl LinuxP11FabricBackend {
             fabric_realm_veth: format!("o3k-x-{}", &suffix[..8]),
             geneve: BTreeMap::new(),
             attachments: BTreeMap::new(),
+            endpoint_taps: BTreeMap::new(),
+            pending_endpoint_taps: BTreeMap::new(),
             directory_generation: plan.directory_generation,
             local_fabric_generation: plan.local_fabric_generation,
         }
@@ -455,6 +486,8 @@ impl LinuxP11FabricBackend {
         if let Some(existing) = self.state.realms.get(&plan.realm_id) {
             ownership.geneve = existing.geneve.clone();
             ownership.attachments = existing.attachments.clone();
+            ownership.endpoint_taps = existing.endpoint_taps.clone();
+            ownership.pending_endpoint_taps = existing.pending_endpoint_taps.clone();
         }
         if let Some(existing) = self.state.realms.get(&plan.realm_id)
             && (existing.namespace != ownership.namespace
@@ -1347,55 +1380,162 @@ impl LinuxP11FabricBackend {
                         ],
                     )
                     .map_err(LinuxP11Error::Storage)?
-            {
-                return Err(LinuxP11Error::CommandFailed);
-            }
-        }
-        for entry in &plan.directory.entries {
-            if entry.selected_host == plan.local_host {
-                let destination = format!("{}/32", entry.fixed_ip);
-                if !self
+                || !self
                     .command
                     .run(
                         "ip",
                         &[
                             "netns",
                             "exec",
-                            &self.config.fabric_namespace,
+                            &ownership.namespace,
                             "ip",
-                            "route",
+                            "neigh",
                             "replace",
-                            &destination,
+                            "proxy",
+                            &route.destination.network.to_string(),
                             "dev",
                             &ownership.realm_veth,
                         ],
                     )
                     .map_err(LinuxP11Error::Storage)?
-                    || !self
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_endpoint_taps(
+        &mut self,
+        plan: &NamespacedRoutedFabricPlan,
+    ) -> Result<(), LinuxP11Error> {
+        let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
+            return Err(LinuxP11Error::CorruptState);
+        };
+        let desired = plan
+            .directory
+            .entries
+            .iter()
+            .filter(|entry| entry.selected_host == plan.local_host)
+            .map(|entry| {
+                (
+                    entry.endpoint_id,
+                    EndpointTapOwnership {
+                        endpoint_id: entry.endpoint_id,
+                        interface: endpoint_tap_name(plan.realm_id, entry.endpoint_id),
+                        mac: entry.mac.clone(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        if !current.pending_endpoint_taps.is_empty() && current.pending_endpoint_taps != desired {
+            return Err(LinuxP11Error::OwnershipConflict);
+        }
+        if current.endpoint_taps != desired && current.pending_endpoint_taps.is_empty() {
+            let mut pending = current.clone();
+            pending.pending_endpoint_taps = desired.clone();
+            self.state.realms.insert(plan.realm_id, pending);
+            store_state(&self.state_path, &self.state)?;
+        }
+        for (endpoint_id, old) in &current.endpoint_taps {
+            if desired.contains_key(endpoint_id) {
+                continue;
+            }
+            self.remove_endpoint_tap(old, &current.bridge)?;
+        }
+        for wanted in desired.values() {
+            if let Some(existing) = current.endpoint_taps.get(&wanted.endpoint_id)
+                && existing != wanted
+            {
+                return Err(LinuxP11Error::OwnershipConflict);
+            }
+            let (exists, output) = self
+                .command
+                .output("ip", &["-d", "link", "show", "dev", &wanted.interface])
+                .map_err(LinuxP11Error::Storage)?;
+            if exists && !tap_link_matches(&output, wanted, &current.bridge) {
+                return Err(LinuxP11Error::ForeignState);
+            }
+            if exists
+                && !current.endpoint_taps.contains_key(&wanted.endpoint_id)
+                && !current
+                    .pending_endpoint_taps
+                    .contains_key(&wanted.endpoint_id)
+            {
+                return Err(LinuxP11Error::ForeignState);
+            }
+            if !exists {
+                for args in [
+                    vec![
+                        "tuntap",
+                        "add",
+                        "dev",
+                        wanted.interface.as_str(),
+                        "mode",
+                        "tap",
+                    ],
+                    vec![
+                        "link",
+                        "set",
+                        "dev",
+                        wanted.interface.as_str(),
+                        "address",
+                        wanted.mac.as_str(),
+                    ],
+                    vec![
+                        "link",
+                        "set",
+                        "dev",
+                        wanted.interface.as_str(),
+                        "master",
+                        current.bridge.as_str(),
+                    ],
+                    vec!["link", "set", "dev", wanted.interface.as_str(), "up"],
+                ] {
+                    if !self
                         .command
-                        .run(
-                            "ip",
-                            &[
-                                "netns",
-                                "exec",
-                                &ownership.namespace,
-                                "ip",
-                                "neigh",
-                                "replace",
-                                &entry.fixed_ip.to_string(),
-                                "lladdr",
-                                &entry.mac,
-                                "nud",
-                                "permanent",
-                                "dev",
-                                &ownership.realm_veth,
-                            ],
-                        )
+                        .run("ip", &args)
                         .map_err(LinuxP11Error::Storage)?
-                {
-                    return Err(LinuxP11Error::CommandFailed);
+                    {
+                        return Err(LinuxP11Error::CommandFailed);
+                    }
                 }
             }
+        }
+        if current.endpoint_taps != desired || !current.pending_endpoint_taps.is_empty() {
+            let mut next = self
+                .state
+                .realms
+                .get(&plan.realm_id)
+                .cloned()
+                .ok_or(LinuxP11Error::CorruptState)?;
+            next.endpoint_taps = desired;
+            next.pending_endpoint_taps.clear();
+            self.state.realms.insert(plan.realm_id, next);
+            store_state(&self.state_path, &self.state)?;
+        }
+        Ok(())
+    }
+
+    fn remove_endpoint_tap(
+        &self,
+        tap: &EndpointTapOwnership,
+        bridge: &str,
+    ) -> Result<(), LinuxP11Error> {
+        let (exists, output) = self
+            .command
+            .output("ip", &["-d", "link", "show", "dev", &tap.interface])
+            .map_err(LinuxP11Error::Storage)?;
+        if exists && !tap_link_matches(&output, tap, bridge) {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if exists
+            && !self
+                .command
+                .run("ip", &["link", "del", "dev", &tap.interface])
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
         }
         Ok(())
     }
@@ -1616,6 +1756,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         self.ensure_realm(plan)?;
         self.configure_peers()?;
         self.ensure_geneve(plan)?;
+        self.ensure_endpoint_taps(plan)?;
         let ownership = self
             .state
             .realms
@@ -1635,6 +1776,14 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             || plan.local_fabric_generation < ownership.local_fabric_generation
         {
             return Err(P11FabricError::StaleGeneration);
+        }
+        for tap in ownership.endpoint_taps.values() {
+            self.remove_endpoint_tap(tap, &ownership.bridge)?;
+        }
+        for tap in ownership.pending_endpoint_taps.values() {
+            if !ownership.endpoint_taps.contains_key(&tap.endpoint_id) {
+                self.remove_endpoint_tap(tap, &ownership.bridge)?;
+            }
         }
         for geneve in ownership.geneve.values() {
             self.remove_geneve_attachment(geneve, &ownership.namespace)?;
@@ -1789,6 +1938,22 @@ fn geneve_fabric_veth_name(realm_id: Uuid, target_host: &str) -> String {
     provider_name("i", realm_id, target_host)
 }
 
+fn endpoint_tap_name(realm_id: Uuid, endpoint_id: Uuid) -> String {
+    let bytes = realm_id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(endpoint_id.as_bytes().iter().copied())
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+        .to_be_bytes();
+    format!(
+        "o3k-t-{:02x}{:02x}{:02x}{:02x}",
+        bytes[4], bytes[5], bytes[6], bytes[7]
+    )
+}
+
 fn tunnel_mac(realm_id: Uuid, host_id: &str) -> String {
     let bytes = realm_id
         .as_bytes()
@@ -1820,6 +1985,12 @@ fn geneve_link_matches(output: &str, ownership: &GeneveOwnership, port: u16) -> 
         && output.contains(&format!("id {}", ownership.vni))
         && output.contains(&format!("remote {}", ownership.remote_transport_ip))
         && output.contains(&format!("dstport {}", port))
+}
+
+fn tap_link_matches(output: &str, ownership: &EndpointTapOwnership, bridge: &str) -> bool {
+    output.contains("tun")
+        && output.contains(&format!("link/ether {}", ownership.mac))
+        && output.contains(&format!("master {}", bridge))
 }
 
 fn load_state(path: &Path) -> Result<ProviderState, LinuxP11Error> {

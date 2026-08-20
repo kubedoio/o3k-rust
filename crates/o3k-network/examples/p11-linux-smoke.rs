@@ -26,16 +26,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let directory = RealmEndpointDirectory::build(
         &realm,
-        vec![EndpointLocation {
-            endpoint_id: Uuid::from_u128(0x1200),
-            project_id: realm.project_id.clone(),
-            realm_id: realm.id,
-            fixed_ip: "10.250.1.12".parse()?,
-            mac: "02:00:00:00:01:12".to_owned(),
-            selected_host: "smoke-remote".to_owned(),
-            endpoint_generation: 1,
-            placement_generation: 1,
-        }],
+        vec![
+            EndpointLocation {
+                endpoint_id: Uuid::from_u128(0x1201),
+                project_id: realm.project_id.clone(),
+                realm_id: realm.id,
+                fixed_ip: "10.250.1.11".parse()?,
+                mac: "02:00:00:00:01:11".to_owned(),
+                selected_host: "smoke-local".to_owned(),
+                endpoint_generation: 1,
+                placement_generation: 1,
+            },
+            EndpointLocation {
+                endpoint_id: Uuid::from_u128(0x1200),
+                project_id: realm.project_id.clone(),
+                realm_id: realm.id,
+                fixed_ip: "10.250.1.12".parse()?,
+                mac: "02:00:00:00:01:12".to_owned(),
+                selected_host: "smoke-remote".to_owned(),
+                endpoint_generation: 1,
+                placement_generation: 1,
+            },
+        ],
         &[],
         1,
     )?;
@@ -136,6 +148,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         || !String::from_utf8_lossy(&realm_attachment.stdout).contains("o3k-e-")
     {
         return Err("provider did not realize the realm-side Geneve attachment".into());
+    }
+    let local_tap = Command::new("ip")
+        .args(["-d", "link", "show", "type", "tun"])
+        .output()?;
+    if !local_tap.status.success() || !String::from_utf8_lossy(&local_tap.stdout).contains("o3k-t-")
+    {
+        return Err("provider did not realize the local endpoint TAP".into());
     }
     println!("p11-linux-smoke: host-transport-address=passed");
     println!("p11-linux-smoke: geneve-realization=passed");

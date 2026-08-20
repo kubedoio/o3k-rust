@@ -5,7 +5,8 @@ use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
     FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider, NetworkAgentIdentity,
     NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan,
-    PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig, StatefulPolicyProvider, TapAccess,
+    P11FabricRealizer, PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig,
+    StatefulPolicyProvider, TapAccess,
 };
 use std::{env, fs, net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
@@ -116,11 +117,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?),
         Err(_) => None,
     };
+    let p11 = match env::var("O3K_NETWORK_P11_ROOT") {
+        Ok(root) => Some(P11FabricRealizer::new(
+            o3k_network::LinuxP11FabricBackend::open(o3k_network::LinuxP11Config::for_root(root))?,
+        )),
+        Err(_) => None,
+    };
     let realizer = CompositeRealizer {
         flat,
         routed,
         policy,
         public,
+        p11,
     };
     let service = agent::NetworkAgentService::new(executor, realizer);
     let recovered = service.reconcile_pending()?;
@@ -146,6 +154,7 @@ struct CompositeRealizer {
     routed: Option<LinuxRoutedProvider>,
     policy: Option<StatefulPolicyProvider>,
     public: Option<PublicAddressRealizer>,
+    p11: Option<P11FabricRealizer<o3k_network::LinuxP11FabricBackend>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -166,6 +175,10 @@ enum CompositeRealizerError {
     PublicNotConfigured,
     #[error("P11 fabric plans require an activated host fabric provider")]
     P11NotConfigured,
+    #[error("P11 fabric realization failed: {0}")]
+    P11(String),
+    #[error("P11 fabric plan contains an intent not yet activated by the P11 provider")]
+    P11UnsupportedIntent,
 }
 
 impl NetworkPlanRealizer for CompositeRealizer {
@@ -173,7 +186,17 @@ impl NetworkPlanRealizer for CompositeRealizer {
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if plan.p11_fabric.is_some() {
-            return Err(CompositeRealizerError::P11NotConfigured);
+            if plan.intents.iter().any(|intent| {
+                is_routed_intent(intent) || is_policy_intent(intent) || is_public_intent(intent)
+            }) {
+                return Err(CompositeRealizerError::P11UnsupportedIntent);
+            }
+            self.p11
+                .as_mut()
+                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .realize(plan)
+                .map_err(|error| CompositeRealizerError::P11(error.to_string()))?;
+            return Ok(());
         }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
@@ -201,7 +224,17 @@ impl NetworkPlanRealizer for CompositeRealizer {
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if plan.p11_fabric.is_some() {
-            return Err(CompositeRealizerError::P11NotConfigured);
+            if plan.intents.iter().any(|intent| {
+                is_routed_intent(intent) || is_policy_intent(intent) || is_public_intent(intent)
+            }) {
+                return Err(CompositeRealizerError::P11UnsupportedIntent);
+            }
+            self.p11
+                .as_mut()
+                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .remove(plan)
+                .map_err(|error| CompositeRealizerError::P11(error.to_string()))?;
+            return Ok(());
         }
         if plan.intents.iter().any(is_public_intent) {
             self.public
@@ -229,7 +262,12 @@ impl NetworkPlanRealizer for CompositeRealizer {
 
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
         if plan.p11_fabric.is_some() {
-            return Err(CompositeRealizerError::P11NotConfigured);
+            return self
+                .p11
+                .as_mut()
+                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .observe(plan)
+                .map_err(|error| CompositeRealizerError::P11(error.to_string()));
         }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
