@@ -38,7 +38,7 @@ Commands run from the repository root:
 ```text
 cargo fmt --all -- --check
 cargo clippy -p o3k-network --all-targets --all-features -- -D warnings
-cargo test -p o3k-network --all-features linux_p11::tests -- --nocapture
+cargo test -p o3k-network --all-features linux_fabric::tests -- --nocapture
 O3K_P11_SMOKE_ROOT=/tmp/o3k-p11-smoke-XXXX target/debug/examples/p11-linux-smoke
 O3K_P11_FIP_ROOT=/tmp/o3k-p11-fip-smoke-XXXX \
   O3K_P11_FIP_UPLINK=o3k-fip-u \

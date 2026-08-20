@@ -1,0 +1,899 @@
+//! Fail-closed Linux realization for the accepted P11 v2 fabric contract.
+//!
+//! Provider-native objects are bounded by an ownership manifest. WireGuard
+//! private-key bytes are generated and retained locally and never occur in
+//! plans, protocol messages, observations, or ordinary logs.
+
+use crate::p11::{P11FabricBackend, P11FabricError};
+use o3k_domain::{
+    FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::{self, Write},
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+};
+use thiserror::Error;
+use uuid::Uuid;
+
+mod naming;
+mod ownership;
+mod persistence;
+
+mod fabric;
+mod geneve;
+mod policy;
+mod public_;
+mod realm;
+
+pub(crate) use naming::*;
+pub(crate) use ownership::*;
+pub(crate) use persistence::*;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxP11Config {
+    pub root: PathBuf,
+    pub fabric_namespace: String,
+    pub fabric_interface: String,
+    pub wireguard_port: u16,
+    pub geneve_port: u16,
+    pub public_uplink: Option<String>,
+}
+
+impl LinuxP11Config {
+    #[must_use]
+    pub fn for_root(root: impl Into<PathBuf>) -> Self {
+        Self {
+            root: root.into(),
+            fabric_namespace: "o3k-fabric".to_owned(),
+            fabric_interface: "wg-o3k".to_owned(),
+            wireguard_port: 51_820,
+            geneve_port: 6_081,
+            public_uplink: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_public_uplink(mut self, uplink: impl Into<String>) -> Self {
+        self.public_uplink = Some(uplink.into());
+        self
+    }
+
+    fn validate(&self) -> Result<(), LinuxP11Error> {
+        if self.root == Path::new("/")
+            || self.root.as_os_str().is_empty()
+            || !valid_name(&self.fabric_namespace)
+            || !valid_name(&self.fabric_interface)
+            || self.wireguard_port == 0
+            || self.geneve_port == 0
+            || self
+                .public_uplink
+                .as_deref()
+                .is_some_and(|uplink| !valid_name(uplink))
+        {
+            return Err(LinuxP11Error::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Error)]
+pub enum LinuxP11Error {
+    #[error("Linux P11 configuration is invalid")]
+    InvalidConfiguration,
+    #[error("Linux P11 provider state is corrupt")]
+    CorruptState,
+    #[error("Linux P11 provider state is foreign or ambiguous")]
+    ForeignState,
+    #[error("Linux P11 provider state conflicts with the requested plan")]
+    OwnershipConflict,
+    #[error("Linux P11 provider command failed")]
+    CommandFailed,
+    #[error("Linux P11 provider state storage failed: {0}")]
+    Storage(#[from] io::Error),
+}
+
+impl From<LinuxP11Error> for P11FabricError {
+    fn from(error: LinuxP11Error) -> Self {
+        Self::Backend(error.to_string())
+    }
+}
+pub(crate) trait LinuxP11Command: Send + Sync {
+    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
+}
+
+pub(crate) struct SystemLinuxP11Command;
+
+impl LinuxP11Command for SystemLinuxP11Command {
+    fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+        let output = Command::new(program).args(args).output()?;
+        Ok((
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ))
+    }
+
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
+        Ok(Command::new(program).args(args).status()?.success())
+    }
+}
+pub struct LinuxP11FabricBackend {
+    pub(crate) config: LinuxP11Config,
+    pub(crate) state_path: PathBuf,
+    pub(crate) plans_path: PathBuf,
+    pub(crate) command: Arc<dyn LinuxP11Command>,
+    pub(crate) state: ProviderState,
+    pub(crate) plans: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
+}
+impl LinuxP11FabricBackend {
+    pub fn open(config: LinuxP11Config) -> Result<Self, LinuxP11Error> {
+        config.validate()?;
+        let state_path = config.root.join("ownership.json");
+        let plans_path = config.root.join("plans");
+        fs::create_dir_all(&plans_path)?;
+        let backend = Self {
+            config,
+            state_path: state_path.clone(),
+            plans_path: plans_path.clone(),
+            command: Arc::new(SystemLinuxP11Command),
+            state: load_state(&state_path)?,
+            plans: load_plans(&plans_path)?,
+        };
+        backend.validate_loaded_state()?;
+        Ok(backend)
+    }
+
+    #[cfg(test)]
+    fn with_command(
+        config: LinuxP11Config,
+        command: Arc<dyn LinuxP11Command>,
+    ) -> Result<Self, LinuxP11Error> {
+        config.validate()?;
+        let state_path = config.root.join("ownership.json");
+        let plans_path = config.root.join("plans");
+        fs::create_dir_all(&plans_path)?;
+        let backend = Self {
+            config,
+            state_path: state_path.clone(),
+            plans_path: plans_path.clone(),
+            command,
+            state: load_state(&state_path)?,
+            plans: load_plans(&plans_path)?,
+        };
+        backend.validate_loaded_state()?;
+        Ok(backend)
+    }
+}
+
+impl LinuxP11FabricBackend {
+    fn validate_loaded_state(&self) -> Result<(), LinuxP11Error> {
+        if self.state.version != STATE_VERSION {
+            return Err(LinuxP11Error::CorruptState);
+        }
+        if let Some(fabric) = &self.state.fabric
+            && (fabric.namespace != self.config.fabric_namespace
+                || fabric.interface != self.config.fabric_interface
+                || fabric.fabric_transport_ip.is_unspecified()
+                || fabric.fabric_transport_ip.is_loopback()
+                || fabric.fabric_generation == 0
+                || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
+        {
+            return Err(LinuxP11Error::CorruptState);
+        }
+        if let Some(fabric) = &self.state.fabric {
+            validate_private_key_file(Path::new(&fabric.private_key_path))?;
+        }
+        for (realm_id, ownership) in &self.state.realms {
+            let Some(plan) = self.plans.get(realm_id) else {
+                return Err(LinuxP11Error::CorruptState);
+            };
+            if realm_id != &ownership.realm_id
+                || plan.realm_id != *realm_id
+                || plan.directory_generation != ownership.directory_generation
+                || plan.local_fabric_generation != ownership.local_fabric_generation
+            {
+                return Err(LinuxP11Error::CorruptState);
+            }
+            for (target_host, geneve) in &ownership.geneve {
+                if target_host != &geneve.target_host
+                    || !valid_name(&geneve.interface)
+                    || geneve.remote_transport_ip.is_unspecified()
+                    || geneve.remote_transport_ip.is_loopback()
+                    || geneve.vni == 0
+                    || geneve.vni > 0x000f_ffff
+                    || geneve.binding_generation == 0
+                    || geneve.vni != plan.encapsulation.provider_segment_id
+                    || geneve.binding_generation != plan.encapsulation.binding_generation
+                    || !valid_mac(&geneve.local_tunnel_mac)
+                    || !valid_mac(&geneve.remote_tunnel_mac)
+                    || !valid_name(&geneve.bridge)
+                    || !valid_name(&geneve.realm_veth)
+                    || !valid_name(&geneve.fabric_veth)
+                    || !plan.peers.iter().any(|peer| {
+                        peer.host_id == geneve.target_host
+                            && peer.fabric_transport_ip == geneve.remote_transport_ip
+                    })
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            for (target_host, attachment) in &ownership.attachments {
+                if target_host != &attachment.target_host
+                    || !valid_name(&attachment.bridge)
+                    || !valid_name(&attachment.realm_veth)
+                    || !valid_name(&attachment.fabric_veth)
+                    || !valid_mac(&attachment.local_tunnel_mac)
+                    || !valid_mac(&attachment.remote_tunnel_mac)
+                    || !ownership.geneve.contains_key(target_host)
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            for (endpoint_id, tap) in &ownership.endpoint_taps {
+                if endpoint_id != &tap.endpoint_id
+                    || !valid_name(&tap.interface)
+                    || !valid_mac(&tap.mac)
+                    || !tap.interface.starts_with("o3k-t-")
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            for (endpoint_id, tap) in &ownership.pending_endpoint_taps {
+                if endpoint_id != &tap.endpoint_id
+                    || !valid_name(&tap.interface)
+                    || !valid_mac(&tap.mac)
+                    || !tap.interface.starts_with("o3k-t-")
+                {
+                    return Err(LinuxP11Error::CorruptState);
+                }
+            }
+            if ownership.policy_generation == 0 && !ownership.policy_fingerprint.is_empty() {
+                return Err(LinuxP11Error::CorruptState);
+            }
+            if ownership.public_generation == 0 && !ownership.public_fingerprint.is_empty()
+                || ownership.public_generation != 0
+                    && (ownership.public_mark == 0 || ownership.public_route_table == 0)
+            {
+                return Err(LinuxP11Error::CorruptState);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LinuxP11FabricBackend {
+    fn persist_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        store_plan(
+            &self.plans_path.join(format!("{}.json", plan.realm_id)),
+            plan,
+        )?;
+        self.plans.insert(plan.realm_id, plan.clone());
+        Ok(())
+    }
+    fn remove_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        self.plans.remove(&plan.realm_id);
+        let _ = fs::remove_file(self.plans_path.join(format!("{}.json", plan.realm_id)));
+        if self.state.realms.remove(&plan.realm_id).is_some() {
+            store_state(&self.state_path, &self.state)?;
+        }
+        Ok(())
+    }
+}
+
+impl P11FabricBackend for LinuxP11FabricBackend {
+    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+        Self::validate_policy_plan(plan)?;
+        Self::validate_public_plan(plan)?;
+        self.ensure_fabric(plan)?;
+        self.persist_plan(plan)?;
+        self.ensure_realm(plan)?;
+        self.configure_peers()?;
+        self.ensure_geneve(plan)?;
+        self.ensure_endpoint_taps(plan)?;
+        self.ensure_policy(plan)?;
+        self.ensure_public(plan)?;
+        let ownership = self
+            .state
+            .realms
+            .get(&plan.realm_id)
+            .cloned()
+            .ok_or(LinuxP11Error::CorruptState)?;
+        self.realize_routes(plan, &ownership)?;
+        Ok(())
+    }
+
+    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+        let Some(ownership) = self.state.realms.get(&plan.realm_id).cloned() else {
+            self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+            return Ok(());
+        };
+        if plan.directory_generation < ownership.directory_generation
+            || plan.local_fabric_generation < ownership.local_fabric_generation
+        {
+            return Err(P11FabricError::StaleGeneration);
+        }
+        self.remove_public(plan)?;
+        self.remove_policy(plan)?;
+        for tap in ownership.endpoint_taps.values() {
+            self.remove_endpoint_tap(tap, &ownership.bridge)?;
+        }
+        for tap in ownership.pending_endpoint_taps.values() {
+            if !ownership.endpoint_taps.contains_key(&tap.endpoint_id) {
+                self.remove_endpoint_tap(tap, &ownership.bridge)?;
+            }
+        }
+        for geneve in ownership.geneve.values() {
+            self.remove_geneve_attachment(geneve, &ownership.namespace)?;
+            let (exists, output) = self
+                .command
+                .output(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        &self.config.fabric_namespace,
+                        "ip",
+                        "-d",
+                        "link",
+                        "show",
+                        "dev",
+                        &geneve.interface,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?;
+            if exists {
+                if !geneve_link_matches(&output, geneve, self.config.geneve_port) {
+                    return Err(P11FabricError::Backend(
+                        LinuxP11Error::ForeignState.to_string(),
+                    ));
+                }
+                if !self
+                    .command
+                    .run(
+                        "ip",
+                        &[
+                            "netns",
+                            "exec",
+                            &self.config.fabric_namespace,
+                            "ip",
+                            "link",
+                            "del",
+                            &geneve.interface,
+                        ],
+                    )
+                    .map_err(LinuxP11Error::Storage)?
+                {
+                    return Err(P11FabricError::Backend(
+                        LinuxP11Error::CommandFailed.to_string(),
+                    ));
+                }
+            }
+        }
+        let commands = [
+            vec![
+                "netns",
+                "exec",
+                ownership.namespace.as_str(),
+                "ip",
+                "route",
+                "flush",
+                "table",
+                "main",
+            ],
+            vec!["link", "del", ownership.host_veth.as_str()],
+            vec!["link", "del", ownership.bridge.as_str()],
+            vec!["netns", "del", ownership.namespace.as_str()],
+        ];
+        for args in commands {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed.into());
+            }
+        }
+        self.remove_plan(plan)?;
+        if !self.state.realms.is_empty() {
+            self.configure_peers()?;
+        }
+        self.remove_fabric_if_unused(plan.local_fabric_generation)?;
+        Ok(())
+    }
+
+    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+        let Some(ownership) = self.state.realms.get(&plan.realm_id) else {
+            return Ok(false);
+        };
+        let (success, _) = self
+            .command
+            .output("ip", &["netns", "exec", &ownership.namespace, "true"])
+            .map_err(LinuxP11Error::Storage)?;
+        Ok(success && self.plans.get(&plan.realm_id) == Some(plan))
+    }
+
+    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+        Ok(!self.state.realms.contains_key(&plan.realm_id)
+            && !self.plans.contains_key(&plan.realm_id))
+    }
+}
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use o3k_domain::{
+        AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
+        NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
+        PublicAddressBindingIntent, RealmEncapsulationBinding, RealmEndpointDirectory,
+    };
+    use std::{os::unix::fs::PermissionsExt, sync::Mutex};
+
+    struct FakeCommand {
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+        namespace_exists: bool,
+    }
+
+    impl LinuxP11Command for FakeCommand {
+        fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
+            self.calls.lock().expect("calls").push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            if args.starts_with(&["netns", "exec"]) && self.namespace_exists {
+                return Ok((true, String::new()));
+            }
+            if program == "wg" {
+                return Ok((true, format!("{}\n", "A".repeat(43) + "=")));
+            }
+            Ok((false, String::new()))
+        }
+
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<bool> {
+            self.calls.lock().expect("calls").push((
+                program.to_owned(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            Ok(true)
+        }
+    }
+
+    fn plan() -> NamespacedRoutedFabricPlan {
+        let realm = AddressRealm {
+            id: Uuid::from_u128(11),
+            project_id: "project-a".to_owned(),
+            prefix: Ipv4Prefix::new("10.40.1.0".parse().expect("ip"), 24).expect("prefix"),
+            overlapping_prefixes: false,
+        };
+        let directory = RealmEndpointDirectory::build(
+            &realm,
+            vec![EndpointLocation {
+                endpoint_id: Uuid::from_u128(12),
+                project_id: realm.project_id.clone(),
+                realm_id: realm.id,
+                fixed_ip: "10.40.1.12".parse().expect("ip"),
+                mac: "02:00:00:00:00:12".to_owned(),
+                selected_host: "host-b".to_owned(),
+                endpoint_generation: 1,
+                placement_generation: 1,
+            }],
+            &[],
+            2,
+        )
+        .expect("directory");
+        let local = FabricHostIdentity {
+            host_id: "host-a".to_owned(),
+            public_key: "public-a".to_owned(),
+            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            fabric_transport_ip: "198.18.0.1".parse().expect("transport ip"),
+            provider_version: "wireguard-v1".to_owned(),
+            fabric_generation: 3,
+            underlay_mtu: 1500,
+            fabric_mtu: 1420,
+        };
+        let remote = FabricHostIdentity {
+            host_id: "host-b".to_owned(),
+            public_key: "B".repeat(43) + "=",
+            underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            fabric_transport_ip: "198.18.0.2".parse().expect("transport ip"),
+            provider_version: "wireguard-v1".to_owned(),
+            fabric_generation: 3,
+            underlay_mtu: 1500,
+            fabric_mtu: 1420,
+        };
+        let binding = RealmEncapsulationBinding {
+            fabric_domain_id: Uuid::from_u128(100),
+            realm_id: realm.id,
+            provider_kind: FabricProviderKind::Geneve,
+            provider_segment_id: 101,
+            binding_generation: 3,
+        };
+        directory
+            .compile_fabric_plan(&local, &[local.clone(), remote], 1400, &binding)
+            .expect("plan")
+    }
+
+    #[test]
+    fn provider_refuses_foreign_fabric_namespace() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: true,
+        });
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        assert!(matches!(
+            provider.apply(&plan()),
+            Err(P11FabricError::Backend(message)) if message.contains("foreign")
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_records_key_path_but_never_plan_key_material() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        provider.apply(&plan()).expect("apply");
+        let state = fs::read_to_string(root.join("ownership.json")).expect("state");
+        let serialized =
+            fs::read_to_string(root.join("plans").join(format!("{}.json", plan().realm_id)))
+                .expect("plan");
+        assert!(!state.contains(&"A".repeat(43)));
+        assert!(!serialized.contains(&"A".repeat(43)));
+        assert!(state.contains("wireguard-private.key"));
+        assert_eq!(
+            fs::metadata(root.join("wireguard-private.key"))
+                .expect("key")
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(
+            calls
+                .iter()
+                .any(|(program, args)| program == "wg" && args == &["genkey"])
+        );
+        let interface = geneve_name(plan().realm_id, "host-b");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.windows(8).any(|window| {
+                    window
+                        == [
+                            "type",
+                            "geneve",
+                            "id",
+                            "101",
+                            "remote",
+                            "198.18.0.2",
+                            "dstport",
+                            "6081",
+                        ]
+                })
+                && args.iter().any(|arg| arg == &interface)
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(2)
+                    .any(|window| window == ["allowed-ips", "198.18.0.2/32"])
+        }));
+        assert!(!calls.iter().any(|(_, args)| {
+            args.windows(2)
+                .any(|window| window == ["allowed-ips", "10.40.1.12/32"])
+        }));
+        let remote_tunnel_mac = tunnel_mac(plan().realm_id, "host-b");
+        let attachment = provider
+            .state
+            .realms
+            .get(&plan().realm_id)
+            .and_then(|realm| realm.attachments.get("host-b"))
+            .expect("remote attachment");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.windows(4).any(|window| {
+                    window == ["lladdr", remote_tunnel_mac.as_str(), "nud", "permanent"]
+                })
+                && args.last() == Some(&attachment.realm_veth)
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.contains(&"bridge".to_owned())
+                && args
+                    .windows(2)
+                    .any(|window| window == ["replace", remote_tunnel_mac.as_str()])
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_uses_static_fdb_entries_not_permanent() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        provider.apply(&plan()).expect("apply");
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        let remote_mac = tunnel_mac(plan().realm_id, "host-b");
+        let local_mac = tunnel_mac(plan().realm_id, "host-a");
+        // Every bridge FDB replace must use "static" not "permanent",
+        // because "permanent" on a bridge port's own MAC creates a local
+        // entry that consumes frames instead of forwarding them.
+        let bridge_calls: Vec<_> = calls
+            .iter()
+            .filter(|(prog, args)| {
+                prog == "ip"
+                    && args.contains(&"bridge".to_owned())
+                    && args.contains(&"fdb".to_owned())
+                    && args.contains(&"replace".to_owned())
+                    && (args.iter().any(|a| a == remote_mac.as_str())
+                        || args.iter().any(|a| a == local_mac.as_str()))
+            })
+            .collect();
+        assert!(!bridge_calls.is_empty(), "no bridge fdb calls found");
+        for (_, args) in &bridge_calls {
+            assert!(
+                args.contains(&"static".to_owned()),
+                "bridge FDB uses permanent instead of static — run 45 regression"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_realizes_realm_scoped_policy_with_owned_marker() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        let current = plan()
+            .with_policy_snapshot(
+                7,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(13),
+                    endpoint_id: Uuid::from_u128(12),
+                    direction: PolicyDirection::Ingress,
+                    protocol: NetworkProtocol::Tcp,
+                    ports: Some(PortRange {
+                        start: 443,
+                        end: 443,
+                    }),
+                    source: Some(
+                        Ipv4Prefix::new("192.0.2.0".parse().expect("ip"), 24).expect("prefix"),
+                    ),
+                    destination: None,
+                    action: PolicyAction::Deny,
+                }],
+            )
+            .expect("policy plan");
+        provider.apply(&current).expect("apply");
+        let table = policy_table_name(current.realm_id);
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(5)
+                    .any(|window| window == ["nft", "add", "table", "ip", table.as_str()])
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "drop")
+                && args.iter().any(|arg| arg == "443-443")
+                && args.iter().any(|arg| arg.contains("o3k-p11-policy:0"))
+        }));
+        let ownership = provider.state.realms.get(&current.realm_id).expect("realm");
+        assert_eq!(ownership.policy_generation, 7);
+        assert!(!ownership.policy_fingerprint.is_empty());
+        drop(calls);
+        provider.remove(&current).expect("remove");
+        assert!(provider.observe_removed(&current).expect("removed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_rejects_invalid_policy_before_host_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        let invalid = plan()
+            .with_policy_snapshot(
+                7,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(14),
+                    endpoint_id: Uuid::from_u128(12),
+                    direction: PolicyDirection::Ingress,
+                    protocol: NetworkProtocol::Tcp,
+                    ports: Some(PortRange {
+                        start: 8443,
+                        end: 443,
+                    }),
+                    source: None,
+                    destination: None,
+                    action: PolicyAction::Allow,
+                }],
+            )
+            .expect("policy snapshot");
+        assert!(matches!(
+            provider.apply(&invalid),
+            Err(P11FabricError::Backend(message)) if message.contains("conflicts")
+        ));
+        assert!(
+            command_for_assertion
+                .calls
+                .lock()
+                .expect("calls")
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_realizes_realm_scoped_public_binding_without_bare_ip_nat() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider = LinuxP11FabricBackend::with_command(
+            LinuxP11Config::for_root(&root).with_public_uplink("eth-public"),
+            command,
+        )
+        .expect("provider");
+        let current = plan()
+            .with_public_snapshot(vec![PublicAddressBindingIntent {
+                id: Uuid::from_u128(15),
+                project_id: "project-a".to_owned(),
+                public_address: "203.0.113.10".parse().expect("ip"),
+                endpoint_id: Uuid::from_u128(12),
+                generation: 4,
+            }])
+            .expect("public plan");
+        provider.apply(&current).expect("apply");
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "dnat")
+                && args.iter().any(|arg| arg == "10.40.1.12")
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "snat")
+                && args.iter().any(|arg| arg == "203.0.113.10")
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "nft"
+                && args.iter().any(|arg| arg == "meta")
+                && args.iter().any(|arg| arg == "mark")
+        }));
+        let ownership = provider.state.realms.get(&current.realm_id).expect("realm");
+        assert_eq!(
+            ownership.public_addresses,
+            vec!["203.0.113.10".parse::<Ipv4Addr>().expect("ip")]
+        );
+        drop(calls);
+        provider.remove(&current).expect("remove");
+        assert!(provider.observe_removed(&current).expect("removed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_fences_generation_changes_and_retains_host_key() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        let current = plan();
+        provider.apply(&current).expect("apply");
+        let mut changed = current.clone();
+        changed.local_fabric_generation += 1;
+        assert!(matches!(
+            provider.apply(&changed),
+            Err(P11FabricError::Backend(message)) if message.contains("conflicts")
+        ));
+        provider.remove(&current).expect("remove");
+        assert!(provider.observe_removed(&current).expect("removed"));
+        // The private key is provisioned host identity material and must
+        // survive fabric removal.
+        assert!(root.join("wireguard-private.key").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_adopts_preprovisioned_host_key() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        let key_path = root.join("wireguard-private.key");
+        let provisioned = format!("{}\n", "C".repeat(43) + "=");
+        fs::write(&key_path, &provisioned).expect("key");
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        provider.apply(&plan()).expect("apply");
+        assert_eq!(fs::read_to_string(&key_path).expect("key"), provisioned);
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(
+            !calls
+                .iter()
+                .any(|(program, args)| program == "wg" && args == &["genkey"])
+        );
+        let key_path_argument = key_path.to_str().expect("path").to_owned();
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(2)
+                    .any(|window| window == ["private-key", key_path_argument.as_str()])
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_rejects_invalid_preprovisioned_host_key() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("root");
+        let key_path = root.join("wireguard-private.key");
+        fs::write(&key_path, "not-a-wireguard-key\n").expect("key");
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        assert!(matches!(
+            provider.apply(&plan()),
+            Err(P11FabricError::Backend(message)) if message.contains("foreign")
+        ));
+        // Operator-provisioned material is never overwritten.
+        assert_eq!(
+            fs::read_to_string(&key_path).expect("key"),
+            "not-a-wireguard-key\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}

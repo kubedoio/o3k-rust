@@ -1,0 +1,106 @@
+use super::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FabricOwnership {
+    pub(crate) namespace: String,
+    pub(crate) interface: String,
+    pub(crate) private_key_path: String,
+    pub(crate) fabric_transport_ip: std::net::Ipv4Addr,
+    pub(crate) fabric_generation: u64,
+    #[serde(default)]
+    pub(crate) managed_peers: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RealmOwnership {
+    pub(crate) realm_id: Uuid,
+    pub(crate) namespace: String,
+    pub(crate) bridge: String,
+    pub(crate) host_veth: String,
+    pub(crate) realm_veth: String,
+    pub(crate) fabric_veth: String,
+    pub(crate) fabric_realm_veth: String,
+    #[serde(default)]
+    pub(crate) public_host_veth: String,
+    #[serde(default)]
+    pub(crate) public_realm_veth: String,
+    #[serde(default)]
+    pub(crate) geneve: BTreeMap<String, GeneveOwnership>,
+    /// One isolated L2 attachment exists for every remote target host.  The
+    /// shared fabric namespace therefore never needs a tenant-IP route table;
+    /// overlapping realms are selected by their attachment and Geneve VNI.
+    #[serde(default)]
+    pub(crate) attachments: BTreeMap<String, FabricAttachmentOwnership>,
+    #[serde(default)]
+    pub(crate) endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
+    #[serde(default)]
+    pub(crate) pending_endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
+    #[serde(default)]
+    pub(crate) policy_generation: u64,
+    #[serde(default)]
+    pub(crate) policy_fingerprint: String,
+    #[serde(default)]
+    pub(crate) public_generation: u64,
+    #[serde(default)]
+    pub(crate) public_fingerprint: String,
+    #[serde(default)]
+    pub(crate) public_mark: u32,
+    #[serde(default)]
+    pub(crate) public_route_table: u32,
+    #[serde(default)]
+    pub(crate) public_addresses: Vec<Ipv4Addr>,
+    pub(crate) directory_generation: u64,
+    pub(crate) local_fabric_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct EndpointTapOwnership {
+    pub(crate) endpoint_id: Uuid,
+    pub(crate) interface: String,
+    pub(crate) mac: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GeneveOwnership {
+    pub(crate) target_host: String,
+    pub(crate) interface: String,
+    pub(crate) remote_transport_ip: std::net::Ipv4Addr,
+    pub(crate) vni: u32,
+    pub(crate) binding_generation: u64,
+    pub(crate) local_tunnel_mac: String,
+    pub(crate) remote_tunnel_mac: String,
+    pub(crate) bridge: String,
+    pub(crate) realm_veth: String,
+    pub(crate) fabric_veth: String,
+    #[serde(default)]
+    pub(crate) realized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FabricAttachmentOwnership {
+    pub(crate) target_host: String,
+    pub(crate) bridge: String,
+    pub(crate) realm_veth: String,
+    pub(crate) fabric_veth: String,
+    pub(crate) local_tunnel_mac: String,
+    pub(crate) remote_tunnel_mac: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ProviderState {
+    pub(crate) version: u32,
+    #[serde(default)]
+    pub(crate) fabric: Option<FabricOwnership>,
+    #[serde(default)]
+    pub(crate) realms: BTreeMap<Uuid, RealmOwnership>,
+}
+
+impl Default for ProviderState {
+    fn default() -> Self {
+        Self {
+            version: STATE_VERSION,
+            fabric: None,
+            realms: BTreeMap::new(),
+        }
+    }
+}
