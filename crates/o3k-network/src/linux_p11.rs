@@ -5,8 +5,11 @@
 //! plans, protocol messages, observations, or ordinary logs.
 
 use crate::p11::{P11FabricBackend, P11FabricError};
-use o3k_domain::{FabricPeer, NamespacedRoutedFabricPlan};
+use o3k_domain::{
+    FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
+};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -130,6 +133,10 @@ struct RealmOwnership {
     endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
     #[serde(default)]
     pending_endpoint_taps: BTreeMap<Uuid, EndpointTapOwnership>,
+    #[serde(default)]
+    policy_generation: u64,
+    #[serde(default)]
+    policy_fingerprint: String,
     directory_generation: u64,
     local_fabric_generation: u64,
 }
@@ -315,6 +322,9 @@ impl LinuxP11FabricBackend {
                     return Err(LinuxP11Error::CorruptState);
                 }
             }
+            if ownership.policy_generation == 0 && !ownership.policy_fingerprint.is_empty() {
+                return Err(LinuxP11Error::CorruptState);
+            }
         }
         Ok(())
     }
@@ -333,6 +343,8 @@ impl LinuxP11FabricBackend {
             attachments: BTreeMap::new(),
             endpoint_taps: BTreeMap::new(),
             pending_endpoint_taps: BTreeMap::new(),
+            policy_generation: 0,
+            policy_fingerprint: String::new(),
             directory_generation: plan.directory_generation,
             local_fabric_generation: plan.local_fabric_generation,
         }
@@ -488,6 +500,8 @@ impl LinuxP11FabricBackend {
             ownership.attachments = existing.attachments.clone();
             ownership.endpoint_taps = existing.endpoint_taps.clone();
             ownership.pending_endpoint_taps = existing.pending_endpoint_taps.clone();
+            ownership.policy_generation = existing.policy_generation;
+            ownership.policy_fingerprint = existing.policy_fingerprint.clone();
         }
         if let Some(existing) = self.state.realms.get(&plan.realm_id)
             && (existing.namespace != ownership.namespace
@@ -1543,6 +1557,238 @@ impl LinuxP11FabricBackend {
         Ok(())
     }
 
+    fn ensure_policy(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
+            return Err(LinuxP11Error::CorruptState);
+        };
+        if plan.policies.is_empty() {
+            return self.remove_policy(plan);
+        }
+        validate_policy_plan(plan)?;
+        let fingerprint = policy_fingerprint(plan);
+        if current.policy_generation == plan.policy_generation
+            && current.policy_fingerprint == fingerprint
+        {
+            return Ok(());
+        }
+        let table = policy_table_name(plan.realm_id);
+        let namespace = current.namespace.as_str();
+        let (table_exists, listing) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns", "exec", namespace, "nft", "list", "table", "ip", &table,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if table_exists && !listing.contains("o3k-p11-policy") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        let mut next = current.clone();
+        next.policy_generation = plan.policy_generation;
+        next.policy_fingerprint = fingerprint.clone();
+        self.state.realms.insert(plan.realm_id, next);
+        store_state(&self.state_path, &self.state)?;
+        if table_exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns", "exec", namespace, "nft", "delete", "table", "ip", &table,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let marker = format!("\"o3k-p11-policy:{fingerprint}\"");
+        for args in [
+            vec![
+                "netns",
+                "exec",
+                namespace,
+                "nft",
+                "add",
+                "table",
+                "ip",
+                table.as_str(),
+                "{",
+                "comment",
+                marker.as_str(),
+                ";",
+                "}",
+            ],
+            vec![
+                "netns",
+                "exec",
+                namespace,
+                "nft",
+                "add",
+                "chain",
+                "ip",
+                table.as_str(),
+                "forward",
+                "{",
+                "type",
+                "filter",
+                "hook",
+                "forward",
+                "priority",
+                "-100",
+                ";",
+                "policy",
+                "accept",
+                ";",
+                "}",
+            ],
+            vec![
+                "netns",
+                "exec",
+                namespace,
+                "nft",
+                "add",
+                "rule",
+                "ip",
+                table.as_str(),
+                "forward",
+                "ct",
+                "state",
+                "established,related",
+                "accept",
+                "comment",
+                "o3k-p11-policy",
+            ],
+        ] {
+            if !self
+                .command
+                .run("ip", &args)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        for (index, policy) in plan.policies.iter().enumerate() {
+            let endpoint = plan
+                .directory
+                .location(policy.endpoint_id)
+                .ok_or(LinuxP11Error::OwnershipConflict)?;
+            let endpoint_address = endpoint.fixed_ip.to_string();
+            let mut args = vec![
+                "netns".to_owned(),
+                "exec".to_owned(),
+                namespace.to_owned(),
+                "nft".to_owned(),
+                "add".to_owned(),
+                "rule".to_owned(),
+                "ip".to_owned(),
+                table.clone(),
+                "forward".to_owned(),
+            ];
+            if matches!(policy.direction, PolicyDirection::Ingress) {
+                args.extend([
+                    "ip".to_owned(),
+                    "daddr".to_owned(),
+                    endpoint_address.clone(),
+                ]);
+            } else {
+                args.extend([
+                    "ip".to_owned(),
+                    "saddr".to_owned(),
+                    endpoint_address.clone(),
+                ]);
+            }
+            if let Some(prefix) = policy.source.or(policy.destination) {
+                let prefix = format!("{}/{}", prefix.network, prefix.prefix_len);
+                if matches!(policy.direction, PolicyDirection::Ingress) {
+                    args.extend(["ip".to_owned(), "saddr".to_owned(), prefix]);
+                } else {
+                    args.extend(["ip".to_owned(), "daddr".to_owned(), prefix]);
+                }
+            }
+            if let Some(protocol) = policy_protocol(policy.protocol) {
+                args.push(protocol.to_owned());
+                if let Some(ports) = policy.ports {
+                    args.extend(["dport".to_owned(), format!("{}-{}", ports.start, ports.end)]);
+                }
+            }
+            args.extend([
+                "counter".to_owned(),
+                if policy.action == PolicyAction::Allow {
+                    "accept".to_owned()
+                } else {
+                    "drop".to_owned()
+                },
+                "comment".to_owned(),
+                format!("\"o3k-p11-policy:{index}\""),
+            ]);
+            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            if !self
+                .command
+                .run("ip", &refs)
+                .map_err(LinuxP11Error::Storage)?
+            {
+                return Err(LinuxP11Error::CommandFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_policy(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+        let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
+            return Ok(());
+        };
+        if current.policy_fingerprint.is_empty() {
+            return Ok(());
+        }
+        let table = policy_table_name(plan.realm_id);
+        let (exists, listing) = self
+            .command
+            .output(
+                "ip",
+                &[
+                    "netns",
+                    "exec",
+                    current.namespace.as_str(),
+                    "nft",
+                    "list",
+                    "table",
+                    "ip",
+                    &table,
+                ],
+            )
+            .map_err(LinuxP11Error::Storage)?;
+        if exists && !listing.contains("o3k-p11-policy") {
+            return Err(LinuxP11Error::ForeignState);
+        }
+        if exists
+            && !self
+                .command
+                .run(
+                    "ip",
+                    &[
+                        "netns",
+                        "exec",
+                        current.namespace.as_str(),
+                        "nft",
+                        "delete",
+                        "table",
+                        "ip",
+                        &table,
+                    ],
+                )
+                .map_err(LinuxP11Error::Storage)?
+        {
+            return Err(LinuxP11Error::CommandFailed);
+        }
+        let mut cleared = current;
+        cleared.policy_generation = 0;
+        cleared.policy_fingerprint.clear();
+        self.state.realms.insert(plan.realm_id, cleared);
+        store_state(&self.state_path, &self.state)
+    }
+
     fn remove_endpoint_tap(
         &self,
         tap: &EndpointTapOwnership,
@@ -1777,12 +2023,14 @@ impl LinuxP11FabricBackend {
 
 impl P11FabricBackend for LinuxP11FabricBackend {
     fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+        validate_policy_plan(plan)?;
         self.ensure_fabric(plan)?;
         self.persist_plan(plan)?;
         self.ensure_realm(plan)?;
         self.configure_peers()?;
         self.ensure_geneve(plan)?;
         self.ensure_endpoint_taps(plan)?;
+        self.ensure_policy(plan)?;
         let ownership = self
             .state
             .realms
@@ -1803,6 +2051,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         {
             return Err(P11FabricError::StaleGeneration);
         }
+        self.remove_policy(plan)?;
         for tap in ownership.endpoint_taps.values() {
             self.remove_endpoint_tap(tap, &ownership.bridge)?;
         }
@@ -1950,6 +2199,47 @@ fn provider_name(prefix: &str, realm_id: Uuid, target_host: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("o3k-{}-{:08x}", prefix, hash as u32)
+}
+
+fn policy_table_name(realm_id: Uuid) -> String {
+    provider_name("p", realm_id, "policy")
+}
+
+fn policy_fingerprint(plan: &NamespacedRoutedFabricPlan) -> String {
+    let bytes = serde_json::to_vec(&(plan.policy_generation, &plan.policies)).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn validate_policy_plan(plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+    if plan.policy_generation == 0
+        || plan.policies.iter().any(|policy| {
+            policy.id.is_nil()
+                || policy.endpoint_id.is_nil()
+                || plan.directory.location(policy.endpoint_id).is_none()
+                || policy.ports.is_some_and(|ports| ports.start > ports.end)
+                || policy.ports.is_some_and(|_| {
+                    matches!(
+                        policy.protocol,
+                        NetworkProtocol::Any | NetworkProtocol::Icmp
+                    )
+                })
+                || (matches!(policy.direction, PolicyDirection::Ingress)
+                    && policy.destination.is_some())
+                || (matches!(policy.direction, PolicyDirection::Egress) && policy.source.is_some())
+        })
+    {
+        return Err(LinuxP11Error::OwnershipConflict);
+    }
+    Ok(())
+}
+
+fn policy_protocol(protocol: NetworkProtocol) -> Option<&'static str> {
+    match protocol {
+        NetworkProtocol::Any => None,
+        NetworkProtocol::Tcp => Some("tcp"),
+        NetworkProtocol::Udp => Some("udp"),
+        NetworkProtocol::Icmp => Some("icmp"),
+    }
 }
 
 fn geneve_bridge_name(realm_id: Uuid, target_host: &str) -> String {
@@ -2109,6 +2399,7 @@ mod tests {
     use super::*;
     use o3k_domain::{
         AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
+        NetworkProtocol, PolicyAction, PolicyDirection, PolicyIntent, PortRange,
         RealmEncapsulationBinding, RealmEndpointDirectory,
     };
     use std::{os::unix::fs::PermissionsExt, sync::Mutex};
@@ -2299,6 +2590,104 @@ mod tests {
         assert!(calls.iter().any(|(program, args)| {
             program == "ip" && args.windows(2).any(|window| window == ["mtu", "1400"])
         }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_realizes_realm_scoped_policy_with_owned_marker() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        let current = plan()
+            .with_policy_snapshot(
+                7,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(13),
+                    endpoint_id: Uuid::from_u128(12),
+                    direction: PolicyDirection::Ingress,
+                    protocol: NetworkProtocol::Tcp,
+                    ports: Some(PortRange {
+                        start: 443,
+                        end: 443,
+                    }),
+                    source: Some(
+                        Ipv4Prefix::new("192.0.2.0".parse().expect("ip"), 24).expect("prefix"),
+                    ),
+                    destination: None,
+                    action: PolicyAction::Deny,
+                }],
+            )
+            .expect("policy plan");
+        provider.apply(&current).expect("apply");
+        let table = policy_table_name(current.realm_id);
+        let calls = command_for_assertion.calls.lock().expect("calls");
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args
+                    .windows(5)
+                    .any(|window| window == ["nft", "add", "table", "ip", table.as_str()])
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.iter().any(|arg| arg == "drop")
+                && args.iter().any(|arg| arg == "443-443")
+                && args.iter().any(|arg| arg.contains("o3k-p11-policy:0"))
+        }));
+        let ownership = provider.state.realms.get(&current.realm_id).expect("realm");
+        assert_eq!(ownership.policy_generation, 7);
+        assert!(!ownership.policy_fingerprint.is_empty());
+        drop(calls);
+        provider.remove(&current).expect("remove");
+        assert!(provider.observe_removed(&current).expect("removed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provider_rejects_invalid_policy_before_host_mutation() {
+        let root = std::env::temp_dir().join(format!("o3k-p11-linux-{}", Uuid::now_v7()));
+        let command = Arc::new(FakeCommand {
+            calls: Mutex::new(Vec::new()),
+            namespace_exists: false,
+        });
+        let command_for_assertion = Arc::clone(&command);
+        let mut provider =
+            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+                .expect("provider");
+        let invalid = plan()
+            .with_policy_snapshot(
+                7,
+                vec![PolicyIntent {
+                    id: Uuid::from_u128(14),
+                    endpoint_id: Uuid::from_u128(12),
+                    direction: PolicyDirection::Ingress,
+                    protocol: NetworkProtocol::Tcp,
+                    ports: Some(PortRange {
+                        start: 8443,
+                        end: 443,
+                    }),
+                    source: None,
+                    destination: None,
+                    action: PolicyAction::Allow,
+                }],
+            )
+            .expect("policy snapshot");
+        assert!(matches!(
+            provider.apply(&invalid),
+            Err(P11FabricError::Backend(message)) if message.contains("conflicts")
+        ));
+        assert!(
+            command_for_assertion
+                .calls
+                .lock()
+                .expect("calls")
+                .is_empty()
+        );
         let _ = fs::remove_dir_all(root);
     }
 
