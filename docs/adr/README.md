@@ -181,6 +181,7 @@ governance decisions require human approval before `Accepted`.
 - [ADR-0169](ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md)
 - [ADR-0170](ADR-0170-namespaced-routed-edge-fabric.md) (superseded by accepted ADR-0171)
 - [ADR-0171](ADR-0171-addressrealm-encapsulated-edge-fabric.md) (accepted)
+- [ADR-0172](ADR-0172-configurable-edge-fabric-transport-ports.md) (proposed)
 
 ## Required audit
 
