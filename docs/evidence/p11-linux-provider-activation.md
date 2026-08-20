@@ -15,6 +15,12 @@ The fabric plan now carries the accepted realm prefix into the provider. The
 provider derives the realm-local gateway on the realm veth, so overlapping
 realms can use the same tenant prefix without a shared host route table.
 
+When a P11 plan carries the same canonical policy snapshot as its policy
+intents, the agent admits that snapshot to the Linux provider. The provider
+persists the policy generation and SHA-256 fingerprint before replacing an
+owned realm-network nftables table, rejects foreign tables, and removes the
+owned table during realm cleanup.
+
 Provider ownership records include endpoint TAP state and a durable pending
 TAP set written before link mutation. Existing links without a matching
 durable ownership record are rejected as foreign. Private WireGuard key bytes
@@ -47,9 +53,9 @@ three-independent-KVM/libvirt gate.
 
 ## Explicit limits
 
-This slice does not yet activate canonical NetworkPolicy, routed/FIP/NAT
-realization, or public-address intents inside a P11 plan; those intents fail
-closed until their realm-scoped provider path is implemented. It does not
-prove real external FIP traffic, independent KVM/libvirt hosts, storage
-placement/checksum persistence, restart/failure recovery, host drain, or the
-final zero-leak evidence matrix.
+This slice activates only the realm-namespace policy table path. It does not
+yet prove local bridge anti-spoof/policy enforcement, routed/FIP/NAT
+realization, or public-address intents inside a P11 plan; unsupported intents
+still fail closed. It does not prove real external FIP traffic, independent
+KVM/libvirt hosts, storage placement/checksum persistence, restart/failure
+recovery, host drain, or the final zero-leak evidence matrix.

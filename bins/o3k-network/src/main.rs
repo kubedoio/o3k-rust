@@ -187,7 +187,9 @@ impl NetworkPlanRealizer for CompositeRealizer {
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if plan.p11_fabric.is_some() {
             if plan.intents.iter().any(|intent| {
-                is_routed_intent(intent) || is_policy_intent(intent) || is_public_intent(intent)
+                is_routed_intent(intent)
+                    || is_public_intent(intent)
+                    || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
             }) {
                 return Err(CompositeRealizerError::P11UnsupportedIntent);
             }
@@ -225,7 +227,9 @@ impl NetworkPlanRealizer for CompositeRealizer {
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
         if plan.p11_fabric.is_some() {
             if plan.intents.iter().any(|intent| {
-                is_routed_intent(intent) || is_policy_intent(intent) || is_public_intent(intent)
+                is_routed_intent(intent)
+                    || is_public_intent(intent)
+                    || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
             }) {
                 return Err(CompositeRealizerError::P11UnsupportedIntent);
             }
@@ -318,6 +322,21 @@ fn is_routed_intent(intent: &NetworkPlanIntent) -> bool {
 
 fn is_policy_intent(intent: &NetworkPlanIntent) -> bool {
     matches!(intent, NetworkPlanIntent::Policy(_))
+}
+
+fn p11_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
+    let Some(fabric) = &plan.p11_fabric else {
+        return false;
+    };
+    let policies = plan
+        .intents
+        .iter()
+        .filter_map(|intent| match intent {
+            NetworkPlanIntent::Policy(policy) => Some(policy.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    policies == fabric.policies
 }
 
 fn is_public_intent(intent: &NetworkPlanIntent) -> bool {
