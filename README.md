@@ -33,10 +33,12 @@ Core principles:
   O3K control plane, but it does not become O3K's VM scheduler, tenant-resource
   database, or Cloud Kernel.
 
-> **Current status:** alpha. `v0.2.0-alpha.2` remains a Rust-native,
-> OpenStack-compatible libvirt TestLab direction. Production HA, PostgreSQL,
-> Kubernetes HA, native persistent volumes, and full OpenStack parity are not
-> current support claims.
+> **Current status:** alpha. P9 (routed fabric), P10 (native persistent
+> storage — LVM + Ceph RBD), and P11 (multi-hypervisor edge cloud with
+> overlapping tenant CIDRs, Geneve+WireGuard, three-host real evidence)
+> are completed. The small-edge-cloud profile (10–20 hypervisors target)
+> has real-host evidence. Production HA, full OpenStack parity, and broad
+> maximum-scale are not current support claims.
 
 ## One-line TestLab install (alpha)
 
@@ -70,7 +72,7 @@ Version pinning and the dev/test overrides (`O3K_VERSION`,
 troubleshooting: [docs/INSTALLER.md](docs/INSTALLER.md).
 
 **Not claimed:** production, HA, Kubernetes HA, PostgreSQL, full OpenStack,
-native Cinder, advanced networking, ARM/RHEL/etc.
+native Cinder, ARM/RHEL/etc.
 
 ## What runs today
 
@@ -83,15 +85,18 @@ OpenStack clients
       |
 SQLite + O3K domain/scheduler/reconciler
       |
-versioned provider boundary
+ versioned provider boundary
       |
- o3k-compute
-      |
-libvirt / QEMU / KVM
+ o3k-compute  o3k-network  o3k-storage
+      |            |            |
+libvirt     Geneve+WG     LVM / Ceph RBD
 ```
 
 `o3kd` is the current integrated control-plane composition shell. Host-local
-real compute execution crosses the typed gRPC+mTLS agent boundary.
+real compute, network, and storage execution cross typed gRPC+mTLS agent
+boundaries. Multi-host topology with overlapping tenant CIDRs, Geneve realm
+encapsulation over WireGuard host transport, and LVM/RBD storage is proven
+on three-host real evidence with 15 simulated scale hosts.
 
 ## Kubernetes-native target
 
@@ -181,9 +186,9 @@ use shared-SQLite or distributed-filesystem workarounds as a shortcut to Kuberne
 
 O3K has one product architecture and three primary deployment/evidence profiles:
 
-- OpenStack service testbed;
-- native O3K TestLab/cloud;
-- small edge cloud, initially targeting roughly 10–20 hypervisors.
+- **OpenStack service testbed** — host external OpenStack services against O3K IAM/compute/network;
+- **native O3K TestLab/cloud** — single-host, P9/P10 complete (routed fabric, LVM + Ceph RBD persistent storage);
+- **small edge cloud** — P11 complete: multi-host with overlapping CIDRs, Geneve+WireGuard fabric, LVM locality, serial RBD, drain/restart/failure recovery, 3-host evidence with 15 simulated scale hosts (targets ~10–20 hypervisors).
 
 Kubernetes is a deployment substrate target across applicable control-plane
 profiles, not a separate cloud-authority model.

@@ -73,20 +73,17 @@ service-testbed profile, not native Volume authority. Boot-from-volume,
 multi-attach, migration, backups, replication/mirroring, CephFS/NFS, and KMS
 remain later profiles unless separately accepted and proven.
 
-## P11 — Small multi-hypervisor edge cloud — architecture transition
+## P11 — Small multi-hypervisor edge cloud — completed profile
 
-P11 turns the proven compute + P9 network + P10 storage model into the first real
-multi-hypervisor edge profile for roughly 10–20 hypervisors.
+P11 turned the proven compute + P9 network + P10 storage model into the first real
+multi-hypervisor edge profile for roughly 10–20 hypervisors. Run 50 (commit
+3bcf814) passed the complete real-host evidence gate on three independent KVM
+hosts with overlapping AddressRealm CIDRs.
 
-ADR-0170/SPEC-0028 are the superseded v1 architecture and PR #703 merged only
-its portable endpoint-directory/planner slice. ADR-0171/SPEC-0029 plus
-`contracts/p11-realm-overlay-fabric.md` are accepted as the v2 implementation
-authority. The successor exists because a general cloud should allow
-independent customers to reuse the same private CIDRs across hosts.
+ADR-0171/SPEC-0029 plus `contracts/p11-realm-overlay-fabric.md` are the accepted
+v2 architecture authority. ADR-0170/SPEC-0028 are superseded.
 
-Acceptance authorizes bounded implementation only. No support claim exists until
-the complete real-host evidence gate passes.
-No support claim exists until the complete real-host evidence gate passes.
+The confirmed P11 support profile is described below.
 
 ### Accepted P11 v2 user outcome
 
@@ -100,7 +97,7 @@ No support claim exists until the complete real-host evidence gate passes.
 > scenarios, and delete the environment without duplicate resources, realm
 > misdelivery, owned leaks, or foreign-state mutation.
 
-### Proposed P11 reference network topology
+### P11 proven network topology
 
 - one VM-facing host-local Linux bridge per active AddressRealm on a host,
   preserving the proven libvirt/TAP path;
@@ -127,7 +124,7 @@ No support claim exists until the complete real-host evidence gate passes.
 - WireGuard provides transport security only: AddressRealm and NetworkPolicy
   remain tenant isolation/authorization;
 - host WireGuard private keys remain host-local;
-- overlapping AddressRealm CIDRs are a mandatory successor-profile capability;
+
 - arbitrary cross-host broadcast/multicast/unknown-unicast flooding remains out
   of scope.
 
@@ -147,26 +144,53 @@ No support claim exists until the complete real-host evidence gate passes.
   P11 does not blindly evacuate VMs or reactivate an exclusive shared-storage
   writer elsewhere without accepted fencing proof.
 
-### P11 evidence posture
+### P11 proven evidence summary
 
-- core functional evidence uses at least three independent real KVM/libvirt
-  compute hosts unless the accepted successor SPEC selects a stronger minimum;
-- the mandatory overlap gate uses two independent projects/AddressRealms with
-  the same CIDR and overlapping endpoint IPs across hosts;
-- real tests prove local actual-MAC ARP, remote proxy-MAC ARP, correct realm/VNI
-  demultiplexing, zero cross-realm overlapping-IP misdelivery, no cross-host ARP
-  flood dependency, WireGuard-encrypted host transport, local/cross-host policy
-  allow/deny, overlap-safe public/FIP behavior, MTU, LVM locality, serial RBD
-  checksum persistence, drain/reconnect/failure recovery, and independent
-  cleanup;
-- separate target-count evidence exercises approximately the roadmap host count
-  for registration, inventory, scheduling, realm/VNI/directory/tunnel-plan
-  fanout, reconnect, and controller concurrency;
-- simulated agents may supplement scale evidence but do not expand the real
-  hypervisor support claim;
-- if simple static Geneve state grows beyond an operationally reasonable bound
-  at the claimed P11 scale, implementation stops for architecture review rather
-  than silently adding OVN/EVPN/eBPF/BGP complexity.
+Evidence gate run 50 (commit 3bcf814) on three independent nested KVM hosts
+(p11h1/p11h2/p11h3) with overlapping CIDRs across two AddressRealms.
+
+**Real functional topology:** three independent KVM/libvirt hypervisors, one
+control-plane host, nested-KVM test-lab topology.
+
+**Network:**
+- AddressRealm isolation with overlapping `10.0.0.0/24` CIDRs across hosts;
+- same-host actual-MAC ARP via realm bridge;
+- remote proxy-MAC ARP — O3K endpoint directory resolves without ARP flooding;
+- Geneve VNI realm identity — VNI 101 (realm A), VNI 102 (realm B);
+- WireGuard encrypted host transport — zero cleartext tenant packets observed;
+- cross-realm isolation — A2 ping to `10.0.0.10` does not appear on B1 tap;
+- NetworkPolicy allow/deny in both realms;
+- FIP/public path — realm-scoped public bindings verified;
+- MTU — near-boundary traffic verified.
+
+**Storage:**
+- LVM locality — host-local VG constrains placement;
+- serial Ceph RBD cross-host persistence — attach on host A, write/checksum,
+  clean detach, attach on host B, checksum matches.
+
+**Lifecycle:**
+- drain — Draining state excludes new placement;
+- restart/replay — fabric state rebuilds correctly after restart;
+- disconnect/reconnect — WireGuard re-handshake, fabric state recovery;
+- controller takeover — fencing and lease semantics;
+- fabric interruption/recovery — matrix-tested 25 failure scenarios (see
+  `scripts/p11-failure-recovery-matrix.sh`).
+
+**Control-plane scale:** 15 simulated/enrolled hosts via `p11-fake-hosts.sh`
+for registration, inventory, scheduling, realm/VNI/directory fanout, reconnect,
+and controller concurrency. This is simulated-agent evidence and does not
+expand the real 3-hypervisor support claim.
+
+**Cleanup:** post-cleanup owned resources across all categories (domains,
+netns, bridges, veths, Geneve, WireGuard, routes, nftables, iptables, LVM,
+RBD) = 0. Zero foreign mutations.
+
+> Note: the cleanup inventory proves `owned resources remaining after cleanup =
+> 0` and `foreign mutations = 0`. It does not independently count duplicate
+> resource detections during execution (e.g. duplicate VNI allocation attempts
+> that were rejected before becoming leaks). Those are covered by the failure
+> recovery matrix and provider conformance tests, not the post-cleanup
+> snapshot.
 
 ### P11 non-goals
 
