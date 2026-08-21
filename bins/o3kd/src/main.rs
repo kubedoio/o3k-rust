@@ -1155,8 +1155,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
-    let cursor_config = o3k_native_api::pagination::CursorConfig::from_env()
-        .map_err(|error| format!("native cursor configuration failed: {error}"))?;
+    // Native pagination is reachable only when IAM is configured.  In the
+    // IAM-disabled health/operational profile, keep the API unavailable and
+    // avoid requiring production secrets solely to start healthz.
+    let cursor_config = if token_issuer.is_some() {
+        o3k_native_api::pagination::CursorConfig::from_env()
+            .map_err(|error| format!("native cursor configuration failed: {error}"))?
+    } else {
+        o3k_native_api::pagination::CursorConfig::default()
+    };
     state = state.with_native_api(o3k_native_api::NativeApiState::new(
         Some(native_manifest_registry),
         cursor_config,
