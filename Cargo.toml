@@ -23,6 +23,7 @@ members = [
     "crates/o3k-config-drive",
     "crates/o3k-placement",
     "crates/o3k-scheduler",
+    "crates/o3k-database-example",
     "crates/o3k-dhcp",
     "crates/o3k-console",
     "crates/o3k-store",
