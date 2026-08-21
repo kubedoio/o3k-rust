@@ -10,7 +10,7 @@
 use base64::Engine as _;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -19,11 +19,6 @@ pub const DEFAULT_PAGE_SIZE: usize = 50;
 
 /// Maximum page size that the server will accept.
 pub const MAX_PAGE_SIZE: usize = 200;
-
-/// Default HMAC key used when no server key is configured.
-/// This is a P12.2 bootstrap default; production deployments should
-/// configure a persistent key.
-const DEFAULT_HMAC_KEY: &[u8] = b"o3k-native-cursor-bootstrap-key-2026";
 
 /// Internal cursor payload — never exposed directly to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,8 +37,10 @@ pub struct CursorConfig {
 
 impl Default for CursorConfig {
     fn default() -> Self {
+        // Empty configuration is intentionally unusable in production.  It
+        // exists only to keep pure unit-test fixtures explicit and harmless.
         Self {
-            hmac_key: DEFAULT_HMAC_KEY.to_vec(),
+            hmac_key: Vec::new(),
         }
     }
 }
@@ -52,6 +49,25 @@ impl CursorConfig {
     #[must_use]
     pub fn new(key: Vec<u8>) -> Self {
         Self { hmac_key: key }
+    }
+
+    /// Load the persistent server-held cursor secret. Production startup must
+    /// fail closed when pagination is enabled without this value.
+    pub fn from_env() -> Result<Self, &'static str> {
+        let key = if let Ok(value) = std::env::var("O3K_NATIVE_CURSOR_HMAC_KEY") {
+            value.into_bytes()
+        } else {
+            let token_key = std::env::var("O3K_TOKEN_SIGNING_KEY")
+                .map_err(|_| "native cursor signing key is not configured")?;
+            let mut hasher = Sha256::new();
+            hasher.update(b"o3k/native-cursor/v1/");
+            hasher.update(token_key.as_bytes());
+            hasher.finalize().to_vec()
+        };
+        if key.len() < 32 {
+            return Err("native cursor signing key is too short");
+        }
+        Ok(Self::new(key))
     }
 
     fn compute_hmac(&self, payload_json: &[u8]) -> Vec<u8> {
@@ -90,15 +106,17 @@ impl CursorConfig {
             serde_json::from_slice(&payload_bytes).map_err(|_| "malformed cursor payload")?;
 
         // Verify HMAC
-        let expected_hmac = self.compute_hmac(&payload_bytes);
         let provided_hmac = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(hmac_b64)
             .map_err(|_| "invalid cursor hmac")?;
 
         // HMAC verification — digest forgery is infeasible without the key
-        if expected_hmac.as_slice() != provided_hmac.as_slice() {
-            return Err("cursor HMAC mismatch");
-        }
+        let Ok(mut mac) = HmacSha256::new_from_slice(&self.hmac_key) else {
+            return Err("cursor HMAC unavailable");
+        };
+        mac.update(&payload_bytes);
+        mac.verify_slice(&provided_hmac)
+            .map_err(|_| "cursor HMAC mismatch")?;
 
         if payload.version != 1 {
             return Err("unsupported cursor version");
@@ -119,6 +137,17 @@ pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
         Some(n) if n > 0 => n.min(MAX_PAGE_SIZE),
         _ => DEFAULT_PAGE_SIZE,
     }
+}
+
+/// Resolve a continuation against a deterministic, already-authorized ID
+/// ordering. A missing anchor is stale and must not silently produce an empty
+/// page.
+#[allow(dead_code)]
+pub(crate) fn continuation_index(ids: &[String], last_id: &str) -> Result<usize, &'static str> {
+    ids.iter()
+        .position(|id| id == last_id)
+        .map(|index| index + 1)
+        .ok_or("stale cursor anchor")
 }
 
 #[cfg(test)]

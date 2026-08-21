@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use o3k_native_api::{
-    auth::{NativeTokenRequestV1, TokenIssuer},
+    auth::{NativeCredentialV1, NativeTokenRequestV1, TokenIssuer},
     compute::ServerItem,
     error::ProblemDetails,
     network::AddressRealmItem,
@@ -29,26 +29,36 @@ impl TokenIssuer for TokenIssuerAdapter {
         &self,
         request: &NativeTokenRequestV1,
     ) -> Result<(String, serde_json::Value), ProblemDetails> {
+        let credential = request
+            .auth
+            .credential()
+            .map_err(ProblemDetails::bad_request)?;
+        let (methods, password, token) = match credential {
+            NativeCredentialV1::Password { user_id, password } => (
+                vec!["password".to_owned()],
+                Some(o3k_identity::PasswordIdentity {
+                    user: o3k_identity::UserReference {
+                        id: Some(user_id),
+                        name: None,
+                        domain: None,
+                        password,
+                    },
+                }),
+                None,
+            ),
+            NativeCredentialV1::Token { token } => (
+                vec!["token".to_owned()],
+                None,
+                Some(o3k_identity::TokenIdentity { id: token }),
+            ),
+        };
         // Build a Keystone-compatible TokenRequest from native request
         let token_req = o3k_identity::TokenRequest {
             auth: o3k_identity::Auth {
                 identity: o3k_identity::Identity {
-                    methods: vec!["password".to_owned()],
-                    password: request.auth.password.as_ref().map(|pw| {
-                        o3k_identity::PasswordIdentity {
-                            user: o3k_identity::UserReference {
-                                id: Some(pw.user_id.clone()),
-                                name: None,
-                                domain: None,
-                                password: pw.password.clone(),
-                            },
-                        }
-                    }),
-                    token: request
-                        .auth
-                        .token
-                        .as_ref()
-                        .map(|t| o3k_identity::TokenIdentity { id: t.clone() }),
+                    methods,
+                    password,
+                    token,
                 },
                 scope: request
                     .auth

@@ -37,10 +37,94 @@ pub struct NativeAuth {
     pub project_id: Option<String>,
 }
 
+/// Validated native credential.  The wire DTO remains deliberately separate
+/// from Keystone's request shape; callers must pass through this validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeCredentialV1 {
+    Password { user_id: String, password: String },
+    Token { token: String },
+}
+
+impl NativeAuth {
+    pub fn credential(&self) -> Result<NativeCredentialV1, &'static str> {
+        match (
+            self.method.as_str(),
+            self.password.as_ref(),
+            self.token.as_ref(),
+        ) {
+            ("password", Some(password), None)
+                if !password.user_id.is_empty() && !password.password.is_empty() =>
+            {
+                Ok(NativeCredentialV1::Password {
+                    user_id: password.user_id.clone(),
+                    password: password.password.clone(),
+                })
+            }
+            ("token", None, Some(token)) if !token.is_empty() => Ok(NativeCredentialV1::Token {
+                token: token.clone(),
+            }),
+            ("password" | "token", _, _) => Err("credential does not match method"),
+            _ => Err("unknown native credential method"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativePasswordCredentials {
     pub user_id: String,
     pub password: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth(
+        method: &str,
+        password: Option<NativePasswordCredentials>,
+        token: Option<&str>,
+    ) -> NativeAuth {
+        NativeAuth {
+            method: method.to_owned(),
+            password,
+            token: token.map(str::to_owned),
+            project_id: None,
+        }
+    }
+
+    #[test]
+    fn credentials_are_strictly_discriminated() {
+        assert!(matches!(
+            auth(
+                "password",
+                Some(NativePasswordCredentials {
+                    user_id: "u".into(),
+                    password: "p".into()
+                }),
+                None
+            )
+            .credential(),
+            Ok(NativeCredentialV1::Password { .. })
+        ));
+        assert!(matches!(
+            auth("token", None, Some("t")).credential(),
+            Ok(NativeCredentialV1::Token { .. })
+        ));
+        assert!(auth("password", None, Some("t")).credential().is_err());
+        assert!(
+            auth(
+                "token",
+                Some(NativePasswordCredentials {
+                    user_id: "u".into(),
+                    password: "p".into()
+                }),
+                None
+            )
+            .credential()
+            .is_err()
+        );
+        assert!(auth("other", None, None).credential().is_err());
+    }
 }
 
 // ── TokenIssuer trait ──────────────────────────────────────────────────────
@@ -76,8 +160,15 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let api_state = NativeApiState::from_ref(state);
+        let header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
 
+        // Missing credentials are always an authentication failure.  Check
+        // this before optional service configuration to avoid leaking a 503.
+        let api_state = NativeApiState::from_ref(state);
         let Some(ref issuer) = api_state.token_issuer else {
             return Err(ProblemDetails::with_detail(
                 crate::error::ErrorCode::NotAvailable,
@@ -85,12 +176,6 @@ where
             )
             .into_response());
         };
-
-        let header = parts
-            .headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
 
         let token = header
             .strip_prefix("Bearer ")
