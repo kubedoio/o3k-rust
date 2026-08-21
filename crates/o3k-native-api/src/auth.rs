@@ -7,7 +7,7 @@
 
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::{HeaderValue, request::Parts},
+    http::request::Parts,
     response::{IntoResponse, Response},
 };
 use o3k_kernel::AuthContext;
@@ -117,6 +117,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
 
     fn auth(
         method: &str,

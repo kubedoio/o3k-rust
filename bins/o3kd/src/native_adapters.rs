@@ -347,6 +347,7 @@ pub struct NetworkReaderAdapter {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod network_reader_tests {
     use super::network_intent_state_wire;
 
