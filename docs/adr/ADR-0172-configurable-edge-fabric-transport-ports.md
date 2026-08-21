@@ -1,9 +1,9 @@
 # ADR-0172 — Configurable edge-fabric transport ports
 
-Status: Proposed
-Date: 2026-08-20
-Decision-accepted: none
-Human-approval: none
+Status: Accepted
+Date: 2026-08-21
+Decision-accepted: 2026-08-21
+Human-approval: Senol Colak, 2026-08-21
 Supersedes: none
 Superseded-by: none
 Affected-services: network, edge, installer, operations, governance
