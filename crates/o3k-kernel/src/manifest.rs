@@ -313,14 +313,13 @@ impl ManifestRegistry {
         let namespace = self.manifests[service_id].namespace.clone();
 
         // Check session generation: a newer session supersedes.
-        if let Some(existing) = self.controllers.get(service_id) {
-            if let Some(ref existing_session) = existing.session {
-                if session.session_generation <= existing_session.session_generation {
-                    return Err(ManifestError::InvalidField(
-                        "session_generation must increase",
-                    ));
-                }
-            }
+        if let Some(existing) = self.controllers.get(service_id)
+            && let Some(ref existing_session) = existing.session
+            && session.session_generation <= existing_session.session_generation
+        {
+            return Err(ManifestError::InvalidField(
+                "session_generation must increase",
+            ));
         }
 
         let registration = ControllerRegistration {
@@ -337,13 +336,15 @@ impl ManifestRegistry {
     /// Transitions a controller from `Declared` to `Ready` after health checks
     /// pass. This is a separate step because SPEC-0031 requires protocol
     /// negotiation, manifest verification and health confirmation before Ready.
-    pub fn activate_controller(
-        &mut self,
-        service_id: &str,
-    ) -> Result<(), ManifestError> {
-        let reg = self.controllers.get_mut(service_id).ok_or(ManifestError::InvalidField("service_id"))?;
+    pub fn activate_controller(&mut self, service_id: &str) -> Result<(), ManifestError> {
+        let reg = self
+            .controllers
+            .get_mut(service_id)
+            .ok_or(ManifestError::InvalidField("service_id"))?;
         if reg.state != ControllerState::Declared {
-            return Err(ManifestError::InvalidField("controller must be Declared to activate"));
+            return Err(ManifestError::InvalidField(
+                "controller must be Declared to activate",
+            ));
         }
         reg.state = ControllerState::Ready;
         Ok(())
@@ -427,7 +428,9 @@ impl ManifestRegistry {
 
         // 4. Parse and validate resource types eagerly (fail-closed)
         if manifest.resource_types.is_empty() {
-            return Err(ManifestError::InvalidField("resource_types (must declare at least one)"));
+            return Err(ManifestError::InvalidField(
+                "resource_types (must declare at least one)",
+            ));
         }
         if manifest.resource_types.len() > 256 {
             return Err(ManifestError::InvalidField("resource_types (max 256)"));
@@ -445,9 +448,8 @@ impl ManifestRegistry {
                         expected: manifest.namespace.clone(),
                     });
                 }
-                ResourceType::new(ns, name).map_err(|e| {
-                    ManifestError::InvalidIdentifier(rt.clone(), e.to_string())
-                })
+                ResourceType::new(ns, name)
+                    .map_err(|e| ManifestError::InvalidIdentifier(rt.clone(), e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -460,7 +462,9 @@ impl ManifestRegistry {
 
         // 6. Parse and validate actions eagerly (fail-closed)
         if manifest.actions.is_empty() {
-            return Err(ManifestError::InvalidField("actions (must declare at least one)"));
+            return Err(ManifestError::InvalidField(
+                "actions (must declare at least one)",
+            ));
         }
         if manifest.actions.len() > 512 {
             return Err(ManifestError::InvalidField("actions (max 512)"));
@@ -481,9 +485,8 @@ impl ManifestRegistry {
                         expected: manifest.namespace.clone(),
                     });
                 }
-                ActionId::new(ns, act).map_err(|e| {
-                    ManifestError::InvalidIdentifier(a.clone(), e.to_string())
-                })
+                ActionId::new(ns, act)
+                    .map_err(|e| ManifestError::InvalidIdentifier(a.clone(), e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -523,7 +526,10 @@ impl ManifestRegistry {
             if qd.key.trim().is_empty() || qd.key.len() > 64 {
                 return Err(ManifestError::InvalidField("quota_dimensions[].key"));
             }
-            if manifest.quota_dimensions[..i].iter().any(|o| o.key == qd.key) {
+            if manifest.quota_dimensions[..i]
+                .iter()
+                .any(|o| o.key == qd.key)
+            {
                 return Err(ManifestError::DuplicateQuotaDimension(qd.key.clone()));
             }
         }
@@ -576,10 +582,7 @@ impl ManifestRegistry {
     }
 
     /// Checks whether a resource type is registered by any active service.
-    ///
-    /// # Panics
-    /// Panics if any registered manifest has malformed resource types — this
-    /// indicates a registry invariant violation.
+    #[allow(clippy::expect_used)]
     #[must_use]
     pub fn has_resource_type(&self, resource_type: &ResourceType) -> bool {
         self.manifests.values().any(|m| {
@@ -590,10 +593,7 @@ impl ManifestRegistry {
     }
 
     /// Checks whether an action is registered by any active service.
-    ///
-    /// # Panics
-    /// Panics if any registered manifest has malformed actions — this
-    /// indicates a registry invariant violation.
+    #[allow(clippy::expect_used)]
     #[must_use]
     pub fn has_action(&self, action: &ActionId) -> bool {
         self.manifests.values().any(|m| {
@@ -794,10 +794,7 @@ impl ManifestRegistry {
     }
 
     /// Returns all unique resource types across registered services.
-    ///
-    /// # Panics
-    /// Panics if any registered manifest has malformed resource types — this
-    /// indicates a registry invariant violation.
+    #[allow(clippy::expect_used)]
     #[must_use]
     pub fn all_resource_types(&self) -> Vec<ResourceType> {
         let mut types: Vec<ResourceType> = Vec::new();
@@ -932,7 +929,10 @@ mod tests {
         m.resource_types = vec![];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
-        assert!(err.to_string().contains("resource_types"), "expected resource_types error, got {err}");
+        assert!(
+            err.to_string().contains("resource_types"),
+            "expected resource_types error, got {err}"
+        );
     }
 
     #[test]
@@ -941,7 +941,10 @@ mod tests {
         m.actions = vec![];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
-        assert!(err.to_string().contains("actions"), "expected actions error, got {err}");
+        assert!(
+            err.to_string().contains("actions"),
+            "expected actions error, got {err}"
+        );
     }
 
     #[test]
@@ -955,7 +958,10 @@ mod tests {
     #[test]
     fn register_rejects_duplicate_resource_type_in_one_manifest() {
         let mut m = valid_database_manifest();
-        m.resource_types = vec!["database:instance".to_owned(), "database:instance".to_owned()];
+        m.resource_types = vec![
+            "database:instance".to_owned(),
+            "database:instance".to_owned(),
+        ];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
         assert!(matches!(err, ManifestError::DuplicateResourceType(_)));
