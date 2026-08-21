@@ -81,7 +81,10 @@ pub struct NativePasswordCredentials {
 pub struct RequestId(pub String);
 
 impl RequestId {
-    fn from_parts(parts: &Parts) -> Self {
+    fn from_parts(parts: &mut Parts) -> Self {
+        if let Some(existing) = parts.extensions.get::<Self>() {
+            return existing.clone();
+        }
         let accepted = parts
             .headers
             .get("x-request-id")
@@ -94,7 +97,9 @@ impl RequestId {
                         .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
             })
             .map(str::to_owned);
-        Self(accepted.unwrap_or_else(|| Uuid::now_v7().to_string()))
+        let value = Self(accepted.unwrap_or_else(|| Uuid::now_v7().to_string()));
+        parts.extensions.insert(value.clone());
+        value
     }
 }
 
@@ -158,6 +163,32 @@ mod tests {
             .is_err()
         );
         assert!(auth("other", None, None).credential().is_err());
+    }
+
+    #[test]
+    fn request_id_is_generated_once_and_reused() {
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        let first = RequestId::from_parts(&mut parts);
+        let second = RequestId::from_parts(&mut parts);
+        assert_eq!(first.0, second.0);
+        assert!(!first.0.is_empty());
+    }
+
+    #[test]
+    fn request_id_accepts_bounded_safe_value_and_rejects_unsafe() {
+        let mut request = axum::http::Request::new(());
+        request
+            .headers_mut()
+            .insert("x-request-id", "client-42".parse().unwrap());
+        let mut parts = request.into_parts().0;
+        assert_eq!(RequestId::from_parts(&mut parts).0, "client-42");
+
+        let mut request = axum::http::Request::new(());
+        request
+            .headers_mut()
+            .insert("x-request-id", "bad value".parse().unwrap());
+        let mut parts = request.into_parts().0;
+        assert_ne!(RequestId::from_parts(&mut parts).0, "bad value");
     }
 }
 
