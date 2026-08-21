@@ -249,17 +249,33 @@ status as of the current release.
   no hard-coded database quota dimensions. Extension services use generic
   namespace construction.
 
-### P12.2 — Native discovery API — implemented (scaffolded)
+### P12.2 — Native IAM, representative reads, error envelope, pagination — implemented
 
-- `crates/o3k-native-api` — sibling northbound adapter (ADR-0173/SPEC-0030);
-- `GET /o3k/v1/services` — registered service discovery from `ManifestRegistry`
-  with lifecycle state;
-- `GET /o3k/v1/resource-types` — resource-type discovery from `ManifestRegistry`;
-- `GET /o3k/v1/identity/me` — **stub only**; real IAM wiring is P12.2 follow-up;
-- wired into `o3kd` alongside the existing OpenStack API router at `/o3k/v1/...`;
-- **Not implemented**: native identity tokens, authentication/authorization,
-  representative read-only resources (compute:server, volume:volume, etc.),
-  service-neutral Operation exposure, pagination, error envelope.
+- `POST /o3k/v1/identity/tokens` — native token issuance through O3K IAM
+  (same `TokenService` as Keystone-compatible path);
+- `GET /o3k/v1/identity/me` — returns authenticated `AuthContext` from
+  bearer token (authenticated: true with principal/scope details);
+- `GET /o3k/v1/compute/servers` — native `compute:server` list via
+  `ComputeService::list_servers_for_auth()`, authorized through canonical
+  O3K IAM/authorization;
+- `GET /o3k/v1/compute/servers/{id}` — native `compute:server` show;
+- `GET /o3k/v1/volume/volumes` — native `volume:volume` list via
+  `StorageRepository::list_volumes()`;
+- `GET /o3k/v1/volume/volumes/{id}` — native `volume:volume` show;
+- RFC 9457 Problem Details (`Content-Type: application/problem+json`)
+  with stable O3K `code`, `request_id` support, and secret-safe errors;
+- Opaque cursor pagination (base64-encoded, scope-bound, tamper-safe);
+- `BearerAuth` extractor for protected native endpoints;
+- Lightweight trait-based service reader ports (`TokenIssuer`,
+  `ServerReader`, `VolumeReader`) so `o3k-native-api` remains
+  dependency-light, with concrete adapters wired at the `o3kd`
+  composition root;
+- **Not implemented**: native create/delete mutations (belongs to #731
+  after #732 Operation convergence), Idempotency-Key (#732), generic
+  resource dispatch (#731), network:address_realm canonical read
+  (deferred until native read API exists for canonical network resources),
+  external controller protocol (#733), Database conformance composition
+  (#734), security evidence matrix (#735).
 
 ### P12.3 — Native CLI — implemented (scaffolded)
 
