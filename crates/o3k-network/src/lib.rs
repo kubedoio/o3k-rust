@@ -301,7 +301,7 @@ mod p9_plan_tests {
             peers: vec![FabricPeer {
                 host_id: "node-b".to_owned(),
                 public_key: "public-key".to_owned(),
-                underlay_endpoint: "192.0.2.2:51820".to_owned(),
+                underlay_endpoint: "192.0.2.2:65001".to_owned(),
                 fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
                 fabric_generation: 6,
             }],

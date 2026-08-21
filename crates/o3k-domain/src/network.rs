@@ -1106,7 +1106,7 @@ mod endpoint_directory_tests {
         let identities = vec![FabricHostIdentity {
             host_id: "host-07".to_owned(),
             public_key: "public-key-07".to_owned(),
-            underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            underlay_endpoint: "192.0.2.7:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 7),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
@@ -1161,7 +1161,7 @@ mod endpoint_directory_tests {
         let local = FabricHostIdentity {
             host_id: "host-01".to_owned(),
             public_key: "public-key-01".to_owned(),
-            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            underlay_endpoint: "192.0.2.1:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 8,
@@ -1171,7 +1171,7 @@ mod endpoint_directory_tests {
         let remote = FabricHostIdentity {
             host_id: "host-07".to_owned(),
             public_key: "public-key-07".to_owned(),
-            underlay_endpoint: "192.0.2.7:51820".to_owned(),
+            underlay_endpoint: "192.0.2.7:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 7),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 9,
@@ -1364,7 +1364,7 @@ mod endpoint_directory_tests {
         let local = FabricHostIdentity {
             host_id: "host-local".to_owned(),
             public_key: "public-local".to_owned(),
-            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            underlay_endpoint: "192.0.2.1:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             provider_version: "geneve-wireguard-v2".to_owned(),
             fabric_generation: 1,
@@ -1374,7 +1374,7 @@ mod endpoint_directory_tests {
         let remote = FabricHostIdentity {
             host_id: "host-remote".to_owned(),
             public_key: "public-remote".to_owned(),
-            underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            underlay_endpoint: "192.0.2.2:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
             provider_version: "geneve-wireguard-v2".to_owned(),
             fabric_generation: 1,

@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = FabricHostIdentity {
         host_id: "smoke-local".to_owned(),
         public_key: "local-public-key-is-not-a-peer".to_owned(),
-        underlay_endpoint: "127.0.0.1:51820".to_owned(),
+        underlay_endpoint: "127.0.0.1:65001".to_owned(),
         fabric_transport_ip: "198.18.0.1".parse()?,
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: 1,

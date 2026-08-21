@@ -182,7 +182,7 @@ cleanup_host_network_state() {
       ip link show 2>/dev/null | awk -F': ' '/o3k-|wg-o3k/ {print \$2}' | xargs -r -n1 ip link del 2>/dev/null; \
       ip link del wg-o3k 2>/dev/null || true
       # Remove the fabric veth NAT rules (tolerate absence, delete duplicates).
-      while iptables -t nat -D PREROUTING ! -i o3k-u -p udp --dport 51820 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do :; done
+      while iptables -t nat -D PREROUTING ! -i o3k-u -p udp --dport 65001 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do :; done
       while iptables -t nat -D POSTROUTING -s 169.254.253.0/30 -j MASQUERADE 2>/dev/null; do :; done
     " || true
   done
@@ -367,7 +367,7 @@ verify_wireguard_handshakes() {
 # matches cleartext leak indicators only: tenant IPs, cleartext Geneve, and
 # fabric transport IPs outside the WireGuard UDP/51820 envelope.
 start_underlay_capture() {
-  local filter='net 10.0.0.0/24 or udp port 6081 or (net 198.18.0.0/16 and not udp port 51820)'
+  local filter='net 10.0.0.0/24 or udp port 6081 or (net 198.18.0.0/16 and not udp port 65001)'
   for host in p11h1 p11h2 p11h3; do
     remote "$host" "command -v tcpdump >/dev/null" \
       || die "tcpdump not found on $host (required for cleartext-on-underlay evidence)"
