@@ -183,7 +183,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 mod tests {
     use super::*;
     use o3k_kernel::ServiceManifest;
-    use o3k_kernel::manifest::{RegisteredResourceType, ResourceScope};
+    use o3k_kernel::manifest::{ManifestController, RegisteredResourceType, ResourceScope};
     use o3k_kernel::resource::ResourceType;
 
     fn test_manifest_registry() -> ManifestRegistry {
@@ -217,7 +217,12 @@ mod tests {
             quota_dimensions: vec![],
             regions: vec![],
             availability_domains: vec![],
-            controller: None,
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
             health: None,
         };
         let _ = reg.register(m);

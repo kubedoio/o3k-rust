@@ -47,7 +47,12 @@ pub fn manifest() -> ServiceManifest {
         quota_dimensions: vec![],
         regions: vec![],
         availability_domains: vec![],
-        controller: None,
+        controller: Some(o3k_kernel::ManifestController {
+            mode: "in-process".to_owned(),
+            protocol: "in-process".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: None,
+        }),
         health: None,
     }
 }

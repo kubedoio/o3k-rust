@@ -44,11 +44,12 @@ pub use controller::{
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;
 pub use manifest::{
-    ControllerBinding, ControllerDescriptor, DependencyDescriptor, ManifestError, ManifestRegistry,
-    NativeResourceMetaV1, NativeResourceV1, OpenStackApiSurface, OpenStackApiSurfaceV1,
-    OpenStackCompatibilityProjection, OpenStackEndpointTemplate, OpenStackEndpointV1,
-    OpenStackProjectionV1, QuotaDimension, QuotaDimensionDescriptor, ResourceTypeDescriptor,
-    ServiceHealth, ServiceLifecycleState, ServiceManifest, ServiceManifestV1,
+    ControllerBinding, ControllerDescriptor, DependencyDescriptor, ManifestController,
+    ManifestError, ManifestRegistry, NativeResourceMetaV1, NativeResourceV1, OpenStackApiSurface,
+    OpenStackApiSurfaceV1, OpenStackCompatibilityProjection, OpenStackEndpointTemplate,
+    OpenStackEndpointV1, OpenStackProjectionV1, QuotaDimension, QuotaDimensionDescriptor,
+    RegisteredResourceType, ResourceScope, ResourceTypeDescriptor, ServiceDependency, ServiceHealth,
+    ServiceLifecycleState, ServiceManifest, ServiceManifestV1,
 };
 pub use operation::{Operation, OperationState};
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};

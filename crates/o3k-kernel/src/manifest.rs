@@ -224,47 +224,129 @@ impl ServiceManifest {
     /// - resource types or actions use identifiers outside the declared namespace;
     /// - the manifest version is unsupported.
     pub fn validate(&self) -> Result<(), ManifestError> {
+        // manifest_version
         if self.manifest_version != 1 {
             return Err(ManifestError::UnsupportedVersion(self.manifest_version));
         }
-        if self.service_id.trim().is_empty() {
-            return Err(ManifestError::InvalidField("service_id"));
-        }
-        if self.namespace.trim().is_empty() {
-            return Err(ManifestError::InvalidField("namespace"));
-        }
-        if self.service_version.trim().is_empty() {
-            return Err(ManifestError::InvalidField("service_version"));
+
+        // service_id: 1..128
+        if self.service_id.trim().is_empty() || self.service_id.len() > 128 {
+            return Err(ManifestError::InvalidField("service_id (1..128)"));
         }
 
-        for rt in &self.resource_types {
-            let rt_str = rt.resource_type.to_string();
-            let Some((ns, _)) = rt_str.split_once(':') else {
-                return Err(ManifestError::InvalidIdentifier(
-                    rt_str.clone(),
-                    "resource type must be namespace:name".to_owned(),
+        // namespace: 1..64
+        if self.namespace.trim().is_empty() || self.namespace.len() > 64 {
+            return Err(ManifestError::InvalidField("namespace (1..64)"));
+        }
+
+        // service_version: 1..64
+        if self.service_version.trim().is_empty() || self.service_version.len() > 64 {
+            return Err(ManifestError::InvalidField("service_version (1..64)"));
+        }
+
+        // Ownership: ExternalHosted is not a valid P12 manifest ownership mode
+        if self.ownership == ServiceOwnership::ExternalHosted {
+            return Err(ManifestError::InvalidField(
+                "ownership: ExternalHosted is not valid for service manifest v1",
+            ));
+        }
+
+        // controller — REQUIRED for every P12 ServiceManifest v1
+        let Some(ref ctrl) = self.controller else {
+            return Err(ManifestError::InvalidField("controller is required"));
+        };
+        match (ctrl.mode.as_str(), self.ownership) {
+            ("in-process", ServiceOwnership::O3kImplemented) => {}
+            ("external", ServiceOwnership::ExternalController) => {
+                if ctrl.protocol != "grpc" {
+                    return Err(ManifestError::InvalidField(
+                        "controller.protocol must be 'grpc' for external mode",
+                    ));
+                }
+                if ctrl
+                    .service_principal
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+                {
+                    return Err(ManifestError::InvalidField(
+                        "controller.service_principal required for external mode",
+                    ));
+                }
+            }
+            ("in-process", _) => {
+                return Err(ManifestError::InvalidField(
+                    "in-process controller requires o3k-implemented ownership",
                 ));
-            };
-            if ns != self.namespace {
+            }
+            ("external", _) => {
+                return Err(ManifestError::InvalidField(
+                    "external controller requires external-controller ownership",
+                ));
+            }
+            (_mode, _) => {
+                return Err(ManifestError::InvalidField(
+                    "controller.mode: expected 'in-process' or 'external'",
+                ));
+            }
+        }
+        match ctrl.protocol.as_str() {
+            "in-process" | "grpc" => {}
+            _ => {
+                return Err(ManifestError::InvalidField(
+                    "controller.protocol: expected 'in-process' or 'grpc'",
+                ));
+            }
+        }
+        if ctrl.protocol_version.trim().is_empty() || ctrl.protocol_version.len() > 64 {
+            return Err(ManifestError::InvalidField(
+                "controller.protocol_version (1..64)",
+            ));
+        }
+        if let Some(ref sp) = ctrl.service_principal && sp.len() > 255 {
+            return Err(ManifestError::InvalidField(
+                "controller.service_principal max 255",
+            ));
+        }
+
+        // resource_types: 1..128, unique, namespace match, schema_version 1..64
+        if self.resource_types.is_empty() || self.resource_types.len() > 128 {
+            return Err(ManifestError::InvalidField("resource_types (1..128)"));
+        }
+        for (i, rt) in self.resource_types.iter().enumerate() {
+            let rt_str = rt.resource_type.to_string();
+            if self.resource_types[..i].contains(rt) {
+                return Err(ManifestError::DuplicateResourceType(rt_str));
+            }
+            if rt.resource_type.namespace() != self.namespace {
                 return Err(ManifestError::NamespaceMismatch {
-                    identifier: rt_str.clone(),
+                    identifier: rt_str,
                     expected: self.namespace.clone(),
                 });
             }
-            // schema_version must be non-empty and bounded
-            if rt.schema_version.trim().is_empty() {
+            if rt.schema_version.trim().is_empty() || rt.schema_version.len() > 64 {
                 return Err(ManifestError::InvalidField(
-                    "resource_types[].schema_version",
+                    "resource_types[].schema_version (1..64)",
                 ));
             }
-            if rt.schema_version.len() > 64 {
+            if let Some(ref coll) = rt.collection
+                && (coll.trim().is_empty() || coll.len() > 128)
+            {
                 return Err(ManifestError::InvalidField(
-                    "resource_types[].schema_version (max 64)",
+                    "resource_types[].collection (1..128)",
                 ));
             }
         }
 
-        for act in &self.actions {
+        // actions: 1..256, unique, accepted syntax
+        if self.actions.is_empty() || self.actions.len() > 256 {
+            return Err(ManifestError::InvalidField("actions (1..256)"));
+        }
+        for (i, act) in self.actions.iter().enumerate() {
+            if self.actions[..i].contains(act) {
+                return Err(ManifestError::DuplicateAction(act.clone()));
+            }
             let Some((ns, _)) = act.split_once(':') else {
                 return Err(ManifestError::InvalidIdentifier(
                     act.clone(),
@@ -277,59 +359,52 @@ impl ServiceManifest {
                     expected: self.namespace.clone(),
                 });
             }
-        }
-
-        // Validate controller coherence based on ownership
-        if self.ownership == ServiceOwnership::ExternalController {
-            let Some(ref ctrl) = self.controller else {
-                return Err(ManifestError::InvalidField(
-                    "controller required for external-controller ownership",
-                ));
-            };
-            if ctrl.mode != "external" {
-                return Err(ManifestError::InvalidField(
-                    "controller.mode must be 'external' for external-controller ownership",
-                ));
-            }
-            if ctrl.protocol != "grpc" {
-                return Err(ManifestError::InvalidField(
-                    "controller.protocol must be 'grpc' for external-controller ownership",
-                ));
-            }
-            if ctrl
-                .service_principal
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-            {
-                return Err(ManifestError::InvalidField(
-                    "controller.service_principal required for external mode",
-                ));
-            }
-        }
-        // In-process controller coherence (if controller declared)
-        if let Some(ref ctrl) = self.controller {
-            match ctrl.mode.as_str() {
-                "in-process" | "external" => {}
-                _ => {
-                    return Err(ManifestError::InvalidField(
-                        "controller.mode: expected 'in-process' or 'external'",
-                    ));
-                }
-            }
-            match ctrl.protocol.as_str() {
-                "in-process" | "grpc" => {}
-                _ => {
-                    return Err(ManifestError::InvalidField(
-                        "controller.protocol: expected 'in-process' or 'grpc'",
-                    ));
-                }
+            if act.len() > 128 {
+                return Err(ManifestError::InvalidField("action (max 128)"));
             }
         }
 
-        // Validate quota scope values
-        for qd in &self.quota_dimensions {
+        // capabilities: max 128, unique, each 1..128
+        if self.capabilities.len() > 128 {
+            return Err(ManifestError::InvalidField("capabilities (max 128)"));
+        }
+        for (i, cap) in self.capabilities.iter().enumerate() {
+            if self.capabilities[..i].contains(cap) {
+                return Err(ManifestError::InvalidField("duplicate capability"));
+            }
+            if cap.trim().is_empty() || cap.len() > 128 {
+                return Err(ManifestError::InvalidField("capability (1..128)"));
+            }
+        }
+
+        // dependencies: max 128, name 1..128
+        if self.dependencies.len() > 128 {
+            return Err(ManifestError::InvalidField("dependencies (max 128)"));
+        }
+        for dep in &self.dependencies {
+            if dep.name.trim().is_empty() || dep.name.len() > 128 {
+                return Err(ManifestError::InvalidField("dependency name (1..128)"));
+            }
+        }
+
+        // quota_dimensions: max 64, key 1..128, unit 1..64, scope tenant/system
+        if self.quota_dimensions.len() > 64 {
+            return Err(ManifestError::InvalidField("quota_dimensions (max 64)"));
+        }
+        for (i, qd) in self.quota_dimensions.iter().enumerate() {
+            if self.quota_dimensions[..i].iter().any(|o| o.key == qd.key) {
+                return Err(ManifestError::DuplicateQuotaDimension(qd.key.clone()));
+            }
+            if qd.key.trim().is_empty() || qd.key.len() > 128 {
+                return Err(ManifestError::InvalidField(
+                    "quota_dimensions[].key (1..128)",
+                ));
+            }
+            if qd.unit.trim().is_empty() || qd.unit.len() > 64 {
+                return Err(ManifestError::InvalidField(
+                    "quota_dimensions[].unit (1..64)",
+                ));
+            }
             match qd.scope.as_str() {
                 "tenant" | "system" => {}
                 _ => {
@@ -340,22 +415,32 @@ impl ServiceManifest {
             }
         }
 
-        // Validate regions/AZ entries
-        for region in &self.regions {
-            if region.trim().is_empty() {
-                return Err(ManifestError::InvalidField("regions[]"));
+        // regions: max 128, unique, entries 1..128
+        if self.regions.len() > 128 {
+            return Err(ManifestError::InvalidField("regions (max 128)"));
+        }
+        for (i, region) in self.regions.iter().enumerate() {
+            if self.regions[..i].contains(region) {
+                return Err(ManifestError::InvalidField("duplicate region"));
             }
-            if region.len() > 128 {
-                return Err(ManifestError::InvalidField("regions[] (max 128)"));
+            if region.trim().is_empty() || region.len() > 128 {
+                return Err(ManifestError::InvalidField("regions[] (1..128)"));
             }
         }
-        for az in &self.availability_domains {
-            if az.trim().is_empty() {
-                return Err(ManifestError::InvalidField("availability_domains[]"));
+
+        // availability_domains: max 256, unique, entries 1..128
+        if self.availability_domains.len() > 256 {
+            return Err(ManifestError::InvalidField(
+                "availability_domains (max 256)",
+            ));
+        }
+        for (i, az) in self.availability_domains.iter().enumerate() {
+            if self.availability_domains[..i].contains(az) {
+                return Err(ManifestError::InvalidField("duplicate availability_domain"));
             }
-            if az.len() > 128 {
+            if az.trim().is_empty() || az.len() > 128 {
                 return Err(ManifestError::InvalidField(
-                    "availability_domains[] (max 128)",
+                    "availability_domains[] (1..128)",
                 ));
             }
         }
@@ -635,7 +720,7 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
             }
         }
 
-        Ok(ServiceManifest {
+        let manifest = ServiceManifest {
             manifest_version: 1,
             service_id: wire.service_id,
             namespace: wire.namespace,
@@ -650,7 +735,10 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
             availability_domains: wire.availability_domains,
             controller,
             health: None,
-        })
+        };
+        // Normalized validate() is the final structural authority.
+        manifest.validate()?;
+        Ok(manifest)
     }
 }
 
@@ -1044,106 +1132,29 @@ impl ManifestRegistry {
     /// Registration is atomic: all invariants are checked before any mutation.
     /// On failure, the registry state is left unchanged.
     pub fn register(&mut self, manifest: ServiceManifest) -> Result<(), ManifestError> {
-        use crate::error::KernelError;
-
-        // 1. Validate manifest structure
+        // 1. Validate manifest structure (all schema-compliant field bounds)
         manifest.validate()?;
 
-        // 2. Reject duplicate / blank service ID
-        if manifest.service_id.trim().is_empty() {
-            return Err(ManifestError::InvalidField("service_id"));
-        }
-        if manifest.service_id.len() > 128 {
-            return Err(ManifestError::InvalidField("service_id (max 128 chars)"));
-        }
+        // 2. Reject duplicate service ID
         if self.manifests.contains_key(&manifest.service_id) {
             return Err(ManifestError::DuplicateServiceId(
                 manifest.service_id.clone(),
             ));
         }
 
-        // 3. Validate namespace
-        if manifest.namespace.trim().is_empty() {
-            return Err(ManifestError::InvalidField("namespace"));
-        }
-        if manifest.namespace.len() > 64 {
-            return Err(ManifestError::InvalidField("namespace (max 64 chars)"));
-        }
+        // 3. Reject duplicate namespace
         if self.by_namespace.contains_key(&manifest.namespace) {
             return Err(ManifestError::DuplicateNamespace(
                 manifest.namespace.clone(),
             ));
         }
 
-        // 4. Parse and validate resource types eagerly (fail-closed)
-        if manifest.resource_types.is_empty() {
-            return Err(ManifestError::InvalidField(
-                "resource_types (must declare at least one)",
-            ));
-        }
-        if manifest.resource_types.len() > 256 {
-            return Err(ManifestError::InvalidField("resource_types (max 256)"));
-        }
+        // 4. Check duplicate resource types against existing registrations
         let parsed_rts: Vec<ResourceType> = manifest
             .resource_types
             .iter()
-            .map(|rt| {
-                let ns = rt.resource_type.namespace();
-                if ns != manifest.namespace {
-                    return Err(ManifestError::NamespaceMismatch {
-                        identifier: rt.resource_type.to_string(),
-                        expected: manifest.namespace.clone(),
-                    });
-                }
-                Ok(rt.resource_type.clone())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // 5. Check duplicate resource types within this manifest
-        for (i, rt) in parsed_rts.iter().enumerate() {
-            if parsed_rts[..i].contains(rt) {
-                return Err(ManifestError::DuplicateResourceType(rt.to_string()));
-            }
-        }
-
-        // 6. Parse and validate actions eagerly (fail-closed)
-        if manifest.actions.is_empty() {
-            return Err(ManifestError::InvalidField(
-                "actions (must declare at least one)",
-            ));
-        }
-        if manifest.actions.len() > 512 {
-            return Err(ManifestError::InvalidField("actions (max 512)"));
-        }
-        let parsed_actions: Vec<ActionId> = manifest
-            .actions
-            .iter()
-            .map(|a| {
-                let (ns, act) = a.split_once(':').ok_or_else(|| {
-                    ManifestError::InvalidIdentifier(
-                        a.clone(),
-                        "action must be namespace:Action".to_owned(),
-                    )
-                })?;
-                if ns != manifest.namespace {
-                    return Err(ManifestError::NamespaceMismatch {
-                        identifier: a.clone(),
-                        expected: manifest.namespace.clone(),
-                    });
-                }
-                ActionId::new(ns, act)
-                    .map_err(|e| ManifestError::InvalidIdentifier(a.clone(), e.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // 7. Check duplicate actions within this manifest
-        for (i, act) in parsed_actions.iter().enumerate() {
-            if parsed_actions[..i].contains(act) {
-                return Err(ManifestError::DuplicateAction(act.to_string()));
-            }
-        }
-
-        // 8. Check duplicate resource types against existing registrations
+            .map(|rt| rt.resource_type.clone())
+            .collect();
         for rt in &parsed_rts {
             for existing in self.manifests.values() {
                 let existing_rts = existing.parsed_resource_types().map_err(|e: KernelError| {
@@ -1155,7 +1166,13 @@ impl ManifestRegistry {
             }
         }
 
-        // 9. Check duplicate actions against existing registrations
+        // 5. Check duplicate actions against existing registrations
+        let parsed_actions: Vec<ActionId> = manifest
+            .actions
+            .iter()
+            .map(|a| ActionId::parse(a))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| ManifestError::InvalidIdentifier("action".to_owned(), e.to_string()))?;
         for act in &parsed_actions {
             for existing in self.manifests.values() {
                 let existing_acts = existing.parsed_actions().map_err(|e: KernelError| {
@@ -1167,20 +1184,7 @@ impl ManifestRegistry {
             }
         }
 
-        // 10. Validate quota dimensions (service-owned namespace)
-        for (i, qd) in manifest.quota_dimensions.iter().enumerate() {
-            if qd.key.trim().is_empty() || qd.key.len() > 64 {
-                return Err(ManifestError::InvalidField("quota_dimensions[].key"));
-            }
-            if manifest.quota_dimensions[..i]
-                .iter()
-                .any(|o| o.key == qd.key)
-            {
-                return Err(ManifestError::DuplicateQuotaDimension(qd.key.clone()));
-            }
-        }
-
-        // 11. ALL CHECKS PASSED — atomically apply (HashMap inserts are infallible)
+        // 6. ALL CHECKS PASSED — atomically apply (HashMap inserts are infallible)
         let service_id = manifest.service_id.clone();
         self.by_namespace
             .insert(manifest.namespace.clone(), service_id.clone());
@@ -1309,7 +1313,12 @@ impl ManifestRegistry {
                 quota_dimensions: vec![],
                 regions: vec![],
                 availability_domains: vec![],
-                controller: None,
+                controller: Some(ManifestController {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    service_principal: None,
+                }),
                 health: None,
             },
             ServiceManifest {
@@ -1338,7 +1347,12 @@ impl ManifestRegistry {
                 quota_dimensions: vec![],
                 regions: vec![],
                 availability_domains: vec![],
-                controller: None,
+                controller: Some(ManifestController {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    service_principal: None,
+                }),
                 health: None,
             },
             ServiceManifest {
@@ -1391,7 +1405,12 @@ impl ManifestRegistry {
                 quota_dimensions: vec![],
                 regions: vec![],
                 availability_domains: vec![],
-                controller: None,
+                controller: Some(ManifestController {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    service_principal: None,
+                }),
                 health: None,
             },
             // ── Deferred from native discovery until P12.2 ────────────────
@@ -1473,7 +1492,12 @@ mod tests {
             quota_dimensions: vec![],
             regions: vec![],
             availability_domains: vec![],
-            controller: None,
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
             health: None,
         }
     }
@@ -1490,7 +1514,7 @@ mod tests {
         m.service_id = "".to_owned();
         assert_eq!(
             m.validate().unwrap_err(),
-            ManifestError::InvalidField("service_id")
+            ManifestError::InvalidField("service_id (1..128)")
         );
     }
 
@@ -1806,7 +1830,12 @@ mod tests {
             quota_dimensions: vec![],
             regions: vec![],
             availability_domains: vec![],
-            controller: None,
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
             health: None,
         };
         let err = reg.register(m).unwrap_err();
@@ -1852,7 +1881,12 @@ mod tests {
             quota_dimensions: vec![],
             regions: vec![],
             availability_domains: vec![],
-            controller: None,
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
             health: None,
         };
         reg.register(m).unwrap();
