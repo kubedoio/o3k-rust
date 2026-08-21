@@ -20,14 +20,15 @@ product rules. Summaries explain these decisions but do not override them.
 | Execution authority and protocol invariants | `contracts/execution-boundaries.md` | `docs/ARCHITECTURE.md`, `AGENTS.md` |
 | Native persistent Volume/Attachment/Snapshot authority and storage execution | `docs/adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md` and `docs/specs/SPEC-0027-native-persistent-storage-v1.md` | `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
 
-## Proposed P12 sources — not active implementation authority yet
+## Accepted P12 sources — active architecture authority
 
-The following P12 sources are deliberately present in `Proposed` state for
-human architecture/security review. They do **not** override the accepted
-sources above and must not be used to claim implemented native API/controller
-support until the related ADRs are accepted and executable evidence passes.
+The following P12 sources were accepted on 2026-08-21 (human architecture/
+security approval recorded under ADR-0154). They are now active architecture
+authority alongside the accepted foundation sources above. Runtime
+implementation and support claims remain gated by the evidence requirements
+defined in each source.
 
-| Subject | Proposed source |
+| Subject | Normative source |
 |---|---|
 | Native O3K resource API, resource envelope, identity/versioning/operations/error/pagination/CLI semantics | `docs/adr/ADR-0173-native-o3k-resource-api-and-resource-model.md`, `docs/specs/SPEC-0030-native-o3k-resource-api-v1.md`, `contracts/native-resource-envelope-v1.schema.json` |
 | Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
@@ -78,8 +79,9 @@ support until the related ADRs are accepted and executable evidence passes.
   operation store.
 - Existing OpenStack, vSphere, Proxmox, KubeVirt, or public clouds require a
   delegated/federated authority model rather than a libvirt-like provider.
-- Proposed P12 documents do not change runtime authority while their governing
-  ADRs remain `Proposed`.
+- Accepted P12 documents are active architecture authority for the native API
+  and extensible service model. Runtime support claims remain evidence-gated
+  by SPEC-0030 §20 and SPEC-0031 §24.
 
 ## Claim discipline
 

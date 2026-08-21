@@ -42,6 +42,18 @@ pub enum ServiceLifecycleState {
     Incompatible,
 }
 
+impl std::fmt::Display for ServiceLifecycleState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Declared => write!(f, "declared"),
+            Self::Ready => write!(f, "ready"),
+            Self::NotReady => write!(f, "not_ready"),
+            Self::Disabled => write!(f, "disabled"),
+            Self::Incompatible => write!(f, "incompatible"),
+        }
+    }
+}
+
 /// Controller protocol binding in a service manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ControllerBinding {
@@ -253,12 +265,16 @@ pub enum ManifestError {
         identifier: String,
         expected: String,
     },
+    #[error("duplicate service ID: {0}")]
+    DuplicateServiceId(String),
     #[error("duplicate namespace: {0}")]
     DuplicateNamespace(String),
     #[error("duplicate resource type: {0}")]
     DuplicateResourceType(String),
     #[error("duplicate action: {0}")]
     DuplicateAction(String),
+    #[error("duplicate quota dimension: {0}")]
+    DuplicateQuotaDimension(String),
 }
 
 /// A registry of active service manifests.
@@ -282,6 +298,9 @@ impl ManifestRegistry {
 
     /// Registers or updates a controller session for a registered service.
     ///
+    /// The controller starts in `Declared` state. Call `update_controller_health`
+    /// after health/readiness verification transitions it to `Ready`.
+    ///
     /// Returns an error if the service is not registered.
     pub fn register_controller(
         &mut self,
@@ -292,14 +311,41 @@ impl ManifestRegistry {
             return Err(ManifestError::InvalidField("service_id"));
         }
         let namespace = self.manifests[service_id].namespace.clone();
-        let reg = ControllerRegistration {
+
+        // Check session generation: a newer session supersedes.
+        if let Some(existing) = self.controllers.get(service_id) {
+            if let Some(ref existing_session) = existing.session {
+                if session.session_generation <= existing_session.session_generation {
+                    return Err(ManifestError::InvalidField(
+                        "session_generation must increase",
+                    ));
+                }
+            }
+        }
+
+        let registration = ControllerRegistration {
             service_id: service_id.to_owned(),
             namespace,
             session: Some(session),
-            state: ControllerState::Ready,
+            state: ControllerState::Declared,
             health: None,
         };
-        self.controllers.insert(service_id.to_owned(), reg);
+        self.controllers.insert(service_id.to_owned(), registration);
+        Ok(())
+    }
+
+    /// Transitions a controller from `Declared` to `Ready` after health checks
+    /// pass. This is a separate step because SPEC-0031 requires protocol
+    /// negotiation, manifest verification and health confirmation before Ready.
+    pub fn activate_controller(
+        &mut self,
+        service_id: &str,
+    ) -> Result<(), ManifestError> {
+        let reg = self.controllers.get_mut(service_id).ok_or(ManifestError::InvalidField("service_id"))?;
+        if reg.state != ControllerState::Declared {
+            return Err(ManifestError::InvalidField("controller must be Declared to activate"));
+        }
+        reg.state = ControllerState::Ready;
         Ok(())
     }
 
@@ -344,42 +390,145 @@ impl ManifestRegistry {
     ///
     /// Returns an error if the manifest fails validation or conflicts with
     /// an already-registered namespace/resource type/action.
+    ///
+    /// Registration is atomic: all invariants are checked before any mutation.
+    /// On failure, the registry state is left unchanged.
     pub fn register(&mut self, manifest: ServiceManifest) -> Result<(), ManifestError> {
+        use crate::error::KernelError;
+
+        // 1. Validate manifest structure
         manifest.validate()?;
 
-        // Check duplicate namespace
+        // 2. Reject duplicate / blank service ID
+        if manifest.service_id.trim().is_empty() {
+            return Err(ManifestError::InvalidField("service_id"));
+        }
+        if manifest.service_id.len() > 128 {
+            return Err(ManifestError::InvalidField("service_id (max 128 chars)"));
+        }
+        if self.manifests.contains_key(&manifest.service_id) {
+            return Err(ManifestError::DuplicateServiceId(
+                manifest.service_id.clone(),
+            ));
+        }
+
+        // 3. Validate namespace
+        if manifest.namespace.trim().is_empty() {
+            return Err(ManifestError::InvalidField("namespace"));
+        }
+        if manifest.namespace.len() > 64 {
+            return Err(ManifestError::InvalidField("namespace (max 64 chars)"));
+        }
         if self.by_namespace.contains_key(&manifest.namespace) {
             return Err(ManifestError::DuplicateNamespace(
                 manifest.namespace.clone(),
             ));
         }
 
-        // Check duplicate resource types within existing registrations
-        if let Ok(parsed_rt) = manifest.parsed_resource_types() {
-            for rt in &parsed_rt {
-                for existing in self.manifests.values() {
-                    if let Ok(existing_rt) = existing.parsed_resource_types()
-                        && existing_rt.contains(rt)
-                    {
-                        return Err(ManifestError::DuplicateResourceType(rt.to_string()));
-                    }
+        // 4. Parse and validate resource types eagerly (fail-closed)
+        if manifest.resource_types.is_empty() {
+            return Err(ManifestError::InvalidField("resource_types (must declare at least one)"));
+        }
+        if manifest.resource_types.len() > 256 {
+            return Err(ManifestError::InvalidField("resource_types (max 256)"));
+        }
+        let parsed_rts: Vec<ResourceType> = manifest
+            .resource_types
+            .iter()
+            .map(|rt| {
+                let (ns, name) = rt.split_once(':').ok_or_else(|| {
+                    ManifestError::InvalidIdentifier(rt.clone(), "missing ':' separator".to_owned())
+                })?;
+                if ns != manifest.namespace {
+                    return Err(ManifestError::NamespaceMismatch {
+                        identifier: rt.clone(),
+                        expected: manifest.namespace.clone(),
+                    });
+                }
+                ResourceType::new(ns, name).map_err(|e| {
+                    ManifestError::InvalidIdentifier(rt.clone(), e.to_string())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 5. Check duplicate resource types within this manifest
+        for (i, rt) in parsed_rts.iter().enumerate() {
+            if parsed_rts[..i].contains(rt) {
+                return Err(ManifestError::DuplicateResourceType(rt.to_string()));
+            }
+        }
+
+        // 6. Parse and validate actions eagerly (fail-closed)
+        if manifest.actions.is_empty() {
+            return Err(ManifestError::InvalidField("actions (must declare at least one)"));
+        }
+        if manifest.actions.len() > 512 {
+            return Err(ManifestError::InvalidField("actions (max 512)"));
+        }
+        let parsed_actions: Vec<ActionId> = manifest
+            .actions
+            .iter()
+            .map(|a| {
+                let (ns, act) = a.split_once(':').ok_or_else(|| {
+                    ManifestError::InvalidIdentifier(
+                        a.clone(),
+                        "action must be namespace:Action".to_owned(),
+                    )
+                })?;
+                if ns != manifest.namespace {
+                    return Err(ManifestError::NamespaceMismatch {
+                        identifier: a.clone(),
+                        expected: manifest.namespace.clone(),
+                    });
+                }
+                ActionId::new(ns, act).map_err(|e| {
+                    ManifestError::InvalidIdentifier(a.clone(), e.to_string())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // 7. Check duplicate actions within this manifest
+        for (i, act) in parsed_actions.iter().enumerate() {
+            if parsed_actions[..i].contains(act) {
+                return Err(ManifestError::DuplicateAction(act.to_string()));
+            }
+        }
+
+        // 8. Check duplicate resource types against existing registrations
+        for rt in &parsed_rts {
+            for existing in self.manifests.values() {
+                let existing_rts = existing.parsed_resource_types().map_err(|e: KernelError| {
+                    ManifestError::InvalidIdentifier("existing".to_owned(), e.to_string())
+                })?;
+                if existing_rts.contains(rt) {
+                    return Err(ManifestError::DuplicateResourceType(rt.to_string()));
                 }
             }
         }
 
-        // Check duplicate actions
-        if let Ok(parsed_actions) = manifest.parsed_actions() {
-            for act in &parsed_actions {
-                for existing in self.manifests.values() {
-                    if let Ok(existing_act) = existing.parsed_actions()
-                        && existing_act.contains(act)
-                    {
-                        return Err(ManifestError::DuplicateAction(act.to_string()));
-                    }
+        // 9. Check duplicate actions against existing registrations
+        for act in &parsed_actions {
+            for existing in self.manifests.values() {
+                let existing_acts = existing.parsed_actions().map_err(|e: KernelError| {
+                    ManifestError::InvalidIdentifier("existing".to_owned(), e.to_string())
+                })?;
+                if existing_acts.contains(act) {
+                    return Err(ManifestError::DuplicateAction(act.to_string()));
                 }
             }
         }
 
+        // 10. Validate quota dimensions (service-owned namespace)
+        for (i, qd) in manifest.quota_dimensions.iter().enumerate() {
+            if qd.key.trim().is_empty() || qd.key.len() > 64 {
+                return Err(ManifestError::InvalidField("quota_dimensions[].key"));
+            }
+            if manifest.quota_dimensions[..i].iter().any(|o| o.key == qd.key) {
+                return Err(ManifestError::DuplicateQuotaDimension(qd.key.clone()));
+            }
+        }
+
+        // 11. ALL CHECKS PASSED — atomically apply (HashMap inserts are infallible)
         let service_id = manifest.service_id.clone();
         self.by_namespace
             .insert(manifest.namespace.clone(), service_id.clone());
@@ -427,35 +576,238 @@ impl ManifestRegistry {
     }
 
     /// Checks whether a resource type is registered by any active service.
+    ///
+    /// # Panics
+    /// Panics if any registered manifest has malformed resource types — this
+    /// indicates a registry invariant violation.
     #[must_use]
     pub fn has_resource_type(&self, resource_type: &ResourceType) -> bool {
         self.manifests.values().any(|m| {
             m.parsed_resource_types()
-                .map(|rts| rts.contains(resource_type))
-                .unwrap_or(false)
+                .expect("registered manifest must have valid resource types")
+                .contains(resource_type)
         })
     }
 
     /// Checks whether an action is registered by any active service.
+    ///
+    /// # Panics
+    /// Panics if any registered manifest has malformed actions — this
+    /// indicates a registry invariant violation.
     #[must_use]
     pub fn has_action(&self, action: &ActionId) -> bool {
         self.manifests.values().any(|m| {
             m.parsed_actions()
-                .map(|acts| acts.contains(action))
-                .unwrap_or(false)
+                .expect("registered manifest must have valid actions")
+                .contains(action)
         })
     }
 
+    /// Seeds the registry with core P0-P11 services for the native TestLab
+    /// profile. This adapts the static `KernelRegistry` services into the
+    /// `ManifestRegistry` format so that native discovery has a coherent
+    /// source of truth during migration.
+    ///
+    /// Existing core services are registered with `Declared` lifecycle state.
+    /// Controller binding and health/readiness are set by the runtime after
+    /// this seeding step.
+    ///
+    /// This is a migration adapter and will be replaced as core services
+    /// adopt native manifest registration directly.
+    pub fn seed_core(&mut self) {
+        let core_manifests = vec![
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "identity".to_owned(),
+                namespace: "identity".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![
+                    "identity:token".to_owned(),
+                    "identity:project".to_owned(),
+                    "identity:user".to_owned(),
+                    "identity:role".to_owned(),
+                ],
+                actions: vec![
+                    "identity:IssueToken".to_owned(),
+                    "identity:ValidateToken".to_owned(),
+                    "identity:RevokeToken".to_owned(),
+                ],
+                capabilities: vec!["openstack-identity-v3".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "image".to_owned(),
+                namespace: "image".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec!["image:image".to_owned()],
+                actions: vec![
+                    "image:ListImages".to_owned(),
+                    "image:CreateImage".to_owned(),
+                    "image:ReadImage".to_owned(),
+                    "image:DeleteImage".to_owned(),
+                    "image:UploadImage".to_owned(),
+                    "image:DownloadImage".to_owned(),
+                ],
+                capabilities: vec!["openstack-glance-v2".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "network".to_owned(),
+                namespace: "network".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![
+                    "network:network".to_owned(),
+                    "network:subnet".to_owned(),
+                    "network:port".to_owned(),
+                ],
+                actions: vec![
+                    "network:ListNetworks".to_owned(),
+                    "network:CreateNetwork".to_owned(),
+                    "network:ReadNetwork".to_owned(),
+                    "network:DeleteNetwork".to_owned(),
+                    "network:ListSubnets".to_owned(),
+                    "network:CreateSubnet".to_owned(),
+                    "network:ReadSubnet".to_owned(),
+                    "network:DeleteSubnet".to_owned(),
+                    "network:ListPorts".to_owned(),
+                    "network:CreatePort".to_owned(),
+                    "network:ReadPort".to_owned(),
+                    "network:DeletePort".to_owned(),
+                ],
+                capabilities: vec!["openstack-neutron-v2".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "compute".to_owned(),
+                namespace: "compute".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![
+                    "compute:server".to_owned(),
+                    "compute:flavor".to_owned(),
+                    "compute:keypair".to_owned(),
+                ],
+                actions: vec![
+                    "compute:ListFlavors".to_owned(),
+                    "compute:CreateFlavor".to_owned(),
+                    "compute:ReadFlavor".to_owned(),
+                    "compute:DeleteFlavor".to_owned(),
+                    "compute:ListKeypairs".to_owned(),
+                    "compute:ImportKeypair".to_owned(),
+                    "compute:ReadKeypair".to_owned(),
+                    "compute:DeleteKeypair".to_owned(),
+                    "compute:ListServers".to_owned(),
+                    "compute:CreateServer".to_owned(),
+                    "compute:ReadServer".to_owned(),
+                    "compute:DeleteServer".to_owned(),
+                    "compute:StopServer".to_owned(),
+                    "compute:StartServer".to_owned(),
+                    "compute:RebootServer".to_owned(),
+                    "compute:ReadConsole".to_owned(),
+                ],
+                capabilities: vec!["openstack-nova-v2.1".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "placement".to_owned(),
+                namespace: "placement".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![
+                    "placement:resource_provider".to_owned(),
+                    "placement:allocation".to_owned(),
+                ],
+                actions: vec![],
+                capabilities: vec!["openstack-placement-v1".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "volume".to_owned(),
+                namespace: "volume".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![
+                    "volume:volume".to_owned(),
+                    "volume:volume_attachment".to_owned(),
+                ],
+                actions: vec![
+                    "volume:ListVolumeAttachments".to_owned(),
+                    "volume:AttachVolume".to_owned(),
+                    "volume:ReadVolumeAttachment".to_owned(),
+                    "volume:DetachVolume".to_owned(),
+                ],
+                capabilities: vec!["o3k-native-storage-v1".to_owned()],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                region: None,
+                availability_domain: None,
+                controller: None,
+                health: None,
+            },
+        ];
+
+        for m in core_manifests {
+            // Silently skip services that are already registered
+            // (e.g. if a controller registered them explicitly)
+            if self.manifests.contains_key(&m.service_id) {
+                continue;
+            }
+            if self.by_namespace.contains_key(&m.namespace) {
+                continue;
+            }
+            let service_id = m.service_id.clone();
+            self.manifests.insert(service_id, m);
+        }
+    }
+
     /// Returns all unique resource types across registered services.
+    ///
+    /// # Panics
+    /// Panics if any registered manifest has malformed resource types — this
+    /// indicates a registry invariant violation.
     #[must_use]
     pub fn all_resource_types(&self) -> Vec<ResourceType> {
         let mut types: Vec<ResourceType> = Vec::new();
         for m in self.manifests.values() {
-            if let Ok(rts) = m.parsed_resource_types() {
-                for rt in rts {
-                    if !types.contains(&rt) {
-                        types.push(rt);
-                    }
+            let rts = m
+                .parsed_resource_types()
+                .expect("registered manifest must have valid resource types");
+            for rt in rts {
+                if !types.contains(&rt) {
+                    types.push(rt);
                 }
             }
         }
@@ -570,5 +922,200 @@ mod tests {
         assert!(reg.has_action(&ActionId::new("database", "CreateInstance")?));
         assert!(!reg.has_action(&ActionId::new("database", "NonExistent")?));
         Ok(())
+    }
+
+    // ── Hardened registration tests ──────────────────────────────────────
+
+    #[test]
+    fn register_rejects_empty_resource_types() {
+        let mut m = valid_database_manifest();
+        m.resource_types = vec![];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(err.to_string().contains("resource_types"), "expected resource_types error, got {err}");
+    }
+
+    #[test]
+    fn register_rejects_empty_actions() {
+        let mut m = valid_database_manifest();
+        m.actions = vec![];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(err.to_string().contains("actions"), "expected actions error, got {err}");
+    }
+
+    #[test]
+    fn register_rejects_duplicate_service_id() {
+        let mut reg = ManifestRegistry::new();
+        reg.register(valid_database_manifest()).unwrap();
+        let err = reg.register(valid_database_manifest()).unwrap_err();
+        assert!(matches!(err, ManifestError::DuplicateServiceId(_)));
+    }
+
+    #[test]
+    fn register_rejects_duplicate_resource_type_in_one_manifest() {
+        let mut m = valid_database_manifest();
+        m.resource_types = vec!["database:instance".to_owned(), "database:instance".to_owned()];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::DuplicateResourceType(_)));
+    }
+
+    #[test]
+    fn register_rejects_duplicate_action_in_one_manifest() {
+        let mut m = valid_database_manifest();
+        m.actions = vec![
+            "database:CreateInstance".to_owned(),
+            "database:CreateInstance".to_owned(),
+        ];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::DuplicateAction(_)));
+    }
+
+    #[test]
+    fn register_rejects_resource_type_outside_manifest_namespace() {
+        let mut m = valid_database_manifest();
+        m.resource_types = vec!["network:port".to_owned()];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::NamespaceMismatch { .. }));
+    }
+
+    #[test]
+    fn register_rejects_action_outside_manifest_namespace() {
+        let mut m = valid_database_manifest();
+        m.actions = vec!["compute:CreateServer".to_owned()];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::NamespaceMismatch { .. }));
+    }
+
+    #[test]
+    fn register_rejects_resource_type_claiming_owned_namespace() {
+        // A service cannot claim a resource type in a namespace it does not own.
+        let mut reg = ManifestRegistry::new();
+        reg.register(valid_database_manifest()).unwrap();
+        let mut m2 = valid_database_manifest();
+        m2.service_id = "database-example-2".to_owned();
+        m2.namespace = "database-2".to_owned();
+        m2.resource_types = vec!["database-2:instance".to_owned()];
+        // Try to claim database:CreateInstance which is owned by database-example
+        m2.actions = vec!["database:CreateInstance".to_owned()];
+        let err = reg.register(m2).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::NamespaceMismatch { .. }),
+            "expected NamespaceMismatch for cross-namespace action, got {err}"
+        );
+    }
+
+    #[test]
+    fn register_rejects_same_namespace_second_service() {
+        let mut reg = ManifestRegistry::new();
+        reg.register(valid_database_manifest()).unwrap();
+        let mut m2 = valid_database_manifest();
+        m2.service_id = "database-example-2".to_owned();
+        // Keep same namespace — should be rejected
+        let err = reg.register(m2).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::DuplicateNamespace(_)),
+            "expected DuplicateNamespace, got {err}"
+        );
+    }
+
+    #[test]
+    fn register_validation_atomic_no_partial_state() {
+        // Prove that a failing registration does not leave stale indexes.
+        let mut reg = ManifestRegistry::new();
+        reg.register(valid_database_manifest()).unwrap();
+        assert_eq!(reg.len(), 1);
+
+        // Attempt to register a service with invalid resource type that clashes
+        let mut bad = valid_database_manifest();
+        bad.service_id = "database-attempt".to_owned();
+        bad.namespace = "database-attempt".to_owned();
+        bad.resource_types = vec!["database:instance".to_owned()]; // clashes
+        let _ = reg.register(bad);
+
+        // State must remain unchanged: only 1 service
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("database-example").is_some());
+        assert!(reg.get("database-attempt").is_none());
+    }
+
+    #[test]
+    fn register_rejects_malformed_resource_type_format() {
+        let mut m = valid_database_manifest();
+        m.resource_types = vec!["not-namespaced".to_owned()];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::InvalidIdentifier(_, _)));
+    }
+
+    #[test]
+    fn register_rejects_malformed_action_format() {
+        let mut m = valid_database_manifest();
+        m.actions = vec!["NoNamespace".to_owned()];
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(matches!(err, ManifestError::InvalidIdentifier(_, _)));
+    }
+
+    #[test]
+    fn register_rejects_empty_namespace() {
+        let mut m = valid_database_manifest();
+        m.namespace = "".to_owned();
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(err.to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn register_rejects_overly_long_namespace() {
+        let mut m = valid_database_manifest();
+        m.namespace = "a".repeat(65);
+        let mut reg = ManifestRegistry::new();
+        let err = reg.register(m).unwrap_err();
+        assert!(err.to_string().contains("namespace"));
+    }
+
+    #[test]
+    fn seed_core_registers_all_services() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        assert_eq!(reg.len(), 6);
+        assert!(reg.get("identity").is_some());
+        assert!(reg.get("image").is_some());
+        assert!(reg.get("network").is_some());
+        assert!(reg.get("compute").is_some());
+        assert!(reg.get("placement").is_some());
+        assert!(reg.get("volume").is_some());
+    }
+
+    #[test]
+    fn seed_core_does_not_overwrite_explicit_registrations() {
+        let mut reg = ManifestRegistry::new();
+        let m = ServiceManifest {
+            manifest_version: 1,
+            service_id: "custom-compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "1.0.0".to_owned(),
+            ownership: ServiceOwnership::O3kImplemented,
+            resource_types: vec!["compute:custom_resource".to_owned()],
+            actions: vec!["compute:CustomAction".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            region: None,
+            availability_domain: None,
+            controller: None,
+            health: None,
+        };
+        reg.register(m).unwrap();
+        reg.seed_core();
+        // compute namespace should still be held by custom-compute, not overridden
+        assert!(reg.get("custom-compute").is_some());
+        // core "compute" service should not be registered since namespace taken
+        assert!(reg.get("compute").is_none());
     }
 }

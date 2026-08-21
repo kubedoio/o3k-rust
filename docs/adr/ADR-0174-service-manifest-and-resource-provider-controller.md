@@ -1,8 +1,8 @@
 # ADR-0174 — O3K Service Manifest and Resource Provider/Controller Architecture
 
-Status: Proposed
+Status: Accepted
 Date: 2026-08-21
-Human-approval: pending
+Human-approval: project-requester (2026-08-21, explicit architecture/security approval recorded in PR #729 review)
 Supersedes: none
 Superseded-by: none
 Affected-services: governance, cloud-kernel, identity, api, cli, service-registry, future-services
@@ -20,7 +20,7 @@ Related decisions and specifications:
 - [OpenStack compatibility projection contract](../../contracts/openstack-compatibility-projection-v1.schema.json)
 - [controller protocol contract](../../contracts/controller-protocol-v1.md)
 
-This ADR establishes a new extensibility/security boundary and external service identity model. It MUST remain `Proposed` until explicit human architecture/security approval is recorded under ADR-0154.
+This ADR establishes a new extensibility/security boundary and external service identity model. Human architecture/security approval was recorded on 2026-08-21 under ADR-0154 (PR #729 review).
 
 ## Context
 

@@ -82,13 +82,15 @@ impl DatabaseExampleController {
     }
 
     /// Returns a registration record for this controller.
+    /// The controller starts as `Declared`; call `activate_controller` after
+    /// health checks pass to transition to `Ready`.
     #[must_use]
     pub fn registration(&self) -> ControllerRegistration {
         ControllerRegistration {
             service_id: self.service_id.clone(),
             namespace: "database".to_owned(),
             session: Some(self.session.clone()),
-            state: ControllerState::Ready,
+            state: ControllerState::Declared,
             health: None,
         }
     }

@@ -16,28 +16,30 @@
 //! - `GET /o3k/v1`                        — API version/entry discovery
 //! - `GET /o3k/v1/services`              — registered services
 //! - `GET /o3k/v1/resource-types`        — registered resource types
-//! - `GET /o3k/v1/identity/me`           — current auth context
-//! - `GET /o3k/v1/compute/servers`       — server list (read-only)
-//! - `GET /o3k/v1/compute/servers/:id`   — server detail (read-only)
+//! - `GET /o3k/v1/identity/me`           — current auth context (stub)
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-use o3k_kernel::KernelRegistry;
+use o3k_kernel::{ManifestRegistry, ServiceLifecycleState};
 use serde::Serialize;
 
 pub mod identity;
 
-/// Shared state wrapping the kernel registry and (eventually) application
-/// services.
+/// Shared state wrapping the manifest registry for native service/resource
+/// discovery.
+///
+/// The `ManifestRegistry` is the authoritative source for native service
+/// discovery (ADR-0174/SPEC-0031). Static P0-P11 core services are
+/// represented through a migration adapter (see `ManifestRegistry::seed_core()`).
 #[derive(Clone, Default)]
 pub struct NativeApiState {
-    /// Kernel registry for service/resource-type discovery.
-    registry: Option<KernelRegistry>,
+    /// Manifest registry as the canonical discovery source.
+    pub registry: Option<ManifestRegistry>,
 }
 
 impl NativeApiState {
-    /// Creates a new `NativeApiState` with an optional registry.
+    /// Creates a new `NativeApiState` with an optional manifest registry.
     #[must_use]
-    pub fn new(registry: Option<KernelRegistry>) -> Self {
+    pub fn new(registry: Option<ManifestRegistry>) -> Self {
         Self { registry }
     }
 }
@@ -80,6 +82,9 @@ pub struct DiscoveredService {
     service_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ownership: Option<String>,
+    /// Lifecycle state from service registration + controller health.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lifecycle_state: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -97,13 +102,20 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
     };
 
     let services: Vec<DiscoveredService> = registry
-        .services()
+        .all()
         .iter()
-        .map(|svc| DiscoveredService {
-            id: svc.id.to_string(),
-            namespace: svc.namespace.to_string(),
-            service_version: "0.4.0".to_owned(),
-            ownership: Some(svc.ownership.to_string()),
+        .map(|m| {
+            let lc = registry
+                .controller(&m.service_id)
+                .map(|c| format!("{:?}", c.state))
+                .unwrap_or_else(|| format!("{:?}", ServiceLifecycleState::Declared));
+            DiscoveredService {
+                id: m.service_id.clone(),
+                namespace: m.namespace.clone(),
+                service_version: m.service_version.clone(),
+                ownership: Some(format!("{:?}", m.ownership)),
+                lifecycle_state: Some(lc),
+            }
         })
         .collect();
 
@@ -137,14 +149,19 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
         );
     };
 
+    let rts = registry.all_resource_types();
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    for svc in registry.services() {
-        for rt in &svc.resource_types {
-            resource_types.push(DiscoveredResourceType {
-                namespace: rt.namespace().to_owned(),
-                name: rt.name().to_owned(),
-                service: svc.id.to_string(),
-            });
+    // Map resource types to their owning service
+    for rt in &rts {
+        for m in registry.all() {
+            if m.namespace == rt.namespace() {
+                resource_types.push(DiscoveredResourceType {
+                    namespace: rt.namespace().to_owned(),
+                    name: rt.name().to_owned(),
+                    service: m.service_id.clone(),
+                });
+                break;
+            }
         }
     }
 
@@ -165,14 +182,36 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use o3k_kernel::ServiceManifest;
 
-    fn test_registry() -> KernelRegistry {
-        KernelRegistry::standard("http://127.0.0.1:18080", None)
+    fn test_manifest_registry() -> ManifestRegistry {
+        let mut reg = ManifestRegistry::new();
+        let m = ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec!["compute:server".to_owned(), "compute:flavor".to_owned()],
+            actions: vec![
+                "compute:ListServers".to_owned(),
+                "compute:CreateServer".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            region: None,
+            availability_domain: None,
+            controller: None,
+            health: None,
+        };
+        let _ = reg.register(m);
+        reg
     }
 
     #[tokio::test]
     async fn api_root_returns_version() {
-        let state = NativeApiState::new(Some(test_registry()));
+        let state = NativeApiState::new(Some(test_manifest_registry()));
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/")
@@ -192,8 +231,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_services_returns_registered() {
-        let state = NativeApiState::new(Some(test_registry()));
+    async fn discover_services_uses_manifest_registry() {
+        let state = NativeApiState::new(Some(test_manifest_registry()));
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/services")
@@ -209,12 +248,14 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(body["count"].as_u64().unwrap_or(0) >= 5);
+        assert_eq!(body["count"].as_u64().unwrap_or(0), 1);
+        assert_eq!(body["services"][0]["namespace"], "compute");
+        assert!(body["services"][0]["lifecycle_state"].is_string());
     }
 
     #[tokio::test]
-    async fn discover_resource_types_returns_known() {
-        let state = NativeApiState::new(Some(test_registry()));
+    async fn discover_resource_types_from_manifest_registry() {
+        let state = NativeApiState::new(Some(test_manifest_registry()));
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/resource-types")
@@ -230,6 +271,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert!(body["count"].as_u64().unwrap_or(0) > 0);
+        // Should contain compute:server and compute:flavor
+        assert!(body["count"].as_u64().unwrap_or(0) >= 2);
     }
 }

@@ -235,57 +235,75 @@ status as of the current release.
   (`crates/o3k-kernel/src/manifest.rs`);
 - `OpenStackCompatibilityProjection` — separate projection for Keystone/OpenStack
   catalog metadata;
-- `ManifestRegistry` — validated registration with namespace ownership,
-  duplicate detection, and resource/action conflict enforcement;
-- `ServiceNamespace` extended with `database()` helper;
-- database quota dimensions added to `LimitKey::KNOWN_DIMENSIONS`.
+- `ManifestRegistry` — validated, atomic registration with namespace ownership,
+  duplicate detection, resource/action conflict enforcement, and bounded input
+  validation;
+- Controller protocol contract (`Controller` trait, `ProtocolVersion`,
+  `ControllerSession`, proper lifecycle state machine);
+- `seed_core()` migration adapter representing P0-P11 services as manifests.
+- **No Database-specific knowledge in kernel**: no `ServiceNamespace::database()`,
+  no hard-coded database quota dimensions. Extension services use generic
+  namespace construction.
 
-### P12.2 — Native discovery API — implemented
+### P12.2 — Native discovery API — implemented (scaffolded)
 
 - `crates/o3k-native-api` — sibling northbound adapter (ADR-0173/SPEC-0030);
-- `GET /o3k/v1/services` — registered service discovery;
-- `GET /o3k/v1/resource-types` — registered resource-type discovery;
-- `GET /o3k/v1/identity/me` — stub identity/context endpoint;
-- wired into `o3kd` alongside the existing OpenStack API router.
+- `GET /o3k/v1/services` — registered service discovery from `ManifestRegistry`
+  with lifecycle state;
+- `GET /o3k/v1/resource-types` — resource-type discovery from `ManifestRegistry`;
+- `GET /o3k/v1/identity/me` — **stub only**; real IAM wiring is P12.2 follow-up;
+- wired into `o3kd` alongside the existing OpenStack API router at `/o3k/v1/...`;
+- **Not implemented**: native identity tokens, authentication/authorization,
+  representative read-only resources (compute:server, volume:volume, etc.),
+  service-neutral Operation exposure, pagination, error envelope.
 
-### P12.3 — Native CLI — implemented
+### P12.3 — Native CLI — implemented (scaffolded)
 
 - `bins/o3k` updated to use `clap` derive for all subcommands;
 - existing `doctor`, `version`, `upgrade`, `rollback` commands preserved;
-- new native API commands: `service list/show`, `resource-type list`,
-  `resource list/show` connect to a running `o3kd` native API endpoint
-  (configurable via `O3K_API_URL`).
+- native API commands: `service list/show`, `resource-type list`;
+- `resource list/show` — **command structure exists but server dispatch does not**;
+  these are nonfunctional until generic resource routes are implemented on the
+  server side;
+- **Not implemented**: generic resource create/delete, stable JSON output.
 
 ### P12.4 — Protocol adapter convergence — implemented
 
 - `o3k-api` (`AppState`) extended with native API state via `FromRef`;
-- native and OpenStack API routes share the same `AppState` composition root.
+- native and OpenStack API routes share the same `AppState` composition root
+  at `/o3k/v1/...`.
 
-### P12.5 — Controller contract and service boundary — implemented
+### P12.5 — Controller contract and service boundary — scaffolded
 
 - `Controller` trait in `o3k-kernel` (`crates/o3k-kernel/src/controller.rs`);
 - `ProtocolVersion`, `ReconcileOutcome`, `DelegationContext`, `ControllerSession`,
-  `ControllerRegistration` — canonical controller protocol types;
-- `ManifestRegistry` extended with controller registration, health tracking, and
-  session management;
-- gRPC transport layer deferred (ADR-0174 reference direction).
+  `ControllerRegistration`, `ControllerState` lifecycle (Declared→Ready);
+- `ManifestRegistry` extended with controller registration, health tracking,
+  session generation fencing, and activation handshake;
+- **Not implemented**: language-neutral external controller transport (gRPC/
+  protobuf/mTLS is the ADR-0174 reference direction), secure delegation
+  enforcement, service SDK crate. The Rust `Controller` trait is an in-process
+  contract only.
 
-### P12.6 — Extension conformance service — implemented
+### P12.6 — Extension conformance service — scaffolded
 
 - `crates/o3k-database-example` — minimal non-production conformance service;
 - namespace `database`, resource type `database:instance`, actions
   `database:CreateInstance`/`ReadInstance`/`DeleteInstance`;
-- proves that a new service can be added without Database-specific business
-  logic in `o3k-kernel`;
-- demonstrates `Controller` trait implementation, `ServiceManifest` registration,
-  and resource spec/status schemas.
+- proves manifest registration and `Controller` trait implementation without
+  Database-specific business logic in `o3k-kernel`;
+- **Not implemented**: real resource composition (compute:server + network:
+  endpoint + volume:volume), bounded delegation, durable operations,
+  compensation, audit correlation, cleanup evidence.
 
 ### P12.7 — Compatibility and evidence — pending
 
 - native/OpenStack authority convergence tests require a running `o3kd`
   instance with both adapters configured;
 - existing OpenStack compatibility tests confirmed no regression (all existing
-  tests pass).
+  tests pass);
+- security evidence matrix (cross-project, IDOR, delegation, cursor, etc.) not
+  yet implemented.
 
 ### P12 non-goals (confirmed)
 

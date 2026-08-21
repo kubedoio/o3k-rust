@@ -1102,10 +1102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?
         .unwrap_or_default();
 
-    let native_api_registry = o3k_kernel::KernelRegistry::standard(
-        &format!("http://{}", config.listen_addr),
-        std::env::var("O3K_CINDER_ENDPOINT").ok().as_deref(),
-    );
+    let mut native_manifest_registry = o3k_kernel::ManifestRegistry::new();
+    native_manifest_registry.seed_core();
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
     let mut state = if let Some(identity) = identity {
@@ -1127,7 +1125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_compute(compute_service)
     };
     state = state.with_native_api(o3k_native_api::NativeApiState::new(Some(
-        native_api_registry,
+        native_manifest_registry,
     )));
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);

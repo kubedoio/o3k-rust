@@ -347,16 +347,17 @@ pub fn router_with_state(state: AppState) -> Router {
                 get(show_volume_attachment).delete(delete_volume_attachment),
             );
     }
+    // Native API routes mounted at /o3k/v1/... (ADR-0173/SPEC-0030).
     if state.native_api.is_some() {
         router = router
-            .route("/v1", get(o3k_native_api::api_root))
-            .route("/v1/services", get(o3k_native_api::discover_services))
+            .route("/o3k/v1", get(o3k_native_api::api_root))
+            .route("/o3k/v1/services", get(o3k_native_api::discover_services))
             .route(
-                "/v1/resource-types",
+                "/o3k/v1/resource-types",
                 get(o3k_native_api::discover_resource_types),
             )
             .route(
-                "/v1/identity/me",
+                "/o3k/v1/identity/me",
                 get(o3k_native_api::identity::current_context),
             );
     }
