@@ -7,7 +7,7 @@
 
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::request::Parts,
+    http::{HeaderValue, request::Parts},
     response::{IntoResponse, Response},
 };
 use o3k_kernel::AuthContext;
@@ -179,14 +179,14 @@ mod tests {
         let mut request = axum::http::Request::new(());
         request
             .headers_mut()
-            .insert("x-request-id", "client-42".parse().unwrap());
+            .insert("x-request-id", HeaderValue::from_static("client-42"));
         let mut parts = request.into_parts().0;
         assert_eq!(RequestId::from_parts(&mut parts).0, "client-42");
 
         let mut request = axum::http::Request::new(());
         request
             .headers_mut()
-            .insert("x-request-id", "bad value".parse().unwrap());
+            .insert("x-request-id", HeaderValue::from_static("bad value"));
         let mut parts = request.into_parts().0;
         assert_ne!(RequestId::from_parts(&mut parts).0, "bad value");
     }
