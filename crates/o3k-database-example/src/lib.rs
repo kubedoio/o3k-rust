@@ -12,13 +12,14 @@
 //! This is NOT a production managed PostgreSQL service. See SPEC-0031 §21
 //! and ADR-0174 §15 for the acceptance criteria.
 
+use o3k_kernel::resource::{ResourceId, ResourceType};
 use o3k_kernel::{
     ManifestRegistry, ServiceManifest,
-    controller::{Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration,
-                 ControllerSession, ControllerState, ProtocolVersion, ReconcileOutcome,
-                 ReconcileRequest},
+    controller::{
+        Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration,
+        ControllerSession, ControllerState, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
+    },
 };
-use o3k_kernel::resource::{ResourceId, ResourceType};
 
 /// Returns the canonical ServiceManifest for the database example service.
 #[must_use]
@@ -120,11 +121,19 @@ impl Controller for DatabaseExampleController {
         ReconcileOutcome::Succeeded
     }
 
-    async fn observe(&self, _resource_type: ResourceType, _resource_id: ResourceId) -> ReconcileOutcome {
+    async fn observe(
+        &self,
+        _resource_type: ResourceType,
+        _resource_id: ResourceId,
+    ) -> ReconcileOutcome {
         ReconcileOutcome::Succeeded
     }
 
-    async fn delete(&self, _resource_type: ResourceType, _resource_id: ResourceId) -> ReconcileOutcome {
+    async fn delete(
+        &self,
+        _resource_type: ResourceType,
+        _resource_id: ResourceId,
+    ) -> ReconcileOutcome {
         ReconcileOutcome::Succeeded
     }
 }
@@ -146,19 +155,25 @@ pub struct InstanceSpec {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use o3k_kernel::{ManifestRegistry, ResourceType, ActionId};
+    use o3k_kernel::{ActionId, ManifestRegistry, ResourceType};
 
     #[test]
     fn manifest_registers_and_displays() -> Result<(), Box<dyn std::error::Error>> {
         let mut registry = ManifestRegistry::new();
         register(&mut registry)?;
 
-        let registered = registry.get("database-example")
+        let registered = registry
+            .get("database-example")
             .ok_or("service not found")?;
         assert_eq!(registered.namespace, "database");
-        assert!(registered.resource_types.contains(&"database:instance".to_owned()));
+        assert!(
+            registered
+                .resource_types
+                .contains(&"database:instance".to_owned())
+        );
         Ok(())
     }
 
@@ -194,7 +209,10 @@ mod tests {
         assert_eq!(health.protocol_version, ProtocolVersion::V1);
 
         let caps = runtime.block_on(ctrl.capabilities());
-        assert!(caps.resource_types.contains(&"database:instance".to_owned()));
+        assert!(
+            caps.resource_types
+                .contains(&"database:instance".to_owned())
+        );
     }
 
     #[test]

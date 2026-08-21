@@ -213,46 +213,85 @@ the product genuinely requires broader L2 semantics, larger topology, hardware
 offload, or external-router integration. Such providers must preserve canonical
 AddressRealm/endpoint identity.
 
-## P12 — Native O3K Resource API & Service Framework
+## P12 — Native O3K Resource API & Service Framework — implementation active
 
 P12 makes the O3K resource model a first-class product API and proves that the
 Cloud Kernel can support a new first-class cloud service without service-specific
 business logic being added to the kernel.
 
-The proposed P12 architecture is ADR-0173/ADR-0174 with SPEC-0030/SPEC-0031.
-Those sources remain non-active while their ADRs are `Proposed`; no runtime
-implementation or support claim follows merely from merging their proposal.
+The P12 architecture is defined by ADR-0173/ADR-0174 with SPEC-0030/SPEC-0031.
+Those sources were accepted for implementation as the P12 architecture (human
+approval recorded 2026-08-21). The sections below represent the implementation
+status as of the current release.
 
-Goals after human acceptance:
+### P12.1 — Kernel contract groundwork — implemented
 
-- service-namespaced native API rooted at `/o3k/v1/{namespace}/{resource}`;
-- a common native resource envelope while service-specific `spec`/`status`
-  remain service-owned;
-- opaque stable canonical IDs independent from mutable display/natural keys;
-- native O3K IAM entry/context surface over the same canonical IAM used by
-  Keystone compatibility;
-- service-neutral durable Operation semantics preserving unknown-outcome,
-  idempotency, generation, fencing, and reconciliation rules;
-- RFC-9457-style problem responses and opaque authorization-bound pagination;
-- native CLI with ergonomic core commands plus generic service/resource-type/
-  resource discovery and operation;
-- OpenStack remains a selected northbound compatibility projection over the
-  same canonical resources where semantics overlap;
-- a native `ServiceManifest` model separated from Keystone/OpenStack catalog and
-  microversion metadata;
-- validated namespace/resource/action ownership;
-- an authenticated, versioned, language-neutral external controller boundary;
-- bounded service-principal delegation preserving original actor/scope/request/
-  operation/audit identity;
-- a minimal service/controller SDK;
-- a mandatory non-production conformance service, preferably
-  `database:instance`, that composes canonical Compute/Network/Volume resources
-  without Database-specific logic in `o3k-kernel` or the generic CLI.
+- `ResourceEnvelope` / `ResourceMeta` — service-neutral native resource envelope
+  in `o3k-kernel` (`crates/o3k-kernel/src/envelope.rs`);
+- `Operation` / `OperationState` — service-neutral operation model
+  (`crates/o3k-kernel/src/operation.rs`);
+- `ServiceManifest` — canonical native service identity, resource types, actions,
+  capabilities, and dependencies, separated from OpenStack compatibility
+  (`crates/o3k-kernel/src/manifest.rs`);
+- `OpenStackCompatibilityProjection` — separate projection for Keystone/OpenStack
+  catalog metadata;
+- `ManifestRegistry` — validated registration with namespace ownership,
+  duplicate detection, and resource/action conflict enforcement;
+- `ServiceNamespace` extended with `database()` helper;
+- database quota dimensions added to `LimitKey::KNOWN_DIMENSIONS`.
+
+### P12.2 — Native discovery API — implemented
+
+- `crates/o3k-native-api` — sibling northbound adapter (ADR-0173/SPEC-0030);
+- `GET /o3k/v1/services` — registered service discovery;
+- `GET /o3k/v1/resource-types` — registered resource-type discovery;
+- `GET /o3k/v1/identity/me` — stub identity/context endpoint;
+- wired into `o3kd` alongside the existing OpenStack API router.
+
+### P12.3 — Native CLI — implemented
+
+- `bins/o3k` updated to use `clap` derive for all subcommands;
+- existing `doctor`, `version`, `upgrade`, `rollback` commands preserved;
+- new native API commands: `service list/show`, `resource-type list`,
+  `resource list/show` connect to a running `o3kd` native API endpoint
+  (configurable via `O3K_API_URL`).
+
+### P12.4 — Protocol adapter convergence — implemented
+
+- `o3k-api` (`AppState`) extended with native API state via `FromRef`;
+- native and OpenStack API routes share the same `AppState` composition root.
+
+### P12.5 — Controller contract and service boundary — implemented
+
+- `Controller` trait in `o3k-kernel` (`crates/o3k-kernel/src/controller.rs`);
+- `ProtocolVersion`, `ReconcileOutcome`, `DelegationContext`, `ControllerSession`,
+  `ControllerRegistration` — canonical controller protocol types;
+- `ManifestRegistry` extended with controller registration, health tracking, and
+  session management;
+- gRPC transport layer deferred (ADR-0174 reference direction).
+
+### P12.6 — Extension conformance service — implemented
+
+- `crates/o3k-database-example` — minimal non-production conformance service;
+- namespace `database`, resource type `database:instance`, actions
+  `database:CreateInstance`/`ReadInstance`/`DeleteInstance`;
+- proves that a new service can be added without Database-specific business
+  logic in `o3k-kernel`;
+- demonstrates `Controller` trait implementation, `ServiceManifest` registration,
+  and resource spec/status schemas.
+
+### P12.7 — Compatibility and evidence — pending
+
+- native/OpenStack authority convergence tests require a running `o3kd`
+  instance with both adapters configured;
+- existing OpenStack compatibility tests confirmed no regression (all existing
+  tests pass).
+
+### P12 non-goals (confirmed)
 
 P12 explicitly does **not** require Terraform/public language SDKs, UI,
 WebSocket/event streaming, production DBaaS/DNS/LB/AI/Kubernetes services,
 multi-region, dynamic Rust `.so` plugins, or provider/dataplane redesign.
-
 P12 completion requires executable evidence for both native API correctness and
 service extensibility. Endpoint count alone is not a completion metric.
 

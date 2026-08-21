@@ -170,9 +170,17 @@ pub trait Controller: Send + Sync {
     /// Reconcile a resource to its desired state.
     async fn reconcile(&self, request: ReconcileRequest) -> ReconcileOutcome;
     /// Observe a resource (read-only, no side effects).
-    async fn observe(&self, resource_type: ResourceType, resource_id: ResourceId) -> ReconcileOutcome;
+    async fn observe(
+        &self,
+        resource_type: ResourceType,
+        resource_id: ResourceId,
+    ) -> ReconcileOutcome;
     /// Delete a resource.
-    async fn delete(&self, resource_type: ResourceType, resource_id: ResourceId) -> ReconcileOutcome;
+    async fn delete(
+        &self,
+        resource_type: ResourceType,
+        resource_id: ResourceId,
+    ) -> ReconcileOutcome;
 }
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -226,6 +234,7 @@ impl ControllerRegistration {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -240,6 +249,7 @@ mod tests {
     #[test]
     fn reconcile_outcome_serialization() {
         let outcome = ReconcileOutcome::Succeeded;
+        #[allow(clippy::unwrap_used)]
         let json = serde_json::to_string(&outcome).unwrap();
         assert_eq!(json, r#"{"status":"succeeded"}"#);
     }

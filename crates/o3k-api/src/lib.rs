@@ -344,8 +344,14 @@ pub fn router_with_state(state: AppState) -> Router {
         router = router
             .route("/v1", get(o3k_native_api::api_root))
             .route("/v1/services", get(o3k_native_api::discover_services))
-            .route("/v1/resource-types", get(o3k_native_api::discover_resource_types))
-            .route("/v1/identity/me", get(o3k_native_api::identity::current_context));
+            .route(
+                "/v1/resource-types",
+                get(o3k_native_api::discover_resource_types),
+            )
+            .route(
+                "/v1/identity/me",
+                get(o3k_native_api::identity::current_context),
+            );
     }
     router
         .layer(axum::middleware::from_fn(microversion_middleware))

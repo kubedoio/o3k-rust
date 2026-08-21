@@ -20,13 +20,7 @@
 //! - `GET /o3k/v1/compute/servers`       — server list (read-only)
 //! - `GET /o3k/v1/compute/servers/:id`   — server detail (read-only)
 
-use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-};
+use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use o3k_kernel::KernelRegistry;
 use serde::Serialize;
 
@@ -168,6 +162,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -187,8 +182,12 @@ mod tests {
             tower::ServiceExt::oneshot(app, response).await.unwrap(),
         );
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(body["api_version"], "o3k.io/v1");
     }
 
@@ -204,8 +203,12 @@ mod tests {
             tower::ServiceExt::oneshot(app, response).await.unwrap(),
         );
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(body["count"].as_u64().unwrap_or(0) >= 5);
     }
 
@@ -221,8 +224,12 @@ mod tests {
             tower::ServiceExt::oneshot(app, response).await.unwrap(),
         );
         assert_eq!(resp.status(), StatusCode::OK);
-        let body: serde_json::Value =
-            serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
         assert!(body["count"].as_u64().unwrap_or(0) > 0);
     }
 }

@@ -37,14 +37,15 @@ pub use authorization::{
     StaticAuthorizer,
 };
 pub use controller::{
-    Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration, ControllerSession,
-    ControllerState, DelegationContext, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
+    Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration,
+    ControllerSession, ControllerState, DelegationContext, ProtocolVersion, ReconcileOutcome,
+    ReconcileRequest,
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;
 pub use manifest::{
-    ControllerBinding, ManifestError, ManifestRegistry, OpenStackCompatibilityProjection,
-    OpenStackApiSurface, OpenStackEndpointTemplate, QuotaDimension, ServiceHealth,
+    ControllerBinding, ManifestError, ManifestRegistry, OpenStackApiSurface,
+    OpenStackCompatibilityProjection, OpenStackEndpointTemplate, QuotaDimension, ServiceHealth,
     ServiceLifecycleState, ServiceManifest,
 };
 pub use operation::{Operation, OperationState};

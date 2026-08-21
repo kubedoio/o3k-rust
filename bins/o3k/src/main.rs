@@ -5,10 +5,7 @@ use std::sync::Arc;
 use o3k::upgrade::engine::{UpgradeArgs, UpgradeOutcome, run_rollback, run_upgrade};
 use o3k::upgrade::output::{UpgradeJson, UpgradeStatus};
 use o3k::upgrade::runner::SystemUpgradeIo;
-use o3k::{
-    Context, ReleaseVersion, SqlxDoctorDb, SystemExec, SystemHttpClient,
-    native_cli,
-};
+use o3k::{Context, ReleaseVersion, SqlxDoctorDb, SystemExec, SystemHttpClient, native_cli};
 
 #[derive(Parser)]
 #[command(name = "o3k", version, about = "O3K operator and cloud-user CLI", long_about = None)]

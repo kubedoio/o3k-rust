@@ -13,9 +13,9 @@
 
 use serde_json::Value;
 
+use crate::HttpClient;
 use crate::context::HttpResponse;
 use crate::sys::SystemHttpClient;
-use crate::HttpClient;
 
 /// Default native API base URL.
 const DEFAULT_API_BASE: &str = "http://127.0.0.1:18080/o3k/v1";
@@ -29,11 +29,11 @@ fn api_base() -> String {
 }
 
 /// Small runtime reused for each API call (cheap: current-thread, no spawn).
-fn runtime() -> tokio::runtime::Runtime {
+fn runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .expect("tokio runtime must build")
+        .map_err(|e| format!("failed to build tokio runtime: {e}"))
 }
 
 /// Performs a GET request against the native API and returns parsed JSON.
@@ -41,8 +41,9 @@ fn api_get(path: &str) -> Result<Value, String> {
     let base = api_base();
     let url = format!("{base}{path}");
     let client = SystemHttpClient;
+    let rt = runtime()?;
 
-    let HttpResponse { status, body, .. } = runtime().block_on(client.get(&url))?;
+    let HttpResponse { status, body, .. } = rt.block_on(client.get(&url))?;
 
     if status != 200 {
         return Err(format!("API returned status {status}: {body}"));
@@ -76,14 +77,18 @@ pub fn show_service(name: &str) -> Result<(), String> {
         .as_array()
         .ok_or_else(|| "unexpected response format: missing services array".to_owned())?;
 
-    let svc = services.iter().find(|s| {
-        s["id"].as_str() == Some(name) || s["namespace"].as_str() == Some(name)
-    }).ok_or_else(|| format!("service '{name}' not found"))?;
+    let svc = services
+        .iter()
+        .find(|s| s["id"].as_str() == Some(name) || s["namespace"].as_str() == Some(name))
+        .ok_or_else(|| format!("service '{name}' not found"))?;
 
     println!("Service:      {}", svc["id"].as_str().unwrap_or("?"));
     println!("Namespace:    {}", svc["namespace"].as_str().unwrap_or("?"));
     println!("Ownership:    {}", svc["ownership"].as_str().unwrap_or("?"));
-    println!("Version:      {}", svc["service_version"].as_str().unwrap_or("?"));
+    println!(
+        "Version:      {}",
+        svc["service_version"].as_str().unwrap_or("?")
+    );
     Ok(())
 }
 
@@ -113,7 +118,9 @@ pub fn list_resources(ns_type: &str) -> Result<(), String> {
     };
     let path = format!("/{ns}/{type_name}");
     let json = api_get(&path)?;
-    let items = json["items"].as_array().map_or(&[] as &[_], |a| a.as_slice());
+    let items = json["items"]
+        .as_array()
+        .map_or(&[] as &[_], |a| a.as_slice());
 
     println!("{:<36} {:<20} {:<12}", "ID", "OWNER", "GENERATION");
     println!("{}", "-".repeat(70));
@@ -137,8 +144,8 @@ pub fn show_resource(ns_type: &str, id: &str) -> Result<(), String> {
     let path = format!("/{ns}/{type_name}/{id}");
     let json = api_get(&path)?;
 
-    let pretty = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("serialization error: {e}"))?;
+    let pretty =
+        serde_json::to_string_pretty(&json).map_err(|e| format!("serialization error: {e}"))?;
     println!("{pretty}");
     Ok(())
 }

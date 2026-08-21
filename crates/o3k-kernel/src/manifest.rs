@@ -14,7 +14,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::action::ActionId;
-use crate::controller::{ControllerRegistration, ControllerSession, ControllerState, ControllerHealth};
+use crate::controller::{
+    ControllerHealth, ControllerRegistration, ControllerSession, ControllerState,
+};
 use crate::error::KernelError;
 use crate::resource::ResourceType;
 
@@ -189,10 +191,7 @@ impl ServiceManifest {
 
     /// Returns the parsed actions as canonical `ActionId` values.
     pub fn parsed_actions(&self) -> Result<Vec<ActionId>, KernelError> {
-        self.actions
-            .iter()
-            .map(|a| ActionId::parse(a))
-            .collect()
+        self.actions.iter().map(|a| ActionId::parse(a)).collect()
     }
 }
 
@@ -250,7 +249,10 @@ pub enum ManifestError {
     #[error("invalid identifier '{0}': {1}")]
     InvalidIdentifier(String, String),
     #[error("identifier '{identifier}' uses namespace outside owned namespace '{expected}'")]
-    NamespaceMismatch { identifier: String, expected: String },
+    NamespaceMismatch {
+        identifier: String,
+        expected: String,
+    },
     #[error("duplicate namespace: {0}")]
     DuplicateNamespace(String),
     #[error("duplicate resource type: {0}")]
@@ -307,9 +309,10 @@ impl ManifestRegistry {
         service_id: &str,
         health: ControllerHealth,
     ) -> Result<(), ManifestError> {
-        let reg = self.controllers.get_mut(service_id).ok_or_else(|| {
-            ManifestError::InvalidField("service_id")
-        })?;
+        let reg = self
+            .controllers
+            .get_mut(service_id)
+            .ok_or(ManifestError::InvalidField("service_id"))?;
         let state = if health.healthy {
             ControllerState::Ready
         } else {
@@ -346,17 +349,19 @@ impl ManifestRegistry {
 
         // Check duplicate namespace
         if self.by_namespace.contains_key(&manifest.namespace) {
-            return Err(ManifestError::DuplicateNamespace(manifest.namespace.clone()));
+            return Err(ManifestError::DuplicateNamespace(
+                manifest.namespace.clone(),
+            ));
         }
 
         // Check duplicate resource types within existing registrations
         if let Ok(parsed_rt) = manifest.parsed_resource_types() {
             for rt in &parsed_rt {
                 for existing in self.manifests.values() {
-                    if let Ok(existing_rt) = existing.parsed_resource_types() {
-                        if existing_rt.contains(rt) {
-                            return Err(ManifestError::DuplicateResourceType(rt.to_string()));
-                        }
+                    if let Ok(existing_rt) = existing.parsed_resource_types()
+                        && existing_rt.contains(rt)
+                    {
+                        return Err(ManifestError::DuplicateResourceType(rt.to_string()));
                     }
                 }
             }
@@ -366,10 +371,10 @@ impl ManifestRegistry {
         if let Ok(parsed_actions) = manifest.parsed_actions() {
             for act in &parsed_actions {
                 for existing in self.manifests.values() {
-                    if let Ok(existing_act) = existing.parsed_actions() {
-                        if existing_act.contains(act) {
-                            return Err(ManifestError::DuplicateAction(act.to_string()));
-                        }
+                    if let Ok(existing_act) = existing.parsed_actions()
+                        && existing_act.contains(act)
+                    {
+                        return Err(ManifestError::DuplicateAction(act.to_string()));
                     }
                 }
             }
@@ -459,6 +464,7 @@ impl ManifestRegistry {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
