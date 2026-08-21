@@ -38,7 +38,20 @@ cleanup_all() {
 assert() {
     local label="$1"
     shift
-    if "$@" 2>/dev/null; then
+    if eval "$*" 2>/dev/null; then
+        echo "[PASS] $label"
+        PASS=$((PASS + 1))
+    else
+        echo "[FAIL] $label"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+output_assert() {
+    # Like assert, but lets stdout through so the caller can inspect it.
+    local label="$1"
+    shift
+    if output=$(eval "$*" 2>/dev/null); then
         echo "[PASS] $label"
         PASS=$((PASS + 1))
     else
@@ -325,11 +338,12 @@ run_round() {
             ! ip netns exec o3k-reg-b ip netns exec "$ns" true 2>/dev/null
     done
 
-    # Verify wg interface is gone.
+    # Verify wg interface is gone (inside fabric namespace, which is also removed).
+    # The fabric namespace deletion above implies wg-o3k is gone; this is a belt.
     assert "WireGuard interface removed from host-A" \
-        ! ip netns exec o3k-reg-a ip link show wg-o3k 2>/dev/null
+        ! ip netns exec o3k-reg-a ip netns exec o3k-fabric ip link show wg-o3k 2>/dev/null
     assert "WireGuard interface removed from host-B" \
-        ! ip netns exec o3k-reg-b ip link show wg-o3k 2>/dev/null
+        ! ip netns exec o3k-reg-b ip netns exec o3k-fabric ip link show wg-o3k 2>/dev/null
 
     # 15. Clean up namespaces and state for this round.
     echo "--- Cleaning up round state ---"
