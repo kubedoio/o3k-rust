@@ -20,6 +20,19 @@ product rules. Summaries explain these decisions but do not override them.
 | Execution authority and protocol invariants | `contracts/execution-boundaries.md` | `docs/ARCHITECTURE.md`, `AGENTS.md` |
 | Native persistent Volume/Attachment/Snapshot authority and storage execution | `docs/adr/ADR-0169-native-persistent-storage-and-o3k-storage-boundary.md` and `docs/specs/SPEC-0027-native-persistent-storage-v1.md` | `docs/ROADMAP.md`, `docs/PRODUCT_REQUIREMENTS.md` |
 
+## Proposed P12 sources — not active implementation authority yet
+
+The following P12 sources are deliberately present in `Proposed` state for
+human architecture/security review. They do **not** override the accepted
+sources above and must not be used to claim implemented native API/controller
+support until the related ADRs are accepted and executable evidence passes.
+
+| Subject | Proposed source |
+|---|---|
+| Native O3K resource API, resource envelope, identity/versioning/operations/error/pagination/CLI semantics | `docs/adr/ADR-0173-native-o3k-resource-api-and-resource-model.md`, `docs/specs/SPEC-0030-native-o3k-resource-api-v1.md`, `contracts/native-resource-envelope-v1.schema.json` |
+| Service Manifest, registry evolution, namespace ownership, external controller/service-principal/delegation/composition model | `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`, `docs/specs/SPEC-0031-service-extension-controller-v1.md`, `contracts/service-manifest-v1.schema.json`, `contracts/controller-protocol-v1.md` |
+| Separation of native service identity from OpenStack service/catalog/API compatibility metadata | `contracts/openstack-compatibility-projection-v1.schema.json` under ADR-0174/SPEC-0031; actual advertisement remains gated by SPEC-0022 and compatibility manifests |
+
 ## Core rules
 
 - O3K owns public identity, ownership, desired state, scheduling, operations,
@@ -65,17 +78,21 @@ product rules. Summaries explain these decisions but do not override them.
   operation store.
 - Existing OpenStack, vSphere, Proxmox, KubeVirt, or public clouds require a
   delegated/federated authority model rather than a libvirt-like provider.
+- Proposed P12 documents do not change runtime authority while their governing
+  ADRs remain `Proposed`.
 
 ## Claim discipline
 
 Architecture is not release evidence. PostgreSQL/Kubernetes HA, routed
-networking, native storage, P11 multi-host networking, broad federation,
-complete parity, and fixed footprint/scale claims remain limited to the exact
-implementation and evidence profiles that passed their gates.
+networking, native storage, P11 multi-host networking, P12 native API/service
+framework, broad federation, complete parity, and fixed footprint/scale claims
+remain limited to the exact implementation and evidence profiles that passed
+their gates.
 
 The current compatibility manifest remains authoritative for which OpenStack
-operations are actually advertised. Proposed/accepted P11 fabric architecture
-does not itself expand Neutron, Nova, or Cinder compatibility.
+operations are actually advertised. Proposed P12 native contracts do not expand
+Keystone, Nova, Neutron, Glance, Placement, or Cinder compatibility by their
+presence in the repository.
 
 The accepted overlapping-AddressRealm P11 successor must not be claimed as a
 supported runtime until a real multi-host gate proves two independent
