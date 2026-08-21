@@ -65,3 +65,76 @@ pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
         _ => DEFAULT_PAGE_SIZE,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_decode_round_trip() {
+        let payload = CursorPayload {
+            last_id: "srv-abc-123".to_owned(),
+            scope_id: "proj-1".to_owned(),
+            version: 1,
+        };
+        let encoded = encode_cursor(&payload);
+        assert!(!encoded.is_empty());
+        assert!(!encoded.contains('=')); // no padding
+
+        let decoded = decode_cursor(&encoded, "proj-1").unwrap();
+        assert_eq!(decoded.last_id, "srv-abc-123");
+        assert_eq!(decoded.scope_id, "proj-1");
+        assert_eq!(decoded.version, 1);
+    }
+
+    #[test]
+    fn decode_rejects_wrong_scope() {
+        let payload = CursorPayload {
+            last_id: "srv-1".to_owned(),
+            scope_id: "proj-a".to_owned(),
+            version: 1,
+        };
+        let encoded = encode_cursor(&payload);
+        let result = decode_cursor(&encoded, "proj-b");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_rejects_unsupported_version() {
+        let payload = CursorPayload {
+            last_id: "srv-1".to_owned(),
+            scope_id: "proj-1".to_owned(),
+            version: 99,
+        };
+        let encoded = encode_cursor(&payload);
+        let result = decode_cursor(&encoded, "proj-1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_rejects_tampered_cursor() {
+        let result = decode_cursor("not-valid-base64!!", "proj-1");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_page_size_default() {
+        assert_eq!(parse_page_size(None), DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn parse_page_size_clamps_to_max() {
+        assert_eq!(parse_page_size(Some("9999")), MAX_PAGE_SIZE);
+    }
+
+    #[test]
+    fn parse_page_size_zero_falls_back() {
+        assert_eq!(parse_page_size(Some("0")), DEFAULT_PAGE_SIZE);
+    }
+
+    #[test]
+    fn parse_page_size_invalid_falls_back() {
+        assert_eq!(parse_page_size(Some("abc")), DEFAULT_PAGE_SIZE);
+    }
+}

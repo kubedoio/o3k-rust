@@ -71,6 +71,24 @@ impl ErrorCode {
             Self::InternalError => "Internal Server Error",
         }
     }
+
+    /// Returns the stable machine code as a SCREAMING_SNAKE_CASE string,
+    /// consistent with the `ErrorCode` `#[serde]` serialization.
+    #[must_use]
+    pub fn as_code_str(&self) -> &'static str {
+        match self {
+            Self::BadRequest => "BAD_REQUEST",
+            Self::Unauthorized => "UNAUTHORIZED",
+            Self::Forbidden => "FORBIDDEN",
+            Self::ResourceNotFound => "RESOURCE_NOT_FOUND",
+            Self::Conflict => "CONFLICT",
+            Self::RequestTooLarge => "REQUEST_TOO_LARGE",
+            Self::InvalidCursor => "INVALID_CURSOR",
+            Self::UnsupportedMediaType => "UNSUPPORTED_MEDIA_TYPE",
+            Self::NotAvailable => "NOT_AVAILABLE",
+            Self::InternalError => "INTERNAL_ERROR",
+        }
+    }
 }
 
 /// RFC 9457-compatible Problem Details response body.
@@ -107,7 +125,7 @@ impl ProblemDetails {
             ),
             title: code.title().to_owned(),
             status: code.status().as_u16(),
-            code: format!("{:?}", code).to_uppercase(),
+            code: code.as_code_str().to_owned(),
             request_id: None,
             detail: None,
             resource_id: None,
@@ -189,5 +207,118 @@ impl IntoResponse for ProblemDetails {
                 // Status 500 with empty body — builder cannot fail on valid status.
                 (StatusCode::INTERNAL_SERVER_ERROR, axum::body::Body::empty()).into_response()
             })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_code_status_mapping() {
+        assert_eq!(ErrorCode::BadRequest.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(ErrorCode::Unauthorized.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(ErrorCode::Forbidden.status(), StatusCode::FORBIDDEN);
+        assert_eq!(ErrorCode::ResourceNotFound.status(), StatusCode::NOT_FOUND);
+        assert_eq!(ErrorCode::Conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            ErrorCode::InternalError.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn error_code_strings_are_screaming_snake_case() {
+        assert_eq!(ErrorCode::BadRequest.as_code_str(), "BAD_REQUEST");
+        assert_eq!(
+            ErrorCode::ResourceNotFound.as_code_str(),
+            "RESOURCE_NOT_FOUND"
+        );
+        assert_eq!(ErrorCode::Unauthorized.as_code_str(), "UNAUTHORIZED");
+        assert_eq!(ErrorCode::Forbidden.as_code_str(), "FORBIDDEN");
+        assert_eq!(ErrorCode::InternalError.as_code_str(), "INTERNAL_ERROR");
+    }
+
+    #[test]
+    fn problem_details_unauthorized() {
+        let pd = ProblemDetails::unauthorized();
+        assert_eq!(pd.status, 401);
+        assert_eq!(pd.code, "UNAUTHORIZED");
+        assert!(pd.detail.is_none());
+        assert!(pd.request_id.is_none());
+        assert!(pd.resource_id.is_none());
+    }
+
+    #[test]
+    fn problem_details_not_found_with_resource_id() {
+        let pd = ProblemDetails::not_found(Some("srv-abc"));
+        assert_eq!(pd.status, 404);
+        assert_eq!(pd.code, "RESOURCE_NOT_FOUND");
+        assert_eq!(pd.resource_id.as_deref(), Some("srv-abc"));
+    }
+
+    #[test]
+    fn problem_details_not_found_without_resource_id() {
+        let pd = ProblemDetails::not_found(None);
+        assert_eq!(pd.status, 404);
+        assert!(pd.resource_id.is_none());
+    }
+
+    #[test]
+    fn problem_details_bad_request() {
+        let pd = ProblemDetails::bad_request("invalid input");
+        assert_eq!(pd.status, 400);
+        assert_eq!(pd.code, "BAD_REQUEST");
+        assert_eq!(pd.detail.as_deref(), Some("invalid input"));
+    }
+
+    #[test]
+    fn problem_details_with_request_id() {
+        let pd = ProblemDetails::unauthorized().with_request_id("req-001");
+        assert_eq!(pd.request_id.as_deref(), Some("req-001"));
+    }
+
+    #[test]
+    fn problem_details_forbidden_with_detail() {
+        let pd = ProblemDetails::forbidden(Some("cross-project access denied"));
+        assert_eq!(pd.status, 403);
+        assert_eq!(pd.code, "FORBIDDEN");
+        assert_eq!(pd.detail.as_deref(), Some("cross-project access denied"));
+    }
+
+    #[test]
+    fn problem_details_forbidden_without_detail() {
+        let pd = ProblemDetails::forbidden(None);
+        assert_eq!(pd.status, 403);
+        assert!(pd.detail.is_none());
+    }
+
+    #[test]
+    fn problem_details_serialization_has_rfc9457_fields() {
+        let pd = ProblemDetails::unauthorized().with_request_id("req-abc");
+        let json = serde_json::to_value(&pd).unwrap();
+        assert_eq!(json["type"], "https://o3k.io/problems/unauthorized");
+        assert_eq!(json["title"], "Unauthorized");
+        assert_eq!(json["status"], 401);
+        assert_eq!(json["code"], "UNAUTHORIZED");
+        assert_eq!(json["request_id"], "req-abc");
+        assert!(json.get("detail").is_none());
+        assert!(json.get("resource_id").is_none());
+    }
+
+    #[test]
+    fn problem_details_into_response_has_problem_content_type() {
+        let pd = ProblemDetails::unauthorized();
+        let resp: Response = pd.into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/problem+json"
+        );
     }
 }
