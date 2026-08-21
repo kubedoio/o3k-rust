@@ -9,6 +9,7 @@ members = [
     "crates/o3k-domain",
     "crates/o3k-identity",
     "crates/o3k-image",
+    "crates/o3k-native-api",
     "crates/o3k-network",
     "crates/o3k-network-protocol",
     "crates/o3k-provider",

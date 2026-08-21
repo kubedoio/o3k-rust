@@ -28,6 +28,10 @@ impl LimitKey {
         ("network", "subnets"),
         ("network", "ports"),
         ("network", "address_allocations"),
+        ("database", "instances"),
+        ("database", "vcpus"),
+        ("database", "memory_mb"),
+        ("database", "storage_gb"),
     ];
 
     #[must_use]

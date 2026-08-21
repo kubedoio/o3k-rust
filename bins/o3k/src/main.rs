@@ -1,46 +1,151 @@
-//! Thin binary entry point for the `o3k` operator CLI.
-//!
-//! Argument handling is a plain match on the first argument:
-//! `doctor` drives the read-only check engine, `version` prints the binary
-//! and installed release versions, and `upgrade`/`rollback` drive the
-//! upgrade state machine (issue #626) through a current-thread tokio
-//! runtime. The binary never panics: runtime build errors print to stderr
-//! and exit 2.
+use clap::{Parser, Subcommand};
+use std::process::ExitCode;
+use std::sync::Arc;
 
 use o3k::upgrade::engine::{UpgradeArgs, UpgradeOutcome, run_rollback, run_upgrade};
 use o3k::upgrade::output::{UpgradeJson, UpgradeStatus};
 use o3k::upgrade::runner::SystemUpgradeIo;
-use o3k::{Context, ReleaseVersion, SqlxDoctorDb, SystemExec, SystemHttpClient, USAGE};
-use std::process::ExitCode;
-use std::sync::Arc;
+use o3k::{
+    Context, ReleaseVersion, SqlxDoctorDb, SystemExec, SystemHttpClient,
+    native_cli,
+};
+
+#[derive(Parser)]
+#[command(name = "o3k", version, about = "O3K operator and cloud-user CLI", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Run read-only installation diagnostics
+    Doctor {
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the binary and installed release versions
+    Version,
+    /// Upgrade the installation
+    Upgrade {
+        /// Target release version (e.g. v0.4.0)
+        #[arg(long)]
+        to: Option<String>,
+        /// Check preflight only (no mutation)
+        #[arg(long)]
+        check: bool,
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        yes: bool,
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore the previous release
+    Rollback {
+        /// Skip confirmation prompts
+        #[arg(short, long)]
+        yes: bool,
+        /// Machine-readable JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Native API service operations
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+    /// Native API resource-type operations
+    ResourceType {
+        #[command(subcommand)]
+        action: ResourceTypeAction,
+    },
+    /// Native API generic resource operations
+    Resource {
+        #[command(subcommand)]
+        action: ResourceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// List registered services
+    List,
+    /// Show service details
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
+enum ResourceTypeAction {
+    /// List known resource types
+    List,
+}
+
+#[derive(Subcommand)]
+enum ResourceAction {
+    /// List resources of a type (namespace:type)
+    List { resource_type: String },
+    /// Show a specific resource
+    Show { resource_type: String, id: String },
+}
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(first) = args.first().map(String::as_str) else {
-        eprintln!("o3k: missing command\n\n{USAGE}");
-        return ExitCode::from(2);
-    };
-    match first {
-        "--help" | "-h" | "help" => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Doctor { json } => run_doctor(json),
+        Commands::Version => run_version(),
+        Commands::Upgrade {
+            to,
+            check,
+            yes,
+            json,
+        } => {
+            let requested = to
+                .as_deref()
+                .map(|v| {
+                    v.parse::<ReleaseVersion>()
+                        .map_err(|e| format!("invalid version '{v}': {e}"))
+                })
+                .transpose();
+            match requested {
+                Ok(r) => run_upgrade_cli(r, check, yes, json),
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::from(2)
+                }
+            }
         }
-        "--version" | "-V" => {
-            println!("o3k {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
-        }
-        "version" => run_version(),
-        "doctor" => run_doctor(&args[1..]),
-        "upgrade" => run_upgrade_cli(&args[1..]),
-        "rollback" => run_rollback_cli(&args[1..]),
-        other => {
-            eprintln!("o3k: unknown command '{other}'\n\n{USAGE}");
-            ExitCode::from(2)
+        Commands::Rollback { yes: _, json } => run_rollback_cli(json),
+        Commands::Service { action } => match action {
+            ServiceAction::List => handle_result(native_cli::list_services()),
+            ServiceAction::Show { id } => handle_result(native_cli::show_service(&id)),
+        },
+        Commands::ResourceType { action } => match action {
+            ResourceTypeAction::List => handle_result(native_cli::list_resource_types()),
+        },
+        Commands::Resource { action } => match action {
+            ResourceAction::List { resource_type } => {
+                handle_result(native_cli::list_resources(&resource_type))
+            }
+            ResourceAction::Show { resource_type, id } => {
+                handle_result(native_cli::show_resource(&resource_type, &id))
+            }
+        },
+    }
+}
+
+fn handle_result(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(1)
         }
     }
 }
 
-/// Builds the current-thread runtime every subcommand needs.
 fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -51,8 +156,6 @@ fn build_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
         })
 }
 
-/// `o3k version`: the binary version plus the installed release version
-/// read from the release manifest (`unknown` when unreadable).
 fn run_version() -> ExitCode {
     println!("o3k {}", env!("CARGO_PKG_VERSION"));
     let installed = installed_version();
@@ -60,8 +163,6 @@ fn run_version() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Reads the installed release version from the release manifest under the
-/// standard prefix candidates.
 fn installed_version() -> String {
     let prefix = std::env::var("O3K_UPGRADE_PREFIX")
         .ok()
@@ -88,22 +189,7 @@ fn installed_version() -> String {
     "unknown".to_owned()
 }
 
-/// Parses `doctor`'s trailing arguments and runs the check engine.
-fn run_doctor(trailing: &[String]) -> ExitCode {
-    let mut json = false;
-    for argument in trailing {
-        match argument.as_str() {
-            "--json" => json = true,
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            other => {
-                eprintln!("o3k doctor: unknown option '{other}'\n\n{USAGE}");
-                return ExitCode::from(2);
-            }
-        }
-    }
+fn run_doctor(json: bool) -> ExitCode {
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,
@@ -133,43 +219,12 @@ fn run_doctor(trailing: &[String]) -> ExitCode {
     }
 }
 
-/// Parses `upgrade`'s trailing arguments and drives the upgrade engine.
-fn run_upgrade_cli(trailing: &[String]) -> ExitCode {
-    let mut requested = None;
-    let mut check_only = false;
-    let mut assume_yes = false;
-    let mut json = false;
-    let mut index = 0;
-    while index < trailing.len() {
-        match trailing[index].as_str() {
-            "--to" => {
-                index += 1;
-                let Some(value) = trailing.get(index) else {
-                    eprintln!("o3k upgrade: --to requires a version\n\n{USAGE}");
-                    return ExitCode::from(2);
-                };
-                match value.parse::<ReleaseVersion>() {
-                    Ok(version) => requested = Some(version),
-                    Err(error) => {
-                        eprintln!("o3k upgrade: invalid --to version '{value}': {error}");
-                        return ExitCode::from(2);
-                    }
-                }
-            }
-            "--check" => check_only = true,
-            "--yes" | "-y" => assume_yes = true,
-            "--json" => json = true,
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            other => {
-                eprintln!("o3k upgrade: unknown option '{other}'\n\n{USAGE}");
-                return ExitCode::from(2);
-            }
-        }
-        index += 1;
-    }
+fn run_upgrade_cli(
+    requested: Option<ReleaseVersion>,
+    check_only: bool,
+    assume_yes: bool,
+    json: bool,
+) -> ExitCode {
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,
@@ -193,23 +248,7 @@ fn run_upgrade_cli(trailing: &[String]) -> ExitCode {
     render_upgrade_outcome("upgrade", outcome, json)
 }
 
-/// Parses `rollback`'s trailing arguments and drives the rollback engine.
-fn run_rollback_cli(trailing: &[String]) -> ExitCode {
-    let mut json = false;
-    for argument in trailing {
-        match argument.as_str() {
-            "--yes" | "-y" => {}
-            "--json" => json = true,
-            "--help" | "-h" => {
-                println!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            other => {
-                eprintln!("o3k rollback: unknown option '{other}'\n\n{USAGE}");
-                return ExitCode::from(2);
-            }
-        }
-    }
+fn run_rollback_cli(json: bool) -> ExitCode {
     let runtime = match build_runtime() {
         Ok(runtime) => runtime,
         Err(exit) => return exit,
@@ -219,9 +258,6 @@ fn run_rollback_cli(trailing: &[String]) -> ExitCode {
     render_upgrade_outcome("rollback", outcome, json)
 }
 
-/// Renders one engine outcome (human or JSON) and derives the exit code:
-/// 0 for committed / rolled back / check passed, 1 for failed / blocked,
-/// 2 for a serialization error.
 fn render_upgrade_outcome(command: &str, outcome: UpgradeOutcome, json: bool) -> ExitCode {
     if json {
         let serialized = UpgradeJson::new(
@@ -240,9 +276,6 @@ fn render_upgrade_outcome(command: &str, outcome: UpgradeOutcome, json: bool) ->
                 return ExitCode::from(2);
             }
         }
-        // The machine output stays on stdout; the human failure description
-        // goes to stderr in both modes so operators and tests can read the
-        // reason without parsing JSON.
         if let Some(error) = &outcome.error {
             eprintln!("o3k {command}: {error}");
         }
@@ -257,8 +290,6 @@ fn render_upgrade_outcome(command: &str, outcome: UpgradeOutcome, json: bool) ->
     }
 }
 
-/// Human rendering of one engine outcome (errors go to stderr, the rest to
-/// stdout; no secrets ever appear).
 fn render_upgrade_human(command: &str, outcome: &UpgradeOutcome) {
     let versions = match (&outcome.source_version, &outcome.target_version) {
         (Some(source), Some(target)) => format!("{source} -> {target}"),

@@ -105,6 +105,11 @@ impl ServiceNamespace {
     pub fn volume() -> Self {
         Self::new_unchecked("volume".to_owned())
     }
+
+    #[must_use]
+    pub fn database() -> Self {
+        Self::new_unchecked("database".to_owned())
+    }
 }
 
 impl fmt::Display for ServiceNamespace {

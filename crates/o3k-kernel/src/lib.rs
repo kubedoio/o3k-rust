@@ -16,7 +16,10 @@ pub mod action;
 pub mod audit;
 pub mod auth_context;
 pub mod authorization;
+pub mod envelope;
 pub mod error;
+pub mod manifest;
+pub mod operation;
 pub mod principal;
 pub mod quota;
 pub mod registry;
@@ -32,7 +35,14 @@ pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
     StaticAuthorizer,
 };
+pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;
+pub use manifest::{
+    ControllerBinding, ManifestError, ManifestRegistry, OpenStackCompatibilityProjection,
+    OpenStackApiSurface, OpenStackEndpointTemplate, QuotaDimension, ServiceHealth,
+    ServiceLifecycleState, ServiceManifest,
+};
+pub use operation::{Operation, OperationState};
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};
 pub use quota::{
     LimitKey, LimitValue, QuotaDecision, Reservation, ReservationId, ReservationState,
