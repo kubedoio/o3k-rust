@@ -97,8 +97,18 @@ def check_actions_and_services(root: Path) -> list[str]:
         errors.append("cloud-kernel-services.yaml declares no services")
 
     # 3. Cross-reference actions and services
+    # Native O3K capability ownership is declared by ServiceManifest/
+    # ManifestRegistry, not by this legacy compatibility projection.  Keep
+    # these canonical native reads out of the mixed OpenStack inventory so a
+    # resource cannot be ambiguously owned by Compute or Neutron.
+    native_only_actions = {
+        "network:ListAddressRealms",
+        "network:ReadAddressRealm",
+        "volume:ListVolumes",
+        "volume:ReadVolume",
+    }
     for act in sorted(action_ids):
-        if act not in service_actions:
+        if act not in service_actions and act not in native_only_actions:
             errors.append(f"action {act!r} defined in actions inventory but missing from services inventory")
 
     for act in sorted(service_actions):
