@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json",
+  "title": "O3K Native Resource Envelope v1 (Proposed)",
+  "description": "Proposed common envelope for first-class O3K native resources. Service-specific spec/status schemas are owned by the service and are not defined here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_version", "kind", "metadata", "spec", "status"],
+  "properties": {
+    "api_version": {
+      "const": "o3k.io/v1"
+    },
+    "kind": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*$",
+      "maxLength": 128,
+      "description": "Canonical service-namespaced ResourceType, for example compute:server."
+    },
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "spec": {
+      "type": "object",
+      "description": "Service-owned desired-state payload. The owning ResourceType schema provides further validation."
+    },
+    "status": {
+      "type": "object",
+      "description": "Service-owned observed/status payload. The owning ResourceType schema provides further validation."
+    }
+  },
+  "$defs": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "generation"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Opaque stable canonical O3K resource ID. Display/natural keys are not identity."
+        },
+        "owner_scope": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Durable owner/security scope when the resource is scope-owned. Null is allowed only for explicitly system/unscoped resource classes."
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Monotonic desired-state generation where mutable desired state exists. Immutable/read-only resource types may remain at generation 0/1 according to their service schema."
+        },
+        "region": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "availability_domain": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "created_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "labels": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 512
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        }
+      }
+    }
+  },
+  "x-o3k-status": "proposed",
+  "x-o3k-related-adr": "ADR-0173",
+  "x-o3k-related-spec": "SPEC-0030"
+}
