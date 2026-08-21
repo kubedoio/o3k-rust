@@ -365,7 +365,7 @@ verify_wireguard_handshakes() {
 
 # Start a background tcpdump on each host's underlay interface.  The filter
 # matches cleartext leak indicators only: tenant IPs, cleartext Geneve, and
-# fabric transport IPs outside the WireGuard UDP/51820 envelope.
+# fabric transport IPs outside the WireGuard UDP/65001 envelope.
 start_underlay_capture() {
   local filter='net 10.0.0.0/24 or udp port 6081 or (net 198.18.0.0/16 and not udp port 65001)'
   for host in p11h1 p11h2 p11h3; do

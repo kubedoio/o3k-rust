@@ -16,7 +16,7 @@ fi
 
 readonly UNDERLAY_BRIDGE=p11-wg-underlay
 readonly UNDERLAY_CIDR=192.0.2.0/24
-readonly WG_PORT=51820
+readonly WG_PORT=65001
 readonly GENEVE_PORT=6081
 readonly FABRIC_MTU=1500
 readonly TENANT_MTU=1400

@@ -37,7 +37,7 @@ collect_snapshot() {
     wg=$((wg + $(remote "$host" "ip -o link show 2>/dev/null | grep -c 'wg-o3k' || true")))
     routes=$((routes + $(remote "$host" "ip route show 2>/dev/null | grep -c 'o3k-' || true")))
     nft=$((nft + $(remote "$host" "nft list tables 2>/dev/null | grep -c 'o3k-' || true")))
-    nat=$((nat + $(remote "$host" "iptables -t nat -S PREROUTING 2>/dev/null | grep -c '51820.*169.254.253.2' || true")))
+    nat=$((nat + $(remote "$host" "iptables -t nat -S PREROUTING 2>/dev/null | grep -c '65001.*169.254.253.2' || true")))
     nat=$((nat + $(remote "$host" "iptables -t nat -S POSTROUTING 2>/dev/null | grep -c '169.254.253.0/30.*MASQUERADE' || true")))
     lvm=$((lvm + $(remote "$host" "lvs --noheadings -o lv_name 2>/dev/null | grep -c 'p11-' || true")))
     rbd=$((rbd + $(remote "$host" "rbd device list 2>/dev/null | wc -l || true")))
