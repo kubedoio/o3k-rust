@@ -251,6 +251,17 @@ impl ServiceManifest {
                     expected: self.namespace.clone(),
                 });
             }
+            // schema_version must be non-empty and bounded
+            if rt.schema_version.trim().is_empty() {
+                return Err(ManifestError::InvalidField(
+                    "resource_types[].schema_version",
+                ));
+            }
+            if rt.schema_version.len() > 64 {
+                return Err(ManifestError::InvalidField(
+                    "resource_types[].schema_version (max 64)",
+                ));
+            }
         }
 
         for act in &self.actions {
@@ -265,6 +276,87 @@ impl ServiceManifest {
                     identifier: act.clone(),
                     expected: self.namespace.clone(),
                 });
+            }
+        }
+
+        // Validate controller coherence based on ownership
+        if self.ownership == ServiceOwnership::ExternalController {
+            let Some(ref ctrl) = self.controller else {
+                return Err(ManifestError::InvalidField(
+                    "controller required for external-controller ownership",
+                ));
+            };
+            if ctrl.mode != "external" {
+                return Err(ManifestError::InvalidField(
+                    "controller.mode must be 'external' for external-controller ownership",
+                ));
+            }
+            if ctrl.protocol != "grpc" {
+                return Err(ManifestError::InvalidField(
+                    "controller.protocol must be 'grpc' for external-controller ownership",
+                ));
+            }
+            if ctrl
+                .service_principal
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                return Err(ManifestError::InvalidField(
+                    "controller.service_principal required for external mode",
+                ));
+            }
+        }
+        // In-process controller coherence (if controller declared)
+        if let Some(ref ctrl) = self.controller {
+            match ctrl.mode.as_str() {
+                "in-process" | "external" => {}
+                _ => {
+                    return Err(ManifestError::InvalidField(
+                        "controller.mode: expected 'in-process' or 'external'",
+                    ));
+                }
+            }
+            match ctrl.protocol.as_str() {
+                "in-process" | "grpc" => {}
+                _ => {
+                    return Err(ManifestError::InvalidField(
+                        "controller.protocol: expected 'in-process' or 'grpc'",
+                    ));
+                }
+            }
+        }
+
+        // Validate quota scope values
+        for qd in &self.quota_dimensions {
+            match qd.scope.as_str() {
+                "tenant" | "system" => {}
+                _ => {
+                    return Err(ManifestError::InvalidField(
+                        "quota_dimensions[].scope: expected 'tenant' or 'system'",
+                    ));
+                }
+            }
+        }
+
+        // Validate regions/AZ entries
+        for region in &self.regions {
+            if region.trim().is_empty() {
+                return Err(ManifestError::InvalidField("regions[]"));
+            }
+            if region.len() > 128 {
+                return Err(ManifestError::InvalidField("regions[] (max 128)"));
+            }
+        }
+        for az in &self.availability_domains {
+            if az.trim().is_empty() {
+                return Err(ManifestError::InvalidField("availability_domains[]"));
+            }
+            if az.len() > 128 {
+                return Err(ManifestError::InvalidField(
+                    "availability_domains[] (max 128)",
+                ));
             }
         }
 
@@ -423,7 +515,20 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
                 let resource_type = ResourceType::new(ns, name).map_err(|e| {
                     ManifestError::InvalidIdentifier(rt.type_.clone(), e.to_string())
                 })?;
-                let scope = ResourceScope::parse(&rt.scope).unwrap_or(ResourceScope::Tenant);
+                // Fail closed: resource scope must be a valid accepted value
+                let scope = ResourceScope::parse(&rt.scope)
+                    .ok_or(ManifestError::InvalidField("resource_types[].scope"))?;
+                // schema_version must be non-empty
+                if rt.schema_version.trim().is_empty() {
+                    return Err(ManifestError::InvalidField(
+                        "resource_types[].schema_version",
+                    ));
+                }
+                if rt.schema_version.len() > 64 {
+                    return Err(ManifestError::InvalidField(
+                        "resource_types[].schema_version (max 64)",
+                    ));
+                }
                 Ok(RegisteredResourceType {
                     resource_type,
                     schema_version: rt.schema_version,
@@ -433,15 +538,46 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Convert controller declaration — manifest policy only, no runtime state
+        // Convert controller declaration — validate mode/protocol values
+        let mode = wire.controller.mode;
+        let protocol = wire.controller.protocol;
+        match mode.as_str() {
+            "in-process" | "external" => {}
+            _ => {
+                return Err(ManifestError::InvalidField(
+                    "controller.mode: expected 'in-process' or 'external'",
+                ));
+            }
+        }
+        match protocol.as_str() {
+            "in-process" | "grpc" => {}
+            _ => {
+                return Err(ManifestError::InvalidField(
+                    "controller.protocol: expected 'in-process' or 'grpc'",
+                ));
+            }
+        }
+        // External controller requires explicit service_principal
+        if mode == "external"
+            && wire
+                .controller
+                .service_principal
+                .as_deref()
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err(ManifestError::InvalidField(
+                "controller.service_principal required for external mode",
+            ));
+        }
         let controller = Some(ManifestController {
-            mode: wire.controller.mode,
-            protocol: wire.controller.protocol,
+            mode,
+            protocol,
             protocol_version: wire.controller.protocol_version,
             service_principal: wire.controller.service_principal,
         });
 
-        // Convert dependencies — preserve kind/name/required
+        // Convert dependencies — fail closed on unknown kind
         let dependencies: Vec<ServiceDependency> = wire
             .dependencies
             .into_iter()
@@ -451,26 +587,53 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
                     "resource_type" => DependencyKind::ResourceType,
                     "action" => DependencyKind::Action,
                     "capability" => DependencyKind::Capability,
-                    _ => DependencyKind::Service, // safe default for unrecognized
+                    _ => {
+                        return Err(ManifestError::InvalidField("dependencies[].kind"));
+                    }
                 };
-                ServiceDependency {
+                Ok(ServiceDependency {
                     kind,
                     name: d.name,
                     required: d.required,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Convert quota_dimensions
+        // Convert quota_dimensions — validate scope is tenant/system
         let quota_dimensions: Vec<QuotaDimension> = wire
             .quota_dimensions
             .into_iter()
-            .map(|qd| QuotaDimension {
-                key: qd.key,
-                unit: qd.unit,
-                scope: qd.scope,
+            .map(|qd| {
+                if qd.key.trim().is_empty() || qd.key.len() > 128 {
+                    return Err(ManifestError::InvalidField("quota_dimensions[].key"));
+                }
+                match qd.scope.as_str() {
+                    "tenant" | "system" => {}
+                    _ => {
+                        return Err(ManifestError::InvalidField(
+                            "quota_dimensions[].scope: expected 'tenant' or 'system'",
+                        ));
+                    }
+                }
+                Ok(QuotaDimension {
+                    key: qd.key,
+                    unit: qd.unit,
+                    scope: qd.scope,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Validate regions/AZ entries
+        for region in &wire.regions {
+            if region.trim().is_empty() || region.len() > 128 {
+                return Err(ManifestError::InvalidField("regions[]"));
+            }
+        }
+        for az in &wire.availability_domains {
+            if az.trim().is_empty() || az.len() > 128 {
+                return Err(ManifestError::InvalidField("availability_domains[]"));
+            }
+        }
 
         Ok(ServiceManifest {
             manifest_version: 1,
@@ -609,9 +772,39 @@ pub struct OpenStackEndpointV1 {
     pub enabled: bool,
 }
 
-impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
-    fn from(wire: OpenStackProjectionV1) -> Self {
-        OpenStackCompatibilityProjection {
+impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
+    type Error = ManifestError;
+
+    fn try_from(wire: OpenStackProjectionV1) -> Result<Self, Self::Error> {
+        // Validate projection_version constant
+        if wire.projection_version != "o3k.io/openstack-projection/v1" {
+            return Err(ManifestError::InvalidField("projection_version"));
+        }
+        // Validate endpoint interface values
+        for ep in &wire.endpoints {
+            match ep.interface.as_str() {
+                "public" | "internal" | "admin" => {}
+                _ => {
+                    return Err(ManifestError::InvalidField(
+                        "endpoints[].interface: expected 'public', 'internal', or 'admin'",
+                    ));
+                }
+            }
+            if !ep.url_template.starts_with("http") && !ep.url_template.starts_with('/') {
+                return Err(ManifestError::InvalidField(
+                    "endpoints[].url_template must start with http or /",
+                ));
+            }
+        }
+        // Validate API surface prefix starts with /
+        for api in &wire.api_surfaces {
+            if !api.prefix.starts_with('/') {
+                return Err(ManifestError::InvalidField(
+                    "api_surfaces[].prefix must start with /",
+                ));
+            }
+        }
+        Ok(OpenStackCompatibilityProjection {
             service_id: wire.service_id,
             service_type: wire.service_type,
             service_name: wire.service_name,
@@ -640,7 +833,7 @@ impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
                 .collect(),
             capabilities: wire.capabilities,
             evidence_profile: wire.evidence_profile,
-        }
+        })
     }
 }
 
@@ -1001,6 +1194,12 @@ impl ManifestRegistry {
         self.manifests.get(service_id)
     }
 
+    /// Returns a mutable reference to a registered manifest by service ID.
+    #[must_use]
+    pub fn get_mut(&mut self, service_id: &str) -> Option<&mut ServiceManifest> {
+        self.manifests.get_mut(service_id)
+    }
+
     /// Returns a reference to a registered manifest by namespace.
     #[must_use]
     pub fn get_by_namespace(&self, namespace: &str) -> Option<&ServiceManifest> {
@@ -1207,15 +1406,11 @@ impl ManifestRegistry {
         for m in core_manifests {
             // Idempotency check: exact equivalent already registered → skip.
             if let Some(existing) = self.manifests.get(&m.service_id) {
-                if existing.namespace == m.namespace
-                    && existing.service_version == m.service_version
-                    && existing.resource_types == m.resource_types
-                    && existing.actions == m.actions
-                {
+                if *existing == m {
                     // Same manifest content — idempotent skip.
                     continue;
                 }
-                // Same service ID with incompatible content → fail.
+                // Same service ID with semantically different content → fail.
                 return Err(ManifestError::DuplicateServiceId(m.service_id.clone()));
             }
             // Same namespace owned by a different service → fail.
@@ -2284,7 +2479,8 @@ mod tests {
             evidence_profile: Some("native-rust-testlab".to_owned()),
         };
 
-        let internal: OpenStackCompatibilityProjection = wire.into();
+        let internal: OpenStackCompatibilityProjection =
+            wire.try_into().expect("projection conversion");
         assert_eq!(internal.service_id, "compute");
         assert_eq!(internal.service_type, "compute");
         assert_eq!(
@@ -2310,6 +2506,229 @@ mod tests {
         assert_eq!(
             internal.evidence_profile.as_deref(),
             Some("native-rust-testlab")
+        );
+    }
+
+    // ── Fail-closed conversion tests ────────────────────────────────────
+
+    fn valid_wire_manifest() -> ServiceManifestV1 {
+        ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "test:resource".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        }
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_resource_scope() {
+        let mut wire = valid_wire_manifest();
+        wire.resource_types[0].scope = "invalid-scope".to_owned();
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid resource scope"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_dependency_kind() {
+        let mut wire = valid_wire_manifest();
+        wire.dependencies = vec![DependencyDescriptor {
+            kind: "bogus-kind".to_owned(),
+            name: "something".to_owned(),
+            required: true,
+        }];
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid dependency kind"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_ownership_mode() {
+        let mut wire = valid_wire_manifest();
+        wire.ownership_mode = "invalid-mode".to_owned();
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid ownership mode"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_controller_mode() {
+        let mut wire = valid_wire_manifest();
+        wire.controller.mode = "invalid".to_owned();
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid controller mode"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_controller_protocol() {
+        let mut wire = valid_wire_manifest();
+        wire.controller.protocol = "invalid".to_owned();
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid controller protocol"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_external_controller_without_service_principal() {
+        let mut wire = valid_wire_manifest();
+        wire.ownership_mode = "external-controller".to_owned();
+        wire.controller = ControllerDescriptor {
+            mode: "external".to_owned(),
+            protocol: "grpc".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: None,
+        };
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of external controller without service_principal"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_invalid_quota_scope() {
+        let mut wire = valid_wire_manifest();
+        wire.quota_dimensions = vec![QuotaDimensionDescriptor {
+            key: "instances".to_owned(),
+            unit: "count".to_owned(),
+            scope: "invalid-scope".to_owned(),
+        }];
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(result.is_err(), "expected rejection of invalid quota scope");
+    }
+
+    #[test]
+    fn seed_core_idempotent_on_exact_match() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        // Calling seed_core again with the same built-in manifests must succeed.
+        assert!(reg.seed_core().is_ok());
+        // State unchanged.
+        assert_eq!(reg.len(), 3);
+    }
+
+    #[test]
+    fn seed_core_fails_on_modified_ownership() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        // Modify the registered compute manifest's ownership
+        if let Some(compute) = reg.get_mut("compute") {
+            compute.ownership = ServiceOwnership::ExternalController;
+        }
+        // seed_core must fail: different ownership is not idempotent.
+        let err = reg.seed_core().unwrap_err();
+        assert!(
+            matches!(err, ManifestError::DuplicateServiceId(_)),
+            "expected DuplicateServiceId for modified ownership, got {err}"
+        );
+    }
+
+    #[test]
+    fn seed_core_fails_on_modified_capabilities() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core().unwrap();
+        // Add a capability to the registered manifest
+        if let Some(compute) = reg.get_mut("compute") {
+            compute.capabilities.push("some-capability".to_owned());
+        }
+        let err = reg.seed_core().unwrap_err();
+        assert!(
+            matches!(err, ManifestError::DuplicateServiceId(_)),
+            "expected DuplicateServiceId for modified capabilities, got {err}"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_empty_schema_version() {
+        let mut wire = valid_wire_manifest();
+        wire.resource_types[0].schema_version = "".to_owned();
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of empty schema_version"
+        );
+    }
+
+    #[test]
+    fn conversion_rejects_empty_region_entry() {
+        let mut wire = valid_wire_manifest();
+        wire.regions = vec!["".to_owned()];
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(result.is_err(), "expected rejection of empty region entry");
+    }
+
+    #[test]
+    fn projection_conversion_rejects_invalid_endpoint_interface() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "compute".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![OpenStackEndpointV1 {
+                interface: "bogus".to_owned(),
+                region: "RegionOne".to_owned(),
+                url_template: "http://localhost".to_owned(),
+                enabled: true,
+            }],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of invalid endpoint interface"
+        );
+    }
+
+    #[test]
+    fn projection_conversion_rejects_wrong_projection_version() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "wrong-version".to_owned(),
+            service_id: "compute".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of wrong projection version"
         );
     }
 }
