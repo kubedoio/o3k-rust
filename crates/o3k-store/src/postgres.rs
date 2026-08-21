@@ -13,9 +13,10 @@ use uuid::Uuid;
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferState,
-    ArtifactTransferUpdate, ComputeRepository, DatabaseHealth, DurableStore, IdentityRepository,
-    ImageMetadataRecord, ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState,
-    ImageOverlayUpdate, ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
+    ArtifactTransferUpdate, ComputeRepository, DatabaseHealth, DurableStore,
+    IdempotencyReservation, IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord,
+    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayState, ImageOverlayUpdate,
+    ImageRepository, KeypairRecord, KeypairRepository, KeystoneDomainRecord,
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
@@ -360,6 +361,29 @@ impl DurableStore for PostgresStore {
         .await
         .map_err(map_pg_error)?;
         Ok(())
+    }
+
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        let result = sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES ($1, $2, $3, $4, $5)").bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint).bind(request.operation_id.to_string()).execute(&self.pool).await;
+        match result {
+            Ok(_) => Ok(IdempotencyReservation::Created(request.operation_id)),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let row = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = $1 AND action = $2 AND idempotency_key = $3").bind(&request.owner_scope).bind(&request.action).bind(&request.key).fetch_one(&self.pool).await.map_err(StoreError::Database)?;
+                let fingerprint: String =
+                    row.try_get("fingerprint").map_err(StoreError::Database)?;
+                let id: String = row.try_get("operation_id").map_err(StoreError::Database)?;
+                if fingerprint != request.fingerprint {
+                    return Ok(IdempotencyReservation::Conflict);
+                }
+                Ok(IdempotencyReservation::ExistingEquivalent(
+                    Uuid::parse_str(&id).map_err(StoreError::InvalidUuid)?,
+                ))
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
     }
 
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {

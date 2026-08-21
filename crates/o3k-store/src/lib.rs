@@ -362,6 +362,35 @@ pub enum OperationState {
     Failed,
 }
 
+/// Maps the durable lifecycle to the provider-neutral kernel vocabulary.
+/// Provider-only fields remain on `OperationRecord` and never cross this
+/// boundary.
+impl From<OperationState> for o3k_kernel::OperationState {
+    fn from(state: OperationState) -> Self {
+        match state {
+            OperationState::Pending => Self::Pending,
+            OperationState::Running => Self::Running,
+            OperationState::Succeeded => Self::Succeeded,
+            OperationState::Retryable => Self::Retryable,
+            OperationState::UnknownOutcome => Self::UnknownOutcome,
+            OperationState::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<o3k_kernel::OperationState> for OperationState {
+    fn from(state: o3k_kernel::OperationState) -> Self {
+        match state {
+            o3k_kernel::OperationState::Pending => Self::Pending,
+            o3k_kernel::OperationState::Running => Self::Running,
+            o3k_kernel::OperationState::Succeeded => Self::Succeeded,
+            o3k_kernel::OperationState::Retryable => Self::Retryable,
+            o3k_kernel::OperationState::UnknownOutcome => Self::UnknownOutcome,
+            o3k_kernel::OperationState::Failed => Self::Failed,
+        }
+    }
+}
+
 impl OperationState {
     fn as_str(self) -> &'static str {
         match self {
@@ -420,6 +449,91 @@ pub struct OperationRecord {
     pub provider_operation_id: Option<String>,
     pub error_category: Option<String>,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdempotencyReservationRequest {
+    pub owner_scope: String,
+    pub action: String,
+    pub key: String,
+    pub fingerprint: String,
+    pub operation_id: Uuid,
+}
+
+impl IdempotencyReservationRequest {
+    pub const MAX_KEY_LENGTH: usize = 128;
+
+    pub fn from_semantics(
+        owner_scope: impl Into<String>,
+        action: impl Into<String>,
+        key: impl Into<String>,
+        resource_type: &str,
+        target: Option<&str>,
+        body: &serde_json::Value,
+        operation_id: Uuid,
+    ) -> Result<Self, StoreError> {
+        let owner_scope = owner_scope.into();
+        let action = action.into();
+        let key = key.into();
+        if owner_scope.is_empty()
+            || action.is_empty()
+            || key.is_empty()
+            || key.len() > Self::MAX_KEY_LENGTH
+        {
+            return Err(StoreError::Corrupt("invalid idempotency identity".into()));
+        }
+        let canonical = canonical_json(body);
+        let material = format!(
+            "{action}\n{resource_type}\n{}\n{canonical}",
+            target.unwrap_or("")
+        );
+        use sha2::{Digest, Sha256};
+        let fingerprint = format!("{:x}", Sha256::digest(material.as_bytes()));
+        Ok(Self {
+            owner_scope,
+            action,
+            key,
+            fingerprint,
+            operation_id,
+        })
+    }
+}
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by_key(|(key, _)| *key);
+            let fields = entries
+                .into_iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(v)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{fields}}}")
+        }
+        serde_json::Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        _ => value.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdempotencyReservation {
+    Created(Uuid),
+    ExistingEquivalent(Uuid),
+    Conflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,6 +681,8 @@ pub enum StoreError {
     StaleGeneration,
     #[error("resource already exists")]
     ResourceAlreadyExists,
+    #[error("idempotency key conflicts with an existing request")]
+    IdempotencyConflict,
     #[error("provider reference already exists")]
     ProviderReferenceAlreadyExists,
     #[error("provider reference not found")]
@@ -669,6 +785,10 @@ pub trait DurableStore: Send + Sync {
         update: &ObservationUpdate<'_>,
     ) -> Result<ResourceRecord, StoreError>;
     async fn insert_operation(&self, operation: &OperationRecord) -> Result<(), StoreError>;
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
     async fn update_operation(
         &self,
@@ -4749,6 +4869,29 @@ impl DurableStore for SqliteStore {
         operation_from_row(&row)
     }
 
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        let result = sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES (?, ?, ?, ?, ?)").bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint).bind(request.operation_id.to_string()).execute(&self.pool).await;
+        match result {
+            Ok(_) => Ok(IdempotencyReservation::Created(request.operation_id)),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let row = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = ? AND action = ? AND idempotency_key = ?").bind(&request.owner_scope).bind(&request.action).bind(&request.key).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.ok_or(StoreError::IdempotencyConflict)?;
+                let fingerprint: String =
+                    row.try_get("fingerprint").map_err(StoreError::Database)?;
+                let id: String = row.try_get("operation_id").map_err(StoreError::Database)?;
+                if fingerprint != request.fingerprint {
+                    return Ok(IdempotencyReservation::Conflict);
+                }
+                Ok(IdempotencyReservation::ExistingEquivalent(
+                    Uuid::parse_str(&id).map_err(StoreError::InvalidUuid)?,
+                ))
+            }
+            Err(error) => Err(StoreError::Database(error)),
+        }
+    }
+
     async fn list_non_terminal_lifecycle_operations(
         &self,
     ) -> Result<Vec<OperationRecord>, StoreError> {
@@ -7867,6 +8010,52 @@ mod tests {
                 row.state
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_idempotency_reservation_is_scoped_and_atomic() -> Result<(), StoreError> {
+        let store = SqliteStore::connect("sqlite::memory:").await?;
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "abc",
+            "compute:server",
+            None,
+            &serde_json::json!({"name": "demo", "size": 10}),
+            Uuid::now_v7(),
+        )?;
+        let equivalent = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "abc",
+            "compute:server",
+            None,
+            &serde_json::json!({"size": 10, "name": "demo"}),
+            request.operation_id,
+        )?;
+        assert_eq!(request.fingerprint, equivalent.fingerprint);
+        assert_eq!(
+            store.reserve_idempotent_operation(&equivalent).await?,
+            IdempotencyReservation::Created(request.operation_id)
+        );
+        assert_eq!(
+            store.reserve_idempotent_operation(&request).await?,
+            IdempotencyReservation::ExistingEquivalent(request.operation_id)
+        );
+        let mut conflict = request.clone();
+        conflict.fingerprint = "sha256:b".into();
+        assert_eq!(
+            store.reserve_idempotent_operation(&conflict).await?,
+            IdempotencyReservation::Conflict
+        );
+        let mut other = request.clone();
+        other.owner_scope = "project-b".into();
+        other.operation_id = Uuid::now_v7();
+        assert_eq!(
+            store.reserve_idempotent_operation(&other).await?,
+            IdempotencyReservation::Created(other.operation_id)
+        );
         Ok(())
     }
 

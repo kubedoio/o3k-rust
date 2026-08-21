@@ -19,6 +19,7 @@ pub mod compute;
 pub mod error;
 pub mod identity;
 pub mod network;
+pub mod operation;
 pub mod pagination;
 pub mod volume;
 
@@ -31,6 +32,7 @@ pub struct NativeApiState {
     pub server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
+    pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
 }
 
 impl NativeApiState {
@@ -50,7 +52,17 @@ impl NativeApiState {
             server_reader,
             volume_reader,
             network_reader,
+            operation_reader: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_operation_reader(
+        mut self,
+        reader: std::sync::Arc<dyn operation::OperationReader>,
+    ) -> Self {
+        self.operation_reader = Some(reader);
+        self
     }
 }
 
@@ -71,6 +83,7 @@ pub fn router(state: NativeApiState) -> Router {
             "/network/address-realms/{id}",
             get(network::show_address_realm),
         )
+        .route("/operations/{id}", get(operation::show_operation))
         .with_state(state)
 }
 
@@ -107,6 +120,7 @@ pub async fn api_root() -> Json<ApiRootResponse> {
             "/o3k/v1/compute/servers",
             "/o3k/v1/volume/volumes",
             "/o3k/v1/network/address-realms",
+            "/o3k/v1/operations/{id}",
         ],
     })
 }

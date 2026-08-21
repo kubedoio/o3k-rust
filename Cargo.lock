@@ -1844,6 +1844,7 @@ dependencies = [
  "o3k-kernel",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "thiserror",
  "tokio",

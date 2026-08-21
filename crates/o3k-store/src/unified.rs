@@ -11,13 +11,14 @@ use o3k_kernel::{
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
     ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository,
-    DatabaseHealth, DurableStore, FencingToken, IdentityRepository, ImageMetadataRecord,
-    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository,
-    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    DatabaseHealth, DurableStore, FencingToken, IdempotencyReservation,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository, KeypairRecord,
+    KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
+    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
+    KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, ResourceRecord, SecurityGroupBindingRecord,
     SecurityGroupRecord, SecurityGroupRuleRecord, SnapshotRecord, SqliteStore,
@@ -308,6 +309,16 @@ impl DurableStore for O3kStore {
         match self {
             Self::Sqlite(s) => s.insert_operation(operation).await,
             Self::Postgres(s) => s.insert_operation(operation).await,
+        }
+    }
+
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.reserve_idempotent_operation(request).await,
+            Self::Postgres(s) => s.reserve_idempotent_operation(request).await,
         }
     }
 
