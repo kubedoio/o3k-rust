@@ -3,9 +3,9 @@
 //! Exposes canonical O3K Network resources (`network:address_realm`)
 //! through the accepted `NativeResourceV1` wire envelope.
 //!
-//! The canonical address realm read path uses the generic store resource
-//! table. O3K AddressRealm concepts (ADR-0168/ADR-0171) are the native
-//! network model — not Neutron network/subnet/port compatibility shapes.
+//! The canonical address realm read path uses durable NetworkIntent records.
+//! Each accepted native NetworkIntent exposes exactly one embedded
+//! `o3k_domain::AddressRealm`; this is not a Neutron compatibility resource.
 
 use axum::{
     Json,
@@ -50,6 +50,7 @@ pub struct AddressRealmItem {
     pub overlapping_prefixes: bool,
     pub created_at: Option<String>,
     pub generation: i64,
+    pub state: String,
 }
 
 // ── Query parameters ──────────────────────────────────────────────────────
@@ -84,7 +85,7 @@ fn realm_to_native_v1(realm: &AddressRealmItem) -> serde_json::Value {
             "overlapping_prefixes": realm.overlapping_prefixes,
         },
         "status": {
-            "state": "active",
+            "state": realm.state,
         }
     })
 }
@@ -246,6 +247,7 @@ mod envelope_tests {
             overlapping_prefixes: false,
             created_at: None,
             generation: 1,
+            state: "active".into(),
         });
         crate::assert_resource_envelope_schema(&value);
     }

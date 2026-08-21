@@ -20,6 +20,20 @@ use o3k_native_api::{
 use o3k_store::{NetworkRepository, storage::StorageRepository};
 use uuid::Uuid;
 
+fn network_intent_state_wire(state: o3k_domain::NetworkIntentState) -> &'static str {
+    match state {
+        o3k_domain::NetworkIntentState::Requested => "requested",
+        o3k_domain::NetworkIntentState::Active => "active",
+        o3k_domain::NetworkIntentState::Deleting => "deleting",
+        o3k_domain::NetworkIntentState::Error => "error",
+    }
+}
+
+fn network_intent_identity_valid(record: &o3k_store::NetworkIntentRecord, intent: &o3k_domain::NetworkIntent) -> bool {
+    record.id == intent.id && record.project_id == intent.project_id
+        && intent.realm.id == record.id && intent.realm.project_id == record.project_id
+}
+
 // ── TokenIssuer ───────────────────────────────────────────────────────────
 
 pub struct TokenIssuerAdapter {
@@ -328,6 +342,27 @@ pub struct NetworkReaderAdapter {
     pub authorizer: Arc<dyn Authorizer>,
 }
 
+#[cfg(test)]
+mod network_reader_tests {
+    use super::network_intent_state_wire;
+
+    #[test]
+    fn network_intent_state_is_serialized_from_canonical_state() {
+        assert_eq!(
+            network_intent_state_wire(o3k_domain::NetworkIntentState::Requested),
+            "requested"
+        );
+        assert_eq!(
+            network_intent_state_wire(o3k_domain::NetworkIntentState::Deleting),
+            "deleting"
+        );
+        assert_eq!(
+            network_intent_state_wire(o3k_domain::NetworkIntentState::Error),
+            "error"
+        );
+    }
+}
+
 #[async_trait::async_trait]
 impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
     async fn list_address_realms(
@@ -357,9 +392,7 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
                             tracing::error!(error = %e, network_intent_id = %record.id, "invalid canonical network intent payload");
                             NativeReadError::Internal
                         })?;
-                    if intent.id != record.id || intent.project_id != record.project_id
-                        || intent.realm.id != record.id
-                    {
+                    if !network_intent_identity_valid(&record, &intent) {
                         tracing::error!(network_intent_id = %record.id, "canonical network intent identity mismatch");
                         return Err(NativeReadError::Internal);
                     }
@@ -370,6 +403,7 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
                         overlapping_prefixes: intent.realm.overlapping_prefixes,
                         created_at: None,
                         generation: i64::try_from(intent.generation).map_err(|_| NativeReadError::Internal)?,
+                        state: network_intent_state_wire(intent.state).to_owned(),
                     })
                 })
                 .collect(),
@@ -400,10 +434,7 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
             Ok(Some(record)) => {
                 let intent: o3k_domain::NetworkIntent =
                     serde_json::from_str(&record.payload).map_err(|_| NativeReadError::Internal)?;
-                if intent.id != record.id
-                    || intent.project_id != record.project_id
-                    || intent.realm.id != id
-                {
+                if !network_intent_identity_valid(&record, &intent) || intent.realm.id != id {
                     return Err(NativeReadError::Internal);
                 }
                 Ok(AddressRealmItem {
@@ -417,6 +448,7 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
                     created_at: None,
                     generation: i64::try_from(intent.generation)
                         .map_err(|_| NativeReadError::Internal)?,
+                    state: network_intent_state_wire(intent.state).to_owned(),
                 })
             }
             Ok(None) => Err(NativeReadError::NotFound),
