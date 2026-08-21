@@ -5,6 +5,13 @@
 //! helpers in `auth` (token validation) and `error` (error envelopes), and
 //! the router-wide microversion negotiation in `middleware`. Axum
 //! routing/extractors and OpenStack JSON wire models stay in this crate.
+//!
+//! Note: this crate also hosts the native API routes (o3k-native-api) when
+//! `AppState.native_api` is configured. This is a pragmatic composition
+//! choice: both the OpenStack and native adapters are northbound protocol
+//! adapters over the same canonical application services, and sharing the
+//! axum Router/state type avoids a complex nested-routing layer. The
+//! architectural intent (sibling adapters) is unchanged — see ADR-0173 §13.
 
 use std::{
     sync::{
