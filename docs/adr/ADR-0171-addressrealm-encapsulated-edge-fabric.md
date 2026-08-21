@@ -21,7 +21,7 @@ Related decisions and specifications:
 - [SPEC-0027 — native persistent storage v1](../specs/SPEC-0027-native-persistent-storage-v1.md)
 - [SPEC-0028 — Namespaced Routed Edge Fabric v1](../specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md)
 - [SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2](../specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md)
-- [P11 realm-overlay contract](../../contracts/p11-realm-overlay-fabric.md)
+- [P11 realm-overlay contract](../../contracts/edge-fabric-realm-overlay.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
 This is a privileged multi-host networking change. The requester acceptance is
@@ -565,7 +565,7 @@ fabric implementation.
 
 The migration requires:
 
-1. activate `contracts/p11-realm-overlay-fabric.md`;
+1. activate `contracts/edge-fabric-realm-overlay.md`;
 2. retire the old non-overlap implementation prompt;
 3. retain PR #703 realm endpoint directory semantics;
 4. revise fabric route/host identity types to be realm-aware and transport-IP

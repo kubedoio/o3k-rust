@@ -8,12 +8,12 @@ use o3k_domain::{
     AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
     PublicAddressBindingIntent, RealmEncapsulationBinding, RealmEndpointDirectory,
 };
-use o3k_network::{LinuxP11Config, LinuxP11FabricBackend, P11FabricBackend};
+use o3k_network::{FabricBackend, LinuxFabricBackend, LinuxFabricConfig};
 use std::{env, fs, path::PathBuf, process::Command};
 use uuid::Uuid;
 
-const GUEST_NS: &str = "o3k-p11-fip-guest";
-const CLIENT_NS: &str = "o3k-p11-fip-client";
+const GUEST_NS: &str = "o3k-fabric-fip-guest";
+const CLIENT_NS: &str = "o3k-fabric-fip-client";
 const GUEST_ROOT: &str = "o3k-fip-g0";
 const CLIENT_ROOT: &str = "o3k-fip-u";
 
@@ -49,7 +49,7 @@ struct CleanupGuard(PathBuf);
 
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
-        if env::var("O3K_P11_FIP_KEEP").ok().as_deref() != Some("1") {
+        if env::var("O3K_FABRIC_FIP_KEEP").ok().as_deref() != Some("1") {
             cleanup(&self.0);
         }
     }
@@ -60,10 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !uid.status.success() || String::from_utf8_lossy(&uid.stdout).trim() != "0" {
         return Err("root is required".into());
     }
-    let root = env::var_os("O3K_P11_FIP_ROOT")
+    let root = env::var_os("O3K_FABRIC_FIP_ROOT")
         .map(PathBuf::from)
-        .ok_or("O3K_P11_FIP_ROOT must name a disposable provider root")?;
-    let uplink = env::var("O3K_P11_FIP_UPLINK").unwrap_or_else(|_| CLIENT_ROOT.to_owned());
+        .ok_or("O3K_FABRIC_FIP_ROOT must name a disposable provider root")?;
+    let uplink = env::var("O3K_FABRIC_FIP_UPLINK").unwrap_or_else(|_| CLIENT_ROOT.to_owned());
     if root == std::path::Path::new("/") || root.as_os_str().is_empty() {
         return Err("refusing an unsafe smoke root".into());
     }
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let realm = AddressRealm {
         id: Uuid::from_u128(0x5100),
-        project_id: "p11-fip-smoke".to_owned(),
+        project_id: "fabric-fip-smoke".to_owned(),
         prefix: Ipv4Prefix::new("10.250.2.0".parse()?, 24).ok_or("invalid prefix")?,
         overlapping_prefixes: false,
     };
@@ -193,8 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run("ip", &["addr", "add", "203.0.113.1/24", "dev", CLIENT_ROOT])?;
     run("sysctl", &["-qw", "net.ipv4.ip_forward=1"])?;
 
-    let mut provider = LinuxP11FabricBackend::open(
-        LinuxP11Config::for_root(&root).with_public_uplink(uplink.clone()),
+    let mut provider = LinuxFabricBackend::open(
+        LinuxFabricConfig::for_root(&root).with_public_uplink(uplink.clone()),
     )?;
     if let Err(error) = provider.apply(&plan) {
         let _ = provider.remove(&plan);
@@ -213,14 +213,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = provider.remove(&plan);
         return Err(error);
     }
-    println!("p11-linux-fip-smoke: realm-scoped-public-traffic=passed");
+    println!("linux-fabric-fip-smoke: realm-scoped-public-traffic=passed");
     provider.remove(&plan)?;
     if !provider.observe_removed(&plan)? {
         return Err("provider did not observe public cleanup".into());
     }
-    if env::var("O3K_P11_FIP_KEEP").ok().as_deref() != Some("1") {
+    if env::var("O3K_FABRIC_FIP_KEEP").ok().as_deref() != Some("1") {
         cleanup(&root);
     }
-    println!("p11-linux-fip-smoke: cleanup=passed");
+    println!("linux-fabric-fip-smoke: cleanup=passed");
     Ok(())
 }

@@ -36,8 +36,8 @@ Before modifying runtime code:
 4. read `docs/NORMATIVE_SOURCES.md`;
 5. read ADR-0160, ADR-0165, ADR-0168, ADR-0169, ADR-0170, **ADR-0171**;
 6. read SPEC-0021, SPEC-0024, SPEC-0026, SPEC-0027, SPEC-0028, **SPEC-0029**;
-7. read `contracts/execution-boundaries.md`, `contracts/p11-edge-fabric.md`, and
-   **`contracts/p11-realm-overlay-fabric.md`**;
+7. read `contracts/execution-boundaries.md`, `contracts/edge-fabric-v1.md`, and
+   **`contracts/edge-fabric-realm-overlay.md`**;
 8. inspect PR #703 and the current `o3k-domain` P11 types before changing them;
 9. inspect current P9 `o3k-network` process/provider/policy/public-address code;
 10. inspect current scheduler/Placement/agent administrative-state behavior;

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_ROOT="/var/lib/o3k-p11-lab"
+LAB_ROOT="/var/lib/o3k-fabric-lab"
 EVIDENCE_DIR="${LAB_ROOT}/evidence"
 FABRIC_STATE="${LAB_ROOT}/fabric-state"
 DB_PATH="/var/lib/o3k/controller/o3k.sqlite"
@@ -424,13 +424,13 @@ run_evidence_tests() {
   b2_to_b1="unknown"
   cross_realm_isolated="unknown"
 
-  if "${SCRIPT_DIR}/p11-domain-helper.sh" exec A1 ping -c 3 -W 3 10.0.0.20 >/dev/null 2>&1; then
+  if "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" exec A1 ping -c 3 -W 3 10.0.0.20 >/dev/null 2>&1; then
     a1_to_a2="passed"
   else
     a1_to_a2="failed"
   fi
 
-  if "${SCRIPT_DIR}/p11-domain-helper.sh" exec B1 ping -c 3 -W 3 10.0.0.20 >/dev/null 2>&1; then
+  if "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" exec B1 ping -c 3 -W 3 10.0.0.20 >/dev/null 2>&1; then
     b1_to_b2="passed"
   else
     b1_to_b2="failed"
@@ -438,14 +438,14 @@ run_evidence_tests() {
 
   # A2 (10.0.0.20 realm-A) -> 10.0.0.10 is A1 in realm-A, same-realm
   # cross-host traffic.  With the fixed Geneve dataplane this must succeed.
-  if "${SCRIPT_DIR}/p11-domain-helper.sh" exec A2 ping -c 3 -W 3 10.0.0.10 >/dev/null 2>&1; then
+  if "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" exec A2 ping -c 3 -W 3 10.0.0.10 >/dev/null 2>&1; then
     a2_to_a1="passed"
   else
     a2_to_a1="failed"
   fi
 
   # B2 (10.0.0.20 realm-B) -> 10.0.0.10 is B1 in realm-B, same-realm.
-  if "${SCRIPT_DIR}/p11-domain-helper.sh" exec B2 ping -c 3 -W 3 10.0.0.10 >/dev/null 2>&1; then
+  if "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" exec B2 ping -c 3 -W 3 10.0.0.10 >/dev/null 2>&1; then
     b2_to_b1="passed"
   else
     b2_to_b1="failed"
@@ -462,7 +462,7 @@ run_evidence_tests() {
     remote p11h3 "nohup timeout 8 tcpdump -eni '${b1_tap}' -c 1 'icmp[icmptype]=8 and src 10.0.0.20' >/tmp/p11-cross-realm-capture.txt 2>/dev/null &
     " </dev/null
     sleep 2
-    "${SCRIPT_DIR}/p11-domain-helper.sh" exec A2 timeout 4 ping -c 1 -W 3 10.0.0.10 >/dev/null 2>&1 || true
+    "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" exec A2 timeout 4 ping -c 1 -W 3 10.0.0.10 >/dev/null 2>&1 || true
     sleep 4
     local captured
     captured=$(remote p11h3 "grep -c . /tmp/p11-cross-realm-capture.txt 2>/dev/null || echo 0" 2>/dev/null || echo 0)
@@ -566,12 +566,12 @@ main() {
   start_network_agents
   ensure_wireguard_keys
   run_fabric_driver apply
-  "${SCRIPT_DIR}/p11-domain-helper.sh" start
+  "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" start
   run_evidence_tests
-  "${SCRIPT_DIR}/p11-failure-recovery-matrix.sh"
-  "${SCRIPT_DIR}/p11-storage-evidence.sh"
-  "${SCRIPT_DIR}/p11-fake-hosts.sh"
-  "${SCRIPT_DIR}/p11-cleanup-inventory.sh"
+  "${SCRIPT_DIR}/edge-fabric-failure-matrix.sh"
+  "${SCRIPT_DIR}/edge-fabric-storage-evidence.sh"
+  "${SCRIPT_DIR}/edge-fabric-fake-hosts.sh"
+  "${SCRIPT_DIR}/edge-fabric-cleanup-inventory.sh"
   collect_final_report
   log "P11 multi-host gate complete"
 }

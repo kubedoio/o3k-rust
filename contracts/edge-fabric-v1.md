@@ -2,7 +2,7 @@
 
 Status: Accepted
 
-Superseded-by: `contracts/p11-realm-overlay-fabric.md` for P11 v2
+Superseded-by: `contracts/edge-fabric-realm-overlay.md` for P11 v2
 
 Related architecture:
 
@@ -12,7 +12,7 @@ Related architecture:
 - [execution-boundary contract](execution-boundaries.md)
 
 This contract remains the historical v1 implementation contract. It is
-superseded for P11 v2 by `contracts/p11-realm-overlay-fabric.md`; it remains
+superseded for P11 v2 by `contracts/edge-fabric-realm-overlay.md`; it remains
 useful only for v1 behavior that is explicitly retained by the v2 authority.
 
 ## Purpose

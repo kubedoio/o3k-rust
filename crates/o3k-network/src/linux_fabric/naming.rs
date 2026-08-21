@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) const STATE_VERSION: u32 = 2;
-pub(crate) const P11_PUBLIC_MARKER: &str = "o3k-p11-public";
+pub(crate) const FABRIC_PUBLIC_MARKER: &str = "o3k-p11-public";
 pub(crate) fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 15

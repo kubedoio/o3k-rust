@@ -8,7 +8,7 @@ That architecture now has a proposed successor:
 
 - `docs/adr/ADR-0171-addressrealm-encapsulated-edge-fabric.md`
 - `docs/specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md`
-- `contracts/p11-realm-overlay-fabric.md`
+- `contracts/edge-fabric-realm-overlay.md`
 - `docs/P11_REALM_OVERLAY_IMPLEMENTATION_PROMPT.md`
 - issue #705
 

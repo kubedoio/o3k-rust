@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_ROOT="/var/lib/o3k-p11-lab"
+LAB_ROOT="/var/lib/o3k-fabric-lab"
 EVIDENCE_DIR="${LAB_ROOT}/evidence"
 FABRIC_STATE="${LAB_ROOT}/fabric-state"
 SSH_KEY="/root/.ssh/id_ed25519"
@@ -78,7 +78,7 @@ main() {
   pre=$(collect_snapshot "pre-cleanup")
 
   log "Destroying P11 tenant VMs"
-  "${SCRIPT_DIR}/p11-domain-helper.sh" destroy || true
+  "${SCRIPT_DIR}/edge-fabric-domain-helper.sh" destroy || true
 
   log "Removing P11 fabric plans"
   cargo run --example p11-multi-host-driver --all-features -- \

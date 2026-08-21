@@ -25,7 +25,7 @@ use o3k_domain::{
     AddressRealm, EndpointLocation, FabricHostIdentity, FabricProviderKind, Ipv4Prefix,
     NamespacedRoutedFabricPlan, RealmEncapsulationBinding, RealmEndpointDirectory,
 };
-use o3k_network::{LinuxP11Config, LinuxP11FabricBackend, P11FabricBackend};
+use o3k_network::{FabricBackend, LinuxFabricBackend, LinuxFabricConfig};
 use std::{env, net::Ipv4Addr, path::PathBuf, process};
 use uuid::Uuid;
 
@@ -82,7 +82,7 @@ fn build_realm_plan(
 
     let realm = AddressRealm {
         id: realm_id,
-        project_id: "p11-regression".to_owned(),
+        project_id: "fabric-regression".to_owned(),
         prefix,
         overlapping_prefixes: true,
     };
@@ -283,14 +283,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     ];
 
-    let mut config = LinuxP11Config::for_root(&root);
+    let mut config = LinuxFabricConfig::for_root(&root);
     if let Some(port) = wireguard_port {
         config = config.with_wireguard_port(port);
     }
     if let Some(port) = geneve_port {
         config = config.with_geneve_port(port);
     }
-    let mut backend = LinuxP11FabricBackend::open(config)?;
+    let mut backend = LinuxFabricBackend::open(config)?;
 
     for plan in &plans {
         match mode.as_str() {

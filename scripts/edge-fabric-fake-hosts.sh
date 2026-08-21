@@ -7,7 +7,7 @@
 
 set -euo pipefail
 
-EVIDENCE_DIR="/var/lib/o3k-p11-lab/evidence"
+EVIDENCE_DIR="/var/lib/o3k-fabric-lab/evidence"
 DB_PATH="/var/lib/o3k/controller/o3k.sqlite"
 
 log() { echo "[$(date -Iseconds)] $*"; }

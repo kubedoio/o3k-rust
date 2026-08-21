@@ -10,9 +10,9 @@
 
 set -euo pipefail
 
-LAB_ROOT="/var/lib/o3k-p11-lab"
+LAB_ROOT="/var/lib/o3k-fabric-lab"
 FABRIC_STATE="${LAB_ROOT}/fabric-state"
-MANIFEST="${FABRIC_STATE}/p11-endpoint-manifest.json"
+MANIFEST="${FABRIC_STATE}/fabric-endpoint-manifest.json"
 IMAGES_DIR="${LAB_ROOT}/images"
 SSH_KEY="/root/.ssh/id_ed25519"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes"
@@ -45,7 +45,7 @@ remote() {
 
 # Ensure the Debian cloud base image exists on the controller and on each host.
 ensure_images() {
-  local src="/var/lib/o3k-p11-lab/images/debian-12-generic-amd64.qcow2"
+  local src="/var/lib/o3k-fabric-lab/images/debian-12-generic-amd64.qcow2"
   [[ -f "$src" ]] || die "Debian cloud image not found: $src"
   mkdir -p "$IMAGES_DIR"
   cp -f "$src" "$IMAGES_DIR/base.qcow2"

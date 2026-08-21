@@ -1,12 +1,12 @@
 use super::*;
 
-impl super::LinuxP11FabricBackend {
+impl super::LinuxFabricBackend {
     pub(crate) fn ensure_policy(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         };
         if plan.policies.is_empty() {
             return self.remove_policy(plan);
@@ -28,9 +28,9 @@ impl super::LinuxP11FabricBackend {
                     "netns", "exec", namespace, "nft", "list", "table", "ip", &table,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if table_exists && !listing.contains("o3k-p11-policy") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         let mut next = current.clone();
         next.policy_generation = plan.policy_generation;
@@ -46,9 +46,9 @@ impl super::LinuxP11FabricBackend {
                         "netns", "exec", namespace, "nft", "delete", "table", "ip", &table,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let marker = format!("\"o3k-p11-policy:{fingerprint}\"");
         for args in [
@@ -111,16 +111,16 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for (index, policy) in plan.policies.iter().enumerate() {
             let endpoint = plan
                 .directory
                 .location(policy.endpoint_id)
-                .ok_or(LinuxP11Error::OwnershipConflict)?;
+                .ok_or(LinuxFabricError::OwnershipConflict)?;
             let endpoint_address = endpoint.fixed_ip.to_string();
             let mut args = vec![
                 "netns".to_owned(),
@@ -174,9 +174,9 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &refs)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         Ok(())
@@ -184,7 +184,7 @@ impl super::LinuxP11FabricBackend {
     pub(crate) fn remove_policy(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
             return Ok(());
         };
@@ -207,9 +207,9 @@ impl super::LinuxP11FabricBackend {
                     &table,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if exists && !listing.contains("o3k-p11-policy") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if exists
             && !self
@@ -227,9 +227,9 @@ impl super::LinuxP11FabricBackend {
                         &table,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let mut cleared = current;
         cleared.policy_generation = 0;
@@ -239,7 +239,7 @@ impl super::LinuxP11FabricBackend {
     }
     pub(crate) fn validate_policy_plan(
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         if plan.policy_generation == 0
             || plan.policies.iter().any(|policy| {
                 policy.id.is_nil()
@@ -258,7 +258,7 @@ impl super::LinuxP11FabricBackend {
                         && policy.source.is_some())
             })
         {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         Ok(())
     }

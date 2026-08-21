@@ -11,7 +11,7 @@ Related decisions:
 - [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md) (Accepted)
 - [SPEC-0021](../docs/specs/SPEC-0021-cross-service-workflows-and-compensation.md)
 - [SPEC-0028](../docs/specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md) (Accepted)
-- [P11 edge-fabric contract](p11-edge-fabric.md) (Accepted)
+- [P11 edge-fabric contract](edge-fabric-v1.md) (Accepted)
 
 ## Purpose
 
@@ -314,7 +314,7 @@ application intent.
 - WireGuard private keys remain host-local and are never protocol payload or
   ordinary evidence.
 
-See `contracts/p11-edge-fabric.md` for the full accepted contract.
+See `contracts/edge-fabric-v1.md` for the full accepted contract.
 
 ## Storage actions
 

@@ -393,7 +393,7 @@ impl NetworkPlanExecutor {
         }
         command
             .plan
-            .validate_p11_fabric()
+            .validate_fabric()
             .map_err(|_| NetworkExecutionError::InvalidCommand)?;
         if command.target != self.agent {
             return Err(NetworkExecutionError::StaleAgentEpoch);

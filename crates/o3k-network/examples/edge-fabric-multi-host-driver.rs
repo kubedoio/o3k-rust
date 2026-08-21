@@ -1,14 +1,14 @@
-//! P11 real multi-host gate fabric driver.
+//! Edge fabric multi-host gate fabric driver.
 //!
 //! Reads the O3K controller SQLite database to discover projects, realms,
-//! subnets, ports and binding hosts, then compiles and dispatches P11 fabric
+//! subnets, ports and binding hosts, then compiles and dispatches fabric
 //! plans directly to each host's `o3k-network` agent.
 //!
 //! Usage:
 //! ```text
 //! cargo run --example p11-multi-host-driver --all-features -- \
 //!   --db /var/lib/o3k/controller/o3k.sqlite \
-//!   --hosts p11h1=10.77.0.11,p11h2=10.77.0.12,p11h3=10.77.0.13 \
+//!   --hosts host1=10.77.0.11,host2=10.77.0.12,host3=10.77.0.13 \
 //!   --pki /opt/o3k/pki \
 //!   --controller-id controller-1 --controller-epoch epoch-1 --fencing-token 1 \
 //!   [--remove]
@@ -30,7 +30,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const FABRIC_STATE_DIR: &str = "/var/lib/o3k-p11-lab/fabric-state";
+const FABRIC_STATE_DIR: &str = "/var/lib/o3k-fabric-lab/fabric-state";
 const VNI_REGISTRY: &str = "vni-registry.json";
 const AGENT_GRPC_PORT: u16 = 50_052;
 const WG_PORT: u16 = 51_820;
@@ -138,9 +138,9 @@ fn parse_args() -> Result<Config, DriverError> {
 
 fn fabric_transport_ip(host_id: &str) -> Result<Ipv4Addr, DriverError> {
     let n = match host_id {
-        "p11h1" => 1,
-        "p11h2" => 2,
-        "p11h3" => 3,
+        "host1" => 1,
+        "host2" => 2,
+        "host3" => 3,
         other => return Err(DriverError::Argument(format!("unknown host {other}"))),
     };
     Ipv4Addr::from_str(&format!("198.18.0.{n}")).map_err(|_| {
@@ -149,7 +149,8 @@ fn fabric_transport_ip(host_id: &str) -> Result<Ipv4Addr, DriverError> {
 }
 
 fn wireguard_public_key(host_id: &str) -> Result<String, DriverError> {
-    let key_path = Path::new("/var/lib/o3k-p11-lab/fabric-state").join(format!("{host_id}.wg.pub"));
+    let key_path =
+        Path::new("/var/lib/o3k-fabric-lab/fabric-state").join(format!("{host_id}.wg.pub"));
     std::fs::read_to_string(&key_path)
         .map(|s| s.trim().to_owned())
         .map_err(DriverError::Io)
@@ -396,7 +397,7 @@ fn write_endpoint_manifest(ports: &[Port], realms: &[Realm]) -> Result<(), Drive
     }
     let dir = Path::new(FABRIC_STATE_DIR);
     std::fs::create_dir_all(dir)?;
-    let path = dir.join("p11-endpoint-manifest.json");
+    let path = dir.join("fabric-endpoint-manifest.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&entries)?)?;
     println!("wrote endpoint manifest to {}", path.display());
     Ok(())
@@ -410,7 +411,7 @@ fn build_node_plan(fabric: NamespacedRoutedFabricPlan) -> Result<NodeNetworkPlan
         operation_id: Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!(
-                "o3k:p11:multi-host:{}:{}",
+                "o3k:fabric:multi-host:{}:{}",
                 fabric.realm_id, fabric.local_host
             )
             .as_bytes(),
@@ -422,17 +423,17 @@ fn build_node_plan(fabric: NamespacedRoutedFabricPlan) -> Result<NodeNetworkPlan
             + 600_000,
         resource_generations: BTreeMap::new(),
         intents: Vec::new(),
-        p11_fabric: None,
+        fabric: None,
         fingerprint_sha256: String::new(),
     };
     plan = plan
-        .with_p11_fabric(fabric)
+        .with_fabric(fabric)
         .map_err(|e| DriverError::Plan(format!("invalid fabric plan: {e}")))?;
     Ok(plan)
 }
 
 fn network_agent_server_name(host_id: &str) -> Result<String, DriverError> {
-    Ok(format!("{}.{}", host_id, "p11.o3k.local"))
+    Ok(format!("{}.{}", host_id, "fabric.o3k.local"))
 }
 
 async fn dispatch_plan(
@@ -453,7 +454,7 @@ async fn dispatch_plan(
     let command_id = Uuid::new_v5(
         &Uuid::NAMESPACE_URL,
         format!(
-            "o3k:p11:command:{}:{}:{}",
+            "o3k:fabric:command:{}:{}:{}",
             plan.plan_id, plan.node_id, config.remove
         )
         .as_bytes(),
@@ -468,7 +469,7 @@ async fn dispatch_plan(
             o3k_network_protocol::proto::NetworkCommand {
                 command_id: command_id.to_string(),
                 operation_id: plan.operation_id.to_string(),
-                idempotency_key: format!("o3k:p11:multi-host:{}:{}", plan.plan_id, plan.node_id),
+                idempotency_key: format!("o3k:fabric:multi-host:{}:{}", plan.plan_id, plan.node_id),
                 agent_id: host.host_id.clone(),
                 agent_epoch: "epoch-1".to_owned(),
                 controller_id: config.controller_id.clone(),

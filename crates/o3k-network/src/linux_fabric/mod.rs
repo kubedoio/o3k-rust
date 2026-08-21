@@ -1,10 +1,10 @@
-//! Fail-closed Linux realization for the accepted P11 v2 fabric contract.
+//! Fail-closed Linux realization for the accepted edge fabric contract.
 //!
 //! Provider-native objects are bounded by an ownership manifest. WireGuard
 //! private-key bytes are generated and retained locally and never occur in
 //! plans, protocol messages, observations, or ordinary logs.
 
-use crate::p11::{P11FabricBackend, P11FabricError};
+use crate::fabric::{FabricBackend, FabricError};
 use o3k_domain::{
     FabricPeer, NamespacedRoutedFabricPlan, NetworkProtocol, PolicyAction, PolicyDirection,
 };
@@ -38,7 +38,7 @@ pub(crate) use ownership::*;
 pub(crate) use persistence::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinuxP11Config {
+pub struct LinuxFabricConfig {
     pub root: PathBuf,
     pub fabric_namespace: String,
     pub fabric_interface: String,
@@ -47,7 +47,7 @@ pub struct LinuxP11Config {
     pub public_uplink: Option<String>,
 }
 
-impl LinuxP11Config {
+impl LinuxFabricConfig {
     #[must_use]
     pub fn for_root(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -78,7 +78,7 @@ impl LinuxP11Config {
         self
     }
 
-    fn validate(&self) -> Result<(), LinuxP11Error> {
+    fn validate(&self) -> Result<(), LinuxFabricError> {
         if self.root == Path::new("/")
             || self.root.as_os_str().is_empty()
             || !valid_name(&self.fabric_namespace)
@@ -90,7 +90,7 @@ impl LinuxP11Config {
                 .as_deref()
                 .is_some_and(|uplink| !valid_name(uplink))
         {
-            return Err(LinuxP11Error::InvalidConfiguration);
+            return Err(LinuxFabricError::InvalidConfiguration);
         }
         Ok(())
     }
@@ -98,12 +98,12 @@ impl LinuxP11Config {
     /// Validate port ranges (1..=65535) and emit a warning if the selected
     /// WireGuard port falls inside the host's ephemeral range, without
     /// mutating the OS range. Returns an error if the port is already bound.
-    pub fn validate_ports(&self) -> Result<(), LinuxP11Error> {
+    pub fn validate_ports(&self) -> Result<(), LinuxFabricError> {
         if self.wireguard_port < 1 || self.geneve_port < 1 {
-            return Err(LinuxP11Error::InvalidConfiguration);
+            return Err(LinuxFabricError::InvalidConfiguration);
         }
         if is_port_bound(self.wireguard_port) {
-            return Err(LinuxP11Error::InvalidConfiguration);
+            return Err(LinuxFabricError::InvalidConfiguration);
         }
         if let Some(low) = ephemeral_port_low()
             && self.wireguard_port >= low
@@ -117,34 +117,34 @@ impl LinuxP11Config {
     }
 }
 #[derive(Debug, Error)]
-pub enum LinuxP11Error {
-    #[error("Linux P11 configuration is invalid")]
+pub enum LinuxFabricError {
+    #[error("Linux fabric configuration is invalid")]
     InvalidConfiguration,
-    #[error("Linux P11 provider state is corrupt")]
+    #[error("Linux fabric provider state is corrupt")]
     CorruptState,
-    #[error("Linux P11 provider state is foreign or ambiguous")]
+    #[error("Linux fabric provider state is foreign or ambiguous")]
     ForeignState,
-    #[error("Linux P11 provider state conflicts with the requested plan")]
+    #[error("Linux fabric provider state conflicts with the requested plan")]
     OwnershipConflict,
-    #[error("Linux P11 provider command failed")]
+    #[error("Linux fabric provider command failed")]
     CommandFailed,
-    #[error("Linux P11 provider state storage failed: {0}")]
+    #[error("Linux fabric provider state storage failed: {0}")]
     Storage(#[from] io::Error),
 }
 
-impl From<LinuxP11Error> for P11FabricError {
-    fn from(error: LinuxP11Error) -> Self {
+impl From<LinuxFabricError> for FabricError {
+    fn from(error: LinuxFabricError) -> Self {
         Self::Backend(error.to_string())
     }
 }
-pub(crate) trait LinuxP11Command: Send + Sync {
+pub(crate) trait LinuxFabricCommand: Send + Sync {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)>;
     fn run(&self, program: &str, args: &[&str]) -> io::Result<bool>;
 }
 
-pub(crate) struct SystemLinuxP11Command;
+pub(crate) struct SystemLinuxFabricCommand;
 
-impl LinuxP11Command for SystemLinuxP11Command {
+impl LinuxFabricCommand for SystemLinuxFabricCommand {
     fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
         let output = Command::new(program).args(args).output()?;
         Ok((
@@ -157,16 +157,16 @@ impl LinuxP11Command for SystemLinuxP11Command {
         Ok(Command::new(program).args(args).status()?.success())
     }
 }
-pub struct LinuxP11FabricBackend {
-    pub(crate) config: LinuxP11Config,
+pub struct LinuxFabricBackend {
+    pub(crate) config: LinuxFabricConfig,
     pub(crate) state_path: PathBuf,
     pub(crate) plans_path: PathBuf,
-    pub(crate) command: Arc<dyn LinuxP11Command>,
+    pub(crate) command: Arc<dyn LinuxFabricCommand>,
     pub(crate) state: ProviderState,
     pub(crate) plans: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
 }
-impl LinuxP11FabricBackend {
-    pub fn open(config: LinuxP11Config) -> Result<Self, LinuxP11Error> {
+impl LinuxFabricBackend {
+    pub fn open(config: LinuxFabricConfig) -> Result<Self, LinuxFabricError> {
         config.validate()?;
         let state_path = config.root.join("ownership.json");
         let plans_path = config.root.join("plans");
@@ -175,7 +175,7 @@ impl LinuxP11FabricBackend {
             config,
             state_path: state_path.clone(),
             plans_path: plans_path.clone(),
-            command: Arc::new(SystemLinuxP11Command),
+            command: Arc::new(SystemLinuxFabricCommand),
             state: load_state(&state_path)?,
             plans: load_plans(&plans_path)?,
         };
@@ -185,9 +185,9 @@ impl LinuxP11FabricBackend {
 
     #[cfg(test)]
     fn with_command(
-        config: LinuxP11Config,
-        command: Arc<dyn LinuxP11Command>,
-    ) -> Result<Self, LinuxP11Error> {
+        config: LinuxFabricConfig,
+        command: Arc<dyn LinuxFabricCommand>,
+    ) -> Result<Self, LinuxFabricError> {
         config.validate()?;
         let state_path = config.root.join("ownership.json");
         let plans_path = config.root.join("plans");
@@ -205,10 +205,10 @@ impl LinuxP11FabricBackend {
     }
 }
 
-impl LinuxP11FabricBackend {
-    fn validate_loaded_state(&self) -> Result<(), LinuxP11Error> {
+impl LinuxFabricBackend {
+    fn validate_loaded_state(&self) -> Result<(), LinuxFabricError> {
         if self.state.version != STATE_VERSION {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         }
         if let Some(fabric) = &self.state.fabric
             && (fabric.namespace != self.config.fabric_namespace
@@ -218,21 +218,21 @@ impl LinuxP11FabricBackend {
                 || fabric.fabric_generation == 0
                 || Path::new(&fabric.private_key_path).parent() != Some(self.config.root.as_path()))
         {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         }
         if let Some(fabric) = &self.state.fabric {
             validate_private_key_file(Path::new(&fabric.private_key_path))?;
         }
         for (realm_id, ownership) in &self.state.realms {
             let Some(plan) = self.plans.get(realm_id) else {
-                return Err(LinuxP11Error::CorruptState);
+                return Err(LinuxFabricError::CorruptState);
             };
             if realm_id != &ownership.realm_id
                 || plan.realm_id != *realm_id
                 || plan.directory_generation != ownership.directory_generation
                 || plan.local_fabric_generation != ownership.local_fabric_generation
             {
-                return Err(LinuxP11Error::CorruptState);
+                return Err(LinuxFabricError::CorruptState);
             }
             for (target_host, geneve) in &ownership.geneve {
                 if target_host != &geneve.target_host
@@ -254,7 +254,7 @@ impl LinuxP11FabricBackend {
                             && peer.fabric_transport_ip == geneve.remote_transport_ip
                     })
                 {
-                    return Err(LinuxP11Error::CorruptState);
+                    return Err(LinuxFabricError::CorruptState);
                 }
             }
             for (target_host, attachment) in &ownership.attachments {
@@ -266,7 +266,7 @@ impl LinuxP11FabricBackend {
                     || !valid_mac(&attachment.remote_tunnel_mac)
                     || !ownership.geneve.contains_key(target_host)
                 {
-                    return Err(LinuxP11Error::CorruptState);
+                    return Err(LinuxFabricError::CorruptState);
                 }
             }
             for (endpoint_id, tap) in &ownership.endpoint_taps {
@@ -275,7 +275,7 @@ impl LinuxP11FabricBackend {
                     || !valid_mac(&tap.mac)
                     || !tap.interface.starts_with("o3k-t-")
                 {
-                    return Err(LinuxP11Error::CorruptState);
+                    return Err(LinuxFabricError::CorruptState);
                 }
             }
             for (endpoint_id, tap) in &ownership.pending_endpoint_taps {
@@ -284,25 +284,25 @@ impl LinuxP11FabricBackend {
                     || !valid_mac(&tap.mac)
                     || !tap.interface.starts_with("o3k-t-")
                 {
-                    return Err(LinuxP11Error::CorruptState);
+                    return Err(LinuxFabricError::CorruptState);
                 }
             }
             if ownership.policy_generation == 0 && !ownership.policy_fingerprint.is_empty() {
-                return Err(LinuxP11Error::CorruptState);
+                return Err(LinuxFabricError::CorruptState);
             }
             if ownership.public_generation == 0 && !ownership.public_fingerprint.is_empty()
                 || ownership.public_generation != 0
                     && (ownership.public_mark == 0 || ownership.public_route_table == 0)
             {
-                return Err(LinuxP11Error::CorruptState);
+                return Err(LinuxFabricError::CorruptState);
             }
         }
         Ok(())
     }
 }
 
-impl LinuxP11FabricBackend {
-    fn persist_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+impl LinuxFabricBackend {
+    fn persist_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxFabricError> {
         store_plan(
             &self.plans_path.join(format!("{}.json", plan.realm_id)),
             plan,
@@ -310,7 +310,7 @@ impl LinuxP11FabricBackend {
         self.plans.insert(plan.realm_id, plan.clone());
         Ok(())
     }
-    fn remove_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxP11Error> {
+    fn remove_plan(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), LinuxFabricError> {
         self.plans.remove(&plan.realm_id);
         let _ = fs::remove_file(self.plans_path.join(format!("{}.json", plan.realm_id)));
         if self.state.realms.remove(&plan.realm_id).is_some() {
@@ -320,8 +320,8 @@ impl LinuxP11FabricBackend {
     }
 }
 
-impl P11FabricBackend for LinuxP11FabricBackend {
-    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+impl FabricBackend for LinuxFabricBackend {
+    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         Self::validate_policy_plan(plan)?;
         Self::validate_public_plan(plan)?;
         self.ensure_fabric(plan)?;
@@ -337,12 +337,12 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             .realms
             .get(&plan.realm_id)
             .cloned()
-            .ok_or(LinuxP11Error::CorruptState)?;
+            .ok_or(LinuxFabricError::CorruptState)?;
         self.realize_routes(plan, &ownership)?;
         Ok(())
     }
 
-    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         let Some(ownership) = self.state.realms.get(&plan.realm_id).cloned() else {
             self.remove_fabric_if_unused(plan.local_fabric_generation)?;
             return Ok(());
@@ -350,7 +350,7 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         if plan.directory_generation < ownership.directory_generation
             || plan.local_fabric_generation < ownership.local_fabric_generation
         {
-            return Err(P11FabricError::StaleGeneration);
+            return Err(FabricError::StaleGeneration);
         }
         self.remove_public(plan)?;
         self.remove_policy(plan)?;
@@ -380,11 +380,11 @@ impl P11FabricBackend for LinuxP11FabricBackend {
                         &geneve.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if exists {
                 if !geneve_link_matches(&output, geneve, self.config.geneve_port) {
-                    return Err(P11FabricError::Backend(
-                        LinuxP11Error::ForeignState.to_string(),
+                    return Err(FabricError::Backend(
+                        LinuxFabricError::ForeignState.to_string(),
                     ));
                 }
                 if !self
@@ -401,10 +401,10 @@ impl P11FabricBackend for LinuxP11FabricBackend {
                             &geneve.interface,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(P11FabricError::Backend(
-                        LinuxP11Error::CommandFailed.to_string(),
+                    return Err(FabricError::Backend(
+                        LinuxFabricError::CommandFailed.to_string(),
                     ));
                 }
             }
@@ -428,9 +428,9 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed.into());
+                return Err(LinuxFabricError::CommandFailed.into());
             }
         }
         self.remove_plan(plan)?;
@@ -441,18 +441,18 @@ impl P11FabricBackend for LinuxP11FabricBackend {
         Ok(())
     }
 
-    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError> {
         let Some(ownership) = self.state.realms.get(&plan.realm_id) else {
             return Ok(false);
         };
         let (success, _) = self
             .command
             .output("ip", &["netns", "exec", &ownership.namespace, "true"])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         Ok(success && self.plans.get(&plan.realm_id) == Some(plan))
     }
 
-    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError> {
         Ok(!self.state.realms.contains_key(&plan.realm_id)
             && !self.plans.contains_key(&plan.realm_id))
     }
@@ -497,7 +497,7 @@ mod tests {
         namespace_exists: bool,
     }
 
-    impl LinuxP11Command for FakeCommand {
+    impl LinuxFabricCommand for FakeCommand {
         fn output(&self, program: &str, args: &[&str]) -> io::Result<(bool, String)> {
             self.calls.lock().expect("calls").push((
                 program.to_owned(),
@@ -584,11 +584,11 @@ mod tests {
             namespace_exists: true,
         });
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         assert!(matches!(
             provider.apply(&plan()),
-            Err(P11FabricError::Backend(message)) if message.contains("foreign")
+            Err(FabricError::Backend(message)) if message.contains("foreign")
         ));
         let _ = fs::remove_dir_all(root);
     }
@@ -602,7 +602,7 @@ mod tests {
         });
         let command_for_assertion = Arc::clone(&command);
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         provider.apply(&plan()).expect("apply");
         let state = fs::read_to_string(root.join("ownership.json")).expect("state");
@@ -690,7 +690,7 @@ mod tests {
         });
         let command_for_assertion = Arc::clone(&command);
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         provider.apply(&plan()).expect("apply");
         let calls = command_for_assertion.calls.lock().expect("calls");
@@ -729,7 +729,7 @@ mod tests {
         });
         let command_for_assertion = Arc::clone(&command);
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         let current = plan()
             .with_policy_snapshot(
@@ -784,7 +784,7 @@ mod tests {
         });
         let command_for_assertion = Arc::clone(&command);
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         let invalid = plan()
             .with_policy_snapshot(
@@ -806,7 +806,7 @@ mod tests {
             .expect("policy snapshot");
         assert!(matches!(
             provider.apply(&invalid),
-            Err(P11FabricError::Backend(message)) if message.contains("conflicts")
+            Err(FabricError::Backend(message)) if message.contains("conflicts")
         ));
         assert!(
             command_for_assertion
@@ -826,8 +826,8 @@ mod tests {
             namespace_exists: false,
         });
         let command_for_assertion = Arc::clone(&command);
-        let mut provider = LinuxP11FabricBackend::with_command(
-            LinuxP11Config::for_root(&root).with_public_uplink("eth-public"),
+        let mut provider = LinuxFabricBackend::with_command(
+            LinuxFabricConfig::for_root(&root).with_public_uplink("eth-public"),
             command,
         )
         .expect("provider");
@@ -876,7 +876,7 @@ mod tests {
             namespace_exists: false,
         });
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         let current = plan();
         provider.apply(&current).expect("apply");
@@ -884,7 +884,7 @@ mod tests {
         changed.local_fabric_generation += 1;
         assert!(matches!(
             provider.apply(&changed),
-            Err(P11FabricError::Backend(message)) if message.contains("conflicts")
+            Err(FabricError::Backend(message)) if message.contains("conflicts")
         ));
         provider.remove(&current).expect("remove");
         assert!(provider.observe_removed(&current).expect("removed"));
@@ -908,7 +908,7 @@ mod tests {
         });
         let command_for_assertion = Arc::clone(&command);
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         provider.apply(&plan()).expect("apply");
         assert_eq!(fs::read_to_string(&key_path).expect("key"), provisioned);
@@ -940,11 +940,11 @@ mod tests {
             namespace_exists: false,
         });
         let mut provider =
-            LinuxP11FabricBackend::with_command(LinuxP11Config::for_root(&root), command)
+            LinuxFabricBackend::with_command(LinuxFabricConfig::for_root(&root), command)
                 .expect("provider");
         assert!(matches!(
             provider.apply(&plan()),
-            Err(P11FabricError::Backend(message)) if message.contains("foreign")
+            Err(FabricError::Backend(message)) if message.contains("foreign")
         ));
         // Operator-provisioned material is never overwritten.
         assert_eq!(

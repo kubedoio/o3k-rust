@@ -13,7 +13,7 @@ Related decisions and specifications:
 - [ADR-0168 — O3K Routed Fabric and node-local network execution](ADR-0168-o3k-routed-fabric-and-network-execution.md)
 - [ADR-0171 — AddressRealm-encapsulated edge fabric](ADR-0171-addressrealm-encapsulated-edge-fabric.md)
 - [SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2](../specs/SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md)
-- [P11 realm-overlay contract](../../contracts/p11-realm-overlay-fabric.md)
+- [P11 realm-overlay contract](../../contracts/edge-fabric-realm-overlay.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
 This ADR refines only provider transport-port ownership and configuration for the
