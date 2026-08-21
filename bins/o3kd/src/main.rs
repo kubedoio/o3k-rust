@@ -1103,7 +1103,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     let mut native_manifest_registry = o3k_kernel::ManifestRegistry::new();
-    native_manifest_registry.seed_core();
+    native_manifest_registry
+        .seed_core()
+        .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
     let mut state = if let Some(identity) = identity {

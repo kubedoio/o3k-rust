@@ -259,7 +259,7 @@ mod tests {
         // Verify that wire values use stable contract strings, not Rust Debug
         // formatting.
         let mut reg = ManifestRegistry::new();
-        reg.seed_core();
+        reg.seed_core().unwrap();
         let state = NativeApiState::new(Some(reg));
         let app = router(state);
         let response = axum::http::Request::builder()
@@ -278,7 +278,7 @@ mod tests {
         .unwrap();
         // All services must have stable lifecycle_state and ownership values.
         let services = body["services"].as_array().unwrap();
-        assert!(services.len() >= 6, "expected at least 6 seeded services");
+        assert!(services.len() >= 3, "expected at least 3 seeded services");
         for svc in services {
             let lc = svc["lifecycle_state"].as_str().unwrap_or("");
             assert!(

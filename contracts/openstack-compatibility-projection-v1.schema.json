@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://o3k.io/contracts/openstack-compatibility-projection-v1.schema.json",
-  "title": "O3K OpenStack Compatibility Projection v1 (Proposed)",
-  "description": "Proposed compatibility-only projection from an O3K service/resource model to selected OpenStack service/catalog/API surfaces. This is not native service identity.",
+  "title": "O3K OpenStack Compatibility Projection v1 (Accepted)",
+  "description": "Accepted compatibility-only projection from an O3K service/resource model to selected OpenStack service/catalog/API surfaces. This is not native service identity.",
   "type": "object",
   "additionalProperties": false,
   "required": ["projection_version", "service_id", "service_type", "enabled", "api_surfaces", "endpoints"],
@@ -116,7 +116,7 @@
       }
     }
   },
-  "x-o3k-status": "proposed",
+  "x-o3k-status": "accepted",
   "x-o3k-related-adr": "ADR-0174",
   "x-o3k-related-spec": "SPEC-0031",
   "x-o3k-evidence-rule": "Advertisement remains gated by SPEC-0022 and compatibility manifests; a syntactically valid projection does not create a support claim."

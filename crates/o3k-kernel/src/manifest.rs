@@ -207,6 +207,323 @@ impl ServiceManifest {
     }
 }
 
+// ── Wire DTO: ServiceManifestV1 ─────────────────────────────────────────
+//
+// Exact wire representation matching contracts/service-manifest-v1.schema.json
+// (x-o3k-status: accepted). Converted to the normalized ServiceManifest for
+// registry storage.
+
+/// Wire DTO for `service-manifest-v1.schema.json` — exact schema conformance.
+///
+/// This type exists only at the API/protocol boundary. The registry stores
+/// the normalized [`ServiceManifest`] after validation and conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceManifestV1 {
+    /// Constant: `"o3k.io/service-manifest/v1"`
+    pub manifest_version: String,
+    /// Stable O3K service identifier (e.g. `"database-example"`).
+    pub service_id: String,
+    /// Canonical service namespace (e.g. `"database"`).
+    pub namespace: String,
+    /// Human-readable service version (e.g. `"0.1.0"`).
+    pub service_version: String,
+    /// Ownership mode: `"o3k-implemented"` or `"external-controller"`.
+    pub ownership_mode: String,
+    /// Resource type descriptors.
+    pub resource_types: Vec<ResourceTypeDescriptor>,
+    /// Action identifiers (e.g. `"database:CreateInstance"`).
+    pub actions: Vec<String>,
+    /// Optional capability labels.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Optional dependency descriptors.
+    #[serde(default)]
+    pub dependencies: Vec<DependencyDescriptor>,
+    /// Optional quota dimension descriptors.
+    #[serde(default)]
+    pub quota_dimensions: Vec<QuotaDimensionDescriptor>,
+    /// Optional region list.
+    #[serde(default)]
+    pub regions: Vec<String>,
+    /// Optional availability domain list.
+    #[serde(default)]
+    pub availability_domains: Vec<String>,
+    /// Controller binding descriptor.
+    pub controller: ControllerDescriptor,
+}
+
+/// Resource type descriptor in a service manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceTypeDescriptor {
+    /// Canonical resource type (e.g. `"database:instance"`).
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// Schema version string for this resource type.
+    pub schema_version: String,
+    /// Optional collection URL name override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+    /// Scope kind: `"tenant"`, `"system"`, or `"mixed"`.
+    #[serde(default = "default_tenant_scope")]
+    pub scope: String,
+}
+
+fn default_tenant_scope() -> String {
+    "tenant".to_owned()
+}
+
+/// Dependency descriptor in a service manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DependencyDescriptor {
+    /// Dependency kind: `"service"`, `"resource_type"`, `"action"`, `"capability"`.
+    pub kind: String,
+    /// Dependency name.
+    pub name: String,
+    /// Whether the dependency is mandatory.
+    pub required: bool,
+}
+
+/// Quota dimension descriptor in a service manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaDimensionDescriptor {
+    /// Dimension key (e.g. `"instances"`).
+    pub key: String,
+    /// Human-readable unit (e.g. `"count"`, `"bytes"`).
+    pub unit: String,
+    /// Scope kind: `"tenant"` or `"system"`.
+    pub scope: String,
+}
+
+/// Controller binding descriptor in a service manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControllerDescriptor {
+    /// Controller mode: `"in-process"` or `"external"`.
+    pub mode: String,
+    /// Controller protocol: `"in-process"` or `"grpc"`.
+    pub protocol: String,
+    /// Protocol version string.
+    pub protocol_version: String,
+    /// Service principal identity (required for external controllers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_principal: Option<String>,
+}
+
+impl TryFrom<ServiceManifestV1> for ServiceManifest {
+    type Error = ManifestError;
+
+    /// Converts a wire `ServiceManifestV1` into the normalized internal
+    /// [`ServiceManifest`], validating schema-level invariants.
+    fn try_from(wire: ServiceManifestV1) -> Result<Self, Self::Error> {
+        // Validate manifest_version constant
+        if wire.manifest_version != "o3k.io/service-manifest/v1" {
+            return Err(ManifestError::InvalidField("manifest_version"));
+        }
+
+        // Validate ownership_mode
+        let ownership = match wire.ownership_mode.as_str() {
+            "o3k-implemented" => ServiceOwnership::O3kImplemented,
+            "external-controller" => ServiceOwnership::ExternalHosted,
+            _ => {
+                return Err(ManifestError::InvalidField(
+                    "ownership_mode: expected 'o3k-implemented' or 'external-controller'",
+                ));
+            }
+        };
+
+        // Convert resource_type descriptors to simple strings for the registry
+        let resource_types: Vec<String> = wire
+            .resource_types
+            .iter()
+            .map(|rt| rt.type_.clone())
+            .collect();
+
+        // Convert controller binding
+        let controller = Some(ControllerBinding {
+            protocol: wire.controller.protocol,
+            endpoint: String::new(), // endpoint is set at runtime
+            identity_ref: wire.controller.service_principal.clone(),
+        });
+
+        // Regions and availability domains: take the first if multiple
+        let region = wire.regions.into_iter().next();
+        let availability_domain = wire.availability_domains.into_iter().next();
+
+        // Convert quota_dimensions
+        let quota_dimensions: Vec<QuotaDimension> = wire
+            .quota_dimensions
+            .into_iter()
+            .map(|qd| QuotaDimension {
+                key: qd.key,
+                unit: qd.unit,
+                scope: qd.scope,
+            })
+            .collect();
+
+        Ok(ServiceManifest {
+            manifest_version: 1,
+            service_id: wire.service_id,
+            namespace: wire.namespace,
+            service_version: wire.service_version,
+            ownership,
+            resource_types,
+            actions: wire.actions,
+            capabilities: wire.capabilities,
+            dependencies: wire.dependencies.into_iter().map(|d| d.name).collect(),
+            quota_dimensions,
+            region,
+            availability_domain,
+            controller,
+            health: None,
+        })
+    }
+}
+
+// ── Wire DTO: NativeResourceV1 ──────────────────────────────────────────
+//
+// Exact wire representation matching contracts/native-resource-envelope-v1.schema.json
+// (x-o3k-status: accepted).
+
+/// Wire DTO for `native-resource-envelope-v1.schema.json` — exact schema conformance.
+///
+/// The normalized internal form is [`ResourceEnvelope`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeResourceV1 {
+    /// Constant: `"o3k.io/v1"`
+    pub api_version: String,
+    /// Canonical resource type string (e.g. `"compute:server"`).
+    pub kind: String,
+    /// Common resource metadata.
+    pub metadata: NativeResourceMetaV1,
+    /// Service-owned desired-state payload.
+    pub spec: serde_json::Value,
+    /// Service-owned observed/status payload (required by schema).
+    pub status: serde_json::Value,
+}
+
+/// Wire metadata for [`NativeResourceV1`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeResourceMetaV1 {
+    /// Opaque canonical resource ID.
+    pub id: String,
+    /// Durable owner/security scope string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_scope: Option<String>,
+    /// Monotonic desired-state generation.
+    #[serde(default)]
+    pub generation: i64,
+    /// Optional region identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// Optional availability domain identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_domain: Option<String>,
+    /// RFC3339 creation timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    /// RFC3339 last-update timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    /// Optional free-form labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<std::collections::HashMap<String, String>>,
+    /// Optional free-form annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<std::collections::HashMap<String, String>>,
+}
+
+// ── Wire DTO: OpenStackProjectionV1 ─────────────────────────────────────
+//
+// Exact wire representation matching contracts/openstack-compatibility-projection-v1.schema.json
+// (x-o3k-status: accepted).
+
+/// Wire DTO for `openstack-compatibility-projection-v1.schema.json` — exact schema conformance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenStackProjectionV1 {
+    /// Constant: `"o3k.io/openstack-projection/v1"`
+    pub projection_version: String,
+    /// O3K service_id this projection maps FROM.
+    pub service_id: String,
+    /// OpenStack service_type (e.g. `"compute"`, `"volumev3"`).
+    pub service_type: String,
+    /// Optional service name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// Whether this projection is currently enabled/advertised.
+    pub enabled: bool,
+    /// Exposed API surfaces.
+    #[serde(default)]
+    pub api_surfaces: Vec<OpenStackApiSurfaceV1>,
+    /// Catalog endpoint templates.
+    #[serde(default)]
+    pub endpoints: Vec<OpenStackEndpointV1>,
+    /// Optional capability tags.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Optional evidence profile reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_profile: Option<String>,
+}
+
+/// API surface in an OpenStack compatibility projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenStackApiSurfaceV1 {
+    /// Human-readable name.
+    pub name: String,
+    /// URL prefix/mount point (must start with `/`).
+    pub prefix: String,
+    /// Version string.
+    pub version: String,
+    /// Minimum microversion, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_microversion: Option<String>,
+    /// Maximum microversion, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_microversion: Option<String>,
+    /// Whether this surface is enabled.
+    pub enabled: bool,
+}
+
+/// Catalog endpoint in an OpenStack compatibility projection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenStackEndpointV1 {
+    /// Interface label: `"public"`, `"internal"`, or `"admin"`.
+    pub interface: String,
+    /// Region identifier.
+    pub region: String,
+    /// URL template.
+    pub url_template: String,
+    /// Whether this endpoint is enabled.
+    pub enabled: bool,
+}
+
+impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
+    fn from(wire: OpenStackProjectionV1) -> Self {
+        OpenStackCompatibilityProjection {
+            service_id: wire.service_id,
+            service_type: wire.service_type,
+            api_surfaces: wire
+                .api_surfaces
+                .into_iter()
+                .map(|s| OpenStackApiSurface {
+                    name: s.name,
+                    prefix: s.prefix,
+                    version: s.version,
+                })
+                .collect(),
+            endpoints: wire
+                .endpoints
+                .into_iter()
+                .map(|e| OpenStackEndpointTemplate {
+                    interface: e.interface,
+                    region: e.region,
+                    url_template: e.url_template,
+                })
+                .collect(),
+            enabled: wire.enabled,
+        }
+    }
+}
+
 /// OpenStack Compatibility Projection v1.
 ///
 /// This is the metadata that maps an O3K service to Keystone/OpenStack
@@ -256,6 +573,8 @@ pub struct OpenStackEndpointTemplate {
 pub enum ManifestError {
     #[error("unsupported manifest version: {0}")]
     UnsupportedVersion(u32),
+    #[error("unsupported wire manifest version: {0}")]
+    UnsupportedWireVersion(String),
     #[error("invalid or missing manifest field: {0}")]
     InvalidField(&'static str),
     #[error("invalid identifier '{0}': {1}")]
@@ -604,16 +923,15 @@ impl ManifestRegistry {
     }
 
     /// Seeds the registry with core P0-P11 services for the native TestLab
-    /// profile. This adapts the static `KernelRegistry` services into the
-    /// `ManifestRegistry` format so that native discovery has a coherent
-    /// source of truth during migration.
+    /// profile. Only services whose canonical actions exist in the accepted
+    /// `contracts/cloud-kernel-actions.yaml` are included.
     ///
-    /// Uses the same validated `register()` path as explicit registration.
-    /// Silently skips duplicates so the seed is idempotent.
+    /// **Deferred until P12.2 (canonical actions accepted):** network, volume, placement.
     ///
-    /// This is a migration adapter and will be replaced as core services
-    /// adopt native manifest registration directly.
-    pub fn seed_core(&mut self) {
+    /// Returns an error if a built-in core manifest fails registration — such
+    /// a failure is an invariant violation that must propagate through daemon
+    /// startup.
+    pub fn seed_core(&mut self) -> Result<(), ManifestError> {
         let core_manifests: Vec<ServiceManifest> = vec![
             ServiceManifest {
                 manifest_version: 1,
@@ -627,6 +945,7 @@ impl ManifestRegistry {
                     "identity:user".to_owned(),
                     "identity:role".to_owned(),
                 ],
+                // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
                     "identity:IssueToken".to_owned(),
                     "identity:ValidateToken".to_owned(),
@@ -647,6 +966,7 @@ impl ManifestRegistry {
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
                 resource_types: vec!["image:image".to_owned()],
+                // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
                     "image:ListImages".to_owned(),
                     "image:CreateImage".to_owned(),
@@ -654,36 +974,6 @@ impl ManifestRegistry {
                     "image:DeleteImage".to_owned(),
                     "image:UploadImage".to_owned(),
                     "image:DownloadImage".to_owned(),
-                ],
-                capabilities: vec![],
-                dependencies: vec![],
-                quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
-                controller: None,
-                health: None,
-            },
-            ServiceManifest {
-                manifest_version: 1,
-                service_id: "network".to_owned(),
-                namespace: "network".to_owned(),
-                service_version: "0.4.0".to_owned(),
-                ownership: ServiceOwnership::O3kImplemented,
-                // FIX 3: Use canonical O3K Network resources (ADR-0168/ADR-0171).
-                // Not Neutron-shaped network/subnet/port.
-                resource_types: vec![
-                    "network:address_realm".to_owned(),
-                    "network:endpoint".to_owned(),
-                ],
-                actions: vec![
-                    "network:ListAddressRealms".to_owned(),
-                    "network:CreateAddressRealm".to_owned(),
-                    "network:ReadAddressRealm".to_owned(),
-                    "network:DeleteAddressRealm".to_owned(),
-                    "network:ListEndpoints".to_owned(),
-                    "network:CreateEndpoint".to_owned(),
-                    "network:ReadEndpoint".to_owned(),
-                    "network:DeleteEndpoint".to_owned(),
                 ],
                 capabilities: vec![],
                 dependencies: vec![],
@@ -704,6 +994,7 @@ impl ManifestRegistry {
                     "compute:flavor".to_owned(),
                     "compute:keypair".to_owned(),
                 ],
+                // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
                     "compute:ListFlavors".to_owned(),
                     "compute:CreateFlavor".to_owned(),
@@ -730,55 +1021,13 @@ impl ManifestRegistry {
                 controller: None,
                 health: None,
             },
-            ServiceManifest {
-                manifest_version: 1,
-                service_id: "placement".to_owned(),
-                namespace: "placement".to_owned(),
-                service_version: "0.4.0".to_owned(),
-                ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec![
-                    "placement:resource_provider".to_owned(),
-                    "placement:allocation".to_owned(),
-                ],
-                actions: vec![
-                    "placement:ListResourceProviders".to_owned(),
-                    "placement:ReadAllocation".to_owned(),
-                ],
-                capabilities: vec![],
-                dependencies: vec![],
-                quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
-                controller: None,
-                health: None,
-            },
-            ServiceManifest {
-                manifest_version: 1,
-                service_id: "volume".to_owned(),
-                namespace: "volume".to_owned(),
-                service_version: "0.4.0".to_owned(),
-                ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec![
-                    "volume:volume".to_owned(),
-                    "volume:volume_attachment".to_owned(),
-                ],
-                actions: vec![
-                    "volume:ListVolumes".to_owned(),
-                    "volume:CreateVolume".to_owned(),
-                    "volume:ReadVolume".to_owned(),
-                    "volume:DeleteVolume".to_owned(),
-                    "volume:AttachVolume".to_owned(),
-                    "volume:ReadVolumeAttachment".to_owned(),
-                    "volume:DetachVolume".to_owned(),
-                ],
-                capabilities: vec![],
-                dependencies: vec![],
-                quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
-                controller: None,
-                health: None,
-            },
+            // ── Deferred from native discovery until P12.2 ────────────────
+            // network: canonical O3K Network resources (address_realm,
+            //   endpoint) need accepted actions (committed).
+            // volume: canonical volume lifecycle actions (CreateVolume,
+            //   ListVolumes, ReadVolume, DeleteVolume) need acceptance.
+            // placement: no actions currently accepted in
+            //   contracts/cloud-kernel-actions.yaml.
         ];
 
         for m in core_manifests {
@@ -788,17 +1037,11 @@ impl ManifestRegistry {
             {
                 continue;
             }
-            // Use the same validated registration path as explicit registration.
-            // A failed seed is an invariant violation — skip and document
-            // rather than panic (production safety).
-            if let Err(_e) = self.register(m) {
-                // ponytail: seed failure means the core manifest definitions
-                // are inconsistent with registry invariants. Skipping instead
-                // of panicking keeps the daemon running; the operator can
-                // inspect logs and fix the definition.
-                eprintln!("seed_core: skipping invalid core manifest: {_e}");
-            }
+            // Fail closed: a built-in core manifest that cannot register
+            // is an invariant violation that must propagate through startup.
+            self.register(m)?;
         }
+        Ok(())
     }
 
     /// Returns all unique resource types across registered services.
@@ -821,7 +1064,7 @@ impl ManifestRegistry {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1094,44 +1337,39 @@ mod tests {
     }
 
     #[test]
-    fn seed_core_registers_all_services() {
+    fn seed_core_registers_accepted_services() {
         let mut reg = ManifestRegistry::new();
-        reg.seed_core();
-        assert_eq!(reg.len(), 6);
+        reg.seed_core().unwrap();
+        // Only identity, image, compute have accepted canonical actions.
+        assert_eq!(reg.len(), 3);
         assert!(reg.get("identity").is_some());
         assert!(reg.get("image").is_some());
-        assert!(reg.get("network").is_some());
         assert!(reg.get("compute").is_some());
-        assert!(reg.get("placement").is_some());
-        assert!(reg.get("volume").is_some());
+        // Network, volume, placement deferred until P12.2
+        assert!(reg.get("network").is_none());
+        assert!(reg.get("volume").is_none());
+        assert!(reg.get("placement").is_none());
     }
 
     #[test]
     fn seed_core_by_namespace_index_consistent() {
         let mut reg = ManifestRegistry::new();
-        reg.seed_core();
+        reg.seed_core().unwrap();
         // get_by_namespace must work for all seeded services
-        for ns in &[
-            "identity",
-            "image",
-            "network",
-            "compute",
-            "placement",
-            "volume",
-        ] {
+        for ns in &["identity", "image", "compute"] {
             let svc = reg.get_by_namespace(ns);
             assert!(svc.is_some(), "get_by_namespace({ns}) returned None");
             assert_eq!(svc.unwrap().namespace, *ns);
         }
         // secondary index must exactly match manifest count
-        assert_eq!(reg.len(), 6);
-        assert_eq!(reg.all().len(), 6);
+        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.all().len(), 3);
     }
 
     #[test]
     fn seed_core_duplicate_namespace_fails() {
         let mut reg = ManifestRegistry::new();
-        reg.seed_core();
+        reg.seed_core().unwrap();
         let m = ServiceManifest {
             manifest_version: 1,
             service_id: "compute-dup".to_owned(),
@@ -1156,41 +1394,9 @@ mod tests {
     }
 
     #[test]
-    fn seed_core_seeded_network_uses_canonical_types() {
-        let mut reg = ManifestRegistry::new();
-        reg.seed_core();
-        let network = reg.get("network").unwrap();
-        // Must use canonical O3K Network concepts, not Neutron-shaped types
-        assert!(
-            network
-                .resource_types
-                .contains(&"network:address_realm".to_owned()),
-            "expected network:address_realm in network resource types, got {:?}",
-            network.resource_types
-        );
-        assert!(
-            network
-                .resource_types
-                .contains(&"network:endpoint".to_owned()),
-            "expected network:endpoint in network resource types, got {:?}",
-            network.resource_types
-        );
-        assert!(
-            !network
-                .resource_types
-                .contains(&"network:subnet".to_owned()),
-            "must not contain Neutron-shaped network:subnet"
-        );
-        assert!(
-            !network.resource_types.contains(&"network:port".to_owned()),
-            "must not contain Neutron-shaped network:port"
-        );
-    }
-
-    #[test]
     fn seed_core_no_openstack_capabilities() {
         let mut reg = ManifestRegistry::new();
-        reg.seed_core();
+        reg.seed_core().unwrap();
         for m in reg.all() {
             for cap in &m.capabilities {
                 assert!(
@@ -1222,10 +1428,315 @@ mod tests {
             health: None,
         };
         reg.register(m).unwrap();
-        reg.seed_core();
+        reg.seed_core().unwrap();
         // compute namespace should still be held by custom-compute, not overridden
         assert!(reg.get("custom-compute").is_some());
         // core "compute" service should not be registered since namespace taken
         assert!(reg.get("compute").is_none());
+    }
+
+    #[test]
+    fn seed_core_invalid_manifest_fails_closed() {
+        // Built-in core manifests must be valid; if invalid, seed fails.
+        // This test only verifies the API shape: seed_core returns Result.
+        let mut reg = ManifestRegistry::new();
+        assert!(reg.seed_core().is_ok());
+    }
+
+    // ── Schema conformance tests ────────────────────────────────────────
+
+    /// Embed the service-manifest-v1 schema.
+    const SERVICE_MANIFEST_SCHEMA: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/service-manifest-v1.schema.json"
+    ));
+
+    /// Embed the native-resource-envelope-v1 schema.
+    const RESOURCE_ENVELOPE_SCHEMA: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-resource-envelope-v1.schema.json"
+    ));
+
+    /// Embed the openstack-compatibility-projection-v1 schema.
+    const PROJECTION_SCHEMA: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/openstack-compatibility-projection-v1.schema.json"
+    ));
+
+    #[test]
+    fn wire_manifest_v1_conforms_to_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect("valid schema JSON");
+        let compiled = jsonschema::validator_for(&schema).expect("valid compiled schema");
+
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "database-example".to_owned(),
+            namespace: "database".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "database:instance".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: Some("instances".to_owned()),
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec![
+                "database:CreateInstance".to_owned(),
+                "database:ReadInstance".to_owned(),
+                "database:DeleteInstance".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let json = serde_json::to_value(&wire).expect("serialization");
+        if let Err(errors) = compiled.validate(&json) {
+            panic!(
+                "ServiceManifestV1 schema validation failed:\n{}",
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn wire_manifest_v1_rejects_invalid_ownership_mode() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect("valid schema JSON");
+        let compiled = jsonschema::validator_for(&schema).expect("valid compiled schema");
+
+        // ownership_mode must be a specific enum value
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "bad-service".to_owned(),
+            namespace: "bad".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "invalid-mode".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "bad:thing".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["bad:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let json = serde_json::to_value(&wire).expect("serialization");
+        let validation = compiled.validate(&json);
+        assert!(
+            validation.is_err(),
+            "expected schema validation failure for invalid ownership_mode"
+        );
+    }
+
+    #[test]
+    fn wire_manifest_v1_rejects_missing_version() {
+        let schema: serde_json::Value =
+            serde_json::from_str(SERVICE_MANIFEST_SCHEMA).expect("valid schema JSON");
+        let compiled = jsonschema::validator_for(&schema).expect("valid compiled schema");
+
+        let mut json = serde_json::json!({
+            "service_id": "no-version",
+            "namespace": "test",
+            "service_version": "0.1.0",
+            "ownership_mode": "o3k-implemented",
+            "resource_types": [{"type": "test:resource", "schema_version": "v1"}],
+            "actions": ["test:DoSomething"],
+            "controller": {
+                "mode": "in-process",
+                "protocol": "in-process",
+                "protocol_version": "1.0"
+            }
+        });
+        // manifest_version is required by the schema as a const
+        let validation = compiled.validate(&json);
+        assert!(
+            validation.is_err(),
+            "expected schema validation failure for missing manifest_version"
+        );
+
+        // Also test invalid manifest_version value
+        json["manifest_version"] = serde_json::json!("wrong-value");
+        let validation2 = compiled.validate(&json);
+        assert!(
+            validation2.is_err(),
+            "expected schema validation failure for wrong manifest_version"
+        );
+    }
+
+    #[test]
+    fn wire_resource_envelope_v1_conforms_to_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(RESOURCE_ENVELOPE_SCHEMA).expect("valid schema JSON");
+        let compiled = jsonschema::validator_for(&schema).expect("valid compiled schema");
+
+        let wire = NativeResourceV1 {
+            api_version: "o3k.io/v1".to_owned(),
+            kind: "compute:server".to_owned(),
+            metadata: NativeResourceMetaV1 {
+                id: "srv-abc-123".to_owned(),
+                owner_scope: Some("proj-xyz".to_owned()),
+                generation: 1,
+                region: None,
+                availability_domain: None,
+                created_at: Some("2026-08-21T12:00:00Z".to_owned()),
+                updated_at: None,
+                labels: None,
+                annotations: None,
+            },
+            spec: serde_json::json!({"flavor": "m1.small"}),
+            status: serde_json::json!({"state": "ACTIVE"}),
+        };
+
+        let json = serde_json::to_value(&wire).expect("serialization");
+        if let Err(errors) = compiled.validate(&json) {
+            panic!(
+                "NativeResourceV1 schema validation failed:\n{}",
+                errors
+            );
+        }
+
+        // Verify api_version is exactly "o3k.io/v1"
+        assert_eq!(json["api_version"], "o3k.io/v1");
+        // Verify kind follows namespace:type pattern
+        assert!(json["kind"].as_str().unwrap().contains(':'));
+    }
+
+    #[test]
+    fn wire_projection_v1_conforms_to_schema() {
+        let schema: serde_json::Value =
+            serde_json::from_str(PROJECTION_SCHEMA).expect("valid schema JSON");
+        let compiled = jsonschema::validator_for(&schema).expect("valid compiled schema");
+
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "compute".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: Some("OpenStack Compute".to_owned()),
+            enabled: true,
+            api_surfaces: vec![OpenStackApiSurfaceV1 {
+                name: "Nova API".to_owned(),
+                prefix: "/v2.1".to_owned(),
+                version: "2.1".to_owned(),
+                min_microversion: Some("2.1".to_owned()),
+                max_microversion: Some("2.99".to_owned()),
+                enabled: true,
+            }],
+            endpoints: vec![OpenStackEndpointV1 {
+                interface: "public".to_owned(),
+                region: "RegionOne".to_owned(),
+                url_template: "http://localhost:18080/v2.1/{project_id}".to_owned(),
+                enabled: true,
+            }],
+            capabilities: vec!["compute:servers".to_owned()],
+            evidence_profile: Some("native-rust-testlab".to_owned()),
+        };
+
+        let json = serde_json::to_value(&wire).expect("serialization");
+        if let Err(errors) = compiled.validate(&json) {
+            panic!(
+                "OpenStackProjectionV1 schema validation failed:\n{}",
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn wire_manifest_v1_converts_to_internal_service_manifest() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "database-example".to_owned(),
+            namespace: "database".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "database:instance".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: Some("instances".to_owned()),
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["database:CreateInstance".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion succeeds");
+        assert_eq!(internal.service_id, "database-example");
+        assert_eq!(internal.namespace, "database");
+        assert_eq!(internal.manifest_version, 1);
+        assert!(
+            internal
+                .resource_types
+                .contains(&"database:instance".to_owned())
+        );
+        assert!(
+            internal
+                .actions
+                .contains(&"database:CreateInstance".to_owned())
+        );
+    }
+
+    #[test]
+    fn wire_manifest_v1_rejects_wrong_version_string() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "wrong-version".to_owned(),
+            service_id: "test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "test:res".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let result: Result<ServiceManifest, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected conversion failure for wrong manifest_version"
+        );
     }
 }

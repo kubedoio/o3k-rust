@@ -240,7 +240,11 @@ status as of the current release.
   validation;
 - Controller protocol contract (`Controller` trait, `ProtocolVersion`,
   `ControllerSession`, proper lifecycle state machine);
-- `seed_core()` migration adapter representing P0-P11 services as manifests.
+- `seed_core()` migration adapter seeding identity, image, and compute into native
+  discovery from accepted `contracts/cloud-kernel-actions.yaml`. Network (canonical
+  O3K AddressRealm/Endpoint), volume (canonical CreateVolume/DeleteVolume), and
+  placement are deferred until P12.2 because their canonical native actions are not
+  yet accepted in the authorization inventory.
 - **No Database-specific knowledge in kernel**: no `ServiceNamespace::database()`,
   no hard-coded database quota dimensions. Extension services use generic
   namespace construction.

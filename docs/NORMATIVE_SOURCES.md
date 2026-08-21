@@ -92,9 +92,10 @@ remain limited to the exact implementation and evidence profiles that passed
 their gates.
 
 The current compatibility manifest remains authoritative for which OpenStack
-operations are actually advertised. Proposed P12 native contracts do not expand
+operations are actually advertised. Accepted P12 native contracts do not expand
 Keystone, Nova, Neutron, Glance, Placement, or Cinder compatibility by their
-presence in the repository.
+presence in the repository; runtime advertisement remains gated by SPEC-0022,
+SPEC-0030 §20, and SPEC-0031 §24 evidence gates.
 
 The accepted overlapping-AddressRealm P11 successor must not be claimed as a
 supported runtime until a real multi-host gate proves two independent
