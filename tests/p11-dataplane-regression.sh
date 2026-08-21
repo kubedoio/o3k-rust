@@ -157,14 +157,15 @@ run_round() {
     ip netns add o3k-reg-a
     ip netns add o3k-reg-b
     ip link add veth-ab type veth peer name veth-ba
+    ip link set veth-ab netns o3k-reg-a
     ip link set veth-ba netns o3k-reg-b
-    ip addr add 10.77.0.1/24 dev veth-ab
-    ip link set veth-ab up
+    ip netns exec o3k-reg-a ip addr add 10.77.0.1/24 dev veth-ab
+    ip netns exec o3k-reg-a ip link set veth-ab up
     ip netns exec o3k-reg-b ip addr add 10.77.0.2/24 dev veth-ba
     ip netns exec o3k-reg-b ip link set veth-ba up
-    ip netns exec o3k-reg-b ip link set lo up
     ip netns exec o3k-reg-a ip link set lo up
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null
+    ip netns exec o3k-reg-b ip link set lo up
+    ip netns exec o3k-reg-a sysctl -w net.ipv4.ip_forward=1 >/dev/null
     ip netns exec o3k-reg-b sysctl -w net.ipv4.ip_forward=1 >/dev/null
     echo "[PASS] underlay ready"
 
@@ -205,12 +206,14 @@ run_round() {
     # Kernel state assertions
     # -------------------------------------------------------------------
 
-    # 6. TAP interfaces exist.
-    for ns in o3k-reg-a o3k-reg-b; do
-        for tap in "$TAP_A1" "$TAP_A2" "$TAP_B1" "$TAP_B2"; do
-            assert "TAP $tap exists in $ns" \
-                ip netns exec "$ns" ip link show "$tap"
-        done
+    # 6. TAP interfaces exist — each host only has its local TAPs.
+    for tap in "$TAP_A1" "$TAP_B1"; do
+        assert "TAP $tap exists on host-A" \
+            ip netns exec o3k-reg-a ip link show "$tap"
+    done
+    for tap in "$TAP_A2" "$TAP_B2"; do
+        assert "TAP $tap exists on host-B" \
+            ip netns exec o3k-reg-b ip link show "$tap"
     done
 
     # 7. Geneve interfaces exist in the fabric namespace.
@@ -251,7 +254,8 @@ run_round() {
         ip netns exec o3k-reg-b ip netns exec o3k-fabric \
             ping -c 3 -W 2 -i 0.3 198.18.0.1
 
-    # 11. FDB entries on realm bridges have "static" (not "permanent").
+    # 11. FDB entries on realm-per-target bridges have "static" (not "permanent").
+    #     Bridges and FDB are inside the fabric namespace; check from there.
     for ns in o3k-reg-a o3k-reg-b; do
         local_mac_a="$(tunnel_mac "$REALM_A_HEX" "reg-host-a")"
         local_mac_b="$(tunnel_mac "$REALM_B_HEX" "reg-host-a")"
@@ -263,17 +267,14 @@ run_round() {
             remote_mac_a="$(tunnel_mac "$REALM_A_HEX" "reg-host-a")"
             remote_mac_b="$(tunnel_mac "$REALM_B_HEX" "reg-host-a")"
         fi
+        fdb_show() { ip netns exec "$ns" ip netns exec o3k-fabric bridge fdb show br "$1" 2>/dev/null; }
         for mac in "$local_mac_a" "$remote_mac_a"; do
             assert "FDB $BRIDGE_A has static entry for $mac in $ns" \
-                ip netns exec "$ns" ip -d link show "$BRIDGE_A" 2>/dev/null \
-                && ip netns exec "$ns" bridge fdb show br "$BRIDGE_A" 2>/dev/null \
-                | grep -q "$mac.*static"
+                fdb_show "$BRIDGE_A" | grep -q "$mac.*static"
         done
         for mac in "$local_mac_b" "$remote_mac_b"; do
             assert "FDB $BRIDGE_B has static entry for $mac in $ns" \
-                ip netns exec "$ns" ip -d link show "$BRIDGE_B" 2>/dev/null \
-                && ip netns exec "$ns" bridge fdb show br "$BRIDGE_B" 2>/dev/null \
-                | grep -q "$mac.*static"
+                fdb_show "$BRIDGE_B" | grep -q "$mac.*static"
         done
     done
 
