@@ -240,11 +240,9 @@ status as of the current release.
   validation;
 - Controller protocol contract (`Controller` trait, `ProtocolVersion`,
   `ControllerSession`, proper lifecycle state machine);
-- `seed_core()` migration adapter seeding identity, image, and compute into native
-  discovery from accepted `contracts/cloud-kernel-actions.yaml`. Network (canonical
-  O3K AddressRealm/Endpoint), volume (canonical CreateVolume/DeleteVolume), and
-  placement are deferred until P12.2 because their canonical native actions are not
-  yet accepted in the authorization inventory.
+- `seed_core()` registers identity, image, compute, network AddressRealm reads,
+  and volume reads into native discovery. Mutating network/volume capabilities
+  and placement remain out of scope.
 - **No Database-specific knowledge in kernel**: no `ServiceNamespace::database()`,
   no hard-coded database quota dimensions. Extension services use generic
   namespace construction.
@@ -262,9 +260,12 @@ status as of the current release.
 - `GET /o3k/v1/volume/volumes` — native `volume:volume` list via
   `StorageRepository::list_volumes()`;
 - `GET /o3k/v1/volume/volumes/{id}` — native `volume:volume` show;
+- `GET /o3k/v1/network/address-realms` and `/{id}` — canonical
+  `network:address_realm` reads from accepted `NetworkIntent` state;
 - RFC 9457 Problem Details (`Content-Type: application/problem+json`)
   with stable O3K `code`, `request_id` support, and secret-safe errors;
-- Opaque cursor pagination (base64-encoded, scope-bound, tamper-safe);
+- Opaque cursor pagination (HMAC-authenticated, scope/resource-bound, stale
+  continuation rejected);
 - `BearerAuth` extractor for protected native endpoints;
 - Lightweight trait-based service reader ports (`TokenIssuer`,
   `ServerReader`, `VolumeReader`) so `o3k-native-api` remains
@@ -272,8 +273,7 @@ status as of the current release.
   composition root;
 - **Not implemented**: native create/delete mutations (belongs to #731
   after #732 Operation convergence), Idempotency-Key (#732), generic
-  resource dispatch (#731), network:address_realm canonical read
-  (deferred until native read API exists for canonical network resources),
+  resource dispatch (#731),
   external controller protocol (#733), Database conformance composition
   (#734), security evidence matrix (#735).
 

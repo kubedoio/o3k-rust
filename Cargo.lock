@@ -1689,6 +1689,7 @@ dependencies = [
  "axum",
  "base64",
  "hmac",
+ "jsonschema",
  "o3k-kernel",
  "serde",
  "serde_json",

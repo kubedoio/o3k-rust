@@ -10,7 +10,7 @@
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::{
     NativeApiState,
-    auth::{BearerAuth, NativeTokenRequestV1},
+    auth::{BearerAuth, NativeTokenRequestV1, RequestId},
     error::{ErrorCode, ProblemDetails},
 };
 
@@ -31,10 +31,20 @@ use crate::{
 /// Keystone-compatible path.
 pub async fn issue_token(
     State(state): State<NativeApiState>,
-    Json(body): Json<NativeTokenRequestV1>,
+    request_id: RequestId,
+    body: Result<Json<NativeTokenRequestV1>, JsonRejection>,
 ) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(_) => {
+            return ProblemDetails::bad_request("invalid native credential request")
+                .with_request_id(request_id.0)
+                .into_response();
+        }
+    };
     let Some(ref issuer) = state.token_issuer else {
         return ProblemDetails::with_detail(ErrorCode::NotAvailable, "IAM is not configured")
+            .with_request_id(request_id.0)
             .into_response();
     };
 
@@ -51,7 +61,7 @@ pub async fn issue_token(
             });
             (StatusCode::CREATED, Json(native_response)).into_response()
         }
-        Err(pd) => pd.into_response(),
+        Err(pd) => pd.with_request_id(request_id.0).into_response(),
     }
 }
 
@@ -71,7 +81,7 @@ pub struct CurrentContext {
 /// Returns the current authentication context.
 ///
 /// Requires a valid Bearer token. Missing/invalid bearer → 401.
-pub async fn current_context(auth: BearerAuth) -> Json<CurrentContext> {
+pub async fn current_context(auth: BearerAuth, _request_id: RequestId) -> Json<CurrentContext> {
     let ctx = auth.0;
     Json(CurrentContext {
         authenticated: true,

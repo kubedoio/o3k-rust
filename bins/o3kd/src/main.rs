@@ -1119,11 +1119,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let volume_reader: Option<std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>> =
         Some(std::sync::Arc::new(native_adapters::VolumeReaderAdapter {
             store: native_api_store.clone(),
+            authorizer: std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()),
         })
             as std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>);
     let network_reader: Option<std::sync::Arc<dyn o3k_native_api::network::NetworkReader>> =
         Some(std::sync::Arc::new(native_adapters::NetworkReaderAdapter {
             store: native_api_store.clone(),
+            authorizer: std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()),
         })
             as std::sync::Arc<dyn o3k_native_api::network::NetworkReader>);
     let token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
@@ -1153,9 +1155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
+    let cursor_config = o3k_native_api::pagination::CursorConfig::from_env()
+        .map_err(|error| format!("native cursor configuration failed: {error}"))?;
     state = state.with_native_api(o3k_native_api::NativeApiState::new(
         Some(native_manifest_registry),
-        o3k_native_api::pagination::CursorConfig::default(),
+        cursor_config,
         token_issuer,
         server_reader,
         volume_reader,

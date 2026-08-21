@@ -30,19 +30,9 @@ pub struct CursorPayload {
 }
 
 /// Cursor configuration held by the native API state.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CursorConfig {
     hmac_key: Vec<u8>,
-}
-
-impl Default for CursorConfig {
-    fn default() -> Self {
-        // Empty configuration is intentionally unusable in production.  It
-        // exists only to keep pure unit-test fixtures explicit and harmless.
-        Self {
-            hmac_key: Vec::new(),
-        }
-    }
 }
 
 impl CursorConfig {

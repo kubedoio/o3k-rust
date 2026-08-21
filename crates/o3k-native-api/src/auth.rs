@@ -12,6 +12,7 @@ use axum::{
 };
 use o3k_kernel::AuthContext;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{NativeApiState, error::ProblemDetails};
 
@@ -73,6 +74,39 @@ impl NativeAuth {
 pub struct NativePasswordCredentials {
     pub user_id: String,
     pub password: String,
+}
+
+/// Bounded request correlation identity accepted by the native API.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+impl RequestId {
+    fn from_parts(parts: &Parts) -> Self {
+        let accepted = parts
+            .headers
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+            })
+            .map(str::to_owned);
+        Self(accepted.unwrap_or_else(|| Uuid::now_v7().to_string()))
+    }
+}
+
+impl<S> FromRequestParts<S> for RequestId
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_parts(parts))
+    }
 }
 
 #[cfg(test)]
@@ -160,11 +194,16 @@ where
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let request_id = RequestId::from_parts(parts);
         let header = parts
             .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
+            .ok_or_else(|| {
+                ProblemDetails::unauthorized()
+                    .with_request_id(request_id.0.clone())
+                    .into_response()
+            })?;
 
         // Missing credentials are always an authentication failure.  Check
         // this before optional service configuration to avoid leaking a 503.
@@ -174,18 +213,22 @@ where
                 crate::error::ErrorCode::NotAvailable,
                 "IAM is not configured",
             )
+            .with_request_id(request_id.0.clone())
             .into_response());
         };
 
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
+        let token = header.strip_prefix("Bearer ").ok_or_else(|| {
+            ProblemDetails::unauthorized()
+                .with_request_id(request_id.0.clone())
+                .into_response()
+        })?;
 
-        let ctx = issuer
-            .auth_context(token)
-            .await
-            .map_err(|_| ProblemDetails::unauthorized().into_response())?;
+        let ctx = issuer.auth_context(token).await.map_err(|_| {
+            ProblemDetails::unauthorized()
+                .with_request_id(request_id.0.clone())
+                .into_response()
+        })?;
 
-        Ok(BearerAuth(ctx))
+        Ok(BearerAuth(ctx.with_request_id(request_id.0)))
     }
 }

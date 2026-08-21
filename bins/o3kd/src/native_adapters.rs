@@ -7,14 +7,17 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use o3k_kernel::{
+    ActionId, AuthorizationRequest, Authorizer, ResourceId, ResourceTarget, ResourceType,
+};
 use o3k_native_api::{
     auth::{NativeCredentialV1, NativeTokenRequestV1, TokenIssuer},
     compute::ServerItem,
-    error::ProblemDetails,
+    error::{NativeReadError, ProblemDetails},
     network::AddressRealmItem,
     volume::VolumeItem,
 };
-use o3k_store::{ComputeRepository, DurableStore, storage::StorageRepository};
+use o3k_store::{NetworkRepository, storage::StorageRepository};
 use uuid::Uuid;
 
 // ── TokenIssuer ───────────────────────────────────────────────────────────
@@ -98,13 +101,21 @@ pub struct ServerReaderAdapter {
 
 #[async_trait::async_trait]
 impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
-    async fn list_servers(&self, auth: &o3k_kernel::AuthContext) -> Result<Vec<ServerItem>, ()> {
+    async fn list_servers(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<ServerItem>, NativeReadError> {
         match self.service.list_servers_for_auth(auth).await {
-            Ok(servers) => Ok(servers
-                .into_iter()
-                .map(|s| {
+            Ok(servers) => {
+                let mut items = Vec::with_capacity(servers.len());
+                for s in servers {
                     let id = s.id.as_uuid();
-                    ServerItem {
+                    let generation = self.service.server_generation_for_auth(auth, s.id).await
+                        .map_err(|error| {
+                            tracing::error!(%error, server_id = %id, "native server metadata read failed");
+                            NativeReadError::Internal
+                        })?;
+                    items.push(ServerItem {
                         id: id.to_string(),
                         name: s.name,
                         project_id: s.project_id,
@@ -114,13 +125,18 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
                             .map(|v| v.as_str().unwrap_or("unknown").to_owned())
                             .unwrap_or_else(|_| "unknown".to_owned()),
                         created_at: None, // No durable timestamp available from domain Server
-                        generation: 0,
-                    }
-                })
-                .collect()),
+                        generation,
+                    });
+                }
+                Ok(items)
+            }
             Err(e) => {
                 tracing::error!(error = %e, "native server list failed");
-                Err(())
+                Err(match e {
+                    o3k_compute::ComputeError::Unauthorized => NativeReadError::Forbidden,
+                    o3k_compute::ComputeError::NotFound => NativeReadError::NotFound,
+                    _ => NativeReadError::Internal,
+                })
             }
         }
     }
@@ -129,27 +145,38 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
         &self,
         auth: &o3k_kernel::AuthContext,
         id: Uuid,
-    ) -> Result<ServerItem, ()> {
+    ) -> Result<ServerItem, NativeReadError> {
         match self
             .service
             .show_server_for_auth(auth, o3k_domain::ServerId::from_uuid(id))
             .await
         {
-            Ok(s) => Ok(ServerItem {
-                id: id.to_string(),
-                name: s.name,
-                project_id: s.project_id,
-                flavor_id: s.flavor_id.to_string(),
-                image_id: s.image_id,
-                state: serde_json::to_value(s.state)
-                    .map(|v| v.as_str().unwrap_or("unknown").to_owned())
-                    .unwrap_or_else(|_| "unknown".to_owned()),
-                created_at: None,
-                generation: 0,
-            }),
+            Ok(s) => {
+                let generation = self.service.server_generation_for_auth(auth, s.id).await
+                    .map_err(|error| {
+                        tracing::error!(%error, server_id = %id, "native server metadata read failed");
+                        NativeReadError::Internal
+                    })?;
+                Ok(ServerItem {
+                    id: id.to_string(),
+                    name: s.name,
+                    project_id: s.project_id,
+                    flavor_id: s.flavor_id.to_string(),
+                    image_id: s.image_id,
+                    state: serde_json::to_value(s.state)
+                        .map(|v| v.as_str().unwrap_or("unknown").to_owned())
+                        .unwrap_or_else(|_| "unknown".to_owned()),
+                    created_at: None,
+                    generation,
+                })
+            }
             Err(e) => {
                 tracing::error!(error = %e, server_id = %id, "native server show failed");
-                Err(())
+                Err(match e {
+                    o3k_compute::ComputeError::Unauthorized
+                    | o3k_compute::ComputeError::NotFound => NativeReadError::NotFound,
+                    _ => NativeReadError::Internal,
+                })
             }
         }
     }
@@ -159,11 +186,82 @@ impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
 
 pub struct VolumeReaderAdapter {
     pub store: Arc<o3k_store::unified::O3kStore>,
+    pub authorizer: Arc<dyn Authorizer>,
+}
+
+fn authorize_collection(
+    auth: &o3k_kernel::AuthContext,
+    action: &str,
+    namespace: &str,
+    name: &str,
+    authorizer: &dyn Authorizer,
+) -> bool {
+    let Ok(action) = ActionId::new(namespace, action.split(':').next_back().unwrap_or(action))
+    else {
+        return false;
+    };
+    let Ok(resource_type) = ResourceType::new(namespace, name) else {
+        return false;
+    };
+    authorizer
+        .authorize(&AuthorizationRequest {
+            auth_context: auth,
+            action,
+            resource_target: ResourceTarget::collection(
+                resource_type,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        })
+        .is_allowed()
+}
+
+fn authorize_instance(
+    auth: &o3k_kernel::AuthContext,
+    action: &str,
+    namespace: &str,
+    name: &str,
+    id: Uuid,
+    authorizer: &dyn Authorizer,
+) -> bool {
+    let Ok(action) = ActionId::new(namespace, action.split(':').next_back().unwrap_or(action))
+    else {
+        return false;
+    };
+    let Ok(resource_type) = ResourceType::new(namespace, name) else {
+        return false;
+    };
+    let Ok(resource_id) = ResourceId::new(id.to_string()) else {
+        return false;
+    };
+    authorizer
+        .authorize(&AuthorizationRequest {
+            auth_context: auth,
+            action,
+            resource_target: ResourceTarget::instance(
+                resource_type,
+                resource_id,
+                Some(auth.effective_scope().id().clone()),
+            ),
+        })
+        .is_allowed()
 }
 
 #[async_trait::async_trait]
 impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
-    async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeItem>, ()> {
+    async fn list_volumes(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<VolumeItem>, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_collection(
+            auth,
+            "volume:ListVolumes",
+            "volume",
+            "volume",
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
         match self.store.list_volumes(project_id).await {
             Ok(records) => Ok(records
                 .into_iter()
@@ -181,12 +279,27 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                 .collect()),
             Err(e) => {
                 tracing::error!(error = %e, project_id = %project_id, "native volume list failed");
-                Err(())
+                Err(NativeReadError::Internal)
             }
         }
     }
 
-    async fn show_volume(&self, project_id: &str, id: Uuid) -> Result<VolumeItem, ()> {
+    async fn show_volume(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        id: Uuid,
+    ) -> Result<VolumeItem, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_instance(
+            auth,
+            "volume:ReadVolume",
+            "volume",
+            "volume",
+            id,
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
         match self.store.get_volume(id).await {
             Ok(Some(r)) if r.volume.project_id == project_id => Ok(VolumeItem {
                 id: r.volume.id.to_string(),
@@ -199,10 +312,10 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                 created_at: Some(r.created_at.clone()),
                 generation: r.volume.generation as i64,
             }),
-            Ok(_) => Err(()),
+            Ok(_) => Err(NativeReadError::NotFound),
             Err(e) => {
                 tracing::error!(error = %e, volume_id = %id, "native volume show failed");
-                Err(())
+                Err(NativeReadError::Internal)
             }
         }
     }
@@ -212,52 +325,102 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
 
 pub struct NetworkReaderAdapter {
     pub store: Arc<o3k_store::unified::O3kStore>,
+    pub authorizer: Arc<dyn Authorizer>,
 }
 
 #[async_trait::async_trait]
 impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
-    async fn list_address_realms(&self, project_id: &str) -> Result<Vec<AddressRealmItem>, ()> {
-        // Use generic resource records with kind "network:address_realm"
+    async fn list_address_realms(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<AddressRealmItem>, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_collection(
+            auth,
+            "network:ListAddressRealms",
+            "network",
+            "address_realm",
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
         match self
             .store
-            .list_resources_by_kind("network:address_realm")
+            .list_network_intents(project_id)
             .await
         {
-            Ok(records) => {
-                let filtered: Vec<AddressRealmItem> = records
-                    .into_iter()
-                    .filter(|r| r.project_id == project_id)
-                    .map(|r| AddressRealmItem {
-                        id: r.id.to_string(),
-                        project_id: r.project_id,
-                        prefix: r.desired_state.clone(),
-                        overlapping_prefixes: false,
+            Ok(records) => records
+                .into_iter()
+                .map(|record| {
+                    let intent: o3k_domain::NetworkIntent =
+                        serde_json::from_str(&record.payload).map_err(|e| {
+                            tracing::error!(error = %e, network_intent_id = %record.id, "invalid canonical network intent payload");
+                            NativeReadError::Internal
+                        })?;
+                    if intent.id != record.id || intent.project_id != record.project_id
+                        || intent.realm.id != record.id
+                    {
+                        tracing::error!(network_intent_id = %record.id, "canonical network intent identity mismatch");
+                        return Err(NativeReadError::Internal);
+                    }
+                    Ok(AddressRealmItem {
+                        id: intent.realm.id.to_string(),
+                        project_id: intent.realm.project_id,
+                        prefix: format!("{}/{}", intent.realm.prefix.network, intent.realm.prefix.prefix_len),
+                        overlapping_prefixes: intent.realm.overlapping_prefixes,
                         created_at: None,
-                        generation: r.generation,
+                        generation: i64::try_from(intent.generation).map_err(|_| NativeReadError::Internal)?,
                     })
-                    .collect();
-                Ok(filtered)
-            }
+                })
+                .collect(),
             Err(e) => {
                 tracing::error!(error = %e, project_id = %project_id, "native address realm list failed");
-                Ok(Vec::new()) // Empty list if no realms stored yet
+                Err(NativeReadError::Internal)
             }
         }
     }
 
-    async fn show_address_realm(&self, project_id: &str, id: Uuid) -> Result<AddressRealmItem, ()> {
-        match self.store.get_resource(id).await {
-            Ok(r) if r.kind == "network:address_realm" && r.project_id == project_id => {
+    async fn show_address_realm(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        id: Uuid,
+    ) -> Result<AddressRealmItem, NativeReadError> {
+        let project_id = auth.effective_scope().id().as_str();
+        if !authorize_instance(
+            auth,
+            "network:ReadAddressRealm",
+            "network",
+            "address_realm",
+            id,
+            self.authorizer.as_ref(),
+        ) {
+            return Err(NativeReadError::Forbidden);
+        }
+        match self.store.get_network_intent(project_id, &id).await {
+            Ok(Some(record)) => {
+                let intent: o3k_domain::NetworkIntent =
+                    serde_json::from_str(&record.payload).map_err(|_| NativeReadError::Internal)?;
+                if intent.id != record.id
+                    || intent.project_id != record.project_id
+                    || intent.realm.id != id
+                {
+                    return Err(NativeReadError::Internal);
+                }
                 Ok(AddressRealmItem {
-                    id: r.id.to_string(),
-                    project_id: r.project_id,
-                    prefix: r.desired_state.clone(),
-                    overlapping_prefixes: false,
+                    id: intent.realm.id.to_string(),
+                    project_id: intent.realm.project_id,
+                    prefix: format!(
+                        "{}/{}",
+                        intent.realm.prefix.network, intent.realm.prefix.prefix_len
+                    ),
+                    overlapping_prefixes: intent.realm.overlapping_prefixes,
                     created_at: None,
-                    generation: r.generation,
+                    generation: i64::try_from(intent.generation)
+                        .map_err(|_| NativeReadError::Internal)?,
                 })
             }
-            _ => Err(()),
+            Ok(None) => Err(NativeReadError::NotFound),
+            Err(_) => Err(NativeReadError::Internal),
         }
     }
 }

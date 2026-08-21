@@ -24,5 +24,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonschema = "0.50"
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower.workspace = true

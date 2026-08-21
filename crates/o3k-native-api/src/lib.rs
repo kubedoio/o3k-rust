@@ -74,6 +74,20 @@ pub fn router(state: NativeApiState) -> Router {
         .with_state(state)
 }
 
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_resource_envelope_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-resource-envelope-v1.schema.json"
+    )))
+    .expect("valid native envelope schema");
+    let validator = jsonschema::validator_for(&schema).expect("compiled native envelope schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native envelope schema violation: {errors}");
+    }
+}
+
 // ── API root ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -361,8 +375,10 @@ mod tests {
 
     #[tokio::test]
     async fn discover_resource_types_from_manifest_registry() {
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
         let state = NativeApiState::new(
-            Some(test_manifest_registry()),
+            Some(registry),
             pagination::CursorConfig::default(),
             None,
             None,
@@ -385,6 +401,21 @@ mod tests {
         )
         .unwrap();
         assert!(body["count"].as_u64().unwrap_or(0) >= 2);
+        let kinds: Vec<String> = body["resource_types"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some(format!(
+                    "{}:{}",
+                    item["namespace"].as_str()?,
+                    item["name"].as_str()?
+                ))
+            })
+            .collect();
+        assert!(kinds.iter().any(|kind| kind == "compute:server"));
+        assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
+        assert!(kinds.iter().any(|kind| kind == "volume:volume"));
     }
 
     #[tokio::test]

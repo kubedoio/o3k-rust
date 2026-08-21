@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     NativeApiState,
-    auth::BearerAuth,
-    error::{ErrorCode, ProblemDetails},
+    auth::{BearerAuth, RequestId},
+    error::{ErrorCode, NativeReadError, ProblemDetails},
     pagination::{CursorPayload, parse_page_size},
 };
 
@@ -25,9 +25,16 @@ use crate::{
 #[async_trait::async_trait]
 pub trait VolumeReader: Send + Sync {
     /// List volumes in the given project scope.
-    async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeItem>, ()>;
+    async fn list_volumes(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<VolumeItem>, NativeReadError>;
     /// Show a single volume by ID.
-    async fn show_volume(&self, project_id: &str, id: Uuid) -> Result<VolumeItem, ()>;
+    async fn show_volume(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        id: Uuid,
+    ) -> Result<VolumeItem, NativeReadError>;
 }
 
 /// Canonical native volume representation from domain state.
@@ -86,6 +93,7 @@ const RESOURCE_TYPE: &str = "volume:volume";
 /// GET /o3k/v1/volume/volumes
 pub async fn list_volumes(
     auth: BearerAuth,
+    request_id: RequestId,
     State(state): State<NativeApiState>,
     Query(query): Query<ListQuery>,
 ) -> Response {
@@ -94,6 +102,7 @@ pub async fn list_volumes(
             ErrorCode::NotAvailable,
             "volume service is not configured",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     };
 
@@ -112,27 +121,43 @@ pub async fn list_volumes(
             ErrorCode::InvalidCursor,
             "cursor is malformed or belongs to a different scope/resource",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     }
 
-    match reader.list_volumes(&project_id).await {
-        Ok(volumes) => {
+    match reader.list_volumes(&ctx).await {
+        Ok(mut volumes) => {
+            volumes.sort_by(|a, b| a.id.cmp(&b.id));
             let total = volumes.len();
             let last_item_id_full = volumes.last().map(|v| v.id.clone());
             let paged: Vec<VolumeItem> = if let Some(ref cursor) = query.cursor {
                 if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE) {
-                    let start_idx = volumes
-                        .iter()
-                        .position(|v| v.id == payload.last_id)
-                        .map(|i| i + 1)
-                        .unwrap_or(total);
+                    let start_idx = match crate::pagination::continuation_index(
+                        &volumes.iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+                        &payload.last_id,
+                    ) {
+                        Ok(index) => index,
+                        Err(_) => {
+                            return ProblemDetails::with_detail(
+                                ErrorCode::InvalidCursor,
+                                "cursor anchor is stale",
+                            )
+                            .with_request_id(request_id.0.clone())
+                            .into_response();
+                        }
+                    };
                     volumes
                         .into_iter()
                         .skip(start_idx)
                         .take(page_size)
                         .collect()
                 } else {
-                    volumes.into_iter().take(page_size).collect()
+                    return ProblemDetails::with_detail(
+                        ErrorCode::InvalidCursor,
+                        "cursor is malformed",
+                    )
+                    .with_request_id(request_id.0.clone())
+                    .into_response();
                 }
             } else {
                 volumes.into_iter().take(page_size).collect()
@@ -164,13 +189,22 @@ pub async fn list_volumes(
             )
                 .into_response()
         }
-        Err(_) => ProblemDetails::internal().into_response(),
+        Err(NativeReadError::Forbidden) => ProblemDetails::forbidden(None)
+            .with_request_id(request_id.0)
+            .into_response(),
+        Err(NativeReadError::NotFound) => ProblemDetails::not_found(None)
+            .with_request_id(request_id.0)
+            .into_response(),
+        Err(NativeReadError::Internal) => ProblemDetails::internal()
+            .with_request_id(request_id.0)
+            .into_response(),
     }
 }
 
 /// GET /o3k/v1/volume/volumes/{id}
 pub async fn show_volume(
     auth: BearerAuth,
+    request_id: RequestId,
     State(state): State<NativeApiState>,
     Path(id): Path<Uuid>,
 ) -> Response {
@@ -179,17 +213,42 @@ pub async fn show_volume(
             ErrorCode::NotAvailable,
             "volume service is not configured",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     };
 
     let ctx = auth.0;
-    let project_id = ctx.effective_scope().id().to_string();
-
-    match reader.show_volume(&project_id, id).await {
+    match reader.show_volume(&ctx, id).await {
         Ok(volume) => {
             let envelope = volume_to_native_v1(&volume);
             (StatusCode::OK, Json(envelope)).into_response()
         }
-        Err(_) => ProblemDetails::not_found(Some(&id.to_string())).into_response(),
+        Err(NativeReadError::NotFound | NativeReadError::Forbidden) => {
+            ProblemDetails::not_found(Some(&id.to_string()))
+                .with_request_id(request_id.0)
+                .into_response()
+        }
+        Err(NativeReadError::Internal) => ProblemDetails::internal()
+            .with_request_id(request_id.0)
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn volume_envelope_conforms_to_schema() {
+        let value = volume_to_native_v1(&VolumeItem {
+            id: "volume-a".into(),
+            project_id: "project-a".into(),
+            size_bytes: 1024,
+            volume_type: "lvm".into(),
+            state: "available".into(),
+            created_at: None,
+            generation: 1,
+        });
+        crate::assert_resource_envelope_schema(&value);
     }
 }

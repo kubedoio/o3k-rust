@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 use crate::{
     NativeApiState,
-    auth::BearerAuth,
-    error::{ErrorCode, ProblemDetails},
+    auth::{BearerAuth, RequestId},
+    error::{ErrorCode, NativeReadError, ProblemDetails},
     pagination::{CursorPayload, parse_page_size},
 };
 
@@ -29,9 +29,16 @@ use crate::{
 #[async_trait::async_trait]
 pub trait NetworkReader: Send + Sync {
     /// List address realms visible to the given project.
-    async fn list_address_realms(&self, project_id: &str) -> Result<Vec<AddressRealmItem>, ()>;
+    async fn list_address_realms(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<AddressRealmItem>, NativeReadError>;
     /// Show a single address realm by ID.
-    async fn show_address_realm(&self, project_id: &str, id: Uuid) -> Result<AddressRealmItem, ()>;
+    async fn show_address_realm(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        id: Uuid,
+    ) -> Result<AddressRealmItem, NativeReadError>;
 }
 
 /// Canonical native address realm representation.
@@ -89,6 +96,7 @@ const RESOURCE_TYPE: &str = "network:address_realm";
 /// GET /o3k/v1/network/address-realms
 pub async fn list_address_realms(
     auth: BearerAuth,
+    request_id: RequestId,
     State(state): State<NativeApiState>,
     Query(query): Query<ListQuery>,
 ) -> Response {
@@ -97,6 +105,7 @@ pub async fn list_address_realms(
             ErrorCode::NotAvailable,
             "network service is not configured",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     };
 
@@ -115,23 +124,39 @@ pub async fn list_address_realms(
             ErrorCode::InvalidCursor,
             "cursor is malformed or belongs to a different scope/resource",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     }
 
-    match reader.list_address_realms(&project_id).await {
-        Ok(realms) => {
+    match reader.list_address_realms(&ctx).await {
+        Ok(mut realms) => {
+            realms.sort_by(|a, b| a.id.cmp(&b.id));
             let total = realms.len();
             let last_item_id_full = realms.last().map(|r| r.id.clone());
             let paged: Vec<AddressRealmItem> = if let Some(ref cursor) = query.cursor {
                 if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE) {
-                    let start_idx = realms
-                        .iter()
-                        .position(|r| r.id == payload.last_id)
-                        .map(|i| i + 1)
-                        .unwrap_or(total);
+                    let start_idx = match crate::pagination::continuation_index(
+                        &realms.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+                        &payload.last_id,
+                    ) {
+                        Ok(index) => index,
+                        Err(_) => {
+                            return ProblemDetails::with_detail(
+                                ErrorCode::InvalidCursor,
+                                "cursor anchor is stale",
+                            )
+                            .with_request_id(request_id.0.clone())
+                            .into_response();
+                        }
+                    };
                     realms.into_iter().skip(start_idx).take(page_size).collect()
                 } else {
-                    realms.into_iter().take(page_size).collect()
+                    return ProblemDetails::with_detail(
+                        ErrorCode::InvalidCursor,
+                        "cursor is malformed",
+                    )
+                    .with_request_id(request_id.0.clone())
+                    .into_response();
                 }
             } else {
                 realms.into_iter().take(page_size).collect()
@@ -163,13 +188,22 @@ pub async fn list_address_realms(
             )
                 .into_response()
         }
-        Err(_) => ProblemDetails::internal().into_response(),
+        Err(NativeReadError::Forbidden) => ProblemDetails::forbidden(None)
+            .with_request_id(request_id.0)
+            .into_response(),
+        Err(NativeReadError::NotFound) => ProblemDetails::not_found(None)
+            .with_request_id(request_id.0)
+            .into_response(),
+        Err(NativeReadError::Internal) => ProblemDetails::internal()
+            .with_request_id(request_id.0)
+            .into_response(),
     }
 }
 
 /// GET /o3k/v1/network/address-realms/{id}
 pub async fn show_address_realm(
     auth: BearerAuth,
+    request_id: RequestId,
     State(state): State<NativeApiState>,
     Path(id): Path<Uuid>,
 ) -> Response {
@@ -178,17 +212,41 @@ pub async fn show_address_realm(
             ErrorCode::NotAvailable,
             "network service is not configured",
         )
+        .with_request_id(request_id.0.clone())
         .into_response();
     };
 
     let ctx = auth.0;
-    let project_id = ctx.effective_scope().id().to_string();
-
-    match reader.show_address_realm(&project_id, id).await {
+    match reader.show_address_realm(&ctx, id).await {
         Ok(realm) => {
             let envelope = realm_to_native_v1(&realm);
             (StatusCode::OK, Json(envelope)).into_response()
         }
-        Err(_) => ProblemDetails::not_found(Some(&id.to_string())).into_response(),
+        Err(NativeReadError::NotFound | NativeReadError::Forbidden) => {
+            ProblemDetails::not_found(Some(&id.to_string()))
+                .with_request_id(request_id.0)
+                .into_response()
+        }
+        Err(NativeReadError::Internal) => ProblemDetails::internal()
+            .with_request_id(request_id.0)
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn network_envelope_conforms_to_schema() {
+        let value = realm_to_native_v1(&AddressRealmItem {
+            id: "realm-a".into(),
+            project_id: "project-a".into(),
+            prefix: "10.0.0.0/24".into(),
+            overlapping_prefixes: false,
+            created_at: None,
+            generation: 1,
+        });
+        crate::assert_resource_envelope_schema(&value);
     }
 }

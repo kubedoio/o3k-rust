@@ -13,6 +13,15 @@ use axum::{
 };
 use serde::Serialize;
 
+/// Internal reader outcomes. These are deliberately mapped to stable public
+/// Problem Details codes at the HTTP boundary.
+#[derive(Debug)]
+pub enum NativeReadError {
+    NotFound,
+    Forbidden,
+    Internal,
+}
+
 /// O3K stable machine-readable error codes.
 ///
 /// These are contract-level values — removing or renaming an entry is a
