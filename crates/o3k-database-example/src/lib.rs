@@ -12,6 +12,7 @@
 //! This is NOT a production managed PostgreSQL service. See SPEC-0031 §21
 //! and ADR-0174 §15 for the acceptance criteria.
 
+use o3k_kernel::manifest::{RegisteredResourceType, ResourceScope};
 use o3k_kernel::resource::{ResourceId, ResourceType};
 use o3k_kernel::{
     ManifestRegistry, ServiceManifest,
@@ -30,7 +31,12 @@ pub fn manifest() -> ServiceManifest {
         namespace: "database".to_owned(),
         service_version: "0.1.0".to_owned(),
         ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
-        resource_types: vec!["database:instance".to_owned()],
+        resource_types: vec![RegisteredResourceType {
+            resource_type: ResourceType::new_unchecked("database", "instance"),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }],
         actions: vec![
             "database:CreateInstance".to_owned(),
             "database:ReadInstance".to_owned(),
@@ -39,8 +45,8 @@ pub fn manifest() -> ServiceManifest {
         capabilities: vec!["conformance".to_owned()],
         dependencies: vec![],
         quota_dimensions: vec![],
-        region: None,
-        availability_domain: None,
+        regions: vec![],
+        availability_domains: vec![],
         controller: None,
         health: None,
     }
@@ -174,7 +180,8 @@ mod tests {
         assert!(
             registered
                 .resource_types
-                .contains(&"database:instance".to_owned())
+                .iter()
+                .any(|rt| rt.resource_type.to_string() == "database:instance")
         );
         Ok(())
     }

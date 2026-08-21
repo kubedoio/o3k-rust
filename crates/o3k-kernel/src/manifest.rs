@@ -22,7 +22,8 @@ use crate::resource::ResourceType;
 
 /// Service ownership mode in O3K Cloud OS.
 ///
-/// Re-exported from registry for convenience; the semantic is the same.
+/// Re-exported from registry for convenience; the semantic is the same as the
+/// legacy enum but extended for P12-native external-controller mode.
 pub use crate::registry::ServiceOwnership;
 
 /// The lifecycle state of a registered service.
@@ -87,12 +88,95 @@ pub struct ServiceHealth {
     pub detail: Option<String>,
 }
 
+/// A registered resource type in a service manifest — preserves all accepted
+/// descriptor fields from service-manifest-v1.schema.json.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RegisteredResourceType {
+    /// Canonical resource type (e.g. `"compute:server"`).
+    pub resource_type: ResourceType,
+    /// Schema version string (e.g. `"v1"`).
+    pub schema_version: String,
+    /// Optional collection URL name override.
+    pub collection: Option<String>,
+    /// Scope kind: tenant, system, or mixed.
+    pub scope: ResourceScope,
+}
+
+/// Resource ownership scope classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceScope {
+    Tenant,
+    System,
+    Mixed,
+}
+
+impl ResourceScope {
+    /// Parses a scope string from the wire format.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tenant" => Some(Self::Tenant),
+            "system" => Some(Self::System),
+            "mixed" => Some(Self::Mixed),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ResourceScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tenant => write!(f, "tenant"),
+            Self::System => write!(f, "system"),
+            Self::Mixed => write!(f, "mixed"),
+        }
+    }
+}
+
+/// A dependency declared by a service manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ServiceDependency {
+    /// Dependency kind: service, resource_type, action, or capability.
+    pub kind: DependencyKind,
+    /// Dependency name/identifier.
+    pub name: String,
+    /// Whether the dependency is mandatory.
+    pub required: bool,
+}
+
+/// Dependency kind classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyKind {
+    Service,
+    ResourceType,
+    Action,
+    Capability,
+}
+
+/// Controller declaration from a service manifest — manifest policy only,
+/// separate from runtime session state.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ManifestController {
+    /// Controller mode: `"in-process"` or `"external"`.
+    pub mode: String,
+    /// Controller protocol: `"in-process"` or `"grpc"`.
+    pub protocol: String,
+    /// Protocol version string.
+    pub protocol_version: String,
+    /// Service principal identity (required for external controllers).
+    pub service_principal: Option<String>,
+}
+
 /// Service Manifest v1 — canonical native O3K service identity and capability
 /// contract.
 ///
 /// This manifest describes what the service IS, not where it runs or which
 /// OpenStack compatibility surfaces it exposes. The latter is handled by
 /// [`OpenStackCompatibilityProjection`].
+///
+/// All accepted wire descriptor fields are preserved in typed form — no lossy
+/// normalization to strings/singletons.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceManifest {
     /// Manifest schema version (v1 uses `1`).
@@ -103,32 +187,30 @@ pub struct ServiceManifest {
     pub namespace: String,
     /// Human-readable service version (e.g. `"0.1.0"`).
     pub service_version: String,
-    /// Ownership mode: `o3k-implemented` or `external-hosted`.
+    /// Ownership mode: `o3k-implemented` or `external-controller`.
     pub ownership: ServiceOwnership,
-    /// Resource types owned by this service.
-    #[serde(default)]
-    pub resource_types: Vec<String>,
+    /// Resource types with full descriptor metadata.
+    pub resource_types: Vec<RegisteredResourceType>,
     /// Action IDs owned by this service (e.g. `"database:CreateInstance"`).
-    #[serde(default)]
     pub actions: Vec<String>,
     /// Optional capability labels.
     #[serde(default)]
     pub capabilities: Vec<String>,
-    /// Optional service dependencies (namespace:type references).
+    /// Optional service dependencies (preserves kind/name/required).
     #[serde(default)]
-    pub dependencies: Vec<String>,
+    pub dependencies: Vec<ServiceDependency>,
     /// Optional quota dimensions.
     #[serde(default)]
     pub quota_dimensions: Vec<QuotaDimension>,
-    /// Optional region scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    /// Optional availability domain scope.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub availability_domain: Option<String>,
-    /// Controller binding for external services.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub controller: Option<ControllerBinding>,
+    /// Optional region scopes (preserves all regions).
+    #[serde(default)]
+    pub regions: Vec<String>,
+    /// Optional availability domain scopes (preserves all).
+    #[serde(default)]
+    pub availability_domains: Vec<String>,
+    /// Controller manifest declaration (separate from runtime session).
+    #[serde(default)]
+    pub controller: Option<ManifestController>,
     /// Health/readiness metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health: Option<ServiceHealth>,
@@ -156,15 +238,16 @@ impl ServiceManifest {
         }
 
         for rt in &self.resource_types {
-            let Some((ns, _)) = rt.split_once(':') else {
+            let rt_str = rt.resource_type.to_string();
+            let Some((ns, _)) = rt_str.split_once(':') else {
                 return Err(ManifestError::InvalidIdentifier(
-                    rt.clone(),
+                    rt_str.clone(),
                     "resource type must be namespace:name".to_owned(),
                 ));
             };
             if ns != self.namespace {
                 return Err(ManifestError::NamespaceMismatch {
-                    identifier: rt.clone(),
+                    identifier: rt_str.clone(),
                     expected: self.namespace.clone(),
                 });
             }
@@ -188,17 +271,13 @@ impl ServiceManifest {
         Ok(())
     }
 
-    /// Returns the parsed resource types as canonical `ResourceType` values.
+    /// Returns the canonical `ResourceType` values for all registered resource types.
     pub fn parsed_resource_types(&self) -> Result<Vec<ResourceType>, KernelError> {
-        self.resource_types
+        Ok(self
+            .resource_types
             .iter()
-            .map(|rt| {
-                let (ns, name) = rt.split_once(':').ok_or_else(|| {
-                    KernelError::InvalidResourceType(format!("malformed resource type: {rt}"))
-                })?;
-                ResourceType::new(ns, name)
-            })
-            .collect()
+            .map(|rt| rt.resource_type.clone())
+            .collect())
     }
 
     /// Returns the parsed actions as canonical `ActionId` values.
@@ -312,17 +391,17 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
     type Error = ManifestError;
 
     /// Converts a wire `ServiceManifestV1` into the normalized internal
-    /// [`ServiceManifest`], validating schema-level invariants.
+    /// [`ServiceManifest`], preserving all accepted descriptor fields.
     fn try_from(wire: ServiceManifestV1) -> Result<Self, Self::Error> {
         // Validate manifest_version constant
         if wire.manifest_version != "o3k.io/service-manifest/v1" {
             return Err(ManifestError::InvalidField("manifest_version"));
         }
 
-        // Validate ownership_mode
+        // Validate ownership_mode — map exactly to accepted vocabulary
         let ownership = match wire.ownership_mode.as_str() {
             "o3k-implemented" => ServiceOwnership::O3kImplemented,
-            "external-controller" => ServiceOwnership::ExternalHosted,
+            "external-controller" => ServiceOwnership::ExternalController,
             _ => {
                 return Err(ManifestError::InvalidField(
                     "ownership_mode: expected 'o3k-implemented' or 'external-controller'",
@@ -330,23 +409,57 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
             }
         };
 
-        // Convert resource_type descriptors to simple strings for the registry
-        let resource_types: Vec<String> = wire
+        // Convert resource_type descriptors — preserve ALL fields
+        let resource_types: Vec<RegisteredResourceType> = wire
             .resource_types
-            .iter()
-            .map(|rt| rt.type_.clone())
-            .collect();
+            .into_iter()
+            .map(|rt| {
+                let (ns, name) = rt.type_.split_once(':').ok_or_else(|| {
+                    ManifestError::InvalidIdentifier(
+                        rt.type_.clone(),
+                        "resource type must be namespace:name".to_owned(),
+                    )
+                })?;
+                let resource_type = ResourceType::new(ns, name).map_err(|e| {
+                    ManifestError::InvalidIdentifier(rt.type_.clone(), e.to_string())
+                })?;
+                let scope = ResourceScope::parse(&rt.scope).unwrap_or(ResourceScope::Tenant);
+                Ok(RegisteredResourceType {
+                    resource_type,
+                    schema_version: rt.schema_version,
+                    collection: rt.collection,
+                    scope,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // Convert controller binding
-        let controller = Some(ControllerBinding {
+        // Convert controller declaration — manifest policy only, no runtime state
+        let controller = Some(ManifestController {
+            mode: wire.controller.mode,
             protocol: wire.controller.protocol,
-            endpoint: String::new(), // endpoint is set at runtime
-            identity_ref: wire.controller.service_principal.clone(),
+            protocol_version: wire.controller.protocol_version,
+            service_principal: wire.controller.service_principal,
         });
 
-        // Regions and availability domains: take the first if multiple
-        let region = wire.regions.into_iter().next();
-        let availability_domain = wire.availability_domains.into_iter().next();
+        // Convert dependencies — preserve kind/name/required
+        let dependencies: Vec<ServiceDependency> = wire
+            .dependencies
+            .into_iter()
+            .map(|d| {
+                let kind = match d.kind.as_str() {
+                    "service" => DependencyKind::Service,
+                    "resource_type" => DependencyKind::ResourceType,
+                    "action" => DependencyKind::Action,
+                    "capability" => DependencyKind::Capability,
+                    _ => DependencyKind::Service, // safe default for unrecognized
+                };
+                ServiceDependency {
+                    kind,
+                    name: d.name,
+                    required: d.required,
+                }
+            })
+            .collect();
 
         // Convert quota_dimensions
         let quota_dimensions: Vec<QuotaDimension> = wire
@@ -368,10 +481,10 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
             resource_types,
             actions: wire.actions,
             capabilities: wire.capabilities,
-            dependencies: wire.dependencies.into_iter().map(|d| d.name).collect(),
+            dependencies,
             quota_dimensions,
-            region,
-            availability_domain,
+            regions: wire.regions,
+            availability_domains: wire.availability_domains,
             controller,
             health: None,
         })
@@ -501,6 +614,8 @@ impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
         OpenStackCompatibilityProjection {
             service_id: wire.service_id,
             service_type: wire.service_type,
+            service_name: wire.service_name,
+            enabled: wire.enabled,
             api_surfaces: wire
                 .api_surfaces
                 .into_iter()
@@ -508,6 +623,9 @@ impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
                     name: s.name,
                     prefix: s.prefix,
                     version: s.version,
+                    min_microversion: s.min_microversion,
+                    max_microversion: s.max_microversion,
+                    enabled: s.enabled,
                 })
                 .collect(),
             endpoints: wire
@@ -517,36 +635,45 @@ impl From<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
                     interface: e.interface,
                     region: e.region,
                     url_template: e.url_template,
+                    enabled: e.enabled,
                 })
                 .collect(),
-            enabled: wire.enabled,
+            capabilities: wire.capabilities,
+            evidence_profile: wire.evidence_profile,
         }
     }
 }
 
-/// OpenStack Compatibility Projection v1.
+/// OpenStack Compatibility Projection v1 — expanded for accepted wire contract.
 ///
-/// This is the metadata that maps an O3K service to Keystone/OpenStack
-/// compatibility concepts. A native-only service (e.g. `database`) has no
-/// projection. An OpenStack-compatible service (e.g. `compute`, `network`,
-/// `volume`) has one projection per verified compatibility surface.
+/// Preserves all fields from openstack-compatibility-projection-v1.schema.json.
+/// A native-only service (e.g. `database`) has no projection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenStackCompatibilityProjection {
     /// O3K service_id this projection maps FROM.
     pub service_id: String,
     /// OpenStack service_type (e.g. `"compute"`, `"volumev3"`).
     pub service_type: String,
-    /// Exposed API surfaces.
-    #[serde(default)]
-    pub api_surfaces: Vec<OpenStackApiSurface>,
-    /// Catalog endpoint templates.
-    #[serde(default)]
-    pub endpoints: Vec<OpenStackEndpointTemplate>,
+    /// Optional OpenStack service name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
     /// Whether this projection is currently enabled/advertised.
     pub enabled: bool,
+    /// Exposed API surfaces (with microversion and enabled state).
+    #[serde(default)]
+    pub api_surfaces: Vec<OpenStackApiSurface>,
+    /// Catalog endpoint templates (with enabled state).
+    #[serde(default)]
+    pub endpoints: Vec<OpenStackEndpointTemplate>,
+    /// Optional capability tags.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Optional evidence profile reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_profile: Option<String>,
 }
 
-/// OpenStack API surface description.
+/// OpenStack API surface description (expanded for projection v1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenStackApiSurface {
     /// Human-readable name.
@@ -555,9 +682,17 @@ pub struct OpenStackApiSurface {
     pub prefix: String,
     /// Version string.
     pub version: String,
+    /// Minimum microversion, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_microversion: Option<String>,
+    /// Maximum microversion, if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_microversion: Option<String>,
+    /// Whether this surface is enabled.
+    pub enabled: bool,
 }
 
-/// OpenStack catalog endpoint template.
+/// OpenStack catalog endpoint template (expanded for projection v1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenStackEndpointTemplate {
     /// Interface label.
@@ -566,6 +701,8 @@ pub struct OpenStackEndpointTemplate {
     pub region: String,
     /// URL template.
     pub url_template: String,
+    /// Whether this endpoint is enabled.
+    pub enabled: bool,
 }
 
 /// Errors produced during manifest validation.
@@ -758,17 +895,14 @@ impl ManifestRegistry {
             .resource_types
             .iter()
             .map(|rt| {
-                let (ns, name) = rt.split_once(':').ok_or_else(|| {
-                    ManifestError::InvalidIdentifier(rt.clone(), "missing ':' separator".to_owned())
-                })?;
+                let ns = rt.resource_type.namespace();
                 if ns != manifest.namespace {
                     return Err(ManifestError::NamespaceMismatch {
-                        identifier: rt.clone(),
+                        identifier: rt.resource_type.to_string(),
                         expected: manifest.namespace.clone(),
                     });
                 }
-                ResourceType::new(ns, name)
-                    .map_err(|e| ManifestError::InvalidIdentifier(rt.clone(), e.to_string()))
+                Ok(rt.resource_type.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -940,10 +1074,30 @@ impl ManifestRegistry {
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
                 resource_types: vec![
-                    "identity:token".to_owned(),
-                    "identity:project".to_owned(),
-                    "identity:user".to_owned(),
-                    "identity:role".to_owned(),
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("identity", "token"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("identity", "project"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("identity", "user"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::System,
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("identity", "role"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::System,
+                    },
                 ],
                 // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
@@ -954,8 +1108,8 @@ impl ManifestRegistry {
                 capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
+                regions: vec![],
+                availability_domains: vec![],
                 controller: None,
                 health: None,
             },
@@ -965,7 +1119,12 @@ impl ManifestRegistry {
                 namespace: "image".to_owned(),
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
-                resource_types: vec!["image:image".to_owned()],
+                resource_types: vec![RegisteredResourceType {
+                    resource_type: ResourceType::new_unchecked("image", "image"),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: ResourceScope::Tenant,
+                }],
                 // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
                     "image:ListImages".to_owned(),
@@ -978,8 +1137,8 @@ impl ManifestRegistry {
                 capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
+                regions: vec![],
+                availability_domains: vec![],
                 controller: None,
                 health: None,
             },
@@ -990,9 +1149,24 @@ impl ManifestRegistry {
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
                 resource_types: vec![
-                    "compute:server".to_owned(),
-                    "compute:flavor".to_owned(),
-                    "compute:keypair".to_owned(),
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("compute", "server"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("compute", "flavor"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                    },
+                    RegisteredResourceType {
+                        resource_type: ResourceType::new_unchecked("compute", "keypair"),
+                        schema_version: "v1".to_owned(),
+                        collection: None,
+                        scope: ResourceScope::Tenant,
+                    },
                 ],
                 // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
@@ -1016,8 +1190,8 @@ impl ManifestRegistry {
                 capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
-                region: None,
-                availability_domain: None,
+                regions: vec![],
+                availability_domains: vec![],
                 controller: None,
                 health: None,
             },
@@ -1031,11 +1205,24 @@ impl ManifestRegistry {
         ];
 
         for m in core_manifests {
-            // Silently skip if already registered (idempotent seed).
-            if self.manifests.contains_key(&m.service_id)
-                || self.by_namespace.contains_key(&m.namespace)
+            // Idempotency check: exact equivalent already registered → skip.
+            if let Some(existing) = self.manifests.get(&m.service_id) {
+                if existing.namespace == m.namespace
+                    && existing.service_version == m.service_version
+                    && existing.resource_types == m.resource_types
+                    && existing.actions == m.actions
+                {
+                    // Same manifest content — idempotent skip.
+                    continue;
+                }
+                // Same service ID with incompatible content → fail.
+                return Err(ManifestError::DuplicateServiceId(m.service_id.clone()));
+            }
+            // Same namespace owned by a different service → fail.
+            if let Some(owner_id) = self.by_namespace.get(&m.namespace)
+                && owner_id != &m.service_id
             {
-                continue;
+                return Err(ManifestError::DuplicateNamespace(m.namespace.clone()));
             }
             // Fail closed: a built-in core manifest that cannot register
             // is an invariant violation that must propagate through startup.
@@ -1075,7 +1262,12 @@ mod tests {
             namespace: "database".to_owned(),
             service_version: "0.1.0".to_owned(),
             ownership: ServiceOwnership::O3kImplemented,
-            resource_types: vec!["database:instance".to_owned()],
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new("database", "instance").unwrap(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+            }],
             actions: vec![
                 "database:CreateInstance".to_owned(),
                 "database:ReadInstance".to_owned(),
@@ -1084,8 +1276,8 @@ mod tests {
             capabilities: vec![],
             dependencies: vec![],
             quota_dimensions: vec![],
-            region: None,
-            availability_domain: None,
+            regions: vec![],
+            availability_domains: vec![],
             controller: None,
             health: None,
         }
@@ -1110,7 +1302,12 @@ mod tests {
     #[test]
     fn manifest_rejects_resource_type_outside_namespace() {
         let mut m = valid_database_manifest();
-        m.resource_types = vec!["compute:server".to_owned()];
+        m.resource_types = vec![RegisteredResourceType {
+            resource_type: ResourceType::new("compute", "server").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }];
         assert_eq!(
             m.validate().unwrap_err(),
             ManifestError::NamespaceMismatch {
@@ -1209,10 +1406,13 @@ mod tests {
     #[test]
     fn register_rejects_duplicate_resource_type_in_one_manifest() {
         let mut m = valid_database_manifest();
-        m.resource_types = vec![
-            "database:instance".to_owned(),
-            "database:instance".to_owned(),
-        ];
+        let rt = RegisteredResourceType {
+            resource_type: ResourceType::new("database", "instance").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        };
+        m.resource_types = vec![rt.clone(), rt];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
         assert!(matches!(err, ManifestError::DuplicateResourceType(_)));
@@ -1233,7 +1433,12 @@ mod tests {
     #[test]
     fn register_rejects_resource_type_outside_manifest_namespace() {
         let mut m = valid_database_manifest();
-        m.resource_types = vec!["network:port".to_owned()];
+        m.resource_types = vec![RegisteredResourceType {
+            resource_type: ResourceType::new("network", "port").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
         assert!(matches!(err, ManifestError::NamespaceMismatch { .. }));
@@ -1256,7 +1461,12 @@ mod tests {
         let mut m2 = valid_database_manifest();
         m2.service_id = "database-example-2".to_owned();
         m2.namespace = "database-2".to_owned();
-        m2.resource_types = vec!["database-2:instance".to_owned()];
+        m2.resource_types = vec![RegisteredResourceType {
+            resource_type: ResourceType::new("database-2", "instance").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }];
         // Try to claim database:CreateInstance which is owned by database-example
         m2.actions = vec!["database:CreateInstance".to_owned()];
         let err = reg.register(m2).unwrap_err();
@@ -1291,7 +1501,12 @@ mod tests {
         let mut bad = valid_database_manifest();
         bad.service_id = "database-attempt".to_owned();
         bad.namespace = "database-attempt".to_owned();
-        bad.resource_types = vec!["database:instance".to_owned()]; // clashes
+        bad.resource_types = vec![RegisteredResourceType {
+            resource_type: ResourceType::new("database", "instance").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }]; // clashes
         let _ = reg.register(bad);
 
         // State must remain unchanged: only 1 service
@@ -1303,10 +1518,18 @@ mod tests {
     #[test]
     fn register_rejects_malformed_resource_type_format() {
         let mut m = valid_database_manifest();
-        m.resource_types = vec!["not-namespaced".to_owned()];
+        m.resource_types = vec![RegisteredResourceType {
+            resource_type: ResourceType::new("other", "resource").unwrap(),
+            schema_version: "v1".to_owned(),
+            collection: None,
+            scope: ResourceScope::Tenant,
+        }];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
-        assert!(matches!(err, ManifestError::InvalidIdentifier(_, _)));
+        assert!(
+            matches!(err, ManifestError::NamespaceMismatch { .. }),
+            "expected NamespaceMismatch for mismatched resource type namespace, got {err}"
+        );
     }
 
     #[test]
@@ -1376,13 +1599,18 @@ mod tests {
             namespace: "compute".to_owned(),
             service_version: "0.1.0".to_owned(),
             ownership: ServiceOwnership::O3kImplemented,
-            resource_types: vec!["compute:server".to_owned()],
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new("compute", "server").unwrap(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+            }],
             actions: vec!["compute:CreateServer".to_owned()],
             capabilities: vec![],
             dependencies: vec![],
             quota_dimensions: vec![],
-            region: None,
-            availability_domain: None,
+            regions: vec![],
+            availability_domains: vec![],
             controller: None,
             health: None,
         };
@@ -1417,22 +1645,32 @@ mod tests {
             namespace: "compute".to_owned(),
             service_version: "1.0.0".to_owned(),
             ownership: ServiceOwnership::O3kImplemented,
-            resource_types: vec!["compute:custom_resource".to_owned()],
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new("compute", "custom_resource").unwrap(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+            }],
             actions: vec!["compute:CustomAction".to_owned()],
             capabilities: vec![],
             dependencies: vec![],
             quota_dimensions: vec![],
-            region: None,
-            availability_domain: None,
+            regions: vec![],
+            availability_domains: vec![],
             controller: None,
             health: None,
         };
         reg.register(m).unwrap();
-        reg.seed_core().unwrap();
-        // compute namespace should still be held by custom-compute, not overridden
+        // seed_core must fail: compute namespace is already owned by
+        // a different service (custom-compute), and the built-in compute
+        // manifest is incompatible with the registered one.
+        let err = reg.seed_core().unwrap_err();
+        assert!(
+            matches!(err, ManifestError::DuplicateNamespace(_)),
+            "expected DuplicateNamespace since custom-compute owns 'compute' namespace, got {err}"
+        );
+        // custom-compute must still remain registered
         assert!(reg.get("custom-compute").is_some());
-        // core "compute" service should not be registered since namespace taken
-        assert!(reg.get("compute").is_none());
     }
 
     #[test]
@@ -1501,10 +1739,7 @@ mod tests {
 
         let json = serde_json::to_value(&wire).expect("serialization");
         if let Err(errors) = compiled.validate(&json) {
-            panic!(
-                "ServiceManifestV1 schema validation failed:\n{}",
-                errors
-            );
+            panic!("ServiceManifestV1 schema validation failed:\n{}", errors);
         }
     }
 
@@ -1610,10 +1845,7 @@ mod tests {
 
         let json = serde_json::to_value(&wire).expect("serialization");
         if let Err(errors) = compiled.validate(&json) {
-            panic!(
-                "NativeResourceV1 schema validation failed:\n{}",
-                errors
-            );
+            panic!("NativeResourceV1 schema validation failed:\n{}", errors);
         }
 
         // Verify api_version is exactly "o3k.io/v1"
@@ -1696,7 +1928,8 @@ mod tests {
         assert!(
             internal
                 .resource_types
-                .contains(&"database:instance".to_owned())
+                .iter()
+                .any(|rt| rt.resource_type.to_string() == "database:instance")
         );
         assert!(
             internal
@@ -1737,6 +1970,346 @@ mod tests {
         assert!(
             result.is_err(),
             "expected conversion failure for wrong manifest_version"
+        );
+    }
+
+    // ── Semantic-preservation tests ─────────────────────────────────────
+
+    #[test]
+    fn conversion_preserves_resource_schema_version() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "db-test".to_owned(),
+            namespace: "database".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "database:instance".to_owned(),
+                schema_version: "v2".to_owned(),
+                collection: Some("myinstances".to_owned()),
+                scope: "system".to_owned(),
+            }],
+            actions: vec!["database:CreateInstance".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        let rt = &internal.resource_types[0];
+        assert_eq!(rt.schema_version, "v2");
+        assert_eq!(rt.collection.as_deref(), Some("myinstances"));
+        assert_eq!(rt.scope, ResourceScope::System);
+    }
+
+    #[test]
+    fn conversion_preserves_mixed_resource_scope() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "scope-test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![
+                ResourceTypeDescriptor {
+                    type_: "test:tenant-res".to_owned(),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: "tenant".to_owned(),
+                },
+                ResourceTypeDescriptor {
+                    type_: "test:sys-res".to_owned(),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: "system".to_owned(),
+                },
+                ResourceTypeDescriptor {
+                    type_: "test:mixed-res".to_owned(),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: "mixed".to_owned(),
+                },
+            ],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        assert_eq!(internal.resource_types.len(), 3);
+        assert_eq!(internal.resource_types[0].scope, ResourceScope::Tenant);
+        assert_eq!(internal.resource_types[1].scope, ResourceScope::System);
+        assert_eq!(internal.resource_types[2].scope, ResourceScope::Mixed);
+    }
+
+    #[test]
+    fn conversion_preserves_dependency_semantics() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "dep-test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "test:resource".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![
+                DependencyDescriptor {
+                    kind: "service".to_owned(),
+                    name: "compute".to_owned(),
+                    required: true,
+                },
+                DependencyDescriptor {
+                    kind: "resource_type".to_owned(),
+                    name: "compute:server".to_owned(),
+                    required: false,
+                },
+                DependencyDescriptor {
+                    kind: "capability".to_owned(),
+                    name: "snapshots".to_owned(),
+                    required: true,
+                },
+            ],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        assert_eq!(internal.dependencies.len(), 3);
+        assert_eq!(internal.dependencies[0].kind, DependencyKind::Service);
+        assert_eq!(internal.dependencies[0].name, "compute");
+        assert!(internal.dependencies[0].required);
+        assert_eq!(internal.dependencies[1].kind, DependencyKind::ResourceType);
+        assert_eq!(internal.dependencies[1].name, "compute:server");
+        assert!(!internal.dependencies[1].required);
+        assert_eq!(internal.dependencies[2].kind, DependencyKind::Capability);
+        assert!(internal.dependencies[2].required);
+    }
+
+    #[test]
+    fn conversion_preserves_multiple_regions_and_availability_domains() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "region-test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "test:resource".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec!["region-a".to_owned(), "region-b".to_owned()],
+            availability_domains: vec![
+                "zone-1".to_owned(),
+                "zone-2".to_owned(),
+                "zone-3".to_owned(),
+            ],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        assert_eq!(internal.regions.len(), 2);
+        assert!(internal.regions.contains(&"region-a".to_owned()));
+        assert!(internal.regions.contains(&"region-b".to_owned()));
+        assert_eq!(internal.availability_domains.len(), 3);
+        assert!(internal.availability_domains.contains(&"zone-3".to_owned()));
+    }
+
+    #[test]
+    fn conversion_preserves_external_controller_semantics() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "ext-ctrl".to_owned(),
+            namespace: "ext".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "external-controller".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "ext:resource".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["ext:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "external".to_owned(),
+                protocol: "grpc".to_owned(),
+                protocol_version: "1.5".to_owned(),
+                service_principal: Some("ext-ctrl-svc@o3k.io".to_owned()),
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        assert_eq!(internal.ownership, ServiceOwnership::ExternalController);
+        let ctrl = internal.controller.expect("controller should be present");
+        assert_eq!(ctrl.mode, "external");
+        assert_eq!(ctrl.protocol, "grpc");
+        assert_eq!(ctrl.protocol_version, "1.5");
+        assert_eq!(
+            ctrl.service_principal.as_deref(),
+            Some("ext-ctrl-svc@o3k.io")
+        );
+    }
+
+    #[test]
+    fn conversion_preserves_quota_dimensions() {
+        let wire = ServiceManifestV1 {
+            manifest_version: "o3k.io/service-manifest/v1".to_owned(),
+            service_id: "quota-test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership_mode: "o3k-implemented".to_owned(),
+            resource_types: vec![ResourceTypeDescriptor {
+                type_: "test:resource".to_owned(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: "tenant".to_owned(),
+            }],
+            actions: vec!["test:Action".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![
+                QuotaDimensionDescriptor {
+                    key: "instances".to_owned(),
+                    unit: "count".to_owned(),
+                    scope: "tenant".to_owned(),
+                },
+                QuotaDimensionDescriptor {
+                    key: "storage_gb".to_owned(),
+                    unit: "gibibytes".to_owned(),
+                    scope: "tenant".to_owned(),
+                },
+            ],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: ControllerDescriptor {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            },
+        };
+
+        let internal: ServiceManifest = wire.try_into().expect("conversion");
+        assert_eq!(internal.quota_dimensions.len(), 2);
+        assert_eq!(internal.quota_dimensions[0].key, "instances");
+        assert_eq!(internal.quota_dimensions[1].key, "storage_gb");
+    }
+
+    #[test]
+    fn projection_preserves_all_wire_fields() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "compute".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: Some("OpenStack Compute Service".to_owned()),
+            enabled: true,
+            api_surfaces: vec![
+                OpenStackApiSurfaceV1 {
+                    name: "Nova API".to_owned(),
+                    prefix: "/v2.1".to_owned(),
+                    version: "2.1".to_owned(),
+                    min_microversion: Some("2.1".to_owned()),
+                    max_microversion: Some("2.99".to_owned()),
+                    enabled: true,
+                },
+                OpenStackApiSurfaceV1 {
+                    name: "Nova Legacy".to_owned(),
+                    prefix: "/v2".to_owned(),
+                    version: "2.0".to_owned(),
+                    min_microversion: None,
+                    max_microversion: None,
+                    enabled: false,
+                },
+            ],
+            endpoints: vec![
+                OpenStackEndpointV1 {
+                    interface: "public".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    url_template: "http://public:8774/v2.1/{project_id}".to_owned(),
+                    enabled: true,
+                },
+                OpenStackEndpointV1 {
+                    interface: "admin".to_owned(),
+                    region: "RegionOne".to_owned(),
+                    url_template: "http://admin:8774/v2.1/{project_id}".to_owned(),
+                    enabled: false,
+                },
+            ],
+            capabilities: vec!["compute:servers".to_owned(), "compute:flavors".to_owned()],
+            evidence_profile: Some("native-rust-testlab".to_owned()),
+        };
+
+        let internal: OpenStackCompatibilityProjection = wire.into();
+        assert_eq!(internal.service_id, "compute");
+        assert_eq!(internal.service_type, "compute");
+        assert_eq!(
+            internal.service_name.as_deref(),
+            Some("OpenStack Compute Service")
+        );
+        assert!(internal.enabled);
+        assert_eq!(internal.api_surfaces.len(), 2);
+        assert_eq!(
+            internal.api_surfaces[0].min_microversion.as_deref(),
+            Some("2.1")
+        );
+        assert_eq!(
+            internal.api_surfaces[0].max_microversion.as_deref(),
+            Some("2.99")
+        );
+        assert!(internal.api_surfaces[0].enabled);
+        assert!(!internal.api_surfaces[1].enabled);
+        assert_eq!(internal.endpoints.len(), 2);
+        assert!(internal.endpoints[0].enabled);
+        assert!(!internal.endpoints[1].enabled);
+        assert_eq!(internal.capabilities.len(), 2);
+        assert_eq!(
+            internal.evidence_profile.as_deref(),
+            Some("native-rust-testlab")
         );
     }
 }

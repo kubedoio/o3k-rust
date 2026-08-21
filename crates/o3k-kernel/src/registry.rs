@@ -120,6 +120,8 @@ pub enum ServiceOwnership {
     O3kImplemented,
     /// Service is hosted externally (e.g. standalone Cinder testbed).
     ExternalHosted,
+    /// Service uses an O3K-native external controller (P12+).
+    ExternalController,
 }
 
 impl fmt::Display for ServiceOwnership {
@@ -127,6 +129,7 @@ impl fmt::Display for ServiceOwnership {
         match self {
             Self::O3kImplemented => write!(f, "o3k-implemented"),
             Self::ExternalHosted => write!(f, "external-hosted"),
+            Self::ExternalController => write!(f, "external-controller"),
         }
     }
 }

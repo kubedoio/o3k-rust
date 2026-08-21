@@ -183,6 +183,8 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
 mod tests {
     use super::*;
     use o3k_kernel::ServiceManifest;
+    use o3k_kernel::manifest::{RegisteredResourceType, ResourceScope};
+    use o3k_kernel::resource::ResourceType;
 
     fn test_manifest_registry() -> ManifestRegistry {
         let mut reg = ManifestRegistry::new();
@@ -192,7 +194,20 @@ mod tests {
             namespace: "compute".to_owned(),
             service_version: "0.4.0".to_owned(),
             ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
-            resource_types: vec!["compute:server".to_owned(), "compute:flavor".to_owned()],
+            resource_types: vec![
+                RegisteredResourceType {
+                    resource_type: ResourceType::new_unchecked("compute", "server"),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: ResourceScope::Tenant,
+                },
+                RegisteredResourceType {
+                    resource_type: ResourceType::new_unchecked("compute", "flavor"),
+                    schema_version: "v1".to_owned(),
+                    collection: None,
+                    scope: ResourceScope::Tenant,
+                },
+            ],
             actions: vec![
                 "compute:ListServers".to_owned(),
                 "compute:CreateServer".to_owned(),
@@ -200,8 +215,8 @@ mod tests {
             capabilities: vec![],
             dependencies: vec![],
             quota_dimensions: vec![],
-            region: None,
-            availability_domain: None,
+            regions: vec![],
+            availability_domains: vec![],
             controller: None,
             health: None,
         };
