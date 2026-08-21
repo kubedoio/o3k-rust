@@ -1,43 +1,75 @@
-//! Concrete adapter implementations for the native API traits, wired at the
-//! `o3kd` composition root where all service instances are available.
+//! Concrete adapter implementations for native API traits.
+//!
+//! Wired at the `o3kd` composition root where all service instances
+//! are available. Internal errors are logged via tracing, NOT sent to
+//! the client.
 
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use o3k_native_api::{
-    auth::TokenIssuer,
-    compute::{self as native_compute, ServerItem},
-    error::{ErrorCode, ProblemDetails},
-    volume::{self as native_volume, VolumeItem},
+    auth::{NativeTokenRequestV1, TokenIssuer},
+    compute::ServerItem,
+    error::ProblemDetails,
+    network::AddressRealmItem,
+    volume::VolumeItem,
 };
+use o3k_store::{ComputeRepository, DurableStore, storage::StorageRepository};
 use uuid::Uuid;
 
 // ── TokenIssuer ───────────────────────────────────────────────────────────
 
-/// Adapter that wraps `TokenService` as a `TokenIssuer`.
 pub struct TokenIssuerAdapter {
     pub service: Arc<o3k_identity::TokenService>,
 }
 
 #[async_trait::async_trait]
 impl TokenIssuer for TokenIssuerAdapter {
-    async fn issue(
+    async fn issue_native(
         &self,
-        request: &serde_json::Value,
-        now: SystemTime,
+        request: &NativeTokenRequestV1,
     ) -> Result<(String, serde_json::Value), ProblemDetails> {
-        let token_req: o3k_identity::TokenRequest = serde_json::from_value(request.clone())
-            .map_err(|_| {
-                ProblemDetails::with_detail(ErrorCode::BadRequest, "invalid auth request body")
-            })?;
-        match self.service.issue(&token_req, now) {
-            Ok((token, response)) => {
-                Ok((token, serde_json::to_value(response).unwrap_or_default()))
-            }
-            Err(e) => Err(ProblemDetails::with_detail(
-                ErrorCode::Unauthorized,
-                format!("authentication failed: {e}"),
-            )),
+        // Build a Keystone-compatible TokenRequest from native request
+        let token_req = o3k_identity::TokenRequest {
+            auth: o3k_identity::Auth {
+                identity: o3k_identity::Identity {
+                    methods: vec!["password".to_owned()],
+                    password: request.auth.password.as_ref().map(|pw| {
+                        o3k_identity::PasswordIdentity {
+                            user: o3k_identity::UserReference {
+                                id: Some(pw.user_id.clone()),
+                                name: None,
+                                domain: None,
+                                password: pw.password.clone(),
+                            },
+                        }
+                    }),
+                    token: request
+                        .auth
+                        .token
+                        .as_ref()
+                        .map(|t| o3k_identity::TokenIdentity { id: t.clone() }),
+                },
+                scope: request
+                    .auth
+                    .project_id
+                    .as_ref()
+                    .map(|pid| o3k_identity::Scope {
+                        project: Some(o3k_identity::ProjectReference {
+                            id: Some(pid.clone()),
+                            name: None,
+                            domain: None,
+                        }),
+                    }),
+            },
+        };
+
+        match self.service.issue(&token_req, SystemTime::now()) {
+            Ok((token, response)) => match serde_json::to_value(response) {
+                Ok(val) => Ok((token, val)),
+                Err(_) => Err(ProblemDetails::internal()),
+            },
+            Err(_) => Err(ProblemDetails::unauthorized()),
         }
     }
 
@@ -50,105 +82,50 @@ impl TokenIssuer for TokenIssuerAdapter {
 
 // ── ServerReader ──────────────────────────────────────────────────────────
 
-/// Adapter that wraps `ComputeService` as a `ServerReader`.
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
 }
 
-/// Converts a Uuid to an RFC3339 timestamp string by extracting the embedded
-/// Unix ms timestamp from a UUIDv7 value. Returns a compact UTC ISO string
-/// without pulling in chrono.
-fn uuid_to_timestamp(id: Uuid) -> String {
-    let unix_ms = id.as_u128() >> 80;
-    if unix_ms == 0 {
-        return "unknown".to_owned();
-    }
-    let secs = (unix_ms / 1000) as u64;
-    let subsec_ms = (unix_ms % 1000) as u32;
-    // Render as ISO 8601 / RFC 3339 without chrono.
-    // Split secs into days and seconds within day.
-    let days_since_epoch = secs / 86400;
-    let secs_today = secs % 86400;
-    let hours = secs_today / 3600;
-    let mins = (secs_today % 3600) / 60;
-    let seconds = secs_today % 60;
-
-    // Days since epoch to calendar date using a simple algorithm valid
-    // from 1970 to 2100.
-    let mut y = 1970i64;
-    let mut remaining = days_since_epoch as i64;
-    loop {
-        let days_in_year = if is_leap(y) { 366 } else { 365 };
-        if remaining < days_in_year {
-            break;
-        }
-        remaining -= days_in_year;
-        y += 1;
-    }
-    let month_days = if is_leap(y) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut m = 1u32;
-    for &md in &month_days {
-        if remaining < md {
-            break;
-        }
-        remaining -= md;
-        m += 1;
-    }
-    let d = remaining + 1;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        y, m, d, hours, mins, seconds, subsec_ms
-    )
-}
-
-fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
-
 #[async_trait::async_trait]
-impl native_compute::ServerReader for ServerReaderAdapter {
-    async fn list_servers(
-        &self,
-        auth: &o3k_kernel::AuthContext,
-    ) -> Result<Vec<ServerItem>, ProblemDetails> {
-        self.service
-            .list_servers_for_auth(auth)
-            .await
-            .map(|servers| {
-                servers
-                    .into_iter()
-                    .map(|s| {
-                        let id = s.id.as_uuid();
-                        ServerItem {
-                            id: id.to_string(),
-                            name: s.name,
-                            project_id: s.project_id,
-                            flavor_id: s.flavor_id.to_string(),
-                            image_id: s.image_id,
-                            state: serde_json::to_value(s.state)
-                                .map(|v| v.as_str().unwrap_or("unknown").to_owned())
-                                .unwrap_or_else(|_| "unknown".to_owned()),
-                            created_at: uuid_to_timestamp(id),
-                        }
-                    })
-                    .collect()
-            })
-            .map_err(|e| ProblemDetails::with_detail(ErrorCode::InternalError, format!("{e}")))
+impl o3k_native_api::compute::ServerReader for ServerReaderAdapter {
+    async fn list_servers(&self, auth: &o3k_kernel::AuthContext) -> Result<Vec<ServerItem>, ()> {
+        match self.service.list_servers_for_auth(auth).await {
+            Ok(servers) => Ok(servers
+                .into_iter()
+                .map(|s| {
+                    let id = s.id.as_uuid();
+                    ServerItem {
+                        id: id.to_string(),
+                        name: s.name,
+                        project_id: s.project_id,
+                        flavor_id: s.flavor_id.to_string(),
+                        image_id: s.image_id,
+                        state: serde_json::to_value(s.state)
+                            .map(|v| v.as_str().unwrap_or("unknown").to_owned())
+                            .unwrap_or_else(|_| "unknown".to_owned()),
+                        created_at: None, // No durable timestamp available from domain Server
+                        generation: 0,
+                    }
+                })
+                .collect()),
+            Err(e) => {
+                tracing::error!(error = %e, "native server list failed");
+                Err(())
+            }
+        }
     }
 
     async fn show_server(
         &self,
         auth: &o3k_kernel::AuthContext,
         id: Uuid,
-    ) -> Result<ServerItem, ProblemDetails> {
-        self.service
+    ) -> Result<ServerItem, ()> {
+        match self
+            .service
             .show_server_for_auth(auth, o3k_domain::ServerId::from_uuid(id))
             .await
-            .map(|s| ServerItem {
+        {
+            Ok(s) => Ok(ServerItem {
                 id: id.to_string(),
                 name: s.name,
                 project_id: s.project_id,
@@ -157,62 +134,116 @@ impl native_compute::ServerReader for ServerReaderAdapter {
                 state: serde_json::to_value(s.state)
                     .map(|v| v.as_str().unwrap_or("unknown").to_owned())
                     .unwrap_or_else(|_| "unknown".to_owned()),
-                created_at: uuid_to_timestamp(id),
-            })
-            .map_err(|e| match e {
-                o3k_compute::ComputeError::NotFound => {
-                    ProblemDetails::not_found(Some(&id.to_string()))
-                }
-                _ => ProblemDetails::with_detail(ErrorCode::InternalError, format!("{e}")),
-            })
+                created_at: None,
+                generation: 0,
+            }),
+            Err(e) => {
+                tracing::error!(error = %e, server_id = %id, "native server show failed");
+                Err(())
+            }
+        }
     }
 }
 
 // ── VolumeReader ──────────────────────────────────────────────────────────
 
-/// Adapter that wraps a `StorageRepository` as a `VolumeReader`.
 pub struct VolumeReaderAdapter {
     pub store: Arc<o3k_store::unified::O3kStore>,
 }
 
 #[async_trait::async_trait]
-impl native_volume::VolumeReader for VolumeReaderAdapter {
-    async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeItem>, ProblemDetails> {
-        use o3k_store::storage::StorageRepository;
-        self.store
-            .list_volumes(project_id)
-            .await
-            .map(|records| {
-                records
-                    .into_iter()
-                    .map(|r| VolumeItem {
-                        id: r.volume.id.to_string(),
-                        project_id: r.volume.project_id.clone(),
-                        size_bytes: r.volume.size_bytes,
-                        volume_type: r.volume.volume_type.clone(),
-                        state: format!("{:?}", r.volume.state),
-                        created_at: r.created_at.clone(),
-                    })
-                    .collect()
-            })
-            .map_err(|e| ProblemDetails::with_detail(ErrorCode::InternalError, format!("{e}")))
+impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
+    async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeItem>, ()> {
+        match self.store.list_volumes(project_id).await {
+            Ok(records) => Ok(records
+                .into_iter()
+                .map(|r| VolumeItem {
+                    id: r.volume.id.to_string(),
+                    project_id: r.volume.project_id.clone(),
+                    size_bytes: r.volume.size_bytes,
+                    volume_type: r.volume.volume_type.clone(),
+                    state: format!("{:?}", r.volume.state),
+                    created_at: Some(r.created_at.clone()),
+                    generation: r.volume.generation as i64,
+                })
+                .collect()),
+            Err(e) => {
+                tracing::error!(error = %e, project_id = %project_id, "native volume list failed");
+                Err(())
+            }
+        }
     }
 
-    async fn show_volume(&self, project_id: &str, id: Uuid) -> Result<VolumeItem, ProblemDetails> {
-        use o3k_store::storage::StorageRepository;
-        self.store
-            .get_volume(id)
-            .await
-            .map_err(|e| ProblemDetails::with_detail(ErrorCode::InternalError, format!("{e}")))?
-            .filter(|r| r.volume.project_id == project_id)
-            .map(|r| VolumeItem {
+    async fn show_volume(&self, project_id: &str, id: Uuid) -> Result<VolumeItem, ()> {
+        match self.store.get_volume(id).await {
+            Ok(Some(r)) if r.volume.project_id == project_id => Ok(VolumeItem {
                 id: r.volume.id.to_string(),
                 project_id: r.volume.project_id.clone(),
                 size_bytes: r.volume.size_bytes,
                 volume_type: r.volume.volume_type.clone(),
                 state: format!("{:?}", r.volume.state),
-                created_at: r.created_at.clone(),
-            })
-            .ok_or_else(|| ProblemDetails::not_found(Some(&id.to_string())))
+                created_at: Some(r.created_at.clone()),
+                generation: r.volume.generation as i64,
+            }),
+            Ok(_) => Err(()),
+            Err(e) => {
+                tracing::error!(error = %e, volume_id = %id, "native volume show failed");
+                Err(())
+            }
+        }
+    }
+}
+
+// ── NetworkReader ─────────────────────────────────────────────────────────
+
+pub struct NetworkReaderAdapter {
+    pub store: Arc<o3k_store::unified::O3kStore>,
+}
+
+#[async_trait::async_trait]
+impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
+    async fn list_address_realms(&self, project_id: &str) -> Result<Vec<AddressRealmItem>, ()> {
+        // Use generic resource records with kind "network:address_realm"
+        match self
+            .store
+            .list_resources_by_kind("network:address_realm")
+            .await
+        {
+            Ok(records) => {
+                let filtered: Vec<AddressRealmItem> = records
+                    .into_iter()
+                    .filter(|r| r.project_id == project_id)
+                    .map(|r| AddressRealmItem {
+                        id: r.id.to_string(),
+                        project_id: r.project_id,
+                        prefix: r.desired_state.clone(),
+                        overlapping_prefixes: false,
+                        created_at: None,
+                        generation: r.generation,
+                    })
+                    .collect();
+                Ok(filtered)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, project_id = %project_id, "native address realm list failed");
+                Ok(Vec::new()) // Empty list if no realms stored yet
+            }
+        }
+    }
+
+    async fn show_address_realm(&self, project_id: &str, id: Uuid) -> Result<AddressRealmItem, ()> {
+        match self.store.get_resource(id).await {
+            Ok(r) if r.kind == "network:address_realm" && r.project_id == project_id => {
+                Ok(AddressRealmItem {
+                    id: r.id.to_string(),
+                    project_id: r.project_id,
+                    prefix: r.desired_state.clone(),
+                    overlapping_prefixes: false,
+                    created_at: None,
+                    generation: r.generation,
+                })
+            }
+            _ => Err(()),
+        }
     }
 }

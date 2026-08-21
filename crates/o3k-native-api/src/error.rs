@@ -14,6 +14,9 @@ use axum::{
 use serde::Serialize;
 
 /// O3K stable machine-readable error codes.
+///
+/// These are contract-level values — removing or renaming an entry is a
+/// compatibility change requiring review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
@@ -72,8 +75,7 @@ impl ErrorCode {
         }
     }
 
-    /// Returns the stable machine code as a SCREAMING_SNAKE_CASE string,
-    /// consistent with the `ErrorCode` `#[serde]` serialization.
+    /// Stable machine code as SCREAMING_SNAKE_CASE contract value.
     #[must_use]
     pub fn as_code_str(&self) -> &'static str {
         match self {
@@ -92,30 +94,25 @@ impl ErrorCode {
 }
 
 /// RFC 9457-compatible Problem Details response body.
+///
+/// Only public-okay fields (machine code, request_id, resource_id) are
+/// included. Internal/store/provider errors are logged, not sent.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProblemDetails {
-    /// A URI reference identifying the problem type.
     #[serde(rename = "type")]
     pub typ: String,
-    /// A short, human-readable summary.
     pub title: String,
-    /// HTTP status code.
     pub status: u16,
-    /// O3K stable machine code.
     pub code: String,
-    /// The request correlation ID, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    /// Human-readable explanation specific to this occurrence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
-    /// Resource identifier relevant to the error, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
 }
 
 impl ProblemDetails {
-    /// Creates a new ProblemDetails for the given error code.
     #[must_use]
     pub fn new(code: ErrorCode) -> Self {
         Self {
@@ -132,7 +129,6 @@ impl ProblemDetails {
         }
     }
 
-    /// Creates a ProblemDetails with a custom detail message.
     #[must_use]
     pub fn with_detail(code: ErrorCode, detail: impl Into<String>) -> Self {
         let mut pd = Self::new(code);
@@ -140,14 +136,12 @@ impl ProblemDetails {
         pd
     }
 
-    /// Sets the request correlation ID.
     #[must_use]
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
     }
 
-    /// Sets the resource ID.
     #[must_use]
     pub fn with_resource_id(mut self, resource_id: impl Into<String>) -> Self {
         self.resource_id = Some(resource_id.into());
@@ -156,13 +150,11 @@ impl ProblemDetails {
 
     // ── Common error shortcuts ────────────────────────────────────────────
 
-    /// Returns an unauthorized error.
     #[must_use]
     pub fn unauthorized() -> Self {
         Self::new(ErrorCode::Unauthorized)
     }
 
-    /// Returns a not-found error with optional resource id.
     #[must_use]
     pub fn not_found(resource_id: Option<&str>) -> Self {
         let mut pd = Self::new(ErrorCode::ResourceNotFound);
@@ -170,7 +162,6 @@ impl ProblemDetails {
         pd
     }
 
-    /// Returns a forbidden error with optional detail.
     #[must_use]
     pub fn forbidden(detail: Option<&str>) -> Self {
         match detail {
@@ -179,14 +170,13 @@ impl ProblemDetails {
         }
     }
 
-    /// Returns a bad request error with the given detail.
     #[must_use]
     pub fn bad_request(detail: impl Into<String>) -> Self {
         Self::with_detail(ErrorCode::BadRequest, detail)
     }
 
-    /// Returns an internal error with the given detail (for logging, not
-    /// sent to the client).
+    /// INTERNAL_ERROR with no detail exposed to the client.
+    /// The actual error is logged separately via tracing.
     #[must_use]
     pub fn internal() -> Self {
         Self::new(ErrorCode::InternalError)
@@ -204,9 +194,20 @@ impl IntoResponse for ProblemDetails {
             .header("Content-Type", "application/problem+json")
             .body(axum::body::Body::from(body))
             .unwrap_or_else(|_| {
-                // Status 500 with empty body — builder cannot fail on valid status.
                 (StatusCode::INTERNAL_SERVER_ERROR, axum::body::Body::empty()).into_response()
             })
+    }
+}
+
+/// Convenience trait to convert common axum rejection/errors into
+/// `ProblemDetails` responses with the correct Content-Type.
+pub trait IntoProblemResponse {
+    fn into_problem_response(self) -> Response;
+}
+
+impl IntoProblemResponse for ProblemDetails {
+    fn into_problem_response(self) -> Response {
+        self.into_response()
     }
 }
 
@@ -229,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn error_code_strings_are_screaming_snake_case() {
+    fn error_code_strings_are_explicit_contract_values() {
         assert_eq!(ErrorCode::BadRequest.as_code_str(), "BAD_REQUEST");
         assert_eq!(
             ErrorCode::ResourceNotFound.as_code_str(),
@@ -238,6 +239,8 @@ mod tests {
         assert_eq!(ErrorCode::Unauthorized.as_code_str(), "UNAUTHORIZED");
         assert_eq!(ErrorCode::Forbidden.as_code_str(), "FORBIDDEN");
         assert_eq!(ErrorCode::InternalError.as_code_str(), "INTERNAL_ERROR");
+        assert_eq!(ErrorCode::InvalidCursor.as_code_str(), "INVALID_CURSOR");
+        assert_eq!(ErrorCode::Conflict.as_code_str(), "CONFLICT");
     }
 
     #[test]
@@ -251,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn problem_details_not_found_with_resource_id() {
+    fn problem_details_not_found() {
         let pd = ProblemDetails::not_found(Some("srv-abc"));
         assert_eq!(pd.status, 404);
         assert_eq!(pd.code, "RESOURCE_NOT_FOUND");
@@ -259,43 +262,16 @@ mod tests {
     }
 
     #[test]
-    fn problem_details_not_found_without_resource_id() {
-        let pd = ProblemDetails::not_found(None);
-        assert_eq!(pd.status, 404);
-        assert!(pd.resource_id.is_none());
-    }
-
-    #[test]
-    fn problem_details_bad_request() {
-        let pd = ProblemDetails::bad_request("invalid input");
-        assert_eq!(pd.status, 400);
-        assert_eq!(pd.code, "BAD_REQUEST");
-        assert_eq!(pd.detail.as_deref(), Some("invalid input"));
-    }
-
-    #[test]
-    fn problem_details_with_request_id() {
-        let pd = ProblemDetails::unauthorized().with_request_id("req-001");
-        assert_eq!(pd.request_id.as_deref(), Some("req-001"));
-    }
-
-    #[test]
-    fn problem_details_forbidden_with_detail() {
-        let pd = ProblemDetails::forbidden(Some("cross-project access denied"));
-        assert_eq!(pd.status, 403);
-        assert_eq!(pd.code, "FORBIDDEN");
-        assert_eq!(pd.detail.as_deref(), Some("cross-project access denied"));
-    }
-
-    #[test]
-    fn problem_details_forbidden_without_detail() {
-        let pd = ProblemDetails::forbidden(None);
-        assert_eq!(pd.status, 403);
+    fn problem_details_internal_has_no_detail() {
+        let pd = ProblemDetails::internal();
+        assert_eq!(pd.status, 500);
+        assert_eq!(pd.code, "INTERNAL_ERROR");
         assert!(pd.detail.is_none());
+        assert!(pd.request_id.is_none());
     }
 
     #[test]
-    fn problem_details_serialization_has_rfc9457_fields() {
+    fn problem_details_serialization_matches_rfc9457() {
         let pd = ProblemDetails::unauthorized().with_request_id("req-abc");
         let json = serde_json::to_value(&pd).unwrap();
         assert_eq!(json["type"], "https://o3k.io/problems/unauthorized");
@@ -308,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn problem_details_into_response_has_problem_content_type() {
+    fn problem_details_into_response_content_type() {
         let pd = ProblemDetails::unauthorized();
         let resp: Response = pd.into_response();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

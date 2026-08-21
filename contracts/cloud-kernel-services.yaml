@@ -45,7 +45,7 @@ services:
     namespace: "network"
     ownership: "o3k-implemented"
     profiles: ["native-rust-testlab", "openstack-service-testbed"]
-    resource_types: ["network", "subnet", "port", "extension"]
+    resource_types: ["network", "subnet", "port", "extension", "address_realm"]
     actions:
       - "network:ListNetworks"
       - "network:CreateNetwork"
@@ -60,6 +60,8 @@ services:
       - "network:ReadPort"
       - "network:DeletePort"
       - "network:ListExtensions"
+      - "network:ListAddressRealms"
+      - "network:ReadAddressRealm"
     api_surfaces:
       - name: "OpenStack Network API"
         prefix: "/v2.0"
@@ -71,7 +73,7 @@ services:
     namespace: "compute"
     ownership: "o3k-implemented"
     profiles: ["native-rust-testlab", "openstack-service-testbed"]
-    resource_types: ["flavor", "keypair", "server", "volume_attachment"]
+    resource_types: ["flavor", "keypair", "server", "volume_attachment", "volume"]
     actions:
       - "compute:ListFlavors"
       - "compute:CreateFlavor"
@@ -93,6 +95,8 @@ services:
       - "volume:AttachVolume"
       - "volume:ReadVolumeAttachment"
       - "volume:DetachVolume"
+      - "volume:ListVolumes"
+      - "volume:ReadVolume"
     api_surfaces:
       - name: "OpenStack Compute API"
         prefix: "/v2.1"

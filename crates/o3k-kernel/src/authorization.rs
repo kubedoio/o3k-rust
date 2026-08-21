@@ -202,6 +202,24 @@ impl StaticAuthorizer {
             "volume_attachment",
             true,
         );
+        // P12.2 — Native volume read actions
+        reg("volume", "ListVolumes", "volume", "volume", true);
+        reg("volume", "ReadVolume", "volume", "volume", true);
+        // P12.2 — Native network read actions (canonical O3K resources)
+        reg(
+            "network",
+            "ListAddressRealms",
+            "network",
+            "address_realm",
+            true,
+        );
+        reg(
+            "network",
+            "ReadAddressRealm",
+            "network",
+            "address_realm",
+            true,
+        );
     }
 }
 

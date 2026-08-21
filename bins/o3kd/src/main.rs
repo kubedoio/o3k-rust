@@ -1110,7 +1110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .seed_core()
         .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
 
-    // Wire native API service adapters before `identity` is consumed by AppState.
+    // Wire native API service adapters.
     let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> =
         Some(std::sync::Arc::new(native_adapters::ServerReaderAdapter {
             service: std::sync::Arc::new(compute_service.clone()),
@@ -1118,10 +1118,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             as std::sync::Arc<dyn o3k_native_api::compute::ServerReader>);
     let volume_reader: Option<std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>> =
         Some(std::sync::Arc::new(native_adapters::VolumeReaderAdapter {
-            store: native_api_store,
+            store: native_api_store.clone(),
         })
             as std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>);
-    // TokenIssuer wraps the TokenService by reference (via Arc).
+    let network_reader: Option<std::sync::Arc<dyn o3k_native_api::network::NetworkReader>> =
+        Some(std::sync::Arc::new(native_adapters::NetworkReaderAdapter {
+            store: native_api_store.clone(),
+        })
+            as std::sync::Arc<dyn o3k_native_api::network::NetworkReader>);
     let token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
         identity.as_ref().map(|id_service| {
             std::sync::Arc::new(native_adapters::TokenIssuerAdapter {
@@ -1151,9 +1155,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     state = state.with_native_api(o3k_native_api::NativeApiState::new(
         Some(native_manifest_registry),
+        o3k_native_api::pagination::CursorConfig::default(),
         token_issuer,
         server_reader,
         volume_reader,
+        network_reader,
     ));
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);

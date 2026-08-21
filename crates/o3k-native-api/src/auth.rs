@@ -1,35 +1,57 @@
 //! Native API authentication and authorization helpers.
 //!
-//! Defines the `TokenIssuer` trait that the native identity endpoints
-//! consume, and the `require_auth` extractor for protected handlers.
-//! The concrete implementation is wired in `o3kd` main.rs where the
-//! actual `TokenService` is available.
+//! Defines:
+//! - `NativeTokenRequestV1` — native IAM request DTO
+//! - `TokenIssuer` trait — port for token issuance/validation
+//! - `BearerAuth` extractor — 401 on failure (never swallowed)
 
 use axum::{
     extract::{FromRef, FromRequestParts},
-    http::{StatusCode, request::Parts},
+    http::request::Parts,
+    response::{IntoResponse, Response},
 };
 use o3k_kernel::AuthContext;
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    NativeApiState,
-    error::{ErrorCode, ProblemDetails},
-};
+use crate::{NativeApiState, error::ProblemDetails};
+
+// ── Native Token Request DTO ──────────────────────────────────────────────
+
+/// Native token request (SPEC-0030 §5).
+///
+/// This is the canonical native IAM request, separate from the
+/// Keystone-compatible `TokenRequest`. Both map to the same O3K IAM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeTokenRequestV1 {
+    pub auth: NativeAuth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAuth {
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<NativePasswordCredentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativePasswordCredentials {
+    pub user_id: String,
+    pub password: String,
+}
 
 // ── TokenIssuer trait ──────────────────────────────────────────────────────
 
 /// Lightweight IAM port used by the native identity endpoints.
-///
-/// The concrete implementation wraps `o3k_identity::TokenService` and is
-/// wired at the composition root (`o3kd` main.rs).
 #[async_trait::async_trait]
 pub trait TokenIssuer: Send + Sync {
-    /// Issues a token from a Keystone-compatible JSON token request.
-    /// Returns `(subject_token_string, full_response_body)` on success.
-    async fn issue(
+    /// Issues a token from a native token request.
+    async fn issue_native(
         &self,
-        request: &serde_json::Value,
-        now: std::time::SystemTime,
+        request: &NativeTokenRequestV1,
     ) -> Result<(String, serde_json::Value), ProblemDetails>;
 
     /// Validates a bearer token and returns the canonical AuthContext.
@@ -41,8 +63,8 @@ pub trait TokenIssuer: Send + Sync {
 /// Extractor that validates a bearer token and provides the canonical
 /// `AuthContext`.
 ///
-/// Returns `ProblemDetails` directly (as an error response) when the
-/// token is missing or invalid.
+/// Missing/malformed/invalid bearer → 401 application/problem+json.
+/// Never returns 200 with authenticated=false.
 #[derive(Debug, Clone)]
 pub struct BearerAuth(pub AuthContext);
 
@@ -51,43 +73,33 @@ where
     S: Send + Sync,
     NativeApiState: FromRef<S>,
 {
-    type Rejection = (StatusCode, axum::Json<ProblemDetails>);
+    type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let api_state = NativeApiState::from_ref(state);
 
         let Some(ref issuer) = api_state.token_issuer else {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(ProblemDetails::with_detail(
-                    ErrorCode::NotAvailable,
-                    "IAM is not configured",
-                )),
-            ));
+            return Err(ProblemDetails::with_detail(
+                crate::error::ErrorCode::NotAvailable,
+                "IAM is not configured",
+            )
+            .into_response());
         };
 
         let header = parts
             .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    axum::Json(ProblemDetails::unauthorized()),
-                )
-            })?;
+            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
 
-        let token = header.strip_prefix("Bearer ").ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                axum::Json(ProblemDetails::unauthorized()),
-            )
-        })?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| ProblemDetails::unauthorized().into_response())?;
 
         let ctx = issuer
             .auth_context(token)
             .await
-            .map_err(|pd| (StatusCode::UNAUTHORIZED, axum::Json(pd)))?;
+            .map_err(|_| ProblemDetails::unauthorized().into_response())?;
 
         Ok(BearerAuth(ctx))
     }

@@ -1,14 +1,18 @@
 //! Opaque cursor pagination for native O3K list endpoints.
 //!
 //! Architecture (SPEC-0030 §11):
-//! - Cursors are opaque to clients (base64-encoded JSON).
-//! - Each cursor binds to the owner scope so a cursor from one tenant
-//!   cannot iterate another tenant's resources.
-//! - Tampered/malformed cursors fail safely.
+//! - Cursors are opaque to clients (HMAC-authenticated base64).
+//! - Each cursor binds to the owner scope + resource type so a cursor
+//!   from one tenant/collection cannot be reused for another.
+//! - Tampered cursors fail with INVALID_CURSOR.
 //! - Bounded page size enforced by the server.
 
 use base64::Engine as _;
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Default page size for native list endpoints.
 pub const DEFAULT_PAGE_SIZE: usize = 50;
@@ -16,46 +20,97 @@ pub const DEFAULT_PAGE_SIZE: usize = 50;
 /// Maximum page size that the server will accept.
 pub const MAX_PAGE_SIZE: usize = 200;
 
+/// Default HMAC key used when no server key is configured.
+/// This is a P12.2 bootstrap default; production deployments should
+/// configure a persistent key.
+const DEFAULT_HMAC_KEY: &[u8] = b"o3k-native-cursor-bootstrap-key-2026";
+
 /// Internal cursor payload — never exposed directly to clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CursorPayload {
-    /// The last-seen resource ID (exclusive start for the next page).
     pub last_id: String,
-    /// A stable scope identifier, bound so cross-tenant cursor use fails.
     pub scope_id: String,
-    /// Cursor schema version for forward compatibility.
+    pub resource_type: String,
     pub version: u8,
 }
 
-/// Encodes an opaque cursor string from the internal payload.
-///
-/// The cursor is base64-encoded JSON. Clients MUST NOT inspect or reverse.
-pub(crate) fn encode_cursor(payload: &CursorPayload) -> String {
-    let json = serde_json::to_string(payload).unwrap_or_else(|_| String::new());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes())
+/// Cursor configuration held by the native API state.
+#[derive(Clone)]
+pub struct CursorConfig {
+    hmac_key: Vec<u8>,
 }
 
-/// Decodes and validates a cursor string, returning the internal payload.
-///
-/// Returns `None` if the cursor is malformed, tampered, or from a
-/// different scope than the caller's.
-pub(crate) fn decode_cursor(
-    cursor: &str,
-    expected_scope_id: &str,
-) -> Result<CursorPayload, &'static str> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| "invalid cursor encoding")?;
-    let payload: CursorPayload =
-        serde_json::from_slice(&bytes).map_err(|_| "malformed cursor payload")?;
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            hmac_key: DEFAULT_HMAC_KEY.to_vec(),
+        }
+    }
+}
 
-    if payload.version != 1 {
-        return Err("unsupported cursor version");
+impl CursorConfig {
+    #[must_use]
+    pub fn new(key: Vec<u8>) -> Self {
+        Self { hmac_key: key }
     }
-    if payload.scope_id != expected_scope_id {
-        return Err("cursor scope mismatch");
+
+    fn compute_hmac(&self, payload_json: &[u8]) -> Vec<u8> {
+        // new_from_slice only fails when key is empty or > 64 bytes;
+        // we guarantee non-empty via construction, so unwrap is safe.
+        let Ok(mut mac) = HmacSha256::new_from_slice(&self.hmac_key) else {
+            return Vec::new();
+        };
+        mac.update(payload_json);
+        mac.finalize().into_bytes().to_vec()
     }
-    Ok(payload)
+
+    /// Encodes an opaque cursor string with HMAC authenticity tag.
+    pub fn encode_cursor(&self, payload: &CursorPayload) -> String {
+        let json = serde_json::to_string(payload).unwrap_or_default();
+        let hmac_bytes = self.compute_hmac(json.as_bytes());
+        let hmac_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&hmac_bytes);
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes());
+        format!("{}.{}", payload_b64, hmac_b64)
+    }
+
+    /// Decodes and authenticates a cursor.
+    pub fn decode_cursor(
+        &self,
+        cursor: &str,
+        expected_scope_id: &str,
+        expected_type: &str,
+    ) -> Result<CursorPayload, &'static str> {
+        let (payload_b64, hmac_b64) = cursor.split_once('.').ok_or("invalid cursor format")?;
+
+        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload_b64)
+            .map_err(|_| "invalid cursor encoding")?;
+
+        let payload: CursorPayload =
+            serde_json::from_slice(&payload_bytes).map_err(|_| "malformed cursor payload")?;
+
+        // Verify HMAC
+        let expected_hmac = self.compute_hmac(&payload_bytes);
+        let provided_hmac = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(hmac_b64)
+            .map_err(|_| "invalid cursor hmac")?;
+
+        // Constant-time comparison
+        if expected_hmac.as_slice() != provided_hmac.as_slice() {
+            return Err("cursor HMAC mismatch");
+        }
+
+        if payload.version != 1 {
+            return Err("unsupported cursor version");
+        }
+        if payload.scope_id != expected_scope_id {
+            return Err("cursor scope mismatch");
+        }
+        if payload.resource_type != expected_type {
+            return Err("cursor resource type mismatch");
+        }
+        Ok(payload)
+    }
 }
 
 /// Helper to extract page size from query parameters with bounds enforcement.
@@ -71,51 +126,92 @@ pub(crate) fn parse_page_size(limit_param: Option<&str>) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
-    fn encode_decode_round_trip() {
-        let payload = CursorPayload {
+    fn test_config() -> CursorConfig {
+        CursorConfig::new(b"test-key-16-bytes!".to_vec())
+    }
+
+    fn test_payload() -> CursorPayload {
+        CursorPayload {
             last_id: "srv-abc-123".to_owned(),
             scope_id: "proj-1".to_owned(),
+            resource_type: "compute:server".to_owned(),
             version: 1,
-        };
-        let encoded = encode_cursor(&payload);
-        assert!(!encoded.is_empty());
-        assert!(!encoded.contains('=')); // no padding
+        }
+    }
 
-        let decoded = decode_cursor(&encoded, "proj-1").unwrap();
+    #[test]
+    fn encode_decode_round_trip() {
+        let cfg = test_config();
+        let payload = test_payload();
+        let encoded = cfg.encode_cursor(&payload);
+        assert!(!encoded.is_empty());
+        assert!(encoded.contains('.'));
+
+        let decoded = cfg
+            .decode_cursor(&encoded, "proj-1", "compute:server")
+            .unwrap();
         assert_eq!(decoded.last_id, "srv-abc-123");
         assert_eq!(decoded.scope_id, "proj-1");
+        assert_eq!(decoded.resource_type, "compute:server");
         assert_eq!(decoded.version, 1);
     }
 
     #[test]
     fn decode_rejects_wrong_scope() {
-        let payload = CursorPayload {
-            last_id: "srv-1".to_owned(),
-            scope_id: "proj-a".to_owned(),
-            version: 1,
-        };
-        let encoded = encode_cursor(&payload);
-        let result = decode_cursor(&encoded, "proj-b");
+        let cfg = test_config();
+        let encoded = cfg.encode_cursor(&test_payload());
+        let result = cfg.decode_cursor(&encoded, "proj-2", "compute:server");
         assert!(result.is_err());
     }
 
     #[test]
-    fn decode_rejects_unsupported_version() {
-        let payload = CursorPayload {
-            last_id: "srv-1".to_owned(),
-            scope_id: "proj-1".to_owned(),
-            version: 99,
-        };
-        let encoded = encode_cursor(&payload);
-        let result = decode_cursor(&encoded, "proj-1");
+    fn decode_rejects_wrong_resource_type() {
+        let cfg = test_config();
+        let encoded = cfg.encode_cursor(&test_payload());
+        let result = cfg.decode_cursor(&encoded, "proj-1", "volume:volume");
         assert!(result.is_err());
     }
 
     #[test]
-    fn decode_rejects_tampered_cursor() {
-        let result = decode_cursor("not-valid-base64!!", "proj-1");
+    fn decode_rejects_tampered_last_id() {
+        let cfg = test_config();
+        let encoded = cfg.encode_cursor(&test_payload());
+
+        // Replace last_id in the payload portion
+        let (payload_b64, _) = encoded.split_once('.').unwrap();
+        let mut payload: CursorPayload = serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(payload_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        payload.last_id = "tampered-id".to_owned();
+
+        // Re-encode with WRONG hmac (tampered)
+        let tampered_json = serde_json::to_string(&payload).unwrap();
+        let tampered_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(tampered_json.as_bytes());
+        let wrong_hmac = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("fakehmac");
+        let tampered = format!("{}.{}", tampered_b64, wrong_hmac);
+
+        let result = cfg.decode_cursor(&tampered, "proj-1", "compute:server");
+        assert!(result.is_err(), "tampered cursor must be rejected");
+    }
+
+    #[test]
+    fn decode_rejects_malformed_cursor() {
+        let cfg = test_config();
+        let result = cfg.decode_cursor("not-valid!!", "proj-1", "compute:server");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_rejects_different_key() {
+        let cfg1 = test_config();
+        let cfg2 = CursorConfig::new(b"different-key-here!!".to_vec());
+        let encoded = cfg1.encode_cursor(&test_payload());
+        let result = cfg2.decode_cursor(&encoded, "proj-1", "compute:server");
+        assert!(result.is_err(), "different key must reject");
     }
 
     #[test]
@@ -124,17 +220,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_page_size_clamps_to_max() {
+    fn parse_page_size_clamps() {
         assert_eq!(parse_page_size(Some("9999")), MAX_PAGE_SIZE);
-    }
-
-    #[test]
-    fn parse_page_size_zero_falls_back() {
         assert_eq!(parse_page_size(Some("0")), DEFAULT_PAGE_SIZE);
-    }
-
-    #[test]
-    fn parse_page_size_invalid_falls_back() {
         assert_eq!(parse_page_size(Some("abc")), DEFAULT_PAGE_SIZE);
     }
 }

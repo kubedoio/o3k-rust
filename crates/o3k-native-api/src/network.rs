@@ -1,7 +1,11 @@
-//! Native volume:volume read endpoints.
+//! Native network resource read endpoints.
 //!
-//! Uses the same canonical `StorageRepository` as the Cinder-compatible
-//! adapter, but returns the accepted `NativeResourceV1` wire envelope.
+//! Exposes canonical O3K Network resources (`network:address_realm`)
+//! through the accepted `NativeResourceV1` wire envelope.
+//!
+//! The canonical address realm read path uses the generic store resource
+//! table. O3K AddressRealm concepts (ADR-0168/ADR-0171) are the native
+//! network model — not Neutron network/subnet/port compatibility shapes.
 
 use axum::{
     Json,
@@ -19,25 +23,24 @@ use crate::{
     pagination::{CursorPayload, parse_page_size},
 };
 
-// ── VolumeReader trait ────────────────────────────────────────────────────
+// ── NetworkReader trait ───────────────────────────────────────────────────
 
-/// Lightweight read port for volume:volume resources.
+/// Lightweight read port for canonical O3K network resources.
 #[async_trait::async_trait]
-pub trait VolumeReader: Send + Sync {
-    /// List volumes in the given project scope.
-    async fn list_volumes(&self, project_id: &str) -> Result<Vec<VolumeItem>, ()>;
-    /// Show a single volume by ID.
-    async fn show_volume(&self, project_id: &str, id: Uuid) -> Result<VolumeItem, ()>;
+pub trait NetworkReader: Send + Sync {
+    /// List address realms visible to the given project.
+    async fn list_address_realms(&self, project_id: &str) -> Result<Vec<AddressRealmItem>, ()>;
+    /// Show a single address realm by ID.
+    async fn show_address_realm(&self, project_id: &str, id: Uuid) -> Result<AddressRealmItem, ()>;
 }
 
-/// Canonical native volume representation from domain state.
+/// Canonical native address realm representation.
 #[derive(Debug, Clone, Serialize)]
-pub struct VolumeItem {
+pub struct AddressRealmItem {
     pub id: String,
     pub project_id: String,
-    pub size_bytes: u64,
-    pub volume_type: String,
-    pub state: String,
+    pub prefix: String,
+    pub overlapping_prefixes: bool,
     pub created_at: Option<String>,
     pub generation: i64,
 }
@@ -50,49 +53,49 @@ pub struct ListQuery {
     pub cursor: Option<String>,
 }
 
-// ── List response ─────────────────────────────────────────────────────────
+// ── Responses ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
-pub struct VolumeListResponse {
+pub struct AddressRealmListResponse {
     pub items: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
 
-fn volume_to_native_v1(vol: &VolumeItem) -> serde_json::Value {
+fn realm_to_native_v1(realm: &AddressRealmItem) -> serde_json::Value {
     serde_json::json!({
         "api_version": "o3k.io/v1",
-        "kind": "volume:volume",
+        "kind": "network:address_realm",
         "metadata": {
-            "id": vol.id,
-            "owner_scope": vol.project_id,
-            "generation": vol.generation,
-            "created_at": vol.created_at,
+            "id": realm.id,
+            "owner_scope": realm.project_id,
+            "generation": realm.generation,
+            "created_at": realm.created_at,
         },
         "spec": {
-            "size_bytes": vol.size_bytes,
-            "volume_type": vol.volume_type,
+            "prefix": realm.prefix,
+            "overlapping_prefixes": realm.overlapping_prefixes,
         },
         "status": {
-            "state": vol.state,
+            "state": "active",
         }
     })
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────
 
-const RESOURCE_TYPE: &str = "volume:volume";
+const RESOURCE_TYPE: &str = "network:address_realm";
 
-/// GET /o3k/v1/volume/volumes
-pub async fn list_volumes(
+/// GET /o3k/v1/network/address-realms
+pub async fn list_address_realms(
     auth: BearerAuth,
     State(state): State<NativeApiState>,
     Query(query): Query<ListQuery>,
 ) -> Response {
-    let Some(ref reader) = state.volume_reader else {
+    let Some(ref reader) = state.network_reader else {
         return ProblemDetails::with_detail(
             ErrorCode::NotAvailable,
-            "volume service is not configured",
+            "network service is not configured",
         )
         .into_response();
     };
@@ -115,33 +118,29 @@ pub async fn list_volumes(
         .into_response();
     }
 
-    match reader.list_volumes(&project_id).await {
-        Ok(volumes) => {
-            let total = volumes.len();
-            let last_item_id_full = volumes.last().map(|v| v.id.clone());
-            let paged: Vec<VolumeItem> = if let Some(ref cursor) = query.cursor {
+    match reader.list_address_realms(&project_id).await {
+        Ok(realms) => {
+            let total = realms.len();
+            let last_item_id_full = realms.last().map(|r| r.id.clone());
+            let paged: Vec<AddressRealmItem> = if let Some(ref cursor) = query.cursor {
                 if let Ok(payload) = cursor_cfg.decode_cursor(cursor, &project_id, RESOURCE_TYPE) {
-                    let start_idx = volumes
+                    let start_idx = realms
                         .iter()
-                        .position(|v| v.id == payload.last_id)
+                        .position(|r| r.id == payload.last_id)
                         .map(|i| i + 1)
                         .unwrap_or(total);
-                    volumes
-                        .into_iter()
-                        .skip(start_idx)
-                        .take(page_size)
-                        .collect()
+                    realms.into_iter().skip(start_idx).take(page_size).collect()
                 } else {
-                    volumes.into_iter().take(page_size).collect()
+                    realms.into_iter().take(page_size).collect()
                 }
             } else {
-                volumes.into_iter().take(page_size).collect()
+                realms.into_iter().take(page_size).collect()
             };
 
-            let items: Vec<serde_json::Value> = paged.iter().map(volume_to_native_v1).collect();
+            let items: Vec<serde_json::Value> = paged.iter().map(realm_to_native_v1).collect();
 
             let next_cursor = if paged.len() == page_size && total > page_size {
-                let is_last = paged.last().map(|v| v.id.as_str()) == last_item_id_full.as_deref();
+                let is_last = paged.last().map(|r| r.id.as_str()) == last_item_id_full.as_deref();
                 if !is_last {
                     paged.last().map(|last| {
                         cursor_cfg.encode_cursor(&CursorPayload {
@@ -160,7 +159,7 @@ pub async fn list_volumes(
 
             (
                 StatusCode::OK,
-                Json(VolumeListResponse { items, next_cursor }),
+                Json(AddressRealmListResponse { items, next_cursor }),
             )
                 .into_response()
         }
@@ -168,16 +167,16 @@ pub async fn list_volumes(
     }
 }
 
-/// GET /o3k/v1/volume/volumes/{id}
-pub async fn show_volume(
+/// GET /o3k/v1/network/address-realms/{id}
+pub async fn show_address_realm(
     auth: BearerAuth,
     State(state): State<NativeApiState>,
     Path(id): Path<Uuid>,
 ) -> Response {
-    let Some(ref reader) = state.volume_reader else {
+    let Some(ref reader) = state.network_reader else {
         return ProblemDetails::with_detail(
             ErrorCode::NotAvailable,
-            "volume service is not configured",
+            "network service is not configured",
         )
         .into_response();
     };
@@ -185,9 +184,9 @@ pub async fn show_volume(
     let ctx = auth.0;
     let project_id = ctx.effective_scope().id().to_string();
 
-    match reader.show_volume(&project_id, id).await {
-        Ok(volume) => {
-            let envelope = volume_to_native_v1(&volume);
+    match reader.show_address_realm(&project_id, id).await {
+        Ok(realm) => {
+            let envelope = realm_to_native_v1(&realm);
             (StatusCode::OK, Json(envelope)).into_response()
         }
         Err(_) => ProblemDetails::not_found(Some(&id.to_string())).into_response(),
