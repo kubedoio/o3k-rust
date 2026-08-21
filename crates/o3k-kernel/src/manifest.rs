@@ -927,7 +927,9 @@ impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
             return Err(ManifestError::InvalidField("service_type (1..128)"));
         }
         // service_name <=128
-        if let Some(ref name) = wire.service_name && name.len() > 128 {
+        if let Some(ref name) = wire.service_name
+            && name.len() > 128
+        {
             return Err(ManifestError::InvalidField("service_name (max 128)"));
         }
         // api_surfaces <=32
@@ -952,12 +954,16 @@ impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
                 ));
             }
             // min/max microversion <=32
-            if let Some(ref mv) = api.min_microversion && mv.len() > 32 {
+            if let Some(ref mv) = api.min_microversion
+                && mv.len() > 32
+            {
                 return Err(ManifestError::InvalidField(
                     "api_surfaces[].min_microversion (max 32)",
                 ));
             }
-            if let Some(ref mv) = api.max_microversion && mv.len() > 32 {
+            if let Some(ref mv) = api.max_microversion
+                && mv.len() > 32
+            {
                 return Err(ManifestError::InvalidField(
                     "api_surfaces[].max_microversion (max 32)",
                 ));
@@ -1001,7 +1007,9 @@ impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
             }
         }
         // evidence_profile <=128
-        if let Some(ref ep) = wire.evidence_profile && ep.len() > 128 {
+        if let Some(ref ep) = wire.evidence_profile
+            && ep.len() > 128
+        {
             return Err(ManifestError::InvalidField("evidence_profile (max 128)"));
         }
         Ok(OpenStackCompatibilityProjection {
