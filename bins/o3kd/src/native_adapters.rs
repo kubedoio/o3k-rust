@@ -376,12 +376,22 @@ mod network_reader_tests {
                 None,
             )),
             o3k_kernel::OwnershipScope::project(
-                o3k_kernel::ScopeId::new_unchecked("project-a"), None, None,
+                o3k_kernel::ScopeId::new_unchecked("project-a"),
+                None,
+                None,
             ),
-            vec!["member".into()], 1, 2, "audit", "request", None,
+            vec!["member".into()],
+            1,
+            2,
+            "audit",
+            "request",
+            None,
         );
         assert!(!authorize_collection(
-            &auth, "network:ListAddressRealms", "network", "address_realm",
+            &auth,
+            "network:ListAddressRealms",
+            "network",
+            "address_realm",
             &o3k_kernel::StaticAuthorizer::empty(),
         ));
     }
@@ -395,15 +405,27 @@ mod volume_reader_tests {
     fn denied_canonical_volume_action_blocks_matching_scope() {
         let auth = o3k_kernel::AuthContext::new(
             o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
-                o3k_kernel::PrincipalId::new_unchecked("user-b"), "user-b", None,
+                o3k_kernel::PrincipalId::new_unchecked("user-b"),
+                "user-b",
+                None,
             )),
             o3k_kernel::OwnershipScope::project(
-                o3k_kernel::ScopeId::new_unchecked("project-b"), None, None,
+                o3k_kernel::ScopeId::new_unchecked("project-b"),
+                None,
+                None,
             ),
-            vec!["member".into()], 1, 2, "audit", "request", None,
+            vec!["member".into()],
+            1,
+            2,
+            "audit",
+            "request",
+            None,
         );
         assert!(!authorize_collection(
-            &auth, "volume:ListVolumes", "volume", "volume",
+            &auth,
+            "volume:ListVolumes",
+            "volume",
+            "volume",
             &o3k_kernel::StaticAuthorizer::empty(),
         ));
     }
