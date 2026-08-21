@@ -349,7 +349,7 @@ pub struct NetworkReaderAdapter {
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod network_reader_tests {
-    use super::network_intent_state_wire;
+    use super::{authorize_collection, network_intent_state_wire};
 
     #[test]
     fn network_intent_state_is_serialized_from_canonical_state() {
@@ -365,6 +365,47 @@ mod network_reader_tests {
             network_intent_state_wire(o3k_domain::NetworkIntentState::Error),
             "error"
         );
+    }
+
+    #[test]
+    fn denied_canonical_network_action_blocks_matching_scope() {
+        let auth = o3k_kernel::AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("user-a"),
+                "user-a",
+                None,
+            )),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked("project-a"), None, None,
+            ),
+            vec!["member".into()], 1, 2, "audit", "request", None,
+        );
+        assert!(!authorize_collection(
+            &auth, "network:ListAddressRealms", "network", "address_realm",
+            &o3k_kernel::StaticAuthorizer::empty(),
+        ));
+    }
+}
+
+#[cfg(test)]
+mod volume_reader_tests {
+    use super::authorize_collection;
+
+    #[test]
+    fn denied_canonical_volume_action_blocks_matching_scope() {
+        let auth = o3k_kernel::AuthContext::new(
+            o3k_kernel::Principal::User(o3k_kernel::UserPrincipal::new(
+                o3k_kernel::PrincipalId::new_unchecked("user-b"), "user-b", None,
+            )),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked("project-b"), None, None,
+            ),
+            vec!["member".into()], 1, 2, "audit", "request", None,
+        );
+        assert!(!authorize_collection(
+            &auth, "volume:ListVolumes", "volume", "volume",
+            &o3k_kernel::StaticAuthorizer::empty(),
+        ));
     }
 }
 
