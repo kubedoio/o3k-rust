@@ -8,7 +8,7 @@ Superseded-by: SPEC-0029
 
 Related decision: [ADR-0170](../adr/ADR-0170-namespaced-routed-edge-fabric.md)
 Related issue: [#701](https://github.com/kubedoio/o3k-rust/issues/701)
-Related contract: [P11 edge fabric](../../contracts/p11-edge-fabric.md)
+Related contract: [P11 edge fabric](../../contracts/edge-fabric-v1.md)
 
 Related normative sources:
 

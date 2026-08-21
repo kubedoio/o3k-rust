@@ -22,8 +22,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod execution;
+pub mod fabric;
 pub mod linux_fabric;
-pub mod p11;
 pub mod policy;
 pub mod public;
 pub use policy::{PolicyEndpoint, PolicyNetworkError, StatefulPolicyProvider};
@@ -34,8 +34,8 @@ pub use execution::{
     NetworkPlanDispatcher, NetworkPlanExecutor, NetworkPlanRealizer, NetworkPlanStatus,
     PlanAdmission, journal_path,
 };
-pub use linux_fabric::{LinuxP11Config, LinuxP11Error, LinuxP11FabricBackend};
-pub use p11::{InMemoryP11FabricBackend, P11FabricBackend, P11FabricError, P11FabricRealizer};
+pub use fabric::{FabricBackend, FabricError, FabricRealizer, InMemoryFabricBackend};
+pub use linux_fabric::{LinuxFabricBackend, LinuxFabricConfig, LinuxFabricError};
 pub use public::{
     PublicAddressAllocator, PublicAddressBinding, PublicAddressError, PublicAddressPool,
     PublicAddressRealizer,
@@ -239,7 +239,7 @@ mod p9_plan_tests {
     }
 
     #[test]
-    fn p11_fabric_payload_is_fingerprinted_and_admission_validated() {
+    fn fabric_payload_is_fingerprinted_and_admission_validated() {
         let base = compile_node_network_plan(
             &intent(),
             "node-a",
@@ -306,17 +306,14 @@ mod p9_plan_tests {
                 fabric_generation: 6,
             }],
         };
-        let plan = base
-            .clone()
-            .with_p11_fabric(fabric)
-            .expect("valid P11 plan");
+        let plan = base.clone().with_fabric(fabric).expect("valid P11 plan");
         assert_ne!(plan.fingerprint_sha256, base.fingerprint_sha256);
-        assert_eq!(plan.validate_p11_fabric(), Ok(()));
+        assert_eq!(plan.validate_fabric(), Ok(()));
 
         let mut invalid = plan.clone();
-        invalid.p11_fabric.as_mut().expect("fabric").routes[0].destination = prefix("10.0.0.0", 24);
+        invalid.fabric.as_mut().expect("fabric").routes[0].destination = prefix("10.0.0.0", 24);
         assert_eq!(
-            invalid.validate_p11_fabric(),
+            invalid.validate_fabric(),
             Err(NetworkPlanError::InvalidFabricPlan)
         );
     }
@@ -3680,7 +3677,7 @@ pub struct NodeNetworkPlan {
     /// Optional accepted P11 semantic fabric plan. `None` preserves the P9
     /// wire shape and legacy fingerprint for non-P11 plans.
     #[serde(default)]
-    pub p11_fabric: Option<NamespacedRoutedFabricPlan>,
+    pub fabric: Option<NamespacedRoutedFabricPlan>,
     pub fingerprint_sha256: String,
 }
 
@@ -3715,20 +3712,20 @@ pub const NODE_NETWORK_PLAN_SCHEMA_VERSION: u16 = 1;
 impl NodeNetworkPlan {
     /// Attaches accepted P11 semantic state and recomputes the transport
     /// fingerprint. Provider-native state is intentionally not accepted here.
-    pub fn with_p11_fabric(
+    pub fn with_fabric(
         mut self,
         fabric: NamespacedRoutedFabricPlan,
     ) -> Result<Self, NetworkPlanError> {
-        self.p11_fabric = Some(fabric);
-        self.validate_p11_fabric()?;
+        self.fabric = Some(fabric);
+        self.validate_fabric()?;
         self.fingerprint_sha256 = canonical_plan_fingerprint(&self)?;
         Ok(self)
     }
 
     /// Validates the semantic P11 payload before admission to a node-local
     /// executor. A valid fingerprint alone is insufficient authorization.
-    pub fn validate_p11_fabric(&self) -> Result<(), NetworkPlanError> {
-        let Some(fabric) = &self.p11_fabric else {
+    pub fn validate_fabric(&self) -> Result<(), NetworkPlanError> {
+        let Some(fabric) = &self.fabric else {
             return Ok(());
         };
         if fabric.local_host != self.node_id
@@ -4171,7 +4168,7 @@ pub fn compile_node_network_plan(
         deadline_unix_ms,
         resource_generations: generations,
         intents,
-        p11_fabric: None,
+        fabric: None,
         fingerprint_sha256,
     })
 }
@@ -4200,7 +4197,7 @@ pub fn validate_plan_replay(
 pub fn canonical_plan_fingerprint(plan: &NodeNetworkPlan) -> Result<String, NetworkPlanError> {
     let mut intents = plan.intents.clone();
     intents.sort_by_key(|value| serde_json::to_string(value).unwrap_or_default());
-    let bytes = if let Some(fabric) = &plan.p11_fabric {
+    let bytes = if let Some(fabric) = &plan.fabric {
         serde_json::to_vec(&(
             &plan.plan_id,
             &plan.node_id,

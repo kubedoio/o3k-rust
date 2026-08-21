@@ -9,7 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LAB_ROOT="/var/lib/o3k-p11-lab"
+LAB_ROOT="/var/lib/o3k-fabric-lab"
 EVIDENCE_DIR="${LAB_ROOT}/evidence"
 DB_PATH="/var/lib/o3k/controller/o3k.sqlite"
 SSH_KEY="/root/.ssh/id_ed25519"

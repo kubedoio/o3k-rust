@@ -7,7 +7,7 @@ Human-approval: requester acceptance recorded in issue #705 comment 5349129789
 
 Related decision: [ADR-0171](../adr/ADR-0171-addressrealm-encapsulated-edge-fabric.md)
 Related issue: [#705](https://github.com/kubedoio/o3k-rust/issues/705)
-Related contract: [P11 realm-overlay fabric](../../contracts/p11-realm-overlay-fabric.md)
+Related contract: [P11 realm-overlay fabric](../../contracts/edge-fabric-realm-overlay.md)
 
 Related normative sources:
 

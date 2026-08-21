@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-# p11-provision-nested-hosts.sh
+# edge-fabric-provision-hosts.sh
 # Create three nested KVM/libvirt compute hosts for O3K P11 real multi-host gate.
 # Re-runnable: destroys and rebuilds the three VMs on each invocation.
 
-BASE_DIR="/var/lib/o3k-p11-lab"
+BASE_DIR="/var/lib/o3k-fabric-lab"
 BACKING_SRC="/root/noble-server-cloudimg-amd64.img"
 BACKING="$BASE_DIR/noble-server-cloudimg-amd64.img"
 SSH_KEY="/root/.ssh/id_ed25519"

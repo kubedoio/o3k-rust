@@ -1,16 +1,16 @@
 use super::*;
 
-impl super::LinuxP11FabricBackend {
+impl super::LinuxFabricBackend {
     pub(crate) fn ensure_fabric(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         if let Some(fabric) = &self.state.fabric {
             if plan.local_fabric_generation != fabric.fabric_generation {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
             if plan.local_fabric_transport_ip != fabric.fabric_transport_ip {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
             let (wg_exists, _) = self
                 .command
@@ -27,7 +27,7 @@ impl super::LinuxP11FabricBackend {
                         &self.config.fabric_interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if !wg_exists {
                 let _ = self.command.run("ip", &["link", "del", "o3k-u"]);
                 let _ = self
@@ -45,9 +45,9 @@ impl super::LinuxP11FabricBackend {
                 "ip",
                 &["netns", "exec", &self.config.fabric_namespace, "true"],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if ns_exists {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         let (if_exists, _) = self
             .command
@@ -55,9 +55,9 @@ impl super::LinuxP11FabricBackend {
                 "ip",
                 &["link", "show", "dev", &self.config.fabric_interface],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if if_exists {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         // The key file is provisioned host identity material (like the TLS
         // keys under /opt/o3k/pki): the controller generates the keypair so
@@ -75,7 +75,7 @@ impl super::LinuxP11FabricBackend {
         if !self
             .command
             .run("ip", &["netns", "add", &self.config.fabric_namespace])
-            .map_err(LinuxP11Error::Storage)?
+            .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -88,7 +88,7 @@ impl super::LinuxP11FabricBackend {
                         "wireguard",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -101,9 +101,9 @@ impl super::LinuxP11FabricBackend {
                         &self.config.fabric_namespace,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let transport_ip = format!("{}/32", plan.local_fabric_transport_ip);
         if !self
@@ -120,12 +120,12 @@ impl super::LinuxP11FabricBackend {
                     "private-key",
                     private_key_path
                         .to_str()
-                        .ok_or(LinuxP11Error::CorruptState)?,
+                        .ok_or(LinuxFabricError::CorruptState)?,
                     "listen-port",
                     &self.config.wireguard_port.to_string(),
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?
+            .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -141,7 +141,7 @@ impl super::LinuxP11FabricBackend {
                         "up",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -158,9 +158,9 @@ impl super::LinuxP11FabricBackend {
                         &self.config.fabric_interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         // Veth pair to connect fabric namespace to the host default namespace
         // so WireGuard encrypted traffic can traverse to/from the underlay.
@@ -173,7 +173,7 @@ impl super::LinuxP11FabricBackend {
                     "link", "add", "o3k-u", "type", "veth", "peer", "name", "o3k-v",
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?
+            .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -186,11 +186,11 @@ impl super::LinuxP11FabricBackend {
                         &self.config.fabric_namespace,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run("ip", &["link", "set", "o3k-u", "up"])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -206,7 +206,7 @@ impl super::LinuxP11FabricBackend {
                         "up",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -223,14 +223,14 @@ impl super::LinuxP11FabricBackend {
                         "o3k-v",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
                     "ip",
                     &["addr", "replace", "169.254.253.1/30", "dev", "o3k-u"],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             || !self
                 .command
                 .run(
@@ -247,9 +247,9 @@ impl super::LinuxP11FabricBackend {
                         "169.254.253.1",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         // Disable rp_filter on the veth interfaces so forwarded packets with
         // source IPs from the fabric namespace are not dropped in the host ns.
@@ -314,9 +314,9 @@ impl super::LinuxP11FabricBackend {
         store_state(&self.state_path, &self.state)?;
         Ok(())
     }
-    pub(crate) fn configure_peers(&mut self) -> Result<(), LinuxP11Error> {
+    pub(crate) fn configure_peers(&mut self) -> Result<(), LinuxFabricError> {
         let Some(fabric) = self.state.fabric.clone() else {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         };
         let mut peers = BTreeMap::<String, FabricPeer>::new();
         for plan in self
@@ -331,7 +331,7 @@ impl super::LinuxP11FabricBackend {
                         || existing.fabric_transport_ip != peer.fabric_transport_ip
                         || existing.fabric_generation != peer.fabric_generation
                     {
-                        return Err(LinuxP11Error::OwnershipConflict);
+                        return Err(LinuxFabricError::OwnershipConflict);
                     }
                 } else {
                     peers.insert(peer.host_id.clone(), peer.clone());
@@ -359,9 +359,9 @@ impl super::LinuxP11FabricBackend {
                         "remove",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for peer in peers.values_mut() {
@@ -379,7 +379,7 @@ impl super::LinuxP11FabricBackend {
                 || peer.fabric_transport_ip.is_unspecified()
                 || peer.fabric_transport_ip.is_loopback()
             {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
             // wg-o3k is in the fabric namespace.
             if !self
@@ -401,9 +401,9 @@ impl super::LinuxP11FabricBackend {
                         &format!("{}/32", peer.fabric_transport_ip),
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
             let route = format!("{}/32", peer.fabric_transport_ip);
             if !self
@@ -422,9 +422,9 @@ impl super::LinuxP11FabricBackend {
                         &fabric.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         if let Some(stored) = self.state.fabric.as_mut() {
@@ -433,7 +433,10 @@ impl super::LinuxP11FabricBackend {
         }
         Ok(())
     }
-    pub(crate) fn remove_fabric_if_unused(&mut self, generation: u64) -> Result<(), LinuxP11Error> {
+    pub(crate) fn remove_fabric_if_unused(
+        &mut self,
+        generation: u64,
+    ) -> Result<(), LinuxFabricError> {
         if !self.state.realms.is_empty() {
             return Ok(());
         }
@@ -441,13 +444,13 @@ impl super::LinuxP11FabricBackend {
             return Ok(());
         };
         if generation < fabric.fabric_generation {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         // wg-o3k is in the fabric namespace.
         let (ns_exists, _) = self
             .command
             .output("ip", &["netns", "exec", &fabric.namespace, "true"])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if ns_exists {
             let (wg_exists, _) = self
                 .command
@@ -464,7 +467,7 @@ impl super::LinuxP11FabricBackend {
                         &fabric.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if wg_exists
                 && !self
                     .command
@@ -480,9 +483,9 @@ impl super::LinuxP11FabricBackend {
                             &fabric.interface,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         let _ = self.command.run("ip", &["link", "del", "o3k-u"]);

@@ -1,10 +1,10 @@
 use super::*;
 
-impl super::LinuxP11FabricBackend {
+impl super::LinuxFabricBackend {
     pub(crate) fn ensure_public(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         if plan.public_bindings.is_empty() {
             return self.remove_public(plan);
         }
@@ -12,7 +12,7 @@ impl super::LinuxP11FabricBackend {
             .config
             .public_uplink
             .as_deref()
-            .ok_or(LinuxP11Error::InvalidConfiguration)?;
+            .ok_or(LinuxFabricError::InvalidConfiguration)?;
         Self::validate_public_plan(plan)?;
         if self.state.realms.iter().any(|(realm_id, ownership)| {
             *realm_id != plan.realm_id
@@ -21,14 +21,14 @@ impl super::LinuxP11FabricBackend {
                     .iter()
                     .any(|binding| ownership.public_addresses.contains(&binding.public_address))
         }) {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         let current = self
             .state
             .realms
             .get(&plan.realm_id)
             .cloned()
-            .ok_or(LinuxP11Error::CorruptState)?;
+            .ok_or(LinuxFabricError::CorruptState)?;
         let fingerprint = public_fingerprint(plan);
         let mark = public_mark(plan.realm_id);
         let route_table = public_route_table(plan.realm_id);
@@ -37,9 +37,9 @@ impl super::LinuxP11FabricBackend {
         let (root_table_exists, root_listing) = self
             .command
             .output("nft", &["list", "table", "ip", &root_table])
-            .map_err(LinuxP11Error::Storage)?;
-        if root_table_exists && !root_listing.contains(P11_PUBLIC_MARKER) {
-            return Err(LinuxP11Error::ForeignState);
+            .map_err(LinuxFabricError::Storage)?;
+        if root_table_exists && !root_listing.contains(FABRIC_PUBLIC_MARKER) {
+            return Err(LinuxFabricError::ForeignState);
         }
         let (realm_table_exists, realm_listing) = self
             .command
@@ -56,9 +56,9 @@ impl super::LinuxP11FabricBackend {
                     &realm_table,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
-        if realm_table_exists && !realm_listing.contains(P11_PUBLIC_MARKER) {
-            return Err(LinuxP11Error::ForeignState);
+            .map_err(LinuxFabricError::Storage)?;
+        if realm_table_exists && !realm_listing.contains(FABRIC_PUBLIC_MARKER) {
+            return Err(LinuxFabricError::ForeignState);
         }
         let mut next = current.clone();
         next.public_generation = plan
@@ -66,7 +66,7 @@ impl super::LinuxP11FabricBackend {
             .iter()
             .map(|binding| binding.generation)
             .max()
-            .ok_or(LinuxP11Error::OwnershipConflict)?;
+            .ok_or(LinuxFabricError::OwnershipConflict)?;
         next.public_fingerprint = fingerprint.clone();
         next.public_mark = mark;
         next.public_route_table = route_table;
@@ -116,9 +116,9 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for binding in &plan.public_bindings {
@@ -148,9 +148,9 @@ impl super::LinuxP11FabricBackend {
                 if !self
                     .command
                     .run("ip", &args)
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
         }
@@ -161,15 +161,15 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("sysctl", &["-w", key.as_str()])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         let rule_listing = self
             .command
             .output("ip", &["rule", "list"])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         let rule = format!("fwmark {mark} lookup {route_table}");
         if (!rule_listing.0 || !rule_listing.1.contains(&rule))
             && !self
@@ -185,17 +185,17 @@ impl super::LinuxP11FabricBackend {
                         &route_table.to_string(),
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         if root_table_exists
             && !self
                 .command
                 .run("nft", &["delete", "table", "ip", &root_table])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         if realm_table_exists
             && !self
@@ -213,11 +213,11 @@ impl super::LinuxP11FabricBackend {
                         &realm_table,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
-        let marker = format!("\"{P11_PUBLIC_MARKER}:{fingerprint}\"");
+        let marker = format!("\"{FABRIC_PUBLIC_MARKER}:{fingerprint}\"");
         for args in [
             vec![
                 "add",
@@ -253,15 +253,15 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("nft", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for binding in &plan.public_bindings {
             let public_address = binding.public_address.to_string();
             let comment = format!(
-                "\"{P11_PUBLIC_MARKER}:{}:{}\"",
+                "\"{FABRIC_PUBLIC_MARKER}:{}:{}\"",
                 plan.realm_id, binding.endpoint_id
             );
             if !self
@@ -287,9 +287,9 @@ impl super::LinuxP11FabricBackend {
                         &comment,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for args in [
@@ -358,20 +358,20 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for binding in &plan.public_bindings {
             let endpoint = plan
                 .directory
                 .location(binding.endpoint_id)
-                .ok_or(LinuxP11Error::OwnershipConflict)?;
+                .ok_or(LinuxFabricError::OwnershipConflict)?;
             let public_address = binding.public_address.to_string();
             let private_address = endpoint.fixed_ip.to_string();
             let comment = format!(
-                "\"{P11_PUBLIC_MARKER}:{}:{}\"",
+                "\"{FABRIC_PUBLIC_MARKER}:{}:{}\"",
                 plan.realm_id, binding.endpoint_id
             );
             for args in [
@@ -419,9 +419,9 @@ impl super::LinuxP11FabricBackend {
                 if !self
                     .command
                     .run("ip", &args)
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
         }
@@ -430,11 +430,11 @@ impl super::LinuxP11FabricBackend {
     pub(crate) fn ensure_public_veth(
         &self,
         ownership: &RealmOwnership,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let (host_exists, _) = self
             .command
             .output("ip", &["link", "show", "dev", &ownership.public_host_veth])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         let (realm_exists, _) = self
             .command
             .output(
@@ -450,9 +450,9 @@ impl super::LinuxP11FabricBackend {
                     &ownership.public_realm_veth,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if host_exists != realm_exists {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if !host_exists {
             for args in [
@@ -489,9 +489,9 @@ impl super::LinuxP11FabricBackend {
                 if !self
                     .command
                     .run("ip", &args)
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
         }
@@ -500,7 +500,7 @@ impl super::LinuxP11FabricBackend {
     pub(crate) fn remove_public(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
             return Ok(());
         };
@@ -511,23 +511,23 @@ impl super::LinuxP11FabricBackend {
             .config
             .public_uplink
             .as_deref()
-            .ok_or(LinuxP11Error::InvalidConfiguration)?;
+            .ok_or(LinuxFabricError::InvalidConfiguration)?;
         let root_table = public_root_table_name(plan.realm_id);
         let realm_table = public_realm_table_name(plan.realm_id);
         let (root_exists, root_listing) = self
             .command
             .output("nft", &["list", "table", "ip", &root_table])
-            .map_err(LinuxP11Error::Storage)?;
-        if root_exists && !root_listing.contains(P11_PUBLIC_MARKER) {
-            return Err(LinuxP11Error::ForeignState);
+            .map_err(LinuxFabricError::Storage)?;
+        if root_exists && !root_listing.contains(FABRIC_PUBLIC_MARKER) {
+            return Err(LinuxFabricError::ForeignState);
         }
         if root_exists
             && !self
                 .command
                 .run("nft", &["delete", "table", "ip", &root_table])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let realm_list_args = [
             "netns",
@@ -542,9 +542,9 @@ impl super::LinuxP11FabricBackend {
         let (realm_exists, realm_listing) = self
             .command
             .output("ip", &realm_list_args)
-            .map_err(LinuxP11Error::Storage)?;
-        if realm_exists && !realm_listing.contains(P11_PUBLIC_MARKER) {
-            return Err(LinuxP11Error::ForeignState);
+            .map_err(LinuxFabricError::Storage)?;
+        if realm_exists && !realm_listing.contains(FABRIC_PUBLIC_MARKER) {
+            return Err(LinuxFabricError::ForeignState);
         }
         if realm_exists
             && !self
@@ -562,9 +562,9 @@ impl super::LinuxP11FabricBackend {
                         &realm_table,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let route_listing = self
             .command
@@ -577,7 +577,7 @@ impl super::LinuxP11FabricBackend {
                     &current.public_route_table.to_string(),
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if route_listing.0 {
             let public_addresses = if current.public_addresses.is_empty() {
                 plan.public_bindings
@@ -604,9 +604,9 @@ impl super::LinuxP11FabricBackend {
                                 &current.public_host_veth,
                             ],
                         )
-                        .map_err(LinuxP11Error::Storage)?
+                        .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
                 if !self
                     .command
@@ -621,16 +621,16 @@ impl super::LinuxP11FabricBackend {
                             uplink,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
         }
         let rule_listing = self
             .command
             .output("ip", &["rule", "list"])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if rule_listing.0
             && rule_listing
                 .1
@@ -648,21 +648,21 @@ impl super::LinuxP11FabricBackend {
                         &current.public_route_table.to_string(),
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let (host_exists, _) = self
             .command
             .output("ip", &["link", "show", "dev", &current.public_host_veth])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if host_exists
             && !self
                 .command
                 .run("ip", &["link", "del", &current.public_host_veth])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let mut cleared = current;
         cleared.public_generation = 0;
@@ -675,7 +675,7 @@ impl super::LinuxP11FabricBackend {
     }
     pub(crate) fn validate_public_plan(
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let mut ids = BTreeSet::new();
         let mut addresses = BTreeSet::new();
         let mut endpoints = BTreeSet::new();
@@ -692,7 +692,7 @@ impl super::LinuxP11FabricBackend {
                     .location(binding.endpoint_id)
                     .is_some_and(|endpoint| endpoint.project_id == binding.project_id)
             {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
         }
         Ok(())

@@ -13,7 +13,7 @@ Related architecture:
 - [ADR-0170](../docs/adr/ADR-0170-namespaced-routed-edge-fabric.md)
 - [current execution-boundary contract](execution-boundaries.md)
 
-This accepted contract supersedes `contracts/p11-edge-fabric.md` for P11 v2
+This accepted contract supersedes `contracts/edge-fabric-v1.md` for P11 v2
 implementation authority. Acceptance authorizes bounded implementation only;
 runtime, product, and real-host support claims remain gated by the evidence
 requirements in this contract and SPEC-0029.

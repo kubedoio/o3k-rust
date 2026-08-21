@@ -39,21 +39,21 @@ Commands run from the repository root:
 cargo fmt --all -- --check
 cargo clippy -p o3k-network --all-targets --all-features -- -D warnings
 cargo test -p o3k-network --all-features linux_fabric::tests -- --nocapture
-O3K_P11_SMOKE_ROOT=/tmp/o3k-p11-smoke-XXXX target/debug/examples/p11-linux-smoke
-O3K_P11_FIP_ROOT=/tmp/o3k-p11-fip-smoke-XXXX \
-  O3K_P11_FIP_UPLINK=o3k-fip-u \
+O3K_FABRIC_SMOKE_ROOT=/tmp/o3k-p11-smoke-XXXX target/debug/examples/p11-linux-smoke
+O3K_FABRIC_FIP_ROOT=/tmp/o3k-p11-fip-smoke-XXXX \
+  O3K_FABRIC_FIP_UPLINK=o3k-fip-u \
   cargo run -p o3k-network --example p11-linux-fip-smoke --all-features
 ```
 
 Observed provider smoke results:
 
 ```text
-p11-linux-smoke: host-transport-address=passed
-p11-linux-smoke: geneve-realization=passed
-p11-linux-smoke: isolated-attachment=passed
-p11-linux-smoke: topology-and-cleanup=passed
-p11-linux-fip-smoke: realm-scoped-public-traffic=passed
-p11-linux-fip-smoke: cleanup=passed
+linux-fabric-smoke: host-transport-address=passed
+linux-fabric-smoke: geneve-realization=passed
+linux-fabric-smoke: isolated-attachment=passed
+linux-fabric-smoke: topology-and-cleanup=passed
+linux-fabric-fip-smoke: realm-scoped-public-traffic=passed
+linux-fabric-fip-smoke: cleanup=passed
 ```
 
 The three-host namespace overlap harness also continues to pass its existing

@@ -3,9 +3,9 @@ mod agent;
 use agent::proto::network_agent_server::NetworkAgentServer;
 use o3k_domain::NetworkPlanIntent;
 use o3k_network::{
-    FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider, NetworkAgentIdentity,
-    NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer, NodeNetworkPlan,
-    P11FabricRealizer, PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig,
+    FabricRealizer, FlatNetworkRealizer, HostNetworkConfig, LinuxRoutedProvider,
+    NetworkAgentIdentity, NetworkControllerLease, NetworkPlanExecutor, NetworkPlanRealizer,
+    NodeNetworkPlan, PolicyEndpoint, PublicAddressRealizer, RoutedExternalConfig,
     StatefulPolicyProvider, TapAccess,
 };
 use std::{env, fs, net::SocketAddr, path::PathBuf};
@@ -117,13 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?),
         Err(_) => None,
     };
-    let p11 = match env::var("O3K_NETWORK_P11_ROOT") {
-        Ok(root) => Some(P11FabricRealizer::new(
-            o3k_network::LinuxP11FabricBackend::open(
-                o3k_network::LinuxP11Config::for_root(root)
-                    .with_public_uplink(required("O3K_NETWORK_UPLINK")?),
-            )?,
-        )),
+    let fabric = match env::var("O3K_NETWORK_FABRIC_ROOT") {
+        Ok(root) => Some(FabricRealizer::new(o3k_network::LinuxFabricBackend::open(
+            o3k_network::LinuxFabricConfig::for_root(root)
+                .with_public_uplink(required("O3K_NETWORK_UPLINK")?),
+        )?)),
         Err(_) => None,
     };
     let realizer = CompositeRealizer {
@@ -131,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         routed,
         policy,
         public,
-        p11,
+        fabric,
     };
     let service = agent::NetworkAgentService::new(executor, realizer);
     let recovered = service.reconcile_pending()?;
@@ -157,7 +155,7 @@ struct CompositeRealizer {
     routed: Option<LinuxRoutedProvider>,
     policy: Option<StatefulPolicyProvider>,
     public: Option<PublicAddressRealizer>,
-    p11: Option<P11FabricRealizer<o3k_network::LinuxP11FabricBackend>>,
+    fabric: Option<FabricRealizer<o3k_network::LinuxFabricBackend>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -176,31 +174,31 @@ enum CompositeRealizerError {
     PolicyNotConfigured,
     #[error("public bindings require O3K_NETWORK_PUBLIC_ROOT configuration")]
     PublicNotConfigured,
-    #[error("P11 fabric plans require an activated host fabric provider")]
-    P11NotConfigured,
-    #[error("P11 fabric realization failed: {0}")]
-    P11(String),
-    #[error("P11 fabric plan contains an intent not yet activated by the P11 provider")]
-    P11UnsupportedIntent,
+    #[error("Edge fabric plans require an activated host fabric provider")]
+    FabricNotConfigured,
+    #[error("Edge fabric realization failed: {0}")]
+    Fabric(String),
+    #[error("Edge fabric plan contains an intent not yet activated by the Fabric provider")]
+    FabricUnsupportedIntent,
 }
 
 impl NetworkPlanRealizer for CompositeRealizer {
     type Error = CompositeRealizerError;
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
-        if plan.p11_fabric.is_some() {
+        if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
-                    || (is_public_intent(intent) && !p11_public_intents_match(plan))
-                    || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
+                    || (is_public_intent(intent) && !fabric_public_intents_match(plan))
+                    || (is_policy_intent(intent) && !fabric_policy_intents_match(plan))
             }) {
-                return Err(CompositeRealizerError::P11UnsupportedIntent);
+                return Err(CompositeRealizerError::FabricUnsupportedIntent);
             }
-            self.p11
+            self.fabric
                 .as_mut()
-                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .realize(plan)
-                .map_err(|error| CompositeRealizerError::P11(error.to_string()))?;
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
             return Ok(());
         }
         let mut flat_plan = plan.clone();
@@ -228,19 +226,19 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
-        if plan.p11_fabric.is_some() {
+        if plan.fabric.is_some() {
             if plan.intents.iter().any(|intent| {
                 is_routed_intent(intent)
-                    || (is_public_intent(intent) && !p11_public_intents_match(plan))
-                    || (is_policy_intent(intent) && !p11_policy_intents_match(plan))
+                    || (is_public_intent(intent) && !fabric_public_intents_match(plan))
+                    || (is_policy_intent(intent) && !fabric_policy_intents_match(plan))
             }) {
-                return Err(CompositeRealizerError::P11UnsupportedIntent);
+                return Err(CompositeRealizerError::FabricUnsupportedIntent);
             }
-            self.p11
+            self.fabric
                 .as_mut()
-                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .remove(plan)
-                .map_err(|error| CompositeRealizerError::P11(error.to_string()))?;
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()))?;
             return Ok(());
         }
         if plan.intents.iter().any(is_public_intent) {
@@ -268,13 +266,13 @@ impl NetworkPlanRealizer for CompositeRealizer {
     }
 
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
-        if plan.p11_fabric.is_some() {
+        if plan.fabric.is_some() {
             return self
-                .p11
+                .fabric
                 .as_mut()
-                .ok_or(CompositeRealizerError::P11NotConfigured)?
+                .ok_or(CompositeRealizerError::FabricNotConfigured)?
                 .observe(plan)
-                .map_err(|error| CompositeRealizerError::P11(error.to_string()));
+                .map_err(|error| CompositeRealizerError::Fabric(error.to_string()));
         }
         let mut flat_plan = plan.clone();
         flat_plan.intents.retain(is_flat_intent);
@@ -327,8 +325,8 @@ fn is_policy_intent(intent: &NetworkPlanIntent) -> bool {
     matches!(intent, NetworkPlanIntent::Policy(_))
 }
 
-fn p11_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
-    let Some(fabric) = &plan.p11_fabric else {
+fn fabric_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
+    let Some(fabric) = &plan.fabric else {
         return false;
     };
     let policies = plan
@@ -342,8 +340,8 @@ fn p11_policy_intents_match(plan: &NodeNetworkPlan) -> bool {
     policies == fabric.policies
 }
 
-fn p11_public_intents_match(plan: &NodeNetworkPlan) -> bool {
-    let Some(fabric) = &plan.p11_fabric else {
+fn fabric_public_intents_match(plan: &NodeNetworkPlan) -> bool {
+    let Some(fabric) = &plan.fabric else {
         return false;
     };
     let bindings = plan
@@ -457,7 +455,7 @@ mod transport_tests {
             deadline_unix_ms,
             resource_generations: BTreeMap::new(),
             intents: Vec::new(),
-            p11_fabric: None,
+            fabric: None,
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 = o3k_network::canonical_plan_fingerprint(&plan)?;

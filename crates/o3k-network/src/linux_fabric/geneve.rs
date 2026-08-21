@@ -1,19 +1,19 @@
 use super::*;
 
-impl super::LinuxP11FabricBackend {
+impl super::LinuxFabricBackend {
     pub(crate) fn ensure_geneve(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         if self.plans.values().any(|other| {
             other.realm_id != plan.realm_id
                 && other.encapsulation.fabric_domain_id == plan.encapsulation.fabric_domain_id
                 && other.encapsulation.provider_segment_id == plan.encapsulation.provider_segment_id
         }) {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         };
         let mut desired = BTreeMap::new();
         for peer in &plan.peers {
@@ -69,10 +69,10 @@ impl super::LinuxP11FabricBackend {
                         &old.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if exists {
                 if !geneve_link_matches(&output, old, self.config.geneve_port) {
-                    return Err(LinuxP11Error::ForeignState);
+                    return Err(LinuxFabricError::ForeignState);
                 }
                 if !self
                     .command
@@ -88,9 +88,9 @@ impl super::LinuxP11FabricBackend {
                             &old.interface,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
         }
@@ -107,7 +107,7 @@ impl super::LinuxP11FabricBackend {
                     || existing.realm_veth != wanted.realm_veth
                     || existing.fabric_veth != wanted.fabric_veth)
             {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
             let (exists, output) = self
                 .command
@@ -125,9 +125,9 @@ impl super::LinuxP11FabricBackend {
                         &wanted.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if exists && !geneve_link_matches(&output, wanted, self.config.geneve_port) {
-                return Err(LinuxP11Error::ForeignState);
+                return Err(LinuxFabricError::ForeignState);
             }
             if !exists {
                 wanted.realized = false;
@@ -175,7 +175,7 @@ impl super::LinuxP11FabricBackend {
                         &wanted.interface,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if !already_exists
                 && !self
                     .command
@@ -199,9 +199,9 @@ impl super::LinuxP11FabricBackend {
                             &port,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
             let tenant_mtu = plan.tenant_mtu.to_string();
             for args in [
@@ -233,9 +233,9 @@ impl super::LinuxP11FabricBackend {
                 if !self
                     .command
                     .run("ip", &args)
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
             if !self
@@ -253,9 +253,9 @@ impl super::LinuxP11FabricBackend {
                         "up",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
             self.ensure_geneve_attachment(plan, wanted)?;
             if let Some(realized) = self
@@ -274,13 +274,13 @@ impl super::LinuxP11FabricBackend {
         &self,
         plan: &NamespacedRoutedFabricPlan,
         geneve: &GeneveOwnership,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let fabric_ns = self.config.fabric_namespace.as_str();
         let realm_ns = self
             .state
             .realms
             .get(&plan.realm_id)
-            .ok_or(LinuxP11Error::CorruptState)?
+            .ok_or(LinuxFabricError::CorruptState)?
             .namespace
             .clone();
         let (bridge_exists, bridge_output) = self
@@ -298,9 +298,9 @@ impl super::LinuxP11FabricBackend {
                     &geneve.bridge,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if bridge_exists && !bridge_output.contains("bridge") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if !bridge_exists
             && !self
@@ -319,9 +319,9 @@ impl super::LinuxP11FabricBackend {
                         "bridge",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         for args in [
             vec![
@@ -351,9 +351,9 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         let (realm_exists, realm_output) = self
@@ -371,9 +371,9 @@ impl super::LinuxP11FabricBackend {
                     &geneve.realm_veth,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if realm_exists && !realm_output.contains("veth") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         let (fabric_exists, fabric_output) = self
             .command
@@ -391,9 +391,9 @@ impl super::LinuxP11FabricBackend {
                     &geneve.fabric_veth,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if fabric_exists && !fabric_output.contains("veth") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if !realm_exists
             && (!self
@@ -411,23 +411,23 @@ impl super::LinuxP11FabricBackend {
                         &geneve.fabric_veth,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
                 || !self
                     .command
                     .run(
                         "ip",
                         &["link", "set", &geneve.realm_veth, "netns", &realm_ns],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 || !self
                     .command
                     .run(
                         "ip",
                         &["link", "set", &geneve.fabric_veth, "netns", fabric_ns],
                     )
-                    .map_err(LinuxP11Error::Storage)?)
+                    .map_err(LinuxFabricError::Storage)?)
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         for args in [
             vec![
@@ -492,9 +492,9 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &args)
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for mac in [
@@ -515,9 +515,9 @@ impl super::LinuxP11FabricBackend {
                         "master", "static",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         Ok(())
@@ -526,7 +526,7 @@ impl super::LinuxP11FabricBackend {
         &self,
         geneve: &GeneveOwnership,
         realm_ns: &str,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let fabric_ns = self.config.fabric_namespace.as_str();
         let (exists, output) = self
             .command
@@ -544,9 +544,9 @@ impl super::LinuxP11FabricBackend {
                     &geneve.bridge,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if exists && !output.contains("bridge") {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if exists {
             let (ports_exist, ports) = self
@@ -565,9 +565,9 @@ impl super::LinuxP11FabricBackend {
                         &geneve.bridge,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if ports_exist && !bridge_ports_are_owned(&ports, geneve) {
-                return Err(LinuxP11Error::ForeignState);
+                return Err(LinuxFabricError::ForeignState);
             }
         }
         if exists
@@ -585,9 +585,9 @@ impl super::LinuxP11FabricBackend {
                         &geneve.bridge,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         let (realm_veth_exists, _) = self
             .command
@@ -604,7 +604,7 @@ impl super::LinuxP11FabricBackend {
                     &geneve.realm_veth,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if realm_veth_exists
             && !self
                 .command
@@ -620,9 +620,9 @@ impl super::LinuxP11FabricBackend {
                         &geneve.realm_veth,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         Ok(())
     }

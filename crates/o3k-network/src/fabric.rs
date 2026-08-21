@@ -1,7 +1,7 @@
 //! Portable P11 fabric realization and conformance seam.
 //!
 //! This module deliberately models provider-owned state without invoking host
-//! commands. The Linux/WireGuard backend can implement [`P11FabricBackend`]
+//! commands. The Linux/WireGuard backend can implement [`FabricBackend`]
 //! later while retaining the same generation, route, peer, and neighbor
 //! invariants.
 
@@ -12,7 +12,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum P11FabricError {
+pub enum FabricError {
     #[error("P11 fabric plan is missing or invalid")]
     InvalidPlan,
     #[error("P11 fabric generation is stale")]
@@ -22,21 +22,21 @@ pub enum P11FabricError {
 }
 
 /// Narrow provider-owned mutation seam for P11 semantic state.
-pub trait P11FabricBackend {
-    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError>;
-    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError>;
-    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError>;
-    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError>;
+pub trait FabricBackend {
+    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError>;
+    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError>;
+    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError>;
+    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError>;
 }
 
 /// Realizer used by the node-local executor. It does not authorize callers or
 /// invent endpoint identity; those checks happen before this boundary.
 #[derive(Debug)]
-pub struct P11FabricRealizer<B> {
+pub struct FabricRealizer<B> {
     backend: B,
 }
 
-impl<B> P11FabricRealizer<B> {
+impl<B> FabricRealizer<B> {
     #[must_use]
     pub fn new(backend: B) -> Self {
         Self { backend }
@@ -51,46 +51,34 @@ impl<B> P11FabricRealizer<B> {
     }
 }
 
-impl<B: P11FabricBackend> NetworkPlanRealizer for P11FabricRealizer<B> {
-    type Error = P11FabricError;
+impl<B: FabricBackend> NetworkPlanRealizer for FabricRealizer<B> {
+    type Error = FabricError;
 
     fn realize(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
-        let fabric = plan
-            .p11_fabric
-            .as_ref()
-            .ok_or(P11FabricError::InvalidPlan)?;
-        plan.validate_p11_fabric()
-            .map_err(|_| P11FabricError::InvalidPlan)?;
+        let fabric = plan.fabric.as_ref().ok_or(FabricError::InvalidPlan)?;
+        plan.validate_fabric()
+            .map_err(|_| FabricError::InvalidPlan)?;
         self.backend.apply(fabric)
     }
 
     fn remove(&mut self, plan: &NodeNetworkPlan) -> Result<(), Self::Error> {
-        let fabric = plan
-            .p11_fabric
-            .as_ref()
-            .ok_or(P11FabricError::InvalidPlan)?;
-        plan.validate_p11_fabric()
-            .map_err(|_| P11FabricError::InvalidPlan)?;
+        let fabric = plan.fabric.as_ref().ok_or(FabricError::InvalidPlan)?;
+        plan.validate_fabric()
+            .map_err(|_| FabricError::InvalidPlan)?;
         self.backend.remove(fabric)
     }
 
     fn observe(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
-        let fabric = plan
-            .p11_fabric
-            .as_ref()
-            .ok_or(P11FabricError::InvalidPlan)?;
-        plan.validate_p11_fabric()
-            .map_err(|_| P11FabricError::InvalidPlan)?;
+        let fabric = plan.fabric.as_ref().ok_or(FabricError::InvalidPlan)?;
+        plan.validate_fabric()
+            .map_err(|_| FabricError::InvalidPlan)?;
         self.backend.observe(fabric)
     }
 
     fn observe_removed(&mut self, plan: &NodeNetworkPlan) -> Result<bool, Self::Error> {
-        let fabric = plan
-            .p11_fabric
-            .as_ref()
-            .ok_or(P11FabricError::InvalidPlan)?;
-        plan.validate_p11_fabric()
-            .map_err(|_| P11FabricError::InvalidPlan)?;
+        let fabric = plan.fabric.as_ref().ok_or(FabricError::InvalidPlan)?;
+        plan.validate_fabric()
+            .map_err(|_| FabricError::InvalidPlan)?;
         self.backend.observe_removed(fabric)
     }
 }
@@ -99,11 +87,11 @@ impl<B: P11FabricBackend> NetworkPlanRealizer for P11FabricRealizer<B> {
 /// generation behavior required from a host provider but performs no network
 /// mutation.
 #[derive(Debug, Default)]
-pub struct InMemoryP11FabricBackend {
+pub struct InMemoryFabricBackend {
     current: BTreeMap<Uuid, NamespacedRoutedFabricPlan>,
 }
 
-impl InMemoryP11FabricBackend {
+impl InMemoryFabricBackend {
     #[must_use]
     pub fn current(&self, realm_id: Uuid) -> Option<&NamespacedRoutedFabricPlan> {
         self.current.get(&realm_id)
@@ -142,26 +130,26 @@ impl InMemoryP11FabricBackend {
     }
 }
 
-impl P11FabricBackend for InMemoryP11FabricBackend {
-    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+impl FabricBackend for InMemoryFabricBackend {
+    fn apply(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         if self
             .current
             .get(&plan.realm_id)
             .is_some_and(|current| Self::is_stale(current, plan))
         {
-            return Err(P11FabricError::StaleGeneration);
+            return Err(FabricError::StaleGeneration);
         }
         self.current.insert(plan.realm_id, plan.clone());
         Ok(())
     }
 
-    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), P11FabricError> {
+    fn remove(&mut self, plan: &NamespacedRoutedFabricPlan) -> Result<(), FabricError> {
         if self
             .current
             .get(&plan.realm_id)
             .is_some_and(|current| Self::is_stale(current, plan))
         {
-            return Err(P11FabricError::StaleGeneration);
+            return Err(FabricError::StaleGeneration);
         }
         if self.current.get(&plan.realm_id).is_some_and(|current| {
             current.local_host == plan.local_host
@@ -172,11 +160,11 @@ impl P11FabricBackend for InMemoryP11FabricBackend {
         Ok(())
     }
 
-    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+    fn observe(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError> {
         Ok(self.current.get(&plan.realm_id) == Some(plan))
     }
 
-    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, P11FabricError> {
+    fn observe_removed(&self, plan: &NamespacedRoutedFabricPlan) -> Result<bool, FabricError> {
         Ok(self
             .current
             .get(&plan.realm_id)
@@ -268,7 +256,7 @@ mod tests {
             deadline_unix_ms: 100,
             resource_generations: std::collections::BTreeMap::new(),
             intents: vec![],
-            p11_fabric: Some(fabric),
+            fabric: Some(fabric),
             fingerprint_sha256: String::new(),
         };
         plan.fingerprint_sha256 = crate::canonical_plan_fingerprint(&plan).expect("fingerprint");
@@ -277,7 +265,7 @@ mod tests {
 
     #[test]
     fn portable_backend_resolves_local_actual_mac_and_remote_proxy() {
-        let mut realizer = P11FabricRealizer::new(InMemoryP11FabricBackend::default());
+        let mut realizer = FabricRealizer::new(InMemoryFabricBackend::default());
         let first = plan(1);
         realizer.realize(&first).expect("apply");
         assert_eq!(
@@ -309,12 +297,12 @@ mod tests {
 
     #[test]
     fn portable_backend_rejects_stale_generation_and_removes_current_state() {
-        let mut realizer = P11FabricRealizer::new(InMemoryP11FabricBackend::default());
+        let mut realizer = FabricRealizer::new(InMemoryFabricBackend::default());
         let current = plan(2);
         realizer.realize(&current).expect("apply");
         assert_eq!(
             realizer.realize(&plan(1)),
-            Err(P11FabricError::StaleGeneration)
+            Err(FabricError::StaleGeneration)
         );
         assert!(realizer.observe(&current).expect("observe"));
         realizer.remove(&current).expect("remove");

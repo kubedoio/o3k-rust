@@ -1,6 +1,6 @@
 use super::*;
 
-impl super::LinuxP11FabricBackend {
+impl super::LinuxFabricBackend {
     pub(crate) fn realm_ownership(&self, plan: &NamespacedRoutedFabricPlan) -> RealmOwnership {
         let suffix = plan.realm_id.simple().to_string();
         RealmOwnership {
@@ -31,7 +31,7 @@ impl super::LinuxP11FabricBackend {
     pub(crate) fn ensure_realm(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let mut ownership = self.realm_ownership(plan);
         if let Some(existing) = self.state.realms.get(&plan.realm_id) {
             ownership.geneve = existing.geneve.clone();
@@ -64,7 +64,7 @@ impl super::LinuxP11FabricBackend {
                 || plan.directory_generation < existing.directory_generation
                 || plan.local_fabric_generation < existing.local_fabric_generation)
         {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         // If state says we own this realm but the bridge is gone (e.g. after a
         // crash or test fabric-interruption), clean up stale state so the
@@ -73,7 +73,7 @@ impl super::LinuxP11FabricBackend {
             let (bridge_exists, _) = self
                 .command
                 .output("ip", &["link", "show", "dev", &ownership.bridge])
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if !bridge_exists {
                 let _ = self
                     .command
@@ -86,9 +86,9 @@ impl super::LinuxP11FabricBackend {
             let (exists, _) = self
                 .command
                 .output("ip", &["netns", "exec", &ownership.namespace, "true"])
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if exists {
-                return Err(LinuxP11Error::ForeignState);
+                return Err(LinuxFabricError::ForeignState);
             }
             for interface in [
                 &ownership.bridge,
@@ -100,9 +100,9 @@ impl super::LinuxP11FabricBackend {
                 let (interface_exists, _) = self
                     .command
                     .output("ip", &["link", "show", "dev", interface])
-                    .map_err(LinuxP11Error::Storage)?;
+                    .map_err(LinuxFabricError::Storage)?;
                 if interface_exists {
-                    return Err(LinuxP11Error::ForeignState);
+                    return Err(LinuxFabricError::ForeignState);
                 }
             }
             self.state.realms.insert(plan.realm_id, ownership.clone());
@@ -165,9 +165,9 @@ impl super::LinuxP11FabricBackend {
                 if !self
                     .command
                     .run("ip", &args)
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
             if !self
@@ -185,9 +185,9 @@ impl super::LinuxP11FabricBackend {
                         "up",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
             for (namespace, interface) in [
                 (&ownership.namespace, &ownership.fabric_veth),
@@ -201,9 +201,9 @@ impl super::LinuxP11FabricBackend {
                             "netns", "exec", namespace, "ip", "link", "set", interface, "up",
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 {
-                    return Err(LinuxP11Error::CommandFailed);
+                    return Err(LinuxFabricError::CommandFailed);
                 }
             }
             if !self
@@ -219,9 +219,9 @@ impl super::LinuxP11FabricBackend {
                         "net.ipv4.ip_forward=1",
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         } else if self.state.realms.get(&plan.realm_id) != Some(&ownership) {
             self.state.realms.insert(plan.realm_id, ownership.clone());
@@ -233,7 +233,7 @@ impl super::LinuxP11FabricBackend {
             .checked_add(1)
             .map(std::net::Ipv4Addr::from)
             .filter(|gateway| plan.realm_prefix.contains(*gateway))
-            .ok_or(LinuxP11Error::OwnershipConflict)?;
+            .ok_or(LinuxFabricError::OwnershipConflict)?;
         let gateway_cidr = format!("{gateway}/{}", plan.realm_prefix.prefix_len);
         if !self
             .command
@@ -251,9 +251,9 @@ impl super::LinuxP11FabricBackend {
                     &ownership.realm_veth,
                 ],
             )
-            .map_err(LinuxP11Error::Storage)?
+            .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         // Enable proxy ARP on the gateway so tenant VMs can reach remote realm
         // endpoints (hosted on other physical hosts) through the gateway.
@@ -268,9 +268,9 @@ impl super::LinuxP11FabricBackend {
             if !self
                 .command
                 .run("ip", &["link", "set", "dev", interface, "mtu", &tenant_mtu])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         for (namespace, interface, mtu) in [
@@ -299,9 +299,9 @@ impl super::LinuxP11FabricBackend {
                         mtu,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         Ok(())
@@ -310,12 +310,12 @@ impl super::LinuxP11FabricBackend {
         &self,
         plan: &NamespacedRoutedFabricPlan,
         ownership: &RealmOwnership,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         for route in &plan.routes {
             let attachment = ownership
                 .attachments
                 .get(&route.target_host)
-                .ok_or(LinuxP11Error::CorruptState)?;
+                .ok_or(LinuxFabricError::CorruptState)?;
             let destination = format!("{}/32", route.destination.network);
             if !self
                 .command
@@ -333,7 +333,7 @@ impl super::LinuxP11FabricBackend {
                         &attachment.realm_veth,
                     ],
                 )
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
                 || !self
                     .command
                     .run(
@@ -354,7 +354,7 @@ impl super::LinuxP11FabricBackend {
                             &attachment.realm_veth,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
                 || !self
                     .command
                     .run(
@@ -372,9 +372,9 @@ impl super::LinuxP11FabricBackend {
                             &ownership.realm_veth,
                         ],
                     )
-                    .map_err(LinuxP11Error::Storage)?
+                    .map_err(LinuxFabricError::Storage)?
             {
-                return Err(LinuxP11Error::CommandFailed);
+                return Err(LinuxFabricError::CommandFailed);
             }
         }
         Ok(())
@@ -382,9 +382,9 @@ impl super::LinuxP11FabricBackend {
     pub(crate) fn ensure_endpoint_taps(
         &mut self,
         plan: &NamespacedRoutedFabricPlan,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let Some(current) = self.state.realms.get(&plan.realm_id).cloned() else {
-            return Err(LinuxP11Error::CorruptState);
+            return Err(LinuxFabricError::CorruptState);
         };
         let desired = plan
             .directory
@@ -403,7 +403,7 @@ impl super::LinuxP11FabricBackend {
             })
             .collect::<BTreeMap<_, _>>();
         if !current.pending_endpoint_taps.is_empty() && current.pending_endpoint_taps != desired {
-            return Err(LinuxP11Error::OwnershipConflict);
+            return Err(LinuxFabricError::OwnershipConflict);
         }
         if current.endpoint_taps != desired && current.pending_endpoint_taps.is_empty() {
             let mut pending = current.clone();
@@ -421,14 +421,14 @@ impl super::LinuxP11FabricBackend {
             if let Some(existing) = current.endpoint_taps.get(&wanted.endpoint_id)
                 && existing != wanted
             {
-                return Err(LinuxP11Error::OwnershipConflict);
+                return Err(LinuxFabricError::OwnershipConflict);
             }
             let (exists, output) = self
                 .command
                 .output("ip", &["-d", "link", "show", "dev", &wanted.interface])
-                .map_err(LinuxP11Error::Storage)?;
+                .map_err(LinuxFabricError::Storage)?;
             if exists && !tap_link_matches(&output, wanted, &current.bridge) {
-                return Err(LinuxP11Error::ForeignState);
+                return Err(LinuxFabricError::ForeignState);
             }
             if exists
                 && !current.endpoint_taps.contains_key(&wanted.endpoint_id)
@@ -436,7 +436,7 @@ impl super::LinuxP11FabricBackend {
                     .pending_endpoint_taps
                     .contains_key(&wanted.endpoint_id)
             {
-                return Err(LinuxP11Error::ForeignState);
+                return Err(LinuxFabricError::ForeignState);
             }
             if !exists {
                 for args in [
@@ -469,9 +469,9 @@ impl super::LinuxP11FabricBackend {
                     if !self
                         .command
                         .run("ip", &args)
-                        .map_err(LinuxP11Error::Storage)?
+                        .map_err(LinuxFabricError::Storage)?
                     {
-                        return Err(LinuxP11Error::CommandFailed);
+                        return Err(LinuxFabricError::CommandFailed);
                     }
                 }
             }
@@ -482,7 +482,7 @@ impl super::LinuxP11FabricBackend {
                 .realms
                 .get(&plan.realm_id)
                 .cloned()
-                .ok_or(LinuxP11Error::CorruptState)?;
+                .ok_or(LinuxFabricError::CorruptState)?;
             next.endpoint_taps = desired;
             next.pending_endpoint_taps.clear();
             self.state.realms.insert(plan.realm_id, next);
@@ -494,21 +494,21 @@ impl super::LinuxP11FabricBackend {
         &self,
         tap: &EndpointTapOwnership,
         bridge: &str,
-    ) -> Result<(), LinuxP11Error> {
+    ) -> Result<(), LinuxFabricError> {
         let (exists, output) = self
             .command
             .output("ip", &["-d", "link", "show", "dev", &tap.interface])
-            .map_err(LinuxP11Error::Storage)?;
+            .map_err(LinuxFabricError::Storage)?;
         if exists && !tap_link_matches(&output, tap, bridge) {
-            return Err(LinuxP11Error::ForeignState);
+            return Err(LinuxFabricError::ForeignState);
         }
         if exists
             && !self
                 .command
                 .run("ip", &["link", "del", "dev", &tap.interface])
-                .map_err(LinuxP11Error::Storage)?
+                .map_err(LinuxFabricError::Storage)?
         {
-            return Err(LinuxP11Error::CommandFailed);
+            return Err(LinuxFabricError::CommandFailed);
         }
         Ok(())
     }

@@ -3,14 +3,14 @@
 # the multi-host lab VMs.
 #
 # Usage (as root on the deployment host):
-#   /root/o3k-p11-fip-next/scripts/p11-deploy-binaries.sh
+#   /root/o3k-p11-fip-next/scripts/edge-fabric-deploy-binaries.sh
 #
-# The script rsyncs from /var/lib/o3k-p11-lab/ over SSH as root using
+# The script rsyncs from /var/lib/o3k-fabric-lab/ over SSH as root using
 # /root/.ssh/id_ed25519 and installs binaries into /opt/o3k/bin/ on each target.
 
 set -euo pipefail
 
-LAB_ROOT="/var/lib/o3k-p11-lab"
+LAB_ROOT="/var/lib/o3k-fabric-lab"
 SSH_KEY="/root/.ssh/id_ed25519"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes)
 

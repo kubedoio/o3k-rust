@@ -80,7 +80,7 @@ multi-hypervisor edge profile for roughly 10–20 hypervisors. Run 50 (commit
 3bcf814) passed the complete real-host evidence gate on three independent KVM
 hosts with overlapping AddressRealm CIDRs.
 
-ADR-0171/SPEC-0029 plus `contracts/p11-realm-overlay-fabric.md` are the accepted
+ADR-0171/SPEC-0029 plus `contracts/edge-fabric-realm-overlay.md` are the accepted
 v2 architecture authority. ADR-0170/SPEC-0028 are superseded.
 
 The confirmed P11 support profile is described below.

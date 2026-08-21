@@ -7,7 +7,7 @@ P11 real multi-host gate harness in the `codex/p11-fip-next` branch.
 
 - ADR-0171 — AddressRealm-encapsulated Edge Fabric v2
 - SPEC-0029 — AddressRealm-encapsulated Edge Fabric v2
-- `contracts/p11-realm-overlay-fabric.md`
+- `contracts/edge-fabric-realm-overlay.md`
 - `docs/P11_REALM_OVERLAY_IMPLEMENTATION_PROMPT.md`
 
 ## Gate topology
@@ -43,12 +43,12 @@ intentional and documented.
 
 ## Deliverables
 
-1. `scripts/p11-multi-host-gate.sh` — top-level orchestrator.
+1. `scripts/edge-fabric-gate.sh` — top-level orchestrator.
 2. `crates/o3k-network/examples/p11-multi-host-driver.rs` — Rust fabric driver.
-3. `scripts/p11-domain-helper.sh` — tenant VM helper via direct `virsh`.
-4. `scripts/p11-cleanup-inventory.sh` — cleanup + zero-leak inventory.
-5. `scripts/p11-storage-evidence.sh` — LVM locality + RBD readiness evidence.
-6. `scripts/p11-fake-hosts.sh` — fake placement providers for scheduler fanout.
+3. `scripts/edge-fabric-domain-helper.sh` — tenant VM helper via direct `virsh`.
+4. `scripts/edge-fabric-cleanup-inventory.sh` — cleanup + zero-leak inventory.
+5. `scripts/edge-fabric-storage-evidence.sh` — LVM locality + RBD readiness evidence.
+6. `scripts/edge-fabric-fake-hosts.sh` — fake placement providers for scheduler fanout.
 
 ## Resource creation
 
@@ -67,11 +67,11 @@ provisioning step because private keys never enter canonical O3K tenant state.
 
 ## Evidence outputs
 
-- `/var/lib/o3k-p11-lab/evidence/p11-gate-result.json`
-- `/var/lib/o3k-p11-lab/evidence/p11-evidence-network.json`
-- `/var/lib/o3k-p11-lab/evidence/p11-storage-evidence.json`
-- `/var/lib/o3k-p11-lab/evidence/p11-fake-hosts.json`
-- `/var/lib/o3k-p11-lab/evidence/p11-cleanup-inventory.json`
+- `/var/lib/o3k-fabric-lab/evidence/p11-gate-result.json`
+- `/var/lib/o3k-fabric-lab/evidence/p11-evidence-network.json`
+- `/var/lib/o3k-fabric-lab/evidence/p11-storage-evidence.json`
+- `/var/lib/o3k-fabric-lab/evidence/p11-fake-hosts.json`
+- `/var/lib/o3k-fabric-lab/evidence/p11-cleanup-inventory.json`
 
 ## Validation
 
@@ -79,7 +79,7 @@ provisioning step because private keys never enter canonical O3K tenant state.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-scripts/p11-multi-host-gate.sh --dry-run
+scripts/edge-fabric-gate.sh --dry-run
 ```
 
 ## Non-goals

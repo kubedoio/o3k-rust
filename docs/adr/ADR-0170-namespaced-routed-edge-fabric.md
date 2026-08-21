@@ -19,7 +19,7 @@ Related decisions and specifications:
 - [SPEC-0026 — O3K Routed Fabric v1](../specs/SPEC-0026-o3k-routed-fabric-v1.md)
 - [SPEC-0027 — native persistent storage v1](../specs/SPEC-0027-native-persistent-storage-v1.md)
 - [SPEC-0028 — Namespaced Routed Edge Fabric v1](../specs/SPEC-0028-namespaced-routed-edge-fabric-v1.md)
-- [P11 edge-fabric contract](../../contracts/p11-edge-fabric.md)
+- [P11 edge-fabric contract](../../contracts/edge-fabric-v1.md)
 - [Execution-boundary contract](../../contracts/execution-boundaries.md)
 
 This is a privileged multi-host networking and scheduling decision. The task
