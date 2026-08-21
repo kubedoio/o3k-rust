@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::action::ActionId;
+use crate::controller::{ControllerRegistration, ControllerSession, ControllerState, ControllerHealth};
 use crate::error::KernelError;
 use crate::resource::ResourceType;
 
@@ -267,6 +268,7 @@ pub enum ManifestError {
 pub struct ManifestRegistry {
     manifests: HashMap<String, ServiceManifest>,
     by_namespace: HashMap<String, String>, // namespace -> service_id
+    controllers: HashMap<String, ControllerRegistration>, // service_id -> registration
 }
 
 impl ManifestRegistry {
@@ -274,6 +276,65 @@ impl ManifestRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Registers or updates a controller session for a registered service.
+    ///
+    /// Returns an error if the service is not registered.
+    pub fn register_controller(
+        &mut self,
+        service_id: &str,
+        session: ControllerSession,
+    ) -> Result<(), ManifestError> {
+        if !self.manifests.contains_key(service_id) {
+            return Err(ManifestError::InvalidField("service_id"));
+        }
+        let namespace = self.manifests[service_id].namespace.clone();
+        let reg = ControllerRegistration {
+            service_id: service_id.to_owned(),
+            namespace,
+            session: Some(session),
+            state: ControllerState::Ready,
+            health: None,
+        };
+        self.controllers.insert(service_id.to_owned(), reg);
+        Ok(())
+    }
+
+    /// Updates the health of a registered controller.
+    pub fn update_controller_health(
+        &mut self,
+        service_id: &str,
+        health: ControllerHealth,
+    ) -> Result<(), ManifestError> {
+        let reg = self.controllers.get_mut(service_id).ok_or_else(|| {
+            ManifestError::InvalidField("service_id")
+        })?;
+        let state = if health.healthy {
+            ControllerState::Ready
+        } else {
+            ControllerState::NotReady
+        };
+        reg.health = Some(health);
+        reg.state = state;
+        Ok(())
+    }
+
+    /// Returns the controller registration for a service, if any.
+    #[must_use]
+    pub fn controller(&self, service_id: &str) -> Option<&ControllerRegistration> {
+        self.controllers.get(service_id)
+    }
+
+    /// Returns all controller registrations.
+    #[must_use]
+    pub fn all_controllers(&self) -> Vec<&ControllerRegistration> {
+        self.controllers.values().collect()
+    }
+
+    /// Removes a controller registration (does not unregister the manifest).
+    pub fn remove_controller(&mut self, service_id: &str) {
+        self.controllers.remove(service_id);
     }
 
     /// Attempts to register a service manifest.

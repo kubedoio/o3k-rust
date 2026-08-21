@@ -16,6 +16,7 @@ pub mod action;
 pub mod audit;
 pub mod auth_context;
 pub mod authorization;
+pub mod controller;
 pub mod envelope;
 pub mod error;
 pub mod manifest;
@@ -34,6 +35,10 @@ pub use auth_context::AuthContext;
 pub use authorization::{
     ActionPolicy, AuthorizationDecision, AuthorizationRequest, Authorizer, DecisionReason,
     StaticAuthorizer,
+};
+pub use controller::{
+    Controller, ControllerCapabilities, ControllerHealth, ControllerRegistration, ControllerSession,
+    ControllerState, DelegationContext, ProtocolVersion, ReconcileOutcome, ReconcileRequest,
 };
 pub use envelope::{ResourceEnvelope, ResourceMeta};
 pub use error::KernelError;

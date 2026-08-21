@@ -1339,6 +1339,7 @@ dependencies = [
 name = "o3k-kernel"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "thiserror",
