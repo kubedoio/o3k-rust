@@ -107,13 +107,13 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
         .map(|m| {
             let lc = registry
                 .controller(&m.service_id)
-                .map(|c| format!("{:?}", c.state))
-                .unwrap_or_else(|| format!("{:?}", ServiceLifecycleState::Declared));
+                .map(|c| c.state.to_string())
+                .unwrap_or_else(|| ServiceLifecycleState::Declared.to_string());
             DiscoveredService {
                 id: m.service_id.clone(),
                 namespace: m.namespace.clone(),
                 service_version: m.service_version.clone(),
-                ownership: Some(format!("{:?}", m.ownership)),
+                ownership: Some(m.ownership.to_string()),
                 lifecycle_state: Some(lc),
             }
         })
@@ -250,7 +250,47 @@ mod tests {
         .unwrap();
         assert_eq!(body["count"].as_u64().unwrap_or(0), 1);
         assert_eq!(body["services"][0]["namespace"], "compute");
-        assert!(body["services"][0]["lifecycle_state"].is_string());
+        assert_eq!(body["services"][0]["lifecycle_state"], "declared");
+        assert_eq!(body["services"][0]["ownership"], "o3k-implemented");
+    }
+
+    #[tokio::test]
+    async fn discover_services_stable_wire_values() {
+        // Verify that wire values use stable contract strings, not Rust Debug
+        // formatting.
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        let state = NativeApiState::new(Some(reg));
+        let app = router(state);
+        let response = axum::http::Request::builder()
+            .uri("/services")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = axum::response::Response::from(
+            tower::ServiceExt::oneshot(app, response).await.unwrap(),
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        // All services must have stable lifecycle_state and ownership values.
+        let services = body["services"].as_array().unwrap();
+        assert!(services.len() >= 6, "expected at least 6 seeded services");
+        for svc in services {
+            let lc = svc["lifecycle_state"].as_str().unwrap_or("");
+            assert!(
+                ["declared", "ready", "not_ready", "disabled", "incompatible"].contains(&lc),
+                "unexpected lifecycle_state: {lc}"
+            );
+            let ownership = svc["ownership"].as_str().unwrap_or("");
+            assert!(
+                ["o3k-implemented", "external-hosted"].contains(&ownership),
+                "unexpected ownership: {ownership}"
+            );
+        }
     }
 
     #[tokio::test]

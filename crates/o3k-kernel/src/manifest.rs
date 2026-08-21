@@ -608,14 +608,13 @@ impl ManifestRegistry {
     /// `ManifestRegistry` format so that native discovery has a coherent
     /// source of truth during migration.
     ///
-    /// Existing core services are registered with `Declared` lifecycle state.
-    /// Controller binding and health/readiness are set by the runtime after
-    /// this seeding step.
+    /// Uses the same validated `register()` path as explicit registration.
+    /// Silently skips duplicates so the seed is idempotent.
     ///
     /// This is a migration adapter and will be replaced as core services
     /// adopt native manifest registration directly.
     pub fn seed_core(&mut self) {
-        let core_manifests = vec![
+        let core_manifests: Vec<ServiceManifest> = vec![
             ServiceManifest {
                 manifest_version: 1,
                 service_id: "identity".to_owned(),
@@ -633,7 +632,7 @@ impl ManifestRegistry {
                     "identity:ValidateToken".to_owned(),
                     "identity:RevokeToken".to_owned(),
                 ],
-                capabilities: vec!["openstack-identity-v3".to_owned()],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -656,7 +655,7 @@ impl ManifestRegistry {
                     "image:UploadImage".to_owned(),
                     "image:DownloadImage".to_owned(),
                 ],
-                capabilities: vec!["openstack-glance-v2".to_owned()],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -670,26 +669,23 @@ impl ManifestRegistry {
                 namespace: "network".to_owned(),
                 service_version: "0.4.0".to_owned(),
                 ownership: ServiceOwnership::O3kImplemented,
+                // FIX 3: Use canonical O3K Network resources (ADR-0168/ADR-0171).
+                // Not Neutron-shaped network/subnet/port.
                 resource_types: vec![
-                    "network:network".to_owned(),
-                    "network:subnet".to_owned(),
-                    "network:port".to_owned(),
+                    "network:address_realm".to_owned(),
+                    "network:endpoint".to_owned(),
                 ],
                 actions: vec![
-                    "network:ListNetworks".to_owned(),
-                    "network:CreateNetwork".to_owned(),
-                    "network:ReadNetwork".to_owned(),
-                    "network:DeleteNetwork".to_owned(),
-                    "network:ListSubnets".to_owned(),
-                    "network:CreateSubnet".to_owned(),
-                    "network:ReadSubnet".to_owned(),
-                    "network:DeleteSubnet".to_owned(),
-                    "network:ListPorts".to_owned(),
-                    "network:CreatePort".to_owned(),
-                    "network:ReadPort".to_owned(),
-                    "network:DeletePort".to_owned(),
+                    "network:ListAddressRealms".to_owned(),
+                    "network:CreateAddressRealm".to_owned(),
+                    "network:ReadAddressRealm".to_owned(),
+                    "network:DeleteAddressRealm".to_owned(),
+                    "network:ListEndpoints".to_owned(),
+                    "network:CreateEndpoint".to_owned(),
+                    "network:ReadEndpoint".to_owned(),
+                    "network:DeleteEndpoint".to_owned(),
                 ],
-                capabilities: vec!["openstack-neutron-v2".to_owned()],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -726,7 +722,7 @@ impl ManifestRegistry {
                     "compute:RebootServer".to_owned(),
                     "compute:ReadConsole".to_owned(),
                 ],
-                capabilities: vec!["openstack-nova-v2.1".to_owned()],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -744,8 +740,11 @@ impl ManifestRegistry {
                     "placement:resource_provider".to_owned(),
                     "placement:allocation".to_owned(),
                 ],
-                actions: vec![],
-                capabilities: vec!["openstack-placement-v1".to_owned()],
+                actions: vec![
+                    "placement:ListResourceProviders".to_owned(),
+                    "placement:ReadAllocation".to_owned(),
+                ],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -764,12 +763,15 @@ impl ManifestRegistry {
                     "volume:volume_attachment".to_owned(),
                 ],
                 actions: vec![
-                    "volume:ListVolumeAttachments".to_owned(),
+                    "volume:ListVolumes".to_owned(),
+                    "volume:CreateVolume".to_owned(),
+                    "volume:ReadVolume".to_owned(),
+                    "volume:DeleteVolume".to_owned(),
                     "volume:AttachVolume".to_owned(),
                     "volume:ReadVolumeAttachment".to_owned(),
                     "volume:DetachVolume".to_owned(),
                 ],
-                capabilities: vec!["o3k-native-storage-v1".to_owned()],
+                capabilities: vec![],
                 dependencies: vec![],
                 quota_dimensions: vec![],
                 region: None,
@@ -780,16 +782,22 @@ impl ManifestRegistry {
         ];
 
         for m in core_manifests {
-            // Silently skip services that are already registered
-            // (e.g. if a controller registered them explicitly)
-            if self.manifests.contains_key(&m.service_id) {
+            // Silently skip if already registered (idempotent seed).
+            if self.manifests.contains_key(&m.service_id)
+                || self.by_namespace.contains_key(&m.namespace)
+            {
                 continue;
             }
-            if self.by_namespace.contains_key(&m.namespace) {
-                continue;
+            // Use the same validated registration path as explicit registration.
+            // A failed seed is an invariant violation — skip and document
+            // rather than panic (production safety).
+            if let Err(_e) = self.register(m) {
+                // ponytail: seed failure means the core manifest definitions
+                // are inconsistent with registry invariants. Skipping instead
+                // of panicking keeps the daemon running; the operator can
+                // inspect logs and fix the definition.
+                eprintln!("seed_core: skipping invalid core manifest: {_e}");
             }
-            let service_id = m.service_id.clone();
-            self.manifests.insert(service_id, m);
         }
     }
 
@@ -1096,6 +1104,102 @@ mod tests {
         assert!(reg.get("compute").is_some());
         assert!(reg.get("placement").is_some());
         assert!(reg.get("volume").is_some());
+    }
+
+    #[test]
+    fn seed_core_by_namespace_index_consistent() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        // get_by_namespace must work for all seeded services
+        for ns in &[
+            "identity",
+            "image",
+            "network",
+            "compute",
+            "placement",
+            "volume",
+        ] {
+            let svc = reg.get_by_namespace(ns);
+            assert!(svc.is_some(), "get_by_namespace({ns}) returned None");
+            assert_eq!(svc.unwrap().namespace, *ns);
+        }
+        // secondary index must exactly match manifest count
+        assert_eq!(reg.len(), 6);
+        assert_eq!(reg.all().len(), 6);
+    }
+
+    #[test]
+    fn seed_core_duplicate_namespace_fails() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        let m = ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute-dup".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership: ServiceOwnership::O3kImplemented,
+            resource_types: vec!["compute:server".to_owned()],
+            actions: vec!["compute:CreateServer".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            region: None,
+            availability_domain: None,
+            controller: None,
+            health: None,
+        };
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::DuplicateNamespace(_)),
+            "expected DuplicateNamespace, got {err}"
+        );
+    }
+
+    #[test]
+    fn seed_core_seeded_network_uses_canonical_types() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        let network = reg.get("network").unwrap();
+        // Must use canonical O3K Network concepts, not Neutron-shaped types
+        assert!(
+            network
+                .resource_types
+                .contains(&"network:address_realm".to_owned()),
+            "expected network:address_realm in network resource types, got {:?}",
+            network.resource_types
+        );
+        assert!(
+            network
+                .resource_types
+                .contains(&"network:endpoint".to_owned()),
+            "expected network:endpoint in network resource types, got {:?}",
+            network.resource_types
+        );
+        assert!(
+            !network
+                .resource_types
+                .contains(&"network:subnet".to_owned()),
+            "must not contain Neutron-shaped network:subnet"
+        );
+        assert!(
+            !network.resource_types.contains(&"network:port".to_owned()),
+            "must not contain Neutron-shaped network:port"
+        );
+    }
+
+    #[test]
+    fn seed_core_no_openstack_capabilities() {
+        let mut reg = ManifestRegistry::new();
+        reg.seed_core();
+        for m in reg.all() {
+            for cap in &m.capabilities {
+                assert!(
+                    !cap.starts_with("openstack-"),
+                    "service {} must not have OpenStack capabilities in native manifest: {cap}",
+                    m.service_id
+                );
+            }
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 Status: Accepted
 Date: 2026-08-21
-Human-approval: project-requester (2026-08-21, explicit architecture/security approval recorded in PR #729 review)
+Human-approval: project-requester (2026-08-21, explicit architecture/security approval recorded in task instruction)
 Supersedes: none
 Superseded-by: none
 Affected-services: governance, cloud-kernel, identity, compute, network, image, placement, volume, api, cli, future-services
@@ -21,7 +21,7 @@ Related decisions and specifications:
 - [SPEC-0031 — O3K Service Extension and Controller v1](../specs/SPEC-0031-service-extension-controller-v1.md)
 - [native resource envelope contract](../../contracts/native-resource-envelope-v1.schema.json)
 
-This ADR changes public-contract architecture and security-sensitive scope handling. Human architecture/security approval was recorded on 2026-08-21 under ADR-0154 (PR #729 review).
+This ADR changes public-contract architecture and security-sensitive scope handling. Human architecture/security approval was recorded on 2026-08-21 under ADR-0154 (explicit acceptance by project-requester in task instruction).
 
 ## Context
 

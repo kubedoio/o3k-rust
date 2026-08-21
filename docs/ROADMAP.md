@@ -277,13 +277,18 @@ status as of the current release.
 
 - `Controller` trait in `o3k-kernel` (`crates/o3k-kernel/src/controller.rs`);
 - `ProtocolVersion`, `ReconcileOutcome`, `DelegationContext`, `ControllerSession`,
-  `ControllerRegistration`, `ControllerState` lifecycle (Declared→Ready);
+  `ControllerRegistration`, `ControllerState` lifecycle types defined;
 - `ManifestRegistry` extended with controller registration, health tracking,
   session generation fencing, and activation handshake;
+- **Controller lifecycle is scaffolding only**: the current in-process
+  `register_controller()` → `update_controller_health()` path does NOT enforce
+  authenticated service identity, manifest binding, protocol negotiation, or
+  health confirmation before reaching `Ready`. Those security-critical checks
+  belong to P12.5.
 - **Not implemented**: language-neutral external controller transport (gRPC/
   protobuf/mTLS is the ADR-0174 reference direction), secure delegation
-  enforcement, service SDK crate. The Rust `Controller` trait is an in-process
-  contract only.
+  enforcement, service SDK crate, authenticated Ready enforcement. The Rust
+  `Controller` trait is an in-process contract only.
 
 ### P12.6 — Extension conformance service — scaffolded
 
@@ -312,6 +317,36 @@ WebSocket/event streaming, production DBaaS/DNS/LB/AI/Kubernetes services,
 multi-region, dynamic Rust `.so` plugins, or provider/dataplane redesign.
 P12 completion requires executable evidence for both native API correctness and
 service extensibility. Endpoint count alone is not a completion metric.
+
+### P12 follow-up issue boundaries
+
+The remaining P12 work is tracked by issues #730–#735 with the following
+corrected scope boundaries:
+
+| Issue | Scope |
+|-------|-------|
+| **#730 (P12.2)** | Native IAM/AuthContext integration, representative native read-only resources (compute:server, volume:volume, network:address_realm), Problem Details error envelope, opaque pagination. |
+| **#731 (P12.3)** | Generic resource server dispatch (map registry types to handlers), native create/delete, generic CLI create/delete, correct 201/202 semantics using completed operation primitives. |
+| **#732 (P12.4)** | Durable Operation convergence (kernel Operation ↔ store ↔ reconciler), Idempotency-Key, generation/precondition concurrency, restart/reload operation semantics, native API Operation exposure. |
+| **#733 (P12.5)** | External gRPC/protobuf/mTLS controller transport, authenticated service identity enforcement, manifest binding verification, protocol negotiation, secure delegation, service SDK crate. |
+| **#734 (P12.6)** | Database conformance service with real resource composition (compute:server + network:endpoint + volume:volume), bounded delegation, durable operations, compensation, audit correlation, cleanup evidence. |
+| **#735 (P12.7)** | Security evidence matrix, native/OpenStack authority convergence integration tests, OpenStack compatibility regression verification. |
+
+The Idempotency-Key implementation belongs to **#732**, not #730, because
+idempotency is an operation-level contract that requires durable Operation
+convergence before it can be correctly wired.
+
+Recommended implementation sequence:
+
+```text
+#730 (P12.2) → #732 (P12.4) → #731 (P12.3) → #733 (P12.5) → #734 (P12.6) → #735 (P12.7)
+```
+
+This ensures native read, IAM, error, and pagination primitives exist before
+Operations and idempotency; Operations and idempotency exist before generic
+create/delete; generic dispatch exists before the external controller boundary;
+the external controller boundary exists before real Database composition; and
+everything exists before the security evidence gate.
 
 ## P13+ — richer cloud platform and ecosystem
 

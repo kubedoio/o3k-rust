@@ -201,6 +201,20 @@ pub enum ControllerState {
     Disabled,
 }
 
+impl std::fmt::Display for ControllerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Stable wire values — must match the serde rename_all and the
+        // SPEC-0031 lifecycle contract.
+        match self {
+            Self::Declared => write!(f, "declared"),
+            Self::Ready => write!(f, "ready"),
+            Self::NotReady => write!(f, "not_ready"),
+            Self::Incompatible => write!(f, "incompatible"),
+            Self::Disabled => write!(f, "disabled"),
+        }
+    }
+}
+
 /// A registered controller binding, linking a service manifest to an
 /// authenticated controller session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

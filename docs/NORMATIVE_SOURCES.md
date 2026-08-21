@@ -23,7 +23,7 @@ product rules. Summaries explain these decisions but do not override them.
 ## Accepted P12 sources — active architecture authority
 
 The following P12 sources were accepted on 2026-08-21 (human architecture/
-security approval recorded under ADR-0154). They are now active architecture
+security approval by project-requester, recorded in task instruction). They are now active architecture
 authority alongside the accepted foundation sources above. Runtime
 implementation and support claims remain gated by the evidence requirements
 defined in each source.
