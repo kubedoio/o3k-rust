@@ -48,8 +48,8 @@ pub use manifest::{
     ManifestError, ManifestRegistry, NativeResourceMetaV1, NativeResourceV1, OpenStackApiSurface,
     OpenStackApiSurfaceV1, OpenStackCompatibilityProjection, OpenStackEndpointTemplate,
     OpenStackEndpointV1, OpenStackProjectionV1, QuotaDimension, QuotaDimensionDescriptor,
-    RegisteredResourceType, ResourceScope, ResourceTypeDescriptor, ServiceDependency, ServiceHealth,
-    ServiceLifecycleState, ServiceManifest, ServiceManifestV1,
+    RegisteredResourceType, ResourceScope, ResourceTypeDescriptor, ServiceDependency,
+    ServiceHealth, ServiceLifecycleState, ServiceManifest, ServiceManifestV1,
 };
 pub use operation::{Operation, OperationState};
 pub use principal::{Principal, PrincipalId, PrincipalKind, ServicePrincipal, UserPrincipal};

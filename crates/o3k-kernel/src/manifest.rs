@@ -20,6 +20,48 @@ use crate::controller::{
 use crate::error::KernelError;
 use crate::resource::ResourceType;
 
+/// Validates an identifier against a character-class predicate and length bounds.
+///
+/// `char_ok` returns true for characters that may appear AFTER the first position.
+/// The first character must satisfy `char_ok(first_char)` (not just `is_ok`).
+/// Empty strings are rejected.
+fn valid_identifier(s: &str, max_len: usize, char_ok: impl Fn(char) -> bool) -> bool {
+    if s.is_empty() || s.len() > max_len {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        None => return false,
+        Some(first) => {
+            if !char_ok(first) {
+                return false;
+            }
+        }
+    }
+    for c in chars {
+        if !char_ok(c) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_lower_digit(c: char) -> bool {
+    c.is_ascii_lowercase() || c.is_ascii_digit()
+}
+fn is_service_id_char(c: char) -> bool {
+    is_lower_digit(c) || c == '.' || c == '_' || c == '-'
+}
+fn is_namespace_char(c: char) -> bool {
+    is_lower_digit(c) || c == '_' || c == '-'
+}
+fn is_capability_char(c: char) -> bool {
+    is_lower_digit(c) || c == '.' || c == '_' || c == ':' || c == '-'
+}
+fn is_action_name_char(c: char) -> bool {
+    c.is_ascii_uppercase() || c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+}
+
 /// Service ownership mode in O3K Cloud OS.
 ///
 /// Re-exported from registry for convenience; the semantic is the same as the
@@ -229,14 +271,18 @@ impl ServiceManifest {
             return Err(ManifestError::UnsupportedVersion(self.manifest_version));
         }
 
-        // service_id: 1..128
-        if self.service_id.trim().is_empty() || self.service_id.len() > 128 {
-            return Err(ManifestError::InvalidField("service_id (1..128)"));
+        // service_id: 1..128, pattern ^[a-z0-9][a-z0-9._-]*$
+        if !valid_identifier(&self.service_id, 128, is_service_id_char) {
+            return Err(ManifestError::InvalidField(
+                "service_id (1..128, lower-case/digit/./_-)",
+            ));
         }
 
-        // namespace: 1..64
-        if self.namespace.trim().is_empty() || self.namespace.len() > 64 {
-            return Err(ManifestError::InvalidField("namespace (1..64)"));
+        // namespace: 1..64, pattern ^[a-z0-9][a-z0-9_-]*$
+        if !valid_identifier(&self.namespace, 64, is_namespace_char) {
+            return Err(ManifestError::InvalidField(
+                "namespace (1..64, lower-case/digit/_-)",
+            ));
         }
 
         // service_version: 1..64
@@ -255,14 +301,13 @@ impl ServiceManifest {
         let Some(ref ctrl) = self.controller else {
             return Err(ManifestError::InvalidField("controller is required"));
         };
-        match (ctrl.mode.as_str(), self.ownership) {
-            ("in-process", ServiceOwnership::O3kImplemented) => {}
-            ("external", ServiceOwnership::ExternalController) => {
-                if ctrl.protocol != "grpc" {
-                    return Err(ManifestError::InvalidField(
-                        "controller.protocol must be 'grpc' for external mode",
-                    ));
-                }
+        // Strict ownership/controller matrix:
+        // O3kImplemented -> mode=in-process, protocol=in-process
+        // ExternalController -> mode=external, protocol=grpc, service_principal non-empty
+        // Everything else is rejected.
+        match (ctrl.mode.as_str(), ctrl.protocol.as_str(), self.ownership) {
+            ("in-process", "in-process", ServiceOwnership::O3kImplemented) => {}
+            ("external", "grpc", ServiceOwnership::ExternalController) => {
                 if ctrl
                     .service_principal
                     .as_deref()
@@ -275,27 +320,9 @@ impl ServiceManifest {
                     ));
                 }
             }
-            ("in-process", _) => {
-                return Err(ManifestError::InvalidField(
-                    "in-process controller requires o3k-implemented ownership",
-                ));
-            }
-            ("external", _) => {
-                return Err(ManifestError::InvalidField(
-                    "external controller requires external-controller ownership",
-                ));
-            }
-            (_mode, _) => {
-                return Err(ManifestError::InvalidField(
-                    "controller.mode: expected 'in-process' or 'external'",
-                ));
-            }
-        }
-        match ctrl.protocol.as_str() {
-            "in-process" | "grpc" => {}
             _ => {
                 return Err(ManifestError::InvalidField(
-                    "controller.protocol: expected 'in-process' or 'grpc'",
+                    "invalid controller mode/protocol/ownership combination",
                 ));
             }
         }
@@ -304,7 +331,9 @@ impl ServiceManifest {
                 "controller.protocol_version (1..64)",
             ));
         }
-        if let Some(ref sp) = ctrl.service_principal && sp.len() > 255 {
+        if let Some(ref sp) = ctrl.service_principal
+            && sp.len() > 255
+        {
             return Err(ManifestError::InvalidField(
                 "controller.service_principal max 255",
             ));
@@ -331,7 +360,9 @@ impl ServiceManifest {
                 ));
             }
             if let Some(ref coll) = rt.collection
-                && (coll.trim().is_empty() || coll.len() > 128)
+                && (coll.trim().is_empty()
+                    || coll.len() > 128
+                    || !valid_identifier(coll, 128, is_namespace_char))
             {
                 return Err(ManifestError::InvalidField(
                     "resource_types[].collection (1..128)",
@@ -347,7 +378,7 @@ impl ServiceManifest {
             if self.actions[..i].contains(act) {
                 return Err(ManifestError::DuplicateAction(act.clone()));
             }
-            let Some((ns, _)) = act.split_once(':') else {
+            let Some((ns, act_name)) = act.split_once(':') else {
                 return Err(ManifestError::InvalidIdentifier(
                     act.clone(),
                     "action must be namespace:Action".to_owned(),
@@ -362,6 +393,19 @@ impl ServiceManifest {
             if act.len() > 128 {
                 return Err(ManifestError::InvalidField("action (max 128)"));
             }
+            // Action name must be PascalCase: uppercase first char, followed by
+            // alphanumeric/underscore.
+            if act_name.is_empty()
+                || !act_name
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+                || !act_name.chars().all(is_action_name_char)
+            {
+                return Err(ManifestError::InvalidField(
+                    "action name must be PascalCase",
+                ));
+            }
         }
 
         // capabilities: max 128, unique, each 1..128
@@ -372,7 +416,10 @@ impl ServiceManifest {
             if self.capabilities[..i].contains(cap) {
                 return Err(ManifestError::InvalidField("duplicate capability"));
             }
-            if cap.trim().is_empty() || cap.len() > 128 {
+            if cap.trim().is_empty()
+                || cap.len() > 128
+                || !valid_identifier(cap, 128, is_capability_char)
+            {
                 return Err(ManifestError::InvalidField("capability (1..128)"));
             }
         }
@@ -395,7 +442,10 @@ impl ServiceManifest {
             if self.quota_dimensions[..i].iter().any(|o| o.key == qd.key) {
                 return Err(ManifestError::DuplicateQuotaDimension(qd.key.clone()));
             }
-            if qd.key.trim().is_empty() || qd.key.len() > 128 {
+            if qd.key.trim().is_empty()
+                || qd.key.len() > 128
+                || !valid_identifier(&qd.key, 128, is_capability_char)
+            {
                 return Err(ManifestError::InvalidField(
                     "quota_dimensions[].key (1..128)",
                 ));
@@ -868,8 +918,57 @@ impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
         if wire.projection_version != "o3k.io/openstack-projection/v1" {
             return Err(ManifestError::InvalidField("projection_version"));
         }
-        // Validate endpoint interface values
+        // service_id 1..128
+        if wire.service_id.trim().is_empty() || wire.service_id.len() > 128 {
+            return Err(ManifestError::InvalidField("service_id (1..128)"));
+        }
+        // service_type 1..128
+        if wire.service_type.trim().is_empty() || wire.service_type.len() > 128 {
+            return Err(ManifestError::InvalidField("service_type (1..128)"));
+        }
+        // service_name <=128
+        if let Some(ref name) = wire.service_name && name.len() > 128 {
+            return Err(ManifestError::InvalidField("service_name (max 128)"));
+        }
+        // api_surfaces <=32
+        if wire.api_surfaces.len() > 32 {
+            return Err(ManifestError::InvalidField("api_surfaces (max 32)"));
+        }
+        for api in &wire.api_surfaces {
+            // name 1..160
+            if api.name.trim().is_empty() || api.name.len() > 160 {
+                return Err(ManifestError::InvalidField("api_surfaces[].name (1..160)"));
+            }
+            // prefix starts "/" and <=255
+            if !api.prefix.starts_with('/') || api.prefix.len() > 255 {
+                return Err(ManifestError::InvalidField(
+                    "api_surfaces[].prefix must start with / (max 255)",
+                ));
+            }
+            // version 1..64
+            if api.version.trim().is_empty() || api.version.len() > 64 {
+                return Err(ManifestError::InvalidField(
+                    "api_surfaces[].version (1..64)",
+                ));
+            }
+            // min/max microversion <=32
+            if let Some(ref mv) = api.min_microversion && mv.len() > 32 {
+                return Err(ManifestError::InvalidField(
+                    "api_surfaces[].min_microversion (max 32)",
+                ));
+            }
+            if let Some(ref mv) = api.max_microversion && mv.len() > 32 {
+                return Err(ManifestError::InvalidField(
+                    "api_surfaces[].max_microversion (max 32)",
+                ));
+            }
+        }
+        // endpoints <=384
+        if wire.endpoints.len() > 384 {
+            return Err(ManifestError::InvalidField("endpoints (max 384)"));
+        }
         for ep in &wire.endpoints {
+            // interface public/internal/admin
             match ep.interface.as_str() {
                 "public" | "internal" | "admin" => {}
                 _ => {
@@ -878,19 +977,32 @@ impl TryFrom<OpenStackProjectionV1> for OpenStackCompatibilityProjection {
                     ));
                 }
             }
-            if !ep.url_template.starts_with("http") && !ep.url_template.starts_with('/') {
+            // region 1..128
+            if ep.region.trim().is_empty() || ep.region.len() > 128 {
+                return Err(ManifestError::InvalidField("endpoints[].region (1..128)"));
+            }
+            // url_template 1..2048 (no prefix restriction per accepted schema)
+            if ep.url_template.trim().is_empty() || ep.url_template.len() > 2048 {
                 return Err(ManifestError::InvalidField(
-                    "endpoints[].url_template must start with http or /",
+                    "endpoints[].url_template (1..2048)",
                 ));
             }
         }
-        // Validate API surface prefix starts with /
-        for api in &wire.api_surfaces {
-            if !api.prefix.starts_with('/') {
-                return Err(ManifestError::InvalidField(
-                    "api_surfaces[].prefix must start with /",
-                ));
+        // capabilities <=256, unique, each 1..128
+        if wire.capabilities.len() > 256 {
+            return Err(ManifestError::InvalidField("capabilities (max 256)"));
+        }
+        for (i, cap) in wire.capabilities.iter().enumerate() {
+            if wire.capabilities[..i].contains(cap) {
+                return Err(ManifestError::InvalidField("duplicate capability"));
             }
+            if cap.trim().is_empty() || cap.len() > 128 {
+                return Err(ManifestError::InvalidField("capability (1..128)"));
+            }
+        }
+        // evidence_profile <=128
+        if let Some(ref ep) = wire.evidence_profile && ep.len() > 128 {
+            return Err(ManifestError::InvalidField("evidence_profile (max 128)"));
         }
         Ok(OpenStackCompatibilityProjection {
             service_id: wire.service_id,
@@ -1512,9 +1624,10 @@ mod tests {
     fn manifest_rejects_missing_service_id() {
         let mut m = valid_database_manifest();
         m.service_id = "".to_owned();
-        assert_eq!(
-            m.validate().unwrap_err(),
-            ManifestError::InvalidField("service_id (1..128)")
+        let err = m.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("service_id"),
+            "expected service_id error, got {err}"
         );
     }
 
@@ -2763,6 +2876,437 @@ mod tests {
         assert!(
             result.is_err(),
             "expected rejection of wrong projection version"
+        );
+    }
+
+    // ── Direct-Rust contract-parity tests ───────────────────────────────
+
+    fn register_test_manifest(reg: &mut ManifestRegistry) -> Result<(), ManifestError> {
+        let m = ServiceManifest {
+            manifest_version: 1,
+            service_id: "test".to_owned(),
+            namespace: "test".to_owned(),
+            service_version: "0.1.0".to_owned(),
+            ownership: ServiceOwnership::O3kImplemented,
+            resource_types: vec![RegisteredResourceType {
+                resource_type: ResourceType::new("test", "server").unwrap(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+            }],
+            actions: vec!["test:CreateServer".to_owned()],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        reg.register(m)
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_service_id() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.service_id = "Bad Service".to_owned();
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("service_id"),
+            "expected service_id error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_namespace() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.namespace = "bad.namespace".to_owned();
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("namespace"),
+            "expected namespace error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_collection() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.resource_types[0].collection = Some("bad collection".to_owned());
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("collection"),
+            "expected collection error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_action_format() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.actions = vec!["database:123bad".to_owned()];
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("PascalCase"),
+            "expected action PascalCase error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_capability() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.capabilities = vec!["Bad Capability".to_owned()];
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("capability"),
+            "expected capability error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_invalid_quota_key() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.quota_dimensions = vec![QuotaDimension {
+            key: "Bad Key".to_owned(),
+            unit: "count".to_owned(),
+            scope: "tenant".to_owned(),
+        }];
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("key"),
+            "expected quota key error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_129_resource_types() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.resource_types = (0..129)
+            .map(|i| RegisteredResourceType {
+                resource_type: ResourceType::new("database", &format!("instance_{i}")).unwrap(),
+                schema_version: "v1".to_owned(),
+                collection: None,
+                scope: ResourceScope::Tenant,
+            })
+            .collect();
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("resource_types"),
+            "expected resource_types error for 129, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_257_actions() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.actions = (0..257).map(|i| format!("database:Action_{i}")).collect();
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("actions"),
+            "expected actions error for 257, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_missing_controller() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.controller = None;
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("controller"),
+            "expected controller required error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_o3k_implemented_with_grpc() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.controller = Some(ManifestController {
+            mode: "in-process".to_owned(),
+            protocol: "grpc".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: None,
+        });
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("controller"),
+            "expected controller combination error for in-process+grpc, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_external_controller_with_in_process_protocol() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.ownership = ServiceOwnership::ExternalController;
+        m.controller = Some(ManifestController {
+            mode: "external".to_owned(),
+            protocol: "in-process".to_owned(),
+            protocol_version: "1.0".to_owned(),
+            service_principal: Some("svc@o3k".to_owned()),
+        });
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("controller"),
+            "expected controller combination error for external+in-process, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_external_hosted_ownership() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.ownership = ServiceOwnership::ExternalHosted;
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("ownership"),
+            "expected ExternalHosted rejection, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_duplicate_capability() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.capabilities = vec!["dup".to_owned(), "dup".to_owned()];
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate capability error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_duplicate_region() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.regions = vec!["region-a".to_owned(), "region-a".to_owned()];
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "expected duplicate region error, got {err}"
+        );
+    }
+
+    #[test]
+    fn direct_rust_rejects_empty_controller_protocol_version() {
+        let mut reg = ManifestRegistry::new();
+        let mut m = valid_database_manifest();
+        m.controller = Some(ManifestController {
+            mode: "in-process".to_owned(),
+            protocol: "in-process".to_owned(),
+            protocol_version: "".to_owned(),
+            service_principal: None,
+        });
+        let err = reg.register(m).unwrap_err();
+        assert!(
+            err.to_string().contains("protocol_version"),
+            "expected protocol_version error, got {err}"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_oversized_service_type() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "x".repeat(129),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of oversized service_type"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_33_surfaces() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: (0..33)
+                .map(|i| OpenStackApiSurfaceV1 {
+                    name: format!("surface_{i}"),
+                    prefix: "/v2".to_owned(),
+                    version: "1.0".to_owned(),
+                    min_microversion: None,
+                    max_microversion: None,
+                    enabled: true,
+                })
+                .collect(),
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(result.is_err(), "expected rejection of 33 API surfaces");
+    }
+
+    #[test]
+    fn projection_rejects_empty_surface_version() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![OpenStackApiSurfaceV1 {
+                name: "Nova".to_owned(),
+                prefix: "/v2.1".to_owned(),
+                version: "".to_owned(),
+                min_microversion: None,
+                max_microversion: None,
+                enabled: true,
+            }],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of empty surface version"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_oversized_microversion() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![OpenStackApiSurfaceV1 {
+                name: "Nova".to_owned(),
+                prefix: "/v2.1".to_owned(),
+                version: "2.1".to_owned(),
+                min_microversion: Some("x".repeat(33)),
+                max_microversion: None,
+                enabled: true,
+            }],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of oversized microversion"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_empty_region() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![OpenStackEndpointV1 {
+                interface: "public".to_owned(),
+                region: "".to_owned(),
+                url_template: "http://localhost".to_owned(),
+                enabled: true,
+            }],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of empty endpoint region"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_duplicate_capability() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![],
+            capabilities: vec!["cap".to_owned(), "cap".to_owned()],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of duplicate projection capability"
+        );
+    }
+
+    #[test]
+    fn projection_rejects_oversized_evidence_profile() {
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![],
+            capabilities: vec![],
+            evidence_profile: Some("x".repeat(129)),
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_err(),
+            "expected rejection of oversized evidence_profile"
+        );
+    }
+
+    #[test]
+    fn projection_accepts_non_http_url_template() {
+        // The accepted schema does NOT require url_template to start with
+        // "http" or "/". A valid non-HTTP URL must not be rejected.
+        let wire = OpenStackProjectionV1 {
+            projection_version: "o3k.io/openstack-projection/v1".to_owned(),
+            service_id: "test".to_owned(),
+            service_type: "compute".to_owned(),
+            service_name: None,
+            enabled: true,
+            api_surfaces: vec![],
+            endpoints: vec![OpenStackEndpointV1 {
+                interface: "public".to_owned(),
+                region: "RegionOne".to_owned(),
+                url_template: "unix:///var/run/o3k.sock".to_owned(),
+                enabled: true,
+            }],
+            capabilities: vec![],
+            evidence_profile: None,
+        };
+        let result: Result<OpenStackCompatibilityProjection, ManifestError> = wire.try_into();
+        assert!(
+            result.is_ok(),
+            "a valid non-http URL template must not be rejected by an undocumented prefix rule"
         );
     }
 }
