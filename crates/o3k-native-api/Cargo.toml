@@ -11,13 +11,19 @@ description = "O3K Native Resource API — service-namespaced REST surface over 
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
+hmac.workspace = true
 o3k-kernel = { path = "../o3k-kernel" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+jsonschema = "0.50"
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower.workspace = true

@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+mod native_adapters;
+
 use o3k_domain::ServerId;
 use o3k_provider::{
     AgentNodeSnapshot, ArtifactKind, ComputeProvider, ConfigDriveRequest, CreateArtifactResolver,
@@ -786,6 +788,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(o3k_store::O3kStore::connect_postgres(url).await?)
         }
     };
+    let native_api_store = store.clone();
 
     let controller_id = o3k_store::ControllerId::new(
         std::env::var("O3K_CONTROLLER_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string()),
@@ -1106,6 +1109,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     native_manifest_registry
         .seed_core()
         .map_err(|e| format!("native manifest seed_core failed: {e}"))?;
+
+    // Wire native API service adapters.
+    let server_reader: Option<std::sync::Arc<dyn o3k_native_api::compute::ServerReader>> =
+        Some(std::sync::Arc::new(native_adapters::ServerReaderAdapter {
+            service: std::sync::Arc::new(compute_service.clone()),
+        })
+            as std::sync::Arc<dyn o3k_native_api::compute::ServerReader>);
+    let volume_reader: Option<std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>> =
+        Some(std::sync::Arc::new(native_adapters::VolumeReaderAdapter {
+            store: native_api_store.clone(),
+            authorizer: std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+        })
+            as std::sync::Arc<dyn o3k_native_api::volume::VolumeReader>);
+    let network_reader: Option<std::sync::Arc<dyn o3k_native_api::network::NetworkReader>> =
+        Some(std::sync::Arc::new(native_adapters::NetworkReaderAdapter {
+            store: native_api_store.clone(),
+            authorizer: std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()),
+        })
+            as std::sync::Arc<dyn o3k_native_api::network::NetworkReader>);
+    let token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
+        identity.as_ref().map(|id_service| {
+            std::sync::Arc::new(native_adapters::TokenIssuerAdapter {
+                service: std::sync::Arc::new(id_service.clone()),
+            }) as std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>
+        });
+
     let inspect_compute_service = compute_service.clone();
     let volume_attachments_enabled = compute_service.cinder_configured();
     let mut state = if let Some(identity) = identity {
@@ -1126,9 +1155,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_volume_attachments_enabled(volume_attachments_enabled)
             .with_compute(compute_service)
     };
-    state = state.with_native_api(o3k_native_api::NativeApiState::new(Some(
-        native_manifest_registry,
-    )));
+    // Native pagination is reachable only when IAM is configured.  In the
+    // IAM-disabled health/operational profile, keep the API unavailable and
+    // avoid requiring production secrets solely to start healthz.
+    let cursor_config = if token_issuer.is_some() {
+        o3k_native_api::pagination::CursorConfig::from_env()
+            .map_err(|error| format!("native cursor configuration failed: {error}"))?
+    } else {
+        o3k_native_api::pagination::CursorConfig::default()
+    };
+    state = state.with_native_api(o3k_native_api::NativeApiState::new(
+        Some(native_manifest_registry),
+        cursor_config,
+        token_issuer,
+        server_reader,
+        volume_reader,
+        network_reader,
+    ));
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
     }

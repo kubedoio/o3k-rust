@@ -2043,6 +2043,27 @@ impl ComputeService {
             .await
     }
 
+    /// Returns the durable control-plane generation for a server already
+    /// authorized through the compute read path. The native API uses this
+    /// bounded projection instead of fabricating generation metadata.
+    pub async fn server_generation_for_auth(
+        &self,
+        auth: &AuthContext,
+        id: ServerId,
+    ) -> Result<i64, ComputeError> {
+        let record = self
+            .store
+            .get_resource(id.as_uuid())
+            .await
+            .map_err(ComputeError::Store)?;
+        if record.project_id != auth.effective_scope().id().as_str()
+            || record.kind != "compute_instance"
+        {
+            return Err(ComputeError::NotFound);
+        }
+        Ok(record.generation)
+    }
+
     pub async fn list_servers(&self, project_id: &str) -> Result<Vec<Server>, ComputeError> {
         let flavors = self.flavors_for_project(project_id).await?;
         let resources = self

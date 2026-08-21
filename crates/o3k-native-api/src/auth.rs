@@ -1,0 +1,266 @@
+//! Native API authentication and authorization helpers.
+//!
+//! Defines:
+//! - `NativeTokenRequestV1` — native IAM request DTO
+//! - `TokenIssuer` trait — port for token issuance/validation
+//! - `BearerAuth` extractor — 401 on failure (never swallowed)
+
+use axum::{
+    extract::{FromRef, FromRequestParts},
+    http::request::Parts,
+    response::{IntoResponse, Response},
+};
+use o3k_kernel::AuthContext;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{NativeApiState, error::ProblemDetails};
+
+// ── Native Token Request DTO ──────────────────────────────────────────────
+
+/// Native token request (SPEC-0030 §5).
+///
+/// This is the canonical native IAM request, separate from the
+/// Keystone-compatible `TokenRequest`. Both map to the same O3K IAM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeTokenRequestV1 {
+    pub auth: NativeAuth,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativeAuth {
+    pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<NativePasswordCredentials>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+}
+
+/// Validated native credential.  The wire DTO remains deliberately separate
+/// from Keystone's request shape; callers must pass through this validator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeCredentialV1 {
+    Password { user_id: String, password: String },
+    Token { token: String },
+}
+
+impl NativeAuth {
+    pub fn credential(&self) -> Result<NativeCredentialV1, &'static str> {
+        match (
+            self.method.as_str(),
+            self.password.as_ref(),
+            self.token.as_ref(),
+        ) {
+            ("password", Some(password), None)
+                if !password.user_id.is_empty() && !password.password.is_empty() =>
+            {
+                Ok(NativeCredentialV1::Password {
+                    user_id: password.user_id.clone(),
+                    password: password.password.clone(),
+                })
+            }
+            ("token", None, Some(token)) if !token.is_empty() => Ok(NativeCredentialV1::Token {
+                token: token.clone(),
+            }),
+            ("password" | "token", _, _) => Err("credential does not match method"),
+            _ => Err("unknown native credential method"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NativePasswordCredentials {
+    pub user_id: String,
+    pub password: String,
+}
+
+/// Bounded request correlation identity accepted by the native API.
+#[derive(Debug, Clone)]
+pub struct RequestId(pub String);
+
+impl RequestId {
+    fn from_parts(parts: &mut Parts) -> Self {
+        if let Some(existing) = parts.extensions.get::<Self>() {
+            return existing.clone();
+        }
+        let accepted = parts
+            .headers
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 128
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+            })
+            .map(str::to_owned);
+        let value = Self(accepted.unwrap_or_else(|| Uuid::now_v7().to_string()));
+        parts.extensions.insert(value.clone());
+        value
+    }
+}
+
+impl<S> FromRequestParts<S> for RequestId
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_parts(parts))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn auth(
+        method: &str,
+        password: Option<NativePasswordCredentials>,
+        token: Option<&str>,
+    ) -> NativeAuth {
+        NativeAuth {
+            method: method.to_owned(),
+            password,
+            token: token.map(str::to_owned),
+            project_id: None,
+        }
+    }
+
+    #[test]
+    fn credentials_are_strictly_discriminated() {
+        assert!(matches!(
+            auth(
+                "password",
+                Some(NativePasswordCredentials {
+                    user_id: "u".into(),
+                    password: "p".into()
+                }),
+                None
+            )
+            .credential(),
+            Ok(NativeCredentialV1::Password { .. })
+        ));
+        assert!(matches!(
+            auth("token", None, Some("t")).credential(),
+            Ok(NativeCredentialV1::Token { .. })
+        ));
+        assert!(auth("password", None, Some("t")).credential().is_err());
+        assert!(
+            auth(
+                "token",
+                Some(NativePasswordCredentials {
+                    user_id: "u".into(),
+                    password: "p".into()
+                }),
+                None
+            )
+            .credential()
+            .is_err()
+        );
+        assert!(auth("other", None, None).credential().is_err());
+    }
+
+    #[test]
+    fn request_id_is_generated_once_and_reused() {
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        let first = RequestId::from_parts(&mut parts);
+        let second = RequestId::from_parts(&mut parts);
+        assert_eq!(first.0, second.0);
+        assert!(!first.0.is_empty());
+    }
+
+    #[test]
+    fn request_id_accepts_bounded_safe_value_and_rejects_unsafe() {
+        let mut request = axum::http::Request::new(());
+        request
+            .headers_mut()
+            .insert("x-request-id", HeaderValue::from_static("client-42"));
+        let mut parts = request.into_parts().0;
+        assert_eq!(RequestId::from_parts(&mut parts).0, "client-42");
+
+        let mut request = axum::http::Request::new(());
+        request
+            .headers_mut()
+            .insert("x-request-id", HeaderValue::from_static("bad value"));
+        let mut parts = request.into_parts().0;
+        assert_ne!(RequestId::from_parts(&mut parts).0, "bad value");
+    }
+}
+
+// ── TokenIssuer trait ──────────────────────────────────────────────────────
+
+/// Lightweight IAM port used by the native identity endpoints.
+#[async_trait::async_trait]
+pub trait TokenIssuer: Send + Sync {
+    /// Issues a token from a native token request.
+    async fn issue_native(
+        &self,
+        request: &NativeTokenRequestV1,
+    ) -> Result<(String, serde_json::Value), ProblemDetails>;
+
+    /// Validates a bearer token and returns the canonical AuthContext.
+    async fn auth_context(&self, token: &str) -> Result<AuthContext, ProblemDetails>;
+}
+
+// ── Bearer auth extractor ──────────────────────────────────────────────────
+
+/// Extractor that validates a bearer token and provides the canonical
+/// `AuthContext`.
+///
+/// Missing/malformed/invalid bearer → 401 application/problem+json.
+/// Never returns 200 with authenticated=false.
+#[derive(Debug, Clone)]
+pub struct BearerAuth(pub AuthContext);
+
+impl<S> FromRequestParts<S> for BearerAuth
+where
+    S: Send + Sync,
+    NativeApiState: FromRef<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let request_id = RequestId::from_parts(parts);
+        let header = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                ProblemDetails::unauthorized()
+                    .with_request_id(request_id.0.clone())
+                    .into_response()
+            })?;
+
+        // Missing credentials are always an authentication failure.  Check
+        // this before optional service configuration to avoid leaking a 503.
+        let api_state = NativeApiState::from_ref(state);
+        let Some(ref issuer) = api_state.token_issuer else {
+            return Err(ProblemDetails::with_detail(
+                crate::error::ErrorCode::NotAvailable,
+                "IAM is not configured",
+            )
+            .with_request_id(request_id.0.clone())
+            .into_response());
+        };
+
+        let token = header.strip_prefix("Bearer ").ok_or_else(|| {
+            ProblemDetails::unauthorized()
+                .with_request_id(request_id.0.clone())
+                .into_response()
+        })?;
+
+        let ctx = issuer.auth_context(token).await.map_err(|_| {
+            ProblemDetails::unauthorized()
+                .with_request_id(request_id.0.clone())
+                .into_response()
+        })?;
+
+        Ok(BearerAuth(ctx.with_request_id(request_id.0)))
+    }
+}

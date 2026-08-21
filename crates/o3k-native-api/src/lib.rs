@@ -1,46 +1,56 @@
 //! O3K Native Resource API — service-namespaced REST surface over Cloud Kernel
 //! resources.
 //!
-//! This crate is a northbound protocol adapter, sibling to `o3k-api` (the
-//! OpenStack compatibility adapter). Both consume the same canonical
-//! application/domain services. See ADR-0173, ADR-0174, and SPEC-0030.
-//!
-//! ## Routing convention
-//!
-//! ```text
-//! /o3k/v1/{service-namespace}/{collection}
-//! ```
-//!
-//! ## Current v1 endpoints (growing)
-//!
-//! - `GET /o3k/v1`                        — API version/entry discovery
-//! - `GET /o3k/v1/services`              — registered services
-//! - `GET /o3k/v1/resource-types`        — registered resource types
-//! - `GET /o3k/v1/identity/me`           — current auth context (stub)
+//! Sibling to `o3k-api` (OpenStack compatibility adapter). Both consume the
+//! same canonical application/domain services. See ADR-0173, ADR-0174, SPEC-0030.
 
-use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Json, Router,
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use o3k_kernel::{ManifestRegistry, ServiceLifecycleState};
 use serde::Serialize;
 
+pub mod auth;
+pub mod compute;
+pub mod error;
 pub mod identity;
+pub mod network;
+pub mod pagination;
+pub mod volume;
 
-/// Shared state wrapping the manifest registry for native service/resource
-/// discovery.
-///
-/// The `ManifestRegistry` is the authoritative source for native service
-/// discovery (ADR-0174/SPEC-0031). Static P0-P11 core services are
-/// represented through a migration adapter (see `ManifestRegistry::seed_core()`).
+/// Shared application state for the native API router.
 #[derive(Clone, Default)]
 pub struct NativeApiState {
-    /// Manifest registry as the canonical discovery source.
     pub registry: Option<ManifestRegistry>,
+    pub cursor_config: pagination::CursorConfig,
+    pub token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
+    pub server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
+    pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
+    pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
 }
 
 impl NativeApiState {
-    /// Creates a new `NativeApiState` with an optional manifest registry.
-    #[must_use]
-    pub fn new(registry: Option<ManifestRegistry>) -> Self {
-        Self { registry }
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        registry: Option<ManifestRegistry>,
+        cursor_config: pagination::CursorConfig,
+        token_issuer: Option<std::sync::Arc<dyn auth::TokenIssuer>>,
+        server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
+        volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
+        network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
+    ) -> Self {
+        Self {
+            registry,
+            cursor_config,
+            token_issuer,
+            server_reader,
+            volume_reader,
+            network_reader,
+        }
     }
 }
 
@@ -50,8 +60,32 @@ pub fn router(state: NativeApiState) -> Router {
         .route("/", get(api_root))
         .route("/services", get(discover_services))
         .route("/resource-types", get(discover_resource_types))
+        .route("/identity/tokens", post(identity::issue_token))
         .route("/identity/me", get(identity::current_context))
+        .route("/compute/servers", get(compute::list_servers))
+        .route("/compute/servers/{id}", get(compute::show_server))
+        .route("/volume/volumes", get(volume::list_volumes))
+        .route("/volume/volumes/{id}", get(volume::show_volume))
+        .route("/network/address-realms", get(network::list_address_realms))
+        .route(
+            "/network/address-realms/{id}",
+            get(network::show_address_realm),
+        )
         .with_state(state)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic)]
+pub(crate) fn assert_resource_envelope_schema(value: &serde_json::Value) {
+    let schema: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/native-resource-envelope-v1.schema.json"
+    )))
+    .expect("valid native envelope schema");
+    let validator = jsonschema::validator_for(&schema).expect("compiled native envelope schema");
+    if let Err(errors) = validator.validate(value) {
+        panic!("native envelope schema violation: {errors}");
+    }
 }
 
 // ── API root ──────────────────────────────────────────────────────────────
@@ -68,7 +102,11 @@ pub async fn api_root() -> Json<ApiRootResponse> {
         endpoints: vec![
             "/o3k/v1/services",
             "/o3k/v1/resource-types",
+            "/o3k/v1/identity/tokens",
             "/o3k/v1/identity/me",
+            "/o3k/v1/compute/servers",
+            "/o3k/v1/volume/volumes",
+            "/o3k/v1/network/address-realms",
         ],
     })
 }
@@ -82,7 +120,6 @@ pub struct DiscoveredService {
     service_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ownership: Option<String>,
-    /// Lifecycle state from service registration + controller health.
     #[serde(skip_serializing_if = "Option::is_none")]
     lifecycle_state: Option<String>,
 }
@@ -98,7 +135,8 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
         return (
             StatusCode::OK,
             Json(serde_json::json!({"services": [], "count": 0})),
-        );
+        )
+            .into_response();
     };
 
     let services: Vec<DiscoveredService> = registry
@@ -124,6 +162,7 @@ pub async fn discover_services(State(state): State<NativeApiState>) -> impl Into
         StatusCode::OK,
         Json(serde_json::to_value(ServicesResponse { services, count }).unwrap_or_default()),
     )
+        .into_response()
 }
 
 // ── Resource-type discovery ────────────────────────────────────────────────
@@ -146,12 +185,12 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
         return (
             StatusCode::OK,
             Json(serde_json::json!({"resource_types": [], "count": 0})),
-        );
+        )
+            .into_response();
     };
 
     let rts = registry.all_resource_types();
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    // Map resource types to their owning service
     for rt in &rts {
         for m in registry.all() {
             if m.namespace == rt.namespace() {
@@ -176,7 +215,10 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             .unwrap_or_default(),
         ),
     )
+        .into_response()
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -231,7 +273,14 @@ mod tests {
 
     #[tokio::test]
     async fn api_root_returns_version() {
-        let state = NativeApiState::new(Some(test_manifest_registry()));
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        );
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/")
@@ -252,7 +301,14 @@ mod tests {
 
     #[tokio::test]
     async fn discover_services_uses_manifest_registry() {
-        let state = NativeApiState::new(Some(test_manifest_registry()));
+        let state = NativeApiState::new(
+            Some(test_manifest_registry()),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        );
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/services")
@@ -276,11 +332,16 @@ mod tests {
 
     #[tokio::test]
     async fn discover_services_stable_wire_values() {
-        // Verify that wire values use stable contract strings, not Rust Debug
-        // formatting.
         let mut reg = ManifestRegistry::new();
         reg.seed_core().unwrap();
-        let state = NativeApiState::new(Some(reg));
+        let state = NativeApiState::new(
+            Some(reg),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        );
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/services")
@@ -296,7 +357,6 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        // All services must have stable lifecycle_state and ownership values.
         let services = body["services"].as_array().unwrap();
         assert!(services.len() >= 3, "expected at least 3 seeded services");
         for svc in services {
@@ -315,7 +375,16 @@ mod tests {
 
     #[tokio::test]
     async fn discover_resource_types_from_manifest_registry() {
-        let state = NativeApiState::new(Some(test_manifest_registry()));
+        let mut registry = ManifestRegistry::new();
+        registry.seed_core().unwrap();
+        let state = NativeApiState::new(
+            Some(registry),
+            pagination::CursorConfig::default(),
+            None,
+            None,
+            None,
+            None,
+        );
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/resource-types")
@@ -331,7 +400,44 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        // Should contain compute:server and compute:flavor
         assert!(body["count"].as_u64().unwrap_or(0) >= 2);
+        let kinds: Vec<String> = body["resource_types"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                Some(format!(
+                    "{}:{}",
+                    item["namespace"].as_str()?,
+                    item["name"].as_str()?
+                ))
+            })
+            .collect();
+        assert!(kinds.iter().any(|kind| kind == "compute:server"));
+        assert!(kinds.iter().any(|kind| kind == "network:address_realm"));
+        assert!(kinds.iter().any(|kind| kind == "volume:volume"));
+    }
+
+    #[tokio::test]
+    async fn endpoint_without_bearer_returns_401() {
+        let state = NativeApiState::default();
+        let app = router(state);
+        // Identity/me requires auth
+        let response = axum::http::Request::builder()
+            .uri("/identity/me")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = axum::response::Response::from(
+            tower::ServiceExt::oneshot(app, response).await.unwrap(),
+        );
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "application/problem+json"
+        );
     }
 }

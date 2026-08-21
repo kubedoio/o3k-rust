@@ -1383,7 +1383,8 @@ impl ManifestRegistry {
     /// profile. Only services whose canonical actions exist in the accepted
     /// `contracts/cloud-kernel-actions.yaml` are included.
     ///
-    /// **Deferred until P12.2 (canonical actions accepted):** network, volume, placement.
+    /// Placement remains deferred; native Network and Volume reads are
+    /// advertised because their canonical actions are now implemented.
     ///
     /// Returns an error if a built-in core manifest fails registration — such
     /// a failure is an invariant violation that must propagate through daemon
@@ -1533,13 +1534,66 @@ impl ManifestRegistry {
                 }),
                 health: None,
             },
-            // ── Deferred from native discovery until P12.2 ────────────────
-            // network: canonical O3K Network resources (address_realm,
-            //   endpoint) need accepted actions (committed).
-            // volume: canonical volume lifecycle actions (CreateVolume,
-            //   ListVolumes, ReadVolume, DeleteVolume) need acceptance.
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "network".to_owned(),
+                namespace: "network".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![RegisteredResourceType {
+                    resource_type: ResourceType::new_unchecked("network", "address_realm"),
+                    schema_version: "v1".to_owned(),
+                    collection: Some("address-realms".to_owned()),
+                    scope: ResourceScope::Tenant,
+                }],
+                actions: vec![
+                    "network:ListAddressRealms".to_owned(),
+                    "network:ReadAddressRealm".to_owned(),
+                ],
+                capabilities: vec![],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                regions: vec![],
+                availability_domains: vec![],
+                controller: Some(ManifestController {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    service_principal: None,
+                }),
+                health: None,
+            },
+            ServiceManifest {
+                manifest_version: 1,
+                service_id: "volume".to_owned(),
+                namespace: "volume".to_owned(),
+                service_version: "0.4.0".to_owned(),
+                ownership: ServiceOwnership::O3kImplemented,
+                resource_types: vec![RegisteredResourceType {
+                    resource_type: ResourceType::new_unchecked("volume", "volume"),
+                    schema_version: "v1".to_owned(),
+                    collection: Some("volumes".to_owned()),
+                    scope: ResourceScope::Tenant,
+                }],
+                actions: vec![
+                    "volume:ListVolumes".to_owned(),
+                    "volume:ReadVolume".to_owned(),
+                ],
+                capabilities: vec![],
+                dependencies: vec![],
+                quota_dimensions: vec![],
+                regions: vec![],
+                availability_domains: vec![],
+                controller: Some(ManifestController {
+                    mode: "in-process".to_owned(),
+                    protocol: "in-process".to_owned(),
+                    protocol_version: "1.0".to_owned(),
+                    service_principal: None,
+                }),
+                health: None,
+            },
             // placement: no actions currently accepted in
-            //   contracts/cloud-kernel-actions.yaml.
+            // contracts/cloud-kernel-actions.yaml.
         ];
 
         for m in core_manifests {
@@ -1903,14 +1957,13 @@ mod tests {
     fn seed_core_registers_accepted_services() {
         let mut reg = ManifestRegistry::new();
         reg.seed_core().unwrap();
-        // Only identity, image, compute have accepted canonical actions.
-        assert_eq!(reg.len(), 3);
+        // Native Network and Volume reads are accepted canonical services.
+        assert_eq!(reg.len(), 5);
         assert!(reg.get("identity").is_some());
         assert!(reg.get("image").is_some());
         assert!(reg.get("compute").is_some());
-        // Network, volume, placement deferred until P12.2
-        assert!(reg.get("network").is_none());
-        assert!(reg.get("volume").is_none());
+        assert!(reg.get("network").is_some());
+        assert!(reg.get("volume").is_some());
         assert!(reg.get("placement").is_none());
     }
 
@@ -1919,14 +1972,14 @@ mod tests {
         let mut reg = ManifestRegistry::new();
         reg.seed_core().unwrap();
         // get_by_namespace must work for all seeded services
-        for ns in &["identity", "image", "compute"] {
+        for ns in &["identity", "image", "compute", "network", "volume"] {
             let svc = reg.get_by_namespace(ns);
             assert!(svc.is_some(), "get_by_namespace({ns}) returned None");
             assert_eq!(svc.unwrap().namespace, *ns);
         }
         // secondary index must exactly match manifest count
-        assert_eq!(reg.len(), 3);
-        assert_eq!(reg.all().len(), 3);
+        assert_eq!(reg.len(), 5);
+        assert_eq!(reg.all().len(), 5);
     }
 
     #[test]
@@ -2789,7 +2842,7 @@ mod tests {
         // Calling seed_core again with the same built-in manifests must succeed.
         assert!(reg.seed_core().is_ok());
         // State unchanged.
-        assert_eq!(reg.len(), 3);
+        assert_eq!(reg.len(), 5);
     }
 
     #[test]

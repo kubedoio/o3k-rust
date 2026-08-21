@@ -1685,10 +1685,16 @@ dependencies = [
 name = "o3k-native-api"
 version = "0.4.0-alpha.1"
 dependencies = [
+ "async-trait",
  "axum",
+ "base64",
+ "hmac",
+ "jsonschema",
  "o3k-kernel",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror",
  "tokio",
  "tower",
  "tracing",

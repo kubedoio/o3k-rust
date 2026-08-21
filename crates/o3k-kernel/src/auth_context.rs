@@ -99,6 +99,13 @@ impl AuthContext {
         &self.request_id
     }
 
+    /// Rebinds the per-request correlation identity at the protocol boundary.
+    #[must_use]
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = request_id.into();
+        self
+    }
+
     /// Returns the optional service principal if this was a service-delegated context.
     #[must_use]
     pub fn service_principal(&self) -> Option<&ServicePrincipal> {

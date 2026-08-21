@@ -344,3 +344,37 @@ actions:
     accepted_principal_classes: ["user", "service"]
     require_ownership: true
     public_discovery: false
+
+  # P12.2 — Native volume read actions
+  - action_id: "volume:ListVolumes"
+    service_namespace: "volume"
+    resource_type: "volume"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: true
+
+  - action_id: "volume:ReadVolume"
+    service_namespace: "volume"
+    resource_type: "volume"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: true
+
+  # P12.2 — Native network read actions (canonical O3K AddressRealm)
+  - action_id: "network:ListAddressRealms"
+    service_namespace: "network"
+    resource_type: "address_realm"
+    target_kind: "collection"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: true
+
+  - action_id: "network:ReadAddressRealm"
+    service_namespace: "network"
+    resource_type: "address_realm"
+    target_kind: "instance"
+    accepted_principal_classes: ["user", "service"]
+    require_ownership: true
+    public_discovery: true

@@ -22,6 +22,10 @@ fn assert_signal_shutdown(signal: &str) -> Result<(), Box<dyn std::error::Error>
             "--log-filter",
             "off",
         ])
+        .env(
+            "O3K_NATIVE_CURSOR_HMAC_KEY",
+            "test-native-cursor-key-0123456789abcdef",
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
