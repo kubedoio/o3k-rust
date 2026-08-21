@@ -232,7 +232,7 @@ mod tests {
         let local = FabricHostIdentity {
             host_id: "node-a".to_owned(),
             public_key: "public-a".to_owned(),
-            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            underlay_endpoint: "192.0.2.1:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 1),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,
@@ -242,7 +242,7 @@ mod tests {
         let remote = FabricHostIdentity {
             host_id: "node-b".to_owned(),
             public_key: "public-b".to_owned(),
-            underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            underlay_endpoint: "192.0.2.2:65001".to_owned(),
             fabric_transport_ip: Ipv4Addr::new(198, 18, 0, 2),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: directory_generation,

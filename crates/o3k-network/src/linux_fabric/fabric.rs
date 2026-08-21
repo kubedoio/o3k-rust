@@ -282,6 +282,7 @@ impl super::LinuxP11FabricBackend {
             ],
         );
         // DNAT incoming WireGuard UDP to the fabric namespace.
+        let wg_port = self.config.wireguard_port.to_string();
         let _ = self.command.run(
             "iptables",
             &[
@@ -295,7 +296,7 @@ impl super::LinuxP11FabricBackend {
                 "-p",
                 "udp",
                 "--dport",
-                "51820",
+                &wg_port,
                 "-j",
                 "DNAT",
                 "--to-destination",
@@ -498,6 +499,7 @@ impl super::LinuxP11FabricBackend {
                 "MASQUERADE",
             ],
         );
+        let wg_port = self.config.wireguard_port.to_string();
         for rule in [
             vec![
                 "-t",
@@ -510,7 +512,7 @@ impl super::LinuxP11FabricBackend {
                 "-p",
                 "udp",
                 "--dport",
-                "51820",
+                &wg_port,
                 "-j",
                 "DNAT",
                 "--to-destination",
@@ -524,7 +526,7 @@ impl super::LinuxP11FabricBackend {
                 "-p",
                 "udp",
                 "--dport",
-                "51820",
+                &wg_port,
                 "-j",
                 "DNAT",
                 "--to-destination",

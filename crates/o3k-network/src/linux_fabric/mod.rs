@@ -54,7 +54,7 @@ impl LinuxP11Config {
             root: root.into(),
             fabric_namespace: "o3k-fabric".to_owned(),
             fabric_interface: "wg-o3k".to_owned(),
-            wireguard_port: 51_820,
+            wireguard_port: 65_001,
             geneve_port: 6_081,
             public_uplink: None,
         }
@@ -63,6 +63,18 @@ impl LinuxP11Config {
     #[must_use]
     pub fn with_public_uplink(mut self, uplink: impl Into<String>) -> Self {
         self.public_uplink = Some(uplink.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_wireguard_port(mut self, port: u16) -> Self {
+        self.wireguard_port = port;
+        self
+    }
+
+    #[must_use]
+    pub fn with_geneve_port(mut self, port: u16) -> Self {
+        self.geneve_port = port;
         self
     }
 
@@ -79,6 +91,27 @@ impl LinuxP11Config {
                 .is_some_and(|uplink| !valid_name(uplink))
         {
             return Err(LinuxP11Error::InvalidConfiguration);
+        }
+        Ok(())
+    }
+
+    /// Validate port ranges (1..=65535) and emit a warning if the selected
+    /// WireGuard port falls inside the host's ephemeral range, without
+    /// mutating the OS range. Returns an error if the port is already bound.
+    pub fn validate_ports(&self) -> Result<(), LinuxP11Error> {
+        if self.wireguard_port < 1 || self.geneve_port < 1 {
+            return Err(LinuxP11Error::InvalidConfiguration);
+        }
+        if is_port_bound(self.wireguard_port) {
+            return Err(LinuxP11Error::InvalidConfiguration);
+        }
+        if let Some(low) = ephemeral_port_low()
+            && self.wireguard_port >= low
+        {
+            eprintln!(
+                "WARNING: WireGuard port {} lies inside the ephemeral range ({}..=65535)",
+                self.wireguard_port, low
+            );
         }
         Ok(())
     }
@@ -424,6 +457,30 @@ impl P11FabricBackend for LinuxP11FabricBackend {
             && !self.plans.contains_key(&plan.realm_id))
     }
 }
+// ---------------------------------------------------------------------------
+// Port validation helpers
+// ---------------------------------------------------------------------------
+
+/// Check whether a UDP port is already in use on 0.0.0.0 by attempting to
+/// bind a socket. Returns `true` if the port cannot be bound.
+pub(crate) fn is_port_bound(port: u16) -> bool {
+    use std::net::UdpSocket;
+    UdpSocket::bind(std::net::SocketAddrV4::new(
+        std::net::Ipv4Addr::UNSPECIFIED,
+        port,
+    ))
+    .is_err()
+}
+
+/// Return the lower bound of the ephemeral port range, or `None` if the
+/// kernel parameter cannot be read.
+pub(crate) fn ephemeral_port_low() -> Option<u16> {
+    let path = "/proc/sys/net/ipv4/ip_local_port_range";
+    let content = std::fs::read_to_string(path).ok()?;
+    let first = content.split_whitespace().next()?;
+    first.parse::<u16>().ok()
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {
@@ -490,7 +547,7 @@ mod tests {
         let local = FabricHostIdentity {
             host_id: "host-a".to_owned(),
             public_key: "public-a".to_owned(),
-            underlay_endpoint: "192.0.2.1:51820".to_owned(),
+            underlay_endpoint: "192.0.2.1:65001".to_owned(),
             fabric_transport_ip: "198.18.0.1".parse().expect("transport ip"),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,
@@ -500,7 +557,7 @@ mod tests {
         let remote = FabricHostIdentity {
             host_id: "host-b".to_owned(),
             public_key: "B".repeat(43) + "=",
-            underlay_endpoint: "192.0.2.2:51820".to_owned(),
+            underlay_endpoint: "192.0.2.2:65001".to_owned(),
             fabric_transport_ip: "198.18.0.2".parse().expect("transport ip"),
             provider_version: "wireguard-v1".to_owned(),
             fabric_generation: 3,

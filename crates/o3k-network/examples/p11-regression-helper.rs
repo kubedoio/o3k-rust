@@ -15,7 +15,7 @@
 //!   --peer-host-id reg-host-b \
 //!   --peer-transport-ip 198.18.0.2 \
 //!   --peer-public-key <base64-key> \
-//!   --underlay-endpoint 10.77.0.2:51820
+//!   --underlay-endpoint 10.77.0.2:65001
 //! ```
 //!
 //! The `--peer-*` and `--underlay-endpoint` describe the **remote** host that
@@ -143,7 +143,7 @@ fn build_realm_plan(
     let local_identity = FabricHostIdentity {
         host_id: local_host_id.to_owned(),
         public_key: "local-placeholder".to_owned(),
-        underlay_endpoint: "127.0.0.1:51820".to_owned(),
+        underlay_endpoint: "127.0.0.1:65001".to_owned(),
         fabric_transport_ip: local_transport_ip,
         provider_version: "wireguard-v1".to_owned(),
         fabric_generation: FABRIC_GENERATION,
@@ -191,6 +191,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer_transport_ip = None;
     let mut peer_public_key = None;
     let mut underlay_endpoint = None;
+    let mut wireguard_port = None;
+    let mut geneve_port = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -226,6 +228,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--underlay-endpoint" => {
                 i += 1;
                 underlay_endpoint = Some(args[i].clone());
+            }
+            "--wireguard-port" => {
+                i += 1;
+                wireguard_port = Some(args[i].parse::<u16>()?);
+            }
+            "--geneve-port" => {
+                i += 1;
+                geneve_port = Some(args[i].parse::<u16>()?);
             }
             other => {
                 eprintln!("unknown argument: {other}");
@@ -273,7 +283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
     ];
 
-    let config = LinuxP11Config::for_root(&root);
+    let mut config = LinuxP11Config::for_root(&root);
+    if let Some(port) = wireguard_port {
+        config = config.with_wireguard_port(port);
+    }
+    if let Some(port) = geneve_port {
+        config = config.with_geneve_port(port);
+    }
     let mut backend = LinuxP11FabricBackend::open(config)?;
 
     for plan in &plans {

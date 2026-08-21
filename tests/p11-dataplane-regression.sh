@@ -29,8 +29,8 @@ cleanup_all() {
     done
     # Clean up iptables rules that may have been added.
     iptables -t nat -D POSTROUTING -s 169.254.253.0/30 -j MASQUERADE 2>/dev/null || true
-    while iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
-    while iptables -t nat -D PREROUTING '!' -i o3k-u -p udp --dport 51820 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
+    while iptables -t nat -D PREROUTING -p udp --dport 65001 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
+    while iptables -t nat -D PREROUTING '!' -i o3k-u -p udp --dport 65001 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
     rm -rf "$ROOT_A" "$ROOT_B"
     set -e
 }
@@ -151,6 +151,9 @@ echo ""
 
 run_round() {
     local round="$1"
+    local wg_args="$2"
+    local underlay_endpoint_a="$3"
+    local underlay_endpoint_b="$4"
 
     echo "=== Round $round ==="
 
@@ -200,7 +203,8 @@ run_round() {
         --host-id reg-host-a --transport-ip 198.18.0.1 \
         --peer-host-id reg-host-b --peer-transport-ip 198.18.0.2 \
         --peer-public-key "$PUB_B" \
-        --underlay-endpoint "10.77.0.2:51820" \
+        --underlay-endpoint "$underlay_endpoint_a" \
+        $wg_args \
         2>&1
     echo "[PASS] host-A apply"
 
@@ -211,7 +215,8 @@ run_round() {
         --host-id reg-host-b --transport-ip 198.18.0.2 \
         --peer-host-id reg-host-a --peer-transport-ip 198.18.0.1 \
         --peer-public-key "$PUB_A" \
-        --underlay-endpoint "10.77.0.1:51820" \
+        --underlay-endpoint "$underlay_endpoint_b" \
+        $wg_args \
         2>&1
     echo "[PASS] host-B apply"
 
@@ -316,7 +321,8 @@ run_round() {
         --host-id reg-host-a --transport-ip 198.18.0.1 \
         --peer-host-id reg-host-b --peer-transport-ip 198.18.0.2 \
         --peer-public-key "$PUB_B" \
-        --underlay-endpoint "10.77.0.2:51820" \
+        --underlay-endpoint "$underlay_endpoint_a" \
+        $wg_args \
         2>&1
     echo "[PASS] host-A remove"
 
@@ -326,7 +332,8 @@ run_round() {
         --host-id reg-host-b --transport-ip 198.18.0.2 \
         --peer-host-id reg-host-a --peer-transport-ip 198.18.0.1 \
         --peer-public-key "$PUB_A" \
-        --underlay-endpoint "10.77.0.1:51820" \
+        --underlay-endpoint "$underlay_endpoint_b" \
+        $wg_args \
         2>&1
     echo "[PASS] host-B remove"
 
@@ -356,8 +363,8 @@ run_round() {
     rm -rf "$ROOT_A" "$ROOT_B"
     # Clean up lingering iptables rules.
     iptables -t nat -D POSTROUTING -s 169.254.253.0/30 -j MASQUERADE 2>/dev/null || true
-    while iptables -t nat -D PREROUTING -p udp --dport 51820 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
-    while iptables -t nat -D PREROUTING '!' -i o3k-u -p udp --dport 51820 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
+    while iptables -t nat -D PREROUTING -p udp --dport 65001 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
+    while iptables -t nat -D PREROUTING '!' -i o3k-u -p udp --dport 65001 -j DNAT --to-destination 169.254.253.2 2>/dev/null; do true; done
     echo "[PASS] round cleanup done"
 }
 
@@ -379,9 +386,13 @@ done
 
 trap cleanup_all EXIT
 
-# Run two rounds for idempotency proof.
-run_round 1
-run_round 2
+# Run two rounds for idempotency proof — first with default port, second with custom port.
+echo "=== Round 1: default WireGuard port 65001 ==="
+run_round 1 "" ""
+echo ""
+
+echo "=== Round 2: custom WireGuard port 65123 ==="
+run_round 2 "--wireguard-port 65123" "10.77.0.2:65123" "10.77.0.1:65123"
 
 echo ""
 echo "=============================================="

@@ -208,7 +208,7 @@ make_realm b3 p11h3 p11eb2 10.0.0.20 10.0.0.10 198.18.0.2 102 102 130 169.254.10
 wait_for_wireguard
 
 capture_file="$ROOT_TMP/underlay.capture"
-timeout 15 tcpdump -ni "$UNDERLAY_BRIDGE" -nn -U 'udp port 51820' >"$capture_file" 2>&1 &
+timeout 15 tcpdump -ni "$UNDERLAY_BRIDGE" -nn -U 'udp port 65001' >"$capture_file" 2>&1 &
 capture_pid=$!
 sleep 1
 
