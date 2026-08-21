@@ -107,7 +107,6 @@ pub async fn list_servers(
     let cursor_cfg = &state.cursor_config;
 
     // Validate cursor if provided
-    // Validate cursor if provided
     let cursor_invalid = query.cursor.as_deref().is_some_and(|c| {
         cursor_cfg
             .decode_cursor(c, &scope_id, RESOURCE_TYPE)

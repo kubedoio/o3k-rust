@@ -162,7 +162,9 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                     project_id: r.volume.project_id.clone(),
                     size_bytes: r.volume.size_bytes,
                     volume_type: r.volume.volume_type.clone(),
-                    state: format!("{:?}", r.volume.state),
+                    state: serde_json::to_value(r.volume.state)
+                        .map(|v| v.as_str().unwrap_or("unknown").to_owned())
+                        .unwrap_or_else(|_| "unknown".to_owned()),
                     created_at: Some(r.created_at.clone()),
                     generation: r.volume.generation as i64,
                 })
@@ -181,7 +183,9 @@ impl o3k_native_api::volume::VolumeReader for VolumeReaderAdapter {
                 project_id: r.volume.project_id.clone(),
                 size_bytes: r.volume.size_bytes,
                 volume_type: r.volume.volume_type.clone(),
-                state: format!("{:?}", r.volume.state),
+                state: serde_json::to_value(r.volume.state)
+                    .map(|v| v.as_str().unwrap_or("unknown").to_owned())
+                    .unwrap_or_else(|_| "unknown".to_owned()),
                 created_at: Some(r.created_at.clone()),
                 generation: r.volume.generation as i64,
             }),

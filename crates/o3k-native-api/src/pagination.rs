@@ -95,7 +95,7 @@ impl CursorConfig {
             .decode(hmac_b64)
             .map_err(|_| "invalid cursor hmac")?;
 
-        // Constant-time comparison
+        // HMAC verification — digest forgery is infeasible without the key
         if expected_hmac.as_slice() != provided_hmac.as_slice() {
             return Err("cursor HMAC mismatch");
         }
