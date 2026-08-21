@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://o3k.io/contracts/service-manifest-v1.schema.json",
-  "title": "O3K Service Manifest v1 (Proposed)",
-  "description": "Proposed native O3K service manifest. OpenStack compatibility metadata is intentionally excluded and belongs to a separate projection contract.",
+  "title": "O3K Service Manifest v1 (Accepted)",
+  "description": "Accepted native O3K service manifest. OpenStack compatibility metadata is intentionally excluded and belongs to a separate projection contract.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -215,7 +215,7 @@
       ]
     }
   },
-  "x-o3k-status": "proposed",
+  "x-o3k-status": "accepted",
   "x-o3k-related-adr": "ADR-0174",
   "x-o3k-related-spec": "SPEC-0031"
 }

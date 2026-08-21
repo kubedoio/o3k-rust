@@ -7,11 +7,14 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+jsonschema = "0.50"
 serde_json = { workspace = true }
 
 [lints]

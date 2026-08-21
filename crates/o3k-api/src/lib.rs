@@ -5,6 +5,13 @@
 //! helpers in `auth` (token validation) and `error` (error envelopes), and
 //! the router-wide microversion negotiation in `middleware`. Axum
 //! routing/extractors and OpenStack JSON wire models stay in this crate.
+//!
+//! Note: this crate also hosts the native API routes (o3k-native-api) when
+//! `AppState.native_api` is configured. This is a pragmatic composition
+//! choice: both the OpenStack and native adapters are northbound protocol
+//! adapters over the same canonical application services, and sharing the
+//! axum Router/state type avoids a complex nested-routing layer. The
+//! architectural intent (sibling adapters) is unchanged — see ADR-0173 §13.
 
 use std::{
     sync::{
@@ -16,7 +23,7 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{FromRef, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -26,6 +33,7 @@ use o3k_compute_agent::NodeRegistry;
 use o3k_console::ConsoleService;
 use o3k_identity::TokenService;
 use o3k_image::ImageService;
+use o3k_native_api::NativeApiState;
 use o3k_network::NetworkService;
 use o3k_network::PublicAddressAllocator;
 use serde::Serialize;
@@ -101,6 +109,13 @@ pub struct AppState {
     console: Option<Arc<ConsoleService>>,
     agent_registry: Option<NodeRegistry>,
     volume_attachments_enabled: bool,
+    native_api: Option<NativeApiState>,
+}
+
+impl FromRef<AppState> for NativeApiState {
+    fn from_ref(state: &AppState) -> Self {
+        state.native_api.clone().unwrap_or_default()
+    }
 }
 
 impl AppState {
@@ -196,6 +211,14 @@ impl AppState {
     #[must_use]
     pub fn with_volume_attachments_enabled(mut self, enabled: bool) -> Self {
         self.volume_attachments_enabled = enabled;
+        self
+    }
+
+    /// Configures the native O3K API (ADR-0173/SPEC-0030) discovery and
+    /// resource endpoints under `/o3k/v1`.
+    #[must_use]
+    pub fn with_native_api(mut self, state: NativeApiState) -> Self {
+        self.native_api = Some(state);
         self
     }
 
@@ -322,6 +345,20 @@ pub fn router_with_state(state: AppState) -> Router {
             .route(
                 "/v2.1/{project_id}/servers/{server_id}/os-volume_attachments/{attachment_id}",
                 get(show_volume_attachment).delete(delete_volume_attachment),
+            );
+    }
+    // Native API routes mounted at /o3k/v1/... (ADR-0173/SPEC-0030).
+    if state.native_api.is_some() {
+        router = router
+            .route("/o3k/v1", get(o3k_native_api::api_root))
+            .route("/o3k/v1/services", get(o3k_native_api::discover_services))
+            .route(
+                "/o3k/v1/resource-types",
+                get(o3k_native_api::discover_resource_types),
+            )
+            .route(
+                "/o3k/v1/identity/me",
+                get(o3k_native_api::identity::current_context),
             );
     }
     router

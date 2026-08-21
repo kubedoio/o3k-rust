@@ -1,6 +1,6 @@
-# O3K Controller Protocol v1 — proposed invariants
+# O3K Controller Protocol v1 — accepted invariants
 
-Status: Proposed
+Status: Accepted
 Related decision: `docs/adr/ADR-0174-service-manifest-and-resource-provider-controller.md`
 Related spec: `docs/specs/SPEC-0031-service-extension-controller-v1.md`
 Related issue: #727

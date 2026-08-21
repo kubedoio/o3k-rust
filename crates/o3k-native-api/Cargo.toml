@@ -1,0 +1,23 @@
+[package]
+name = "o3k-native-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "O3K Native Resource API — service-namespaced REST surface over Cloud Kernel resources"
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+o3k-kernel = { path = "../o3k-kernel" }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tower.workspace = true

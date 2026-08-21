@@ -1,8 +1,8 @@
 # SPEC-0030 — Native O3K Resource API v1
 
-Status: Proposed
+Status: Accepted
 
-Related decision: [ADR-0173](../adr/ADR-0173-native-o3k-resource-api-and-resource-model.md)
+Related decision: [ADR-0173](../adr/ADR-0173-native-o3k-resource-api-and-resource-model.md) (human architecture/security approval 2026-08-21; this spec derives acceptance from that decision)
 Related issue: [#727](https://github.com/kubedoio/o3k-rust/issues/727)
 Related contract: [native resource envelope v1](../../contracts/native-resource-envelope-v1.schema.json)
 
@@ -20,7 +20,7 @@ Related normative sources:
 - [SPEC-0027](SPEC-0027-native-persistent-storage-v1.md)
 - [SPEC-0029](SPEC-0029-addressrealm-encapsulated-edge-fabric-v2.md)
 
-This specification is `Proposed` and is not runtime implementation authority until ADR-0173 receives the required human approval. It defines the intended v1 native contract and the evidence required before that contract may be advertised.
+This specification derives acceptance from ADR-0173 (human architecture/security approval 2026-08-21). It defines the v1 native contract and the evidence required before that contract may be advertised. Runtime implementation must not claim advertised v1 native API support until SPEC-0030 §20 evidence gates pass.
 
 ## 1. Purpose
 

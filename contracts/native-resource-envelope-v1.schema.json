@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://o3k.io/contracts/native-resource-envelope-v1.schema.json",
-  "title": "O3K Native Resource Envelope v1 (Proposed)",
-  "description": "Proposed common envelope for first-class O3K native resources. Service-specific spec/status schemas are owned by the service and are not defined here.",
+  "title": "O3K Native Resource Envelope v1 (Accepted)",
+  "description": "Accepted common envelope for first-class O3K native resources. Service-specific spec/status schemas are owned by the service and are not defined here.",
   "type": "object",
   "additionalProperties": false,
   "required": ["api_version", "kind", "metadata", "spec", "status"],
@@ -98,7 +98,7 @@
       }
     }
   },
-  "x-o3k-status": "proposed",
+  "x-o3k-status": "accepted",
   "x-o3k-related-adr": "ADR-0173",
   "x-o3k-related-spec": "SPEC-0030"
 }

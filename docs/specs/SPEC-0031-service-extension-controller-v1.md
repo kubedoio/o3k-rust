@@ -1,8 +1,8 @@
 # SPEC-0031 — O3K Service Extension and Controller v1
 
-Status: Proposed
+Status: Accepted
 
-Related decision: [ADR-0174](../adr/ADR-0174-service-manifest-and-resource-provider-controller.md)
+Related decision: [ADR-0174](../adr/ADR-0174-service-manifest-and-resource-provider-controller.md) (human architecture/security approval 2026-08-21; this spec derives acceptance from that decision)
 Related issue: [#727](https://github.com/kubedoio/o3k-rust/issues/727)
 Related contracts:
 
@@ -21,7 +21,7 @@ Related normative sources:
 - [SPEC-0024](SPEC-0024-product-profiles-and-claims.md)
 - [execution-boundary contract](../../contracts/execution-boundaries.md)
 
-This specification is `Proposed` and does not activate dynamic service registration or external controller support until ADR-0174 receives required human architecture/security approval.
+This specification derives acceptance from ADR-0174 (human architecture/security approval 2026-08-21). It does not activate dynamic service registration or external controller support until SPEC-0031 §24 evidence gates pass.
 
 ## 1. Purpose
 

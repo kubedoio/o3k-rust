@@ -16,6 +16,7 @@ pub mod checks;
 pub mod context;
 pub mod db;
 pub mod engine;
+pub mod native_cli;
 pub mod output;
 pub mod sys;
 #[cfg(test)]
