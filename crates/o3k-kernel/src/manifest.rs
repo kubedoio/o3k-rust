@@ -2889,36 +2889,6 @@ mod tests {
 
     // ── Direct-Rust contract-parity tests ───────────────────────────────
 
-    fn register_test_manifest(reg: &mut ManifestRegistry) -> Result<(), ManifestError> {
-        let m = ServiceManifest {
-            manifest_version: 1,
-            service_id: "test".to_owned(),
-            namespace: "test".to_owned(),
-            service_version: "0.1.0".to_owned(),
-            ownership: ServiceOwnership::O3kImplemented,
-            resource_types: vec![RegisteredResourceType {
-                resource_type: ResourceType::new("test", "server").unwrap(),
-                schema_version: "v1".to_owned(),
-                collection: None,
-                scope: ResourceScope::Tenant,
-            }],
-            actions: vec!["test:CreateServer".to_owned()],
-            capabilities: vec![],
-            dependencies: vec![],
-            quota_dimensions: vec![],
-            regions: vec![],
-            availability_domains: vec![],
-            controller: Some(ManifestController {
-                mode: "in-process".to_owned(),
-                protocol: "in-process".to_owned(),
-                protocol_version: "1.0".to_owned(),
-                service_principal: None,
-            }),
-            health: None,
-        };
-        reg.register(m)
-    }
-
     #[test]
     fn direct_rust_rejects_invalid_service_id() {
         let mut reg = ManifestRegistry::new();
@@ -3001,7 +2971,7 @@ mod tests {
         let mut m = valid_database_manifest();
         m.resource_types = (0..129)
             .map(|i| RegisteredResourceType {
-                resource_type: ResourceType::new("database", &format!("instance_{i}")).unwrap(),
+                resource_type: ResourceType::new("database", format!("instance_{i}")).unwrap(),
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
