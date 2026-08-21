@@ -29,9 +29,13 @@ fn network_intent_state_wire(state: o3k_domain::NetworkIntentState) -> &'static 
     }
 }
 
-fn network_intent_identity_valid(record: &o3k_store::NetworkIntentRecord, intent: &o3k_domain::NetworkIntent) -> bool {
-    record.id == intent.id && record.project_id == intent.project_id
-        && intent.realm.id == record.id && intent.realm.project_id == record.project_id
+fn network_intent_identity_valid(
+    record: &o3k_store::NetworkIntentRecord,
+    intent: &o3k_domain::NetworkIntent,
+) -> bool {
+    record.id == intent.id
+        && record.project_id == intent.project_id
+        && intent.realm.project_id == record.project_id
 }
 
 // ── TokenIssuer ───────────────────────────────────────────────────────────
@@ -430,8 +434,15 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
         ) {
             return Err(NativeReadError::Forbidden);
         }
-        match self.store.get_network_intent(project_id, &id).await {
-            Ok(Some(record)) => {
+        match self.store.list_network_intents(project_id).await {
+            Ok(records) => {
+                let Some(record) = records.into_iter().find(|record| {
+                    serde_json::from_str::<o3k_domain::NetworkIntent>(&record.payload)
+                        .map(|intent| intent.realm.id == id)
+                        .unwrap_or(false)
+                }) else {
+                    return Err(NativeReadError::NotFound);
+                };
                 let intent: o3k_domain::NetworkIntent =
                     serde_json::from_str(&record.payload).map_err(|_| NativeReadError::Internal)?;
                 if !network_intent_identity_valid(&record, &intent) || intent.realm.id != id {
@@ -451,7 +462,6 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
                     state: network_intent_state_wire(intent.state).to_owned(),
                 })
             }
-            Ok(None) => Err(NativeReadError::NotFound),
             Err(_) => Err(NativeReadError::Internal),
         }
     }
