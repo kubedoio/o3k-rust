@@ -213,33 +213,62 @@ the product genuinely requires broader L2 semantics, larger topology, hardware
 offload, or external-router integration. Such providers must preserve canonical
 AddressRealm/endpoint identity.
 
-## P12 — Native O3K API and CLI
+## P12 — Native O3K Resource API & Service Framework
 
-After the primary IaaS domains have mature native semantics, make the O3K
-resource model the first-class product API rather than forcing every capability
-through historical OpenStack shapes.
+P12 makes the O3K resource model a first-class product API and proves that the
+Cloud Kernel can support a new first-class cloud service without service-specific
+business logic being added to the kernel.
 
-Goals:
+The proposed P12 architecture is ADR-0173/ADR-0174 with SPEC-0030/SPEC-0031.
+Those sources remain non-active while their ADRs are `Proposed`; no runtime
+implementation or support claim follows merely from merging their proposal.
 
-- native O3K API contracts for the stable Cloud Kernel resource model;
-- native CLI built around O3K resource/workflow semantics;
-- OpenStack remains a selected northbound compatibility adapter rather than the
-  primary internal/product model;
-- no loss of verified OpenStack compatibility merely because a native API
-  exists;
-- API design uses the proven Compute/Network/Volume/IAM semantics rather than
-  freezing an incomplete resource model too early.
+Goals after human acceptance:
+
+- service-namespaced native API rooted at `/o3k/v1/{namespace}/{resource}`;
+- a common native resource envelope while service-specific `spec`/`status`
+  remain service-owned;
+- opaque stable canonical IDs independent from mutable display/natural keys;
+- native O3K IAM entry/context surface over the same canonical IAM used by
+  Keystone compatibility;
+- service-neutral durable Operation semantics preserving unknown-outcome,
+  idempotency, generation, fencing, and reconciliation rules;
+- RFC-9457-style problem responses and opaque authorization-bound pagination;
+- native CLI with ergonomic core commands plus generic service/resource-type/
+  resource discovery and operation;
+- OpenStack remains a selected northbound compatibility projection over the
+  same canonical resources where semantics overlap;
+- a native `ServiceManifest` model separated from Keystone/OpenStack catalog and
+  microversion metadata;
+- validated namespace/resource/action ownership;
+- an authenticated, versioned, language-neutral external controller boundary;
+- bounded service-principal delegation preserving original actor/scope/request/
+  operation/audit identity;
+- a minimal service/controller SDK;
+- a mandatory non-production conformance service, preferably
+  `database:instance`, that composes canonical Compute/Network/Volume resources
+  without Database-specific logic in `o3k-kernel` or the generic CLI.
+
+P12 explicitly does **not** require Terraform/public language SDKs, UI,
+WebSocket/event streaming, production DBaaS/DNS/LB/AI/Kubernetes services,
+multi-region, dynamic Rust `.so` plugins, or provider/dataplane redesign.
+
+P12 completion requires executable evidence for both native API correctness and
+service extensibility. Endpoint count alone is not a completion metric.
 
 ## P13+ — richer cloud platform and ecosystem
 
 Possible later tracks include:
 
 - richer IAM/organization/federation capabilities;
-- Terraform provider, SDKs and UI around the native API;
+- Terraform provider, public SDKs and UI around the native API;
 - eBPF network dataplane/observability provider where justified;
 - richer Neutron compatibility profiles;
-- load balancing, DNS, object storage, secrets or other first-class services;
+- production load balancing, DNS, object storage, secrets, managed database,
+  Kubernetes, AI/ML, or other first-class services built on the P12 framework;
 - delegated/federated cloud connectors with explicit authority models;
+- service packaging/installation/upgrade ecosystem once its safety/evidence
+  contracts are separately proven;
 - scale, performance, security and production-certification campaigns.
 
 New services must reuse Cloud Kernel IAM, authorization, ownership, quota,
@@ -272,6 +301,9 @@ evidence exists.
   topology than was tested;
 - do not continue privileged successor fabric implementation from stale
   ADR-0170-era prompt text;
-- P12 native API work follows mature domain semantics rather than preceding
-  them;
+- P12 native API/service-framework implementation must not begin from proposed
+  contracts as if they were accepted; human architecture/security approval is
+  required first;
+- P12 must not hard-code a new service into the Cloud Kernel merely to satisfy
+  the conformance example;
 - architecture direction does not replace executable evidence or human review.

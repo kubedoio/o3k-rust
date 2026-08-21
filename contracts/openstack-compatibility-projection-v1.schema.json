@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/openstack-compatibility-projection-v1.schema.json",
+  "title": "O3K OpenStack Compatibility Projection v1 (Proposed)",
+  "description": "Proposed compatibility-only projection from an O3K service/resource model to selected OpenStack service/catalog/API surfaces. This is not native service identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["projection_version", "service_id", "service_type", "enabled", "api_surfaces", "endpoints"],
+  "properties": {
+    "projection_version": {
+      "const": "o3k.io/openstack-projection/v1"
+    },
+    "service_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "service_type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "OpenStack service catalog type such as compute, network, identity, image, placement, or volumev3."
+    },
+    "service_name": {
+      "type": ["string", "null"],
+      "maxLength": 128
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "api_surfaces": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/apiSurface"
+      }
+    },
+    "endpoints": {
+      "type": "array",
+      "maxItems": 384,
+      "items": {
+        "$ref": "#/$defs/endpoint"
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "evidence_profile": {
+      "type": ["string", "null"],
+      "maxLength": 128,
+      "description": "Optional reference to the compatibility/evidence profile that authorizes advertisement. Presence is not itself evidence."
+    }
+  },
+  "$defs": {
+    "apiSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "prefix", "version", "enabled"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "prefix": {
+          "type": "string",
+          "pattern": "^/",
+          "maxLength": 255
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "min_microversion": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "max_microversion": {
+          "type": ["string", "null"],
+          "maxLength": 32
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interface", "region", "url_template", "enabled"],
+      "properties": {
+        "interface": {
+          "enum": ["public", "internal", "admin"]
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "url_template": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  "x-o3k-status": "proposed",
+  "x-o3k-related-adr": "ADR-0174",
+  "x-o3k-related-spec": "SPEC-0031",
+  "x-o3k-evidence-rule": "Advertisement remains gated by SPEC-0022 and compatibility manifests; a syntactically valid projection does not create a support claim."
+}

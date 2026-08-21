@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://o3k.io/contracts/service-manifest-v1.schema.json",
+  "title": "O3K Service Manifest v1 (Proposed)",
+  "description": "Proposed native O3K service manifest. OpenStack compatibility metadata is intentionally excluded and belongs to a separate projection contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "service_id",
+    "namespace",
+    "service_version",
+    "ownership_mode",
+    "resource_types",
+    "actions",
+    "controller"
+  ],
+  "properties": {
+    "manifest_version": {
+      "const": "o3k.io/service-manifest/v1"
+    },
+    "service_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "namespace": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "service_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "ownership_mode": {
+      "enum": ["o3k-implemented", "external-controller"]
+    },
+    "resource_types": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/resourceType"
+      }
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/action"
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9._:-]*$",
+        "maxLength": 128
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "$ref": "#/$defs/dependency"
+      }
+    },
+    "quota_dimensions": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/quotaDimension"
+      }
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "availability_domains": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "controller": {
+      "$ref": "#/$defs/controller"
+    }
+  },
+  "$defs": {
+    "resourceType": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "schema_version"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*:[a-z0-9][a-z0-9_-]*$",
+          "maxLength": 128
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "collection": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "maxLength": 128
+        },
+        "scope": {
+          "enum": ["tenant", "system", "mixed"]
+        }
+      }
+    },
+    "action": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]*:[A-Za-z][A-Za-z0-9_]*$",
+      "maxLength": 128
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "required"],
+      "properties": {
+        "kind": {
+          "enum": ["service", "resource_type", "action", "capability"]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "required": {
+          "type": "boolean"
+        }
+      }
+    },
+    "quotaDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "unit", "scope"],
+      "properties": {
+        "key": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._:-]*$",
+          "maxLength": 128
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "scope": {
+          "enum": ["tenant", "system"]
+        }
+      }
+    },
+    "controller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "protocol", "protocol_version"],
+      "properties": {
+        "mode": {
+          "enum": ["in-process", "external"]
+        },
+        "protocol": {
+          "enum": ["in-process", "grpc"]
+        },
+        "protocol_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "service_principal": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "Required for external controllers; omitted/null for in-process controllers until implementation defines a dedicated internal identity binding."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {"const": "external"}
+            }
+          },
+          "then": {
+            "properties": {
+              "protocol": {"const": "grpc"},
+              "service_principal": {"type": "string", "minLength": 1}
+            },
+            "required": ["service_principal"]
+          }
+        }
+      ]
+    }
+  },
+  "x-o3k-status": "proposed",
+  "x-o3k-related-adr": "ADR-0174",
+  "x-o3k-related-spec": "SPEC-0031"
+}
