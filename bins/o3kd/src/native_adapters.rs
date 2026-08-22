@@ -403,6 +403,7 @@ pub struct ServerReaderAdapter {
 /// provider or controller directly. Mutations remain unsupported until a
 /// canonical mutation service is wired for the resource.
 pub struct GenericResourceApplication {
+    pub compute: Arc<o3k_compute::ComputeService>,
     pub store: Arc<o3k_store::unified::O3kStore>,
     pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
     pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
@@ -410,19 +411,17 @@ pub struct GenericResourceApplication {
 }
 
 fn mutation_now() -> String {
-    format!(
-        "{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs())
-    )
+    chrono::Utc::now().to_rfc3339()
 }
 
-fn mutation_resource_id(owner: &str, action: &str, key: &str) -> Uuid {
-    Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("{owner}\n{action}\n{key}").as_bytes(),
-    )
+fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
+    match error {
+        o3k_compute::ComputeError::Unauthorized => ResourceApplicationError::Forbidden,
+        o3k_compute::ComputeError::NotFound => ResourceApplicationError::NotFound,
+        o3k_compute::ComputeError::InvalidRequest => ResourceApplicationError::Validation,
+        o3k_compute::ComputeError::Conflict => ResourceApplicationError::Conflict,
+        _ => ResourceApplicationError::Internal,
+    }
 }
 
 fn generic_read_error(error: o3k_native_api::error::NativeReadError) -> ResourceApplicationError {
@@ -514,100 +513,70 @@ impl ResourceApplication for GenericResourceApplication {
         request: CreateRequest,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        let key = idempotency_key.ok_or(ResourceApplicationError::Validation)?;
-        let action = descriptor
-            .lifecycle_actions
-            .get(&o3k_native_api::resource::LifecycleOperation::Create)
-            .ok_or(ResourceApplicationError::UnsupportedOperation)?
-            .to_string();
-        let owner = auth.effective_scope().to_string();
-        let id = mutation_resource_id(&owner, &action, key);
-        let operation_id = Uuid::new_v4();
-        let now = mutation_now();
-        let operation = o3k_store::OperationRecord {
-            id: operation_id,
-            resource_id: id,
-            kind: "native:create".into(),
-            state: o3k_store::OperationState::Succeeded,
-            provider_operation_id: None,
-            error_category: None,
-            error_message: None,
-        };
-        let resource = o3k_store::ResourceRecord {
-            id,
-            kind: descriptor.resource_type.to_string(),
-            project_id: owner.clone(),
-            generation: 1,
-            observed_generation: 1,
-            desired_state: serde_json::to_string(&request.spec)
-                .map_err(|_| ResourceApplicationError::Validation)?,
-            observed_state: "active".into(),
-            provider_id: None,
-        };
-        let canonical = o3k_store::CanonicalOperationRecord {
-            id: operation_id,
-            service: descriptor.owning_service.clone(),
-            action: action.clone(),
-            actor: auth.principal().id().to_string(),
-            owner_scope: owner.clone(),
-            resource_type: descriptor.resource_type.to_string(),
-            resource_id: Some(id.to_string()),
-            state: o3k_store::OperationState::Succeeded,
-            attempt: 1,
-            created_at: now,
-            started_at: None,
-            finished_at: None,
-            error: None,
-            request_id: Some(auth.request_id().to_owned()),
-        };
-        let reservation = o3k_store::IdempotencyReservationRequest::from_semantics(
-            &owner,
-            &action,
-            key,
-            &descriptor.resource_type.to_string(),
-            Some(&id.to_string()),
-            &request.spec,
-            operation_id,
-        )
-        .map_err(|_| ResourceApplicationError::Validation)?;
-        if let Err(error) = self.store.insert_resource(&resource).await {
-            // Replays deterministically address the same authority-owned
-            // resource. Preserve the existing row so the canonical store can
-            // decide equivalent versus conflicting idempotency semantics.
-            let existing = self
-                .store
-                .get_resource(id)
-                .await
-                .map_err(|_| ResourceApplicationError::Conflict)?;
-            if existing.project_id != resource.project_id || existing.kind != resource.kind {
-                return Err(ResourceApplicationError::Conflict);
-            }
-            let _ = error;
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
         }
-        match self
-            .store
-            .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &reservation)
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ComputeSpec {
+            name: String,
+            image_id: String,
+            flavor_id: Uuid,
+            network_ids: Vec<String>,
+            #[serde(default)]
+            key_name: Option<String>,
+        }
+        let spec: ComputeSpec = serde_json::from_value(request.spec)
+            .map_err(|_| ResourceApplicationError::Validation)?;
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let server = self
+            .compute
+            .create_server_for_auth(
+                auth,
+                o3k_compute::ServerCreateInput {
+                    user_id: auth.principal().id().to_string(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    name: spec.name,
+                    image_id: spec.image_id,
+                    flavor_id: spec.flavor_id,
+                    network_ids: spec.network_ids,
+                    key_name: spec.key_name,
+                    config_drive: None,
+                    idempotency_key: key,
+                },
+            )
             .await
-            .map_err(|_| ResourceApplicationError::Internal)?
-        {
-            o3k_store::IdempotencyReservation::Conflict => {
-                Err(ResourceApplicationError::IdempotencyConflict)
-            }
-            o3k_store::IdempotencyReservation::ExistingEquivalent(existing) => Ok(MutationResult {
-                operation_id: existing.to_string(),
-                resource_id: Some(id.to_string()),
-                complete: true,
-                resource: None,
-            }),
-            o3k_store::IdempotencyReservation::Created(_) => Ok(MutationResult {
-                operation_id: operation_id.to_string(),
-                resource_id: Some(id.to_string()),
-                complete: true,
-                resource: Some(
-                    serde_json::json!({"api_version":"o3k.io/v1","kind":descriptor.resource_type.to_string(),"metadata":{"id":id,"owner_scope":owner,"generation":1},"spec":request.spec,"status":{"state":"active"}}),
-                ),
-            }),
-        }
+            .map_err(compute_error)?;
+        let resource = self
+            .store
+            .get_resource(server.id.as_uuid())
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        let intent: o3k_provider::CreateInstanceRequest =
+            serde_json::from_str(&resource.desired_state)
+                .map_err(|_| ResourceApplicationError::Internal)?;
+        let operation = self
+            .store
+            .get_operation(intent.operation_id)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: intent.operation_id.to_string(),
+            resource_id: Some(server.id.as_uuid().to_string()),
+            complete: matches!(operation.state, o3k_store::OperationState::Succeeded),
+            resource: Some(server_json(ServerItem {
+                id: server.id.as_uuid().to_string(),
+                project_id: server.project_id,
+                name: server.name,
+                flavor_id: server.flavor_id.to_string(),
+                image_id: server.image_id,
+                state: format!("{:?}", server.state),
+                generation: resource.generation,
+                created_at: Some(mutation_now()),
+            })),
+        })
     }
 
     async fn delete(
@@ -617,7 +586,10 @@ impl ResourceApplication for GenericResourceApplication {
         id: &str,
         idempotency_key: Option<&str>,
     ) -> Result<MutationResult, ResourceApplicationError> {
-        let key = idempotency_key.ok_or(ResourceApplicationError::Validation)?;
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let _key = idempotency_key.unwrap_or("");
         let resource_id = id
             .parse::<Uuid>()
             .map_err(|_| ResourceApplicationError::NotFound)?;
@@ -626,87 +598,34 @@ impl ResourceApplication for GenericResourceApplication {
             .get_resource(resource_id)
             .await
             .map_err(|_| ResourceApplicationError::NotFound)?;
-        let action = descriptor
-            .lifecycle_actions
-            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
-            .ok_or(ResourceApplicationError::UnsupportedOperation)?
-            .to_string();
-        let owner = auth.effective_scope().to_string();
-        if existing.project_id != owner {
+        if existing.project_id != auth.effective_scope().id().as_str() {
             return Err(ResourceApplicationError::NotFound);
         }
-        let operation_id = Uuid::new_v4();
-        let body = serde_json::json!({"id": id});
-        let reservation = o3k_store::IdempotencyReservationRequest::from_semantics(
-            &owner,
-            &action,
-            key,
-            &descriptor.resource_type.to_string(),
-            Some(id),
-            &body,
-            operation_id,
-        )
-        .map_err(|_| ResourceApplicationError::Validation)?;
-        let operation = o3k_store::OperationRecord {
-            id: operation_id,
-            resource_id,
-            kind: "native:delete".into(),
-            state: o3k_store::OperationState::Succeeded,
-            provider_operation_id: None,
-            error_category: None,
-            error_message: None,
-        };
-        let canonical = o3k_store::CanonicalOperationRecord {
-            id: operation_id,
-            service: descriptor.owning_service.clone(),
-            action,
-            actor: auth.principal().id().to_string(),
-            owner_scope: owner,
-            resource_type: descriptor.resource_type.to_string(),
-            resource_id: Some(id.to_owned()),
-            state: o3k_store::OperationState::Succeeded,
-            attempt: 1,
-            created_at: mutation_now(),
-            started_at: None,
-            finished_at: None,
-            error: None,
-            request_id: Some(auth.request_id().to_owned()),
-        };
-        match self
-            .store
-            .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &reservation)
+        self.compute
+            .delete_server_for_auth(auth, o3k_domain::ServerId::from_uuid(resource_id))
             .await
-            .map_err(|_| ResourceApplicationError::Internal)?
-        {
-            o3k_store::IdempotencyReservation::Conflict => {
-                Err(ResourceApplicationError::IdempotencyConflict)
-            }
-            o3k_store::IdempotencyReservation::ExistingEquivalent(existing) => Ok(MutationResult {
-                operation_id: existing.to_string(),
-                resource_id: Some(id.to_owned()),
-                complete: true,
-                resource: None,
-            }),
-            o3k_store::IdempotencyReservation::Created(_) => {
-                self.store
-                    .update_resource(
-                        resource_id,
-                        existing.generation,
-                        "deleted",
-                        "deleted",
-                        existing.generation + 1,
-                        None,
-                    )
-                    .await
-                    .map_err(|_| ResourceApplicationError::Conflict)?;
-                Ok(MutationResult {
-                    operation_id: operation_id.to_string(),
-                    resource_id: Some(id.to_owned()),
-                    complete: true,
-                    resource: None,
-                })
-            }
-        }
+            .map_err(compute_error)?;
+        let operation_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!(
+                "o3k:delete:{}:{}:{}",
+                auth.effective_scope().id(),
+                id,
+                existing.generation
+            )
+            .as_bytes(),
+        );
+        let operation = self
+            .store
+            .get_operation(operation_id)
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: operation_id.to_string(),
+            resource_id: Some(id.to_owned()),
+            complete: matches!(operation.state, o3k_store::OperationState::Succeeded),
+            resource: None,
+        })
     }
 }
 
