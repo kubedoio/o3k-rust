@@ -84,7 +84,8 @@ mod operation_visibility_tests {
     use o3k_kernel::{AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal};
     use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
     use o3k_store::{
-        CanonicalOperationRecord, DurableStore, OperationRecord, OperationState, ResourceRecord,
+        CanonicalOperationRecord, DurableStore, IdempotencyReservationRequest, OperationRecord,
+        OperationState, ResourceRecord,
     };
     use std::path::PathBuf;
     use tower::util::ServiceExt;
@@ -153,37 +154,45 @@ mod operation_visibility_tests {
             })
             .await
             .expect("resource");
+        let durable = OperationRecord {
+            id,
+            resource_id,
+            kind: "native:create".into(),
+            state: OperationState::Succeeded,
+            provider_operation_id: Some("secret-provider-op".into()),
+            error_category: None,
+            error_message: Some("secret provider detail".into()),
+        };
+        let canonical = CanonicalOperationRecord {
+            id,
+            service: "compute".into(),
+            action: "compute:CreateServer".into(),
+            actor: "user-project-a".into(),
+            owner_scope: "project-a".into(),
+            resource_type: "compute:server".into(),
+            resource_id: Some(resource_id.to_string()),
+            state: OperationState::Succeeded,
+            attempt: 1,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            started_at: None,
+            finished_at: Some("2026-01-01T00:00:01Z".into()),
+            error: None,
+            request_id: Some("req-a".into()),
+        };
+        let reservation = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "native-operation-visibility",
+            "compute:server",
+            Some(&resource_id.to_string()),
+            &serde_json::json!({"resource_id": resource_id}),
+            id,
+        )
+        .expect("idempotency identity");
         store
-            .insert_operation(&OperationRecord {
-                id,
-                resource_id,
-                kind: "native:create".into(),
-                state: OperationState::Succeeded,
-                provider_operation_id: Some("secret-provider-op".into()),
-                error_category: None,
-                error_message: Some("secret provider detail".into()),
-            })
+            .create_or_replay_canonical_idempotent_operation(&durable, &canonical, &reservation)
             .await
-            .expect("operation");
-        store
-            .insert_canonical_operation(&CanonicalOperationRecord {
-                id,
-                service: "compute".into(),
-                action: "compute:CreateServer".into(),
-                actor: "user-project-a".into(),
-                owner_scope: "project-a".into(),
-                resource_type: "compute:server".into(),
-                resource_id: Some(Uuid::new_v4().to_string()),
-                state: OperationState::Succeeded,
-                attempt: 1,
-                created_at: "2026-01-01T00:00:00Z".into(),
-                started_at: None,
-                finished_at: Some("2026-01-01T00:00:01Z".into()),
-                error: None,
-                request_id: Some("req-a".into()),
-            })
-            .await
-            .expect("canonical operation");
+            .expect("canonical operation triplet");
         // Exercise the same durable reconstruction path used after an o3kd
         // restart, rather than serving the record from the seeding pool.
         drop(store);
