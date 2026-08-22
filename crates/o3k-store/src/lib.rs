@@ -9,6 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chrono::DateTime;
 use md5::{Digest as Md5Digest, Md5};
 use sqlx::{
     Row, SqlitePool,
@@ -471,9 +472,27 @@ pub struct CanonicalOperationRecord {
     pub request_id: Option<String>,
 }
 
+/// Durable public lifecycle projection for a canonical operation.  Updates
+/// are committed together with the provider-neutral OperationRecord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalOperationLifecycleUpdate {
+    pub state: OperationState,
+    pub attempt: u32,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub public_error: Option<String>,
+}
+
 impl TryFrom<CanonicalOperationRecord> for o3k_kernel::Operation {
     type Error = StoreError;
     fn try_from(value: CanonicalOperationRecord) -> Result<Self, Self::Error> {
+        if value.created_at.trim().is_empty()
+            || DateTime::parse_from_rfc3339(&value.created_at).is_err()
+            || value.started_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+            || value.finished_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+        {
+            return Err(StoreError::Corrupt("invalid canonical operation timestamp".into()));
+        }
         let action = o3k_kernel::ActionId::parse(&value.action)
             .map_err(|e| StoreError::Corrupt(format!("invalid operation action: {e}")))?;
         let scope = o3k_kernel::OwnershipScope::project(
@@ -598,7 +617,12 @@ pub(crate) fn validate_canonical_operation_read(
             "canonical operation owner differs from resource owner".into(),
         ));
     }
-    if canonical.actor.trim().is_empty() || canonical.created_at.trim().is_empty() {
+    if canonical.actor.trim().is_empty()
+        || canonical.created_at.trim().is_empty()
+        || DateTime::parse_from_rfc3339(&canonical.created_at).is_err()
+        || canonical.started_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+        || canonical.finished_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+    {
         return Err(StoreError::Corrupt(
             "canonical operation identity is incomplete".into(),
         ));
@@ -611,9 +635,10 @@ pub(crate) fn validate_canonical_operation_read(
         .ok_or_else(|| StoreError::Corrupt("invalid operation resource type".into()))?;
     let resource_type = o3k_kernel::ResourceType::new(namespace, name)
         .map_err(|e| StoreError::Corrupt(format!("invalid operation resource type: {e}")))?;
+    let expected_resource_type = canonical_resource_type_for_record(resource)?;
     if canonical.service != action.namespace()
         || canonical.service != resource_type.namespace()
-        || canonical.resource_type != resource.kind
+        || resource_type != expected_resource_type
     {
         return Err(StoreError::Corrupt(
             "canonical operation namespaces/resource type differ".into(),
@@ -625,6 +650,31 @@ pub(crate) fn validate_canonical_operation_read(
         ));
     }
     Ok(())
+}
+
+/// Map the durable/internal resource discriminator to the canonical Kernel
+/// resource type.  These values intentionally are not required to be equal:
+/// historical Compute rows use `compute_instance`, while the native contract
+/// exposes `compute:server`.
+pub(crate) fn canonical_resource_type_for_record(
+    resource: &ResourceRecord,
+) -> Result<o3k_kernel::ResourceType, StoreError> {
+    let (namespace, name) = match resource.kind.as_str() {
+        "compute_instance" | "compute_server" | "server" | "compute:server" => {
+            ("compute", "server")
+        }
+        "volume" | "volume_volume" | "volume:volume" => ("volume", "volume"),
+        "address_realm" | "network_address_realm" | "network:address_realm" => {
+            ("network", "address_realm")
+        }
+        _ => {
+            return Err(StoreError::Corrupt(
+                "unknown durable resource kind".into(),
+            ))
+        }
+    };
+    o3k_kernel::ResourceType::new(namespace, name)
+        .map_err(|e| StoreError::Corrupt(format!("invalid canonical resource type: {e}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1002,6 +1052,11 @@ pub trait DurableStore: Send + Sync {
     async fn get_canonical_operation(
         &self,
         id: Uuid,
+    ) -> Result<CanonicalOperationRecord, StoreError>;
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &CanonicalOperationLifecycleUpdate,
     ) -> Result<CanonicalOperationRecord, StoreError>;
     async fn update_operation(
         &self,
@@ -2603,6 +2658,9 @@ impl SqliteStore {
         canonical: &CanonicalOperationRecord,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError> {
+        if request.key.is_empty() || request.key.len() > IdempotencyReservationRequest::MAX_KEY_LENGTH {
+            return Err(StoreError::Corrupt("invalid idempotency key byte length".into()));
+        }
         validate_canonical_idempotent_operation_identity(operation, canonical, request)?;
         let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
         sqlx::query("BEGIN IMMEDIATE")
@@ -5418,6 +5476,37 @@ impl DurableStore for SqliteStore {
         SqliteStore::commit_or_rollback(&mut connection, outcome).await?;
         drop(connection);
         self.get_operation(id).await
+    }
+
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &CanonicalOperationLifecycleUpdate,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(StoreError::Database)?;
+        let result: Result<(), StoreError> = async {
+            let operation = sqlx::query("SELECT state FROM operations WHERE id = ?")
+                .bind(id.to_string()).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
+                .ok_or(StoreError::OperationNotFound)?;
+            let canonical = sqlx::query("SELECT operation_id FROM canonical_operation_metadata WHERE operation_id = ?")
+                .bind(id.to_string()).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
+                .ok_or_else(|| StoreError::Corrupt("canonical lifecycle metadata is missing".into()))?;
+            let _ = canonical;
+            let current_state: String = operation.try_get("state").map_err(StoreError::Database)?;
+            if current_state == OperationState::Succeeded.as_str() && update.state != OperationState::Succeeded
+                || current_state == OperationState::Failed.as_str() && update.state != OperationState::Failed {
+                return Err(StoreError::Corrupt("terminal operation state cannot regress".into()));
+            }
+            sqlx::query("UPDATE operations SET state = ? WHERE id = ?")
+                .bind(update.state.as_str()).bind(id.to_string()).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            sqlx::query("UPDATE canonical_operation_metadata SET state = ?, attempt = ?, started_at = ?, finished_at = ?, error = ? WHERE operation_id = ?")
+                .bind(update.state.as_str()).bind(update.attempt as i64).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(id.to_string())
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            Ok(())
+        }.await;
+        SqliteStore::commit_or_rollback(&mut connection, result).await?;
+        self.get_canonical_operation(id).await
     }
 
     async fn attach_provider_reference(
@@ -8535,7 +8624,9 @@ mod tests {
         store
             .insert_resource(&ResourceRecord {
                 id: resource_id,
-                kind: "compute:server".to_owned(),
+                // Existing Compute rows use the durable internal discriminator;
+                // native canonical reads map it to compute:server.
+                kind: "compute_instance".to_owned(),
                 project_id: "project-a".to_owned(),
                 generation: 1,
                 observed_generation: 0,
