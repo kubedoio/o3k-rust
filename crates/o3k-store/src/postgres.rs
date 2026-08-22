@@ -840,6 +840,7 @@ impl DurableStore for PostgresStore {
         id: Uuid,
         update: &crate::CanonicalOperationLifecycleUpdate,
     ) -> Result<CanonicalOperationRecord, StoreError> {
+        crate::validate_canonical_lifecycle_update(update)?;
         let id_str = id.to_string();
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let exists = sqlx::query("SELECT state FROM operations WHERE id = $1 FOR UPDATE")

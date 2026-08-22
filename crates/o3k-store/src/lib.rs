@@ -483,6 +483,63 @@ pub struct CanonicalOperationLifecycleUpdate {
     pub public_error: Option<String>,
 }
 
+impl CanonicalOperationLifecycleUpdate {
+    /// Build a lifecycle update from the typed kernel state.  Timestamp and
+    /// terminal-state rules are checked before a transaction is opened.
+    pub fn new(
+        state: o3k_kernel::OperationState,
+        attempt: u32,
+        started_at: Option<String>,
+        finished_at: Option<String>,
+        public_error: Option<String>,
+    ) -> Result<Self, StoreError> {
+        let update = Self {
+            state: state.into(),
+            attempt,
+            started_at,
+            finished_at,
+            public_error,
+        };
+        validate_canonical_lifecycle_update(&update)?;
+        Ok(update)
+    }
+}
+
+fn validate_canonical_lifecycle_update(
+    update: &CanonicalOperationLifecycleUpdate,
+) -> Result<(), StoreError> {
+    for timestamp in [&update.started_at, &update.finished_at]
+        .into_iter()
+        .flatten()
+    {
+        if DateTime::parse_from_rfc3339(timestamp).is_err() {
+            return Err(StoreError::Corrupt(
+                "invalid canonical operation timestamp".into(),
+            ));
+        }
+    }
+    if matches!(update.state, OperationState::Running) && update.started_at.is_none() {
+        return Err(StoreError::Corrupt(
+            "running operation requires started_at".into(),
+        ));
+    }
+    if matches!(
+        update.state,
+        OperationState::Succeeded | OperationState::Failed
+    ) && update.finished_at.is_none()
+    {
+        return Err(StoreError::Corrupt(
+            "terminal operation requires finished_at".into(),
+        ));
+    }
+    if matches!(update.state, OperationState::UnknownOutcome) && update.finished_at.is_some() {
+        return Err(StoreError::Corrupt(
+            "unknown outcome cannot have finished_at".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl TryFrom<CanonicalOperationRecord> for o3k_kernel::Operation {
     type Error = StoreError;
     fn try_from(value: CanonicalOperationRecord) -> Result<Self, Self::Error> {
@@ -537,6 +594,35 @@ impl TryFrom<CanonicalOperationRecord> for o3k_kernel::Operation {
             finished_at: value.finished_at,
             error: value.error,
             request_id: value.request_id,
+        })
+    }
+}
+
+impl CanonicalOperationRecord {
+    /// Construct canonical durable metadata without losing the scope kind.
+    /// P12.4 currently persists project-owned operations only; callers using
+    /// a domain or system operation are rejected before any string encoding.
+    pub fn from_kernel_operation(operation: &o3k_kernel::Operation) -> Result<Self, StoreError> {
+        if operation.owner_scope.kind() != o3k_kernel::ScopeKind::Project {
+            return Err(StoreError::Corrupt(
+                "canonical operations require a project ownership scope".into(),
+            ));
+        }
+        Ok(Self {
+            id: operation.id,
+            service: operation.service.clone(),
+            action: operation.action.to_string(),
+            actor: operation.actor.clone(),
+            owner_scope: operation.owner_scope.id().as_str().to_owned(),
+            resource_type: operation.resource_type.to_string(),
+            resource_id: operation.resource_id.as_ref().map(ToString::to_string),
+            state: operation.state.into(),
+            attempt: operation.attempt,
+            created_at: operation.created_at.clone(),
+            started_at: operation.started_at.clone(),
+            finished_at: operation.finished_at.clone(),
+            error: operation.error.clone(),
+            request_id: operation.request_id.clone(),
         })
     }
 }
@@ -5497,6 +5583,7 @@ impl DurableStore for SqliteStore {
         id: Uuid,
         update: &CanonicalOperationLifecycleUpdate,
     ) -> Result<CanonicalOperationRecord, StoreError> {
+        validate_canonical_lifecycle_update(update)?;
         let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
         sqlx::query("BEGIN IMMEDIATE")
             .execute(&mut *connection)

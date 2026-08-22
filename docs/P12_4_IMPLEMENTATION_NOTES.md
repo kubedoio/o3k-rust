@@ -52,9 +52,20 @@ row absence, injected rollback, and concurrent generation CAS. Absence of
 `O3K_DATABASE_URL` is a failure in that gate.
 
 Canonical P12.4 ownership is project-scoped in this schema: `owner_scope` is a
-project identifier, and non-project `OwnershipScope` values are not accepted
-by the native P12.4 creation path. This avoids silently coercing Domain/System
-scope kinds while the accepted P12 contract remains project-owned.
+project identifier, and `CanonicalOperationRecord::from_kernel_operation`
+rejects non-project `OwnershipScope` values before they can be encoded. This
+avoids silently coercing Domain/System scope kinds while the accepted P12
+contract remains project-owned. Legacy durable resource kinds are also not
+required to equal Kernel `ResourceType` values: the store's single mapping
+projects historical `compute_instance`/`server`, volume, and native network
+kinds to their canonical resource types during validation.
+
+Canonical lifecycle updates atomically evolve both the provider-neutral
+`OperationRecord` state and canonical metadata (`attempt`, timestamps, and
+secret-safe public error). The typed update constructor rejects malformed
+timestamps, missing terminal timestamps, and fabricated `finished_at` values
+for `UnknownOutcome`; the same validation runs at both SQLite and PostgreSQL
+store boundaries.
 
 Historical rows without `canonical_operation_metadata` remain usable by legacy
 OperationJournal paths but cannot be reconstructed as a public Kernel
