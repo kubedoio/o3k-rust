@@ -101,6 +101,13 @@ pub struct MutationReceipt<T> {
     pub replayed: bool,
 }
 
+struct CreateMutationReceipt {
+    server: Server,
+    operation_id: Uuid,
+    operation_state: o3k_store::OperationState,
+    replayed: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum ComputeError {
     #[error("unauthorized")]
@@ -1427,18 +1434,14 @@ impl ComputeService {
         {
             return Err(ComputeError::Unauthorized);
         }
-        let server = self
+        let accepted = self
             .create_server_for_user_with_context(input, Some(&context))
             .await?;
-        let resource = self.store.get_resource(server.id.as_uuid()).await?;
-        let request: CreateInstanceRequest =
-            serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
-        let operation = self.store.get_operation(request.operation_id).await?;
         Ok(MutationReceipt {
-            resource: server,
-            operation_id: operation.id,
-            operation_state: operation.state,
-            replayed: false,
+            resource: accepted.server,
+            operation_id: accepted.operation_id,
+            operation_state: accepted.operation_state,
+            replayed: accepted.replayed,
         })
     }
 
@@ -1469,14 +1472,17 @@ impl ComputeService {
         &self,
         input: ServerCreateInput,
     ) -> Result<Server, ComputeError> {
-        self.create_server_for_user_with_context(input, None).await
+        Ok(self
+            .create_server_for_user_with_context(input, None)
+            .await?
+            .server)
     }
 
     async fn create_server_for_user_with_context(
         &self,
         input: ServerCreateInput,
         canonical: Option<&o3k_reconciler::CanonicalMutationContext>,
-    ) -> Result<Server, ComputeError> {
+    ) -> Result<CreateMutationReceipt, ComputeError> {
         let ServerCreateInput {
             user_id,
             project_id,
@@ -1695,9 +1701,19 @@ impl ComputeService {
                             }
                         }
                     }
-                    return self
+                    let server = self
                         .show_server(&project_id, ServerId::from_uuid(server_id))
-                        .await;
+                        .await?;
+                    let operation = self
+                        .store
+                        .get_operation(existing_request.operation_id)
+                        .await?;
+                    return Ok(CreateMutationReceipt {
+                        server,
+                        operation_id: operation.id,
+                        operation_state: operation.state,
+                        replayed: true,
+                    });
                 }
             }
             Err(StoreError::ResourceNotFound) => {}
@@ -1929,8 +1945,8 @@ impl ComputeService {
                         return Err(ComputeError::Conflict);
                     }
                     Ok(o3k_store::CanonicalAcceptanceOutcome::ExistingEquivalent {
+                        operation_id: existing_operation_id,
                         resource_id,
-                        ..
                     }) => {
                         let existing = self.store.get_resource(resource_id).await?;
                         let existing_request: CreateInstanceRequest =
@@ -1947,9 +1963,16 @@ impl ComputeService {
                         {
                             self.release_placement_decision(decision).await?;
                         }
-                        return self
+                        let server = self
                             .show_server(&project_id, ServerId::from_uuid(resource_id))
-                            .await;
+                            .await?;
+                        let operation = self.store.get_operation(existing_operation_id).await?;
+                        return Ok(CreateMutationReceipt {
+                            server,
+                            operation_id: existing_operation_id,
+                            operation_state: operation.state,
+                            replayed: true,
+                        });
                     }
                     Ok(_) => {}
                     Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
@@ -2032,7 +2055,19 @@ impl ComputeService {
                                 }
                             }
                         }
-                        return self.show_server(&project_id, ServerId::from_uuid(id)).await;
+                        let server = self
+                            .show_server(&project_id, ServerId::from_uuid(id))
+                            .await?;
+                        let operation = self
+                            .store
+                            .get_operation(existing_request.operation_id)
+                            .await?;
+                        return Ok(CreateMutationReceipt {
+                            server,
+                            operation_id: operation.id,
+                            operation_state: operation.state,
+                            replayed: true,
+                        });
                     }
                     // The placement allocation referenced by this create was
                     // reconciled away before the consumer intent became durable
@@ -2108,7 +2143,13 @@ impl ComputeService {
             .show_server(&project_id, ServerId::from_uuid(id))
             .await?;
         let _ = self.store.commit_reservation(&quota_res.id).await;
-        Ok(server)
+        let operation = self.store.get_operation(request.operation_id).await?;
+        Ok(CreateMutationReceipt {
+            server,
+            operation_id: operation.id,
+            operation_state: operation.state,
+            replayed: false,
+        })
     }
 
     pub async fn list_servers_for_auth(
