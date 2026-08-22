@@ -20,7 +20,7 @@ use crate::{
     KeystoneEndpointRecord, KeystoneProjectRecord, KeystoneRegionRecord,
     KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord, KeystoneUserRecord,
     NetworkAddressAllocationRecord, NetworkIntentRecord, NetworkRecord, NetworkRepository,
-    ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
+    CanonicalOperationRecord, ObservationUpdate, OperationRecord, OperationState, PlacementAllocationRecord,
     PlacementIntentRecord, PlacementInventoryRecord, PlacementProviderRecord,
     PlacementReconcileRecord, PlacementRepository, PlacementResourceRecord, PortRecord,
     ProviderReference, ResourceRecord, SecurityGroupBindingRecord, SecurityGroupRecord,
@@ -441,6 +441,15 @@ impl DurableStore for PostgresStore {
             Some(row) => row_to_operation(&row),
             None => Err(StoreError::OperationNotFound),
         }
+    }
+
+    async fn insert_canonical_operation(&self, o: &CanonicalOperationRecord) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)").bind(o.id.to_string()).bind(&o.service).bind(&o.action).bind(&o.actor).bind(&o.owner_scope).bind(&o.resource_type).bind(&o.resource_id).bind(i64::from(o.attempt)).bind(&o.created_at).bind(&o.started_at).bind(&o.finished_at).bind(&o.error).bind(&o.request_id).execute(&self.pool).await.map_err(map_pg_error)?; Ok(())
+    }
+
+    async fn get_canonical_operation(&self, id: Uuid) -> Result<CanonicalOperationRecord, StoreError> {
+        let row = sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id=$1").bind(id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.ok_or(StoreError::OperationNotFound)?;
+        Ok(CanonicalOperationRecord { id, service: row.try_get("service").map_err(StoreError::Database)?, action: row.try_get("action").map_err(StoreError::Database)?, actor: row.try_get("actor").map_err(StoreError::Database)?, owner_scope: row.try_get("owner_scope").map_err(StoreError::Database)?, resource_type: row.try_get("resource_type").map_err(StoreError::Database)?, resource_id: row.try_get("resource_id").map_err(StoreError::Database)?, state: self.get_operation(id).await?.state, attempt: u32::try_from(row.try_get::<i64,_>("attempt").map_err(StoreError::Database)?).map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?, created_at: row.try_get("created_at").map_err(StoreError::Database)?, started_at: row.try_get("started_at").map_err(StoreError::Database)?, finished_at: row.try_get("finished_at").map_err(StoreError::Database)?, error: row.try_get("error").map_err(StoreError::Database)?, request_id: row.try_get("request_id").map_err(StoreError::Database)? })
     }
 
     async fn update_operation(

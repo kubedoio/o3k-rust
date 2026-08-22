@@ -451,6 +451,46 @@ pub struct OperationRecord {
     pub error_message: Option<String>,
 }
 
+/// Canonical metadata persisted separately so historical OperationJournal
+/// rows remain readable without inventing public identity fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalOperationRecord {
+    pub id: Uuid,
+    pub service: String,
+    pub action: String,
+    pub actor: String,
+    pub owner_scope: String,
+    pub resource_type: String,
+    pub resource_id: Option<String>,
+    pub state: OperationState,
+    pub attempt: u32,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub error: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl TryFrom<CanonicalOperationRecord> for o3k_kernel::Operation {
+    type Error = StoreError;
+    fn try_from(value: CanonicalOperationRecord) -> Result<Self, Self::Error> {
+        let action = o3k_kernel::ActionId::parse(&value.action)
+            .map_err(|e| StoreError::Corrupt(format!("invalid operation action: {e}")))?;
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new(value.owner_scope)
+                .map_err(|e| StoreError::Corrupt(format!("invalid operation scope: {e}")))?,
+            None,
+            None,
+        );
+        let (namespace, name) = value.resource_type.split_once(':').ok_or_else(|| StoreError::Corrupt("invalid operation resource type".into()))?;
+        let resource_type = o3k_kernel::ResourceType::new(namespace, name)
+            .map_err(|e| StoreError::Corrupt(format!("invalid operation resource type: {e}")))?;
+        let resource_id = value.resource_id.map(|id| o3k_kernel::ResourceId::new(id)
+            .map_err(|e| StoreError::Corrupt(format!("invalid operation resource id: {e}")))).transpose()?;
+        Ok(o3k_kernel::Operation { id: value.id, service: value.service, action, actor: value.actor, owner_scope: scope, resource_type, resource_id, state: value.state.into(), attempt: value.attempt, created_at: value.created_at, started_at: value.started_at, finished_at: value.finished_at, error: value.error, request_id: value.request_id })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdempotencyReservationRequest {
     pub owner_scope: String,
@@ -798,6 +838,8 @@ pub trait DurableStore: Send + Sync {
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
+    async fn insert_canonical_operation(&self, operation: &CanonicalOperationRecord) -> Result<(), StoreError>;
+    async fn get_canonical_operation(&self, id: Uuid) -> Result<CanonicalOperationRecord, StoreError>;
     async fn update_operation(
         &self,
         id: Uuid,
@@ -4947,6 +4989,17 @@ impl DurableStore for SqliteStore {
             .map_err(StoreError::Database)?
             .ok_or(StoreError::OperationNotFound)?;
         operation_from_row(&row)
+    }
+
+    async fn insert_canonical_operation(&self, o: &CanonicalOperationRecord) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(o.id.to_string()).bind(&o.service).bind(&o.action).bind(&o.actor).bind(&o.owner_scope).bind(&o.resource_type).bind(&o.resource_id).bind(i64::from(o.attempt)).bind(&o.created_at).bind(&o.started_at).bind(&o.finished_at).bind(&o.error).bind(&o.request_id).execute(&self.pool).await.map_err(StoreError::Database)?;
+        Ok(())
+    }
+
+    async fn get_canonical_operation(&self, id: Uuid) -> Result<CanonicalOperationRecord, StoreError> {
+        let row = sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id=?").bind(id.to_string()).fetch_optional(&self.pool).await.map_err(StoreError::Database)?.ok_or(StoreError::OperationNotFound)?;
+        Ok(CanonicalOperationRecord { id, service: row.get("service"), action: row.get("action"), actor: row.get("actor"), owner_scope: row.get("owner_scope"), resource_type: row.get("resource_type"), resource_id: row.get("resource_id"), state: self.get_operation(id).await?.state, attempt: u32::try_from(row.get::<i64,_>("attempt")).map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?, created_at: row.get("created_at"), started_at: row.get("started_at"), finished_at: row.get("finished_at"), error: row.get("error"), request_id: row.get("request_id") })
     }
 
     async fn reserve_idempotent_operation(

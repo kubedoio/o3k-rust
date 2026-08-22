@@ -17,7 +17,7 @@ use crate::{
     KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
     KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
     KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
-    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    CanonicalOperationRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
     PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, ResourceRecord, SecurityGroupBindingRecord,
@@ -339,6 +339,9 @@ impl DurableStore for O3kStore {
             Self::Postgres(s) => s.get_operation(id).await,
         }
     }
+
+    async fn insert_canonical_operation(&self, o: &CanonicalOperationRecord) -> Result<(), StoreError> { match self { Self::Sqlite(s) => s.insert_canonical_operation(o).await, Self::Postgres(s) => s.insert_canonical_operation(o).await } }
+    async fn get_canonical_operation(&self, id: Uuid) -> Result<CanonicalOperationRecord, StoreError> { match self { Self::Sqlite(s) => s.get_canonical_operation(id).await, Self::Postgres(s) => s.get_canonical_operation(id).await } }
 
     async fn update_operation(
         &self,
