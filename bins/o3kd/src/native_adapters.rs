@@ -418,6 +418,13 @@ fn mutation_now() -> String {
     )
 }
 
+fn mutation_resource_id(owner: &str, action: &str, key: &str) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        format!("{owner}\n{action}\n{key}").as_bytes(),
+    )
+}
+
 fn generic_read_error(error: o3k_native_api::error::NativeReadError) -> ResourceApplicationError {
     match error {
         o3k_native_api::error::NativeReadError::NotFound => ResourceApplicationError::NotFound,
@@ -513,8 +520,8 @@ impl ResourceApplication for GenericResourceApplication {
             .get(&o3k_native_api::resource::LifecycleOperation::Create)
             .ok_or(ResourceApplicationError::UnsupportedOperation)?
             .to_string();
-        let id = Uuid::new_v4();
         let owner = auth.effective_scope().to_string();
+        let id = mutation_resource_id(&owner, &action, key);
         let operation_id = Uuid::new_v4();
         let now = mutation_now();
         let operation = o3k_store::OperationRecord {
@@ -563,10 +570,20 @@ impl ResourceApplication for GenericResourceApplication {
             operation_id,
         )
         .map_err(|_| ResourceApplicationError::Validation)?;
-        self.store
-            .insert_resource(&resource)
-            .await
-            .map_err(|_| ResourceApplicationError::Conflict)?;
+        if let Err(error) = self.store.insert_resource(&resource).await {
+            // Replays deterministically address the same authority-owned
+            // resource. Preserve the existing row so the canonical store can
+            // decide equivalent versus conflicting idempotency semantics.
+            let existing = self
+                .store
+                .get_resource(id)
+                .await
+                .map_err(|_| ResourceApplicationError::Conflict)?;
+            if existing.project_id != resource.project_id || existing.kind != resource.kind {
+                return Err(ResourceApplicationError::Conflict);
+            }
+            let _ = error;
+        }
         match self
             .store
             .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &reservation)
