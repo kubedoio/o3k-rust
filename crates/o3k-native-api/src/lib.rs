@@ -21,6 +21,7 @@ pub mod identity;
 pub mod network;
 pub mod operation;
 pub mod pagination;
+pub mod resource;
 pub mod volume;
 
 /// Shared application state for the native API router.
@@ -33,6 +34,10 @@ pub struct NativeApiState {
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
+    /// Validated generic resource descriptors.  This is the northbound
+    /// registry; applications below it are intentionally controller-agnostic.
+    pub resource_registry: resource::ResourceRegistry,
+    pub resource_application: Option<resource::SharedResourceApplication>,
 }
 
 impl NativeApiState {
@@ -53,6 +58,8 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
+            resource_registry: resource::ResourceRegistry::default(),
+            resource_application: None,
         }
     }
 
@@ -62,6 +69,17 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn operation::OperationReader>,
     ) -> Self {
         self.operation_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_resource_application(
+        mut self,
+        registry: resource::ResourceRegistry,
+        application: resource::SharedResourceApplication,
+    ) -> Self {
+        self.resource_registry = registry;
+        self.resource_application = Some(application);
         self
     }
 }
@@ -82,6 +100,11 @@ pub fn router(state: NativeApiState) -> Router {
         .route(
             "/network/address-realms/{id}",
             get(network::show_address_realm),
+        )
+        .route("/{namespace}/{collection}", post(resource::create))
+        .route(
+            "/{namespace}/{collection}/{id}",
+            axum::routing::delete(resource::delete),
         )
         .route("/operations/{id}", get(operation::show_operation))
         .with_state(state)
@@ -186,6 +209,11 @@ pub struct DiscoveredResourceType {
     namespace: String,
     name: String,
     service: String,
+    schema_version: String,
+    collection: String,
+    scope: String,
+    ready: bool,
+    lifecycle_actions: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -203,19 +231,45 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             .into_response();
     };
 
-    let rts = registry.all_resource_types();
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    for rt in &rts {
-        for m in registry.all() {
-            if m.namespace == rt.namespace() {
+    for m in registry.all() {
+        for rt_meta in &m.resource_types {
+            let rt = &rt_meta.resource_type;
+            {
                 resource_types.push(DiscoveredResourceType {
                     namespace: rt.namespace().to_owned(),
                     name: rt.name().to_owned(),
                     service: m.service_id.clone(),
+                    schema_version: rt_meta.schema_version.clone(),
+                    collection: rt_meta
+                        .collection
+                        .clone()
+                        .unwrap_or_else(|| rt.name().to_owned()),
+                    scope: rt_meta.scope.to_string(),
+                    ready: registry
+                        .controller(&m.service_id)
+                        .is_some_and(|c| c.state == o3k_kernel::controller::ControllerState::Ready),
+                    lifecycle_actions: std::collections::HashMap::new(),
                 });
-                break;
             }
         }
+    }
+
+    for descriptor in state.resource_registry.all() {
+        let mut actions = std::collections::HashMap::new();
+        for (op, action) in &descriptor.lifecycle_actions {
+            actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
+        }
+        resource_types.push(DiscoveredResourceType {
+            namespace: descriptor.resource_type.namespace().to_owned(),
+            name: descriptor.resource_type.name().to_owned(),
+            service: descriptor.owning_service.clone(),
+            schema_version: descriptor.schema_version.clone(),
+            collection: descriptor.collection.clone(),
+            scope: descriptor.scope.to_string(),
+            ready: descriptor.ready,
+            lifecycle_actions: actions,
+        });
     }
 
     let count = resource_types.len();
