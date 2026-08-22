@@ -17,8 +17,45 @@ use o3k_native_api::{
     network::AddressRealmItem,
     volume::VolumeItem,
 };
-use o3k_store::{NetworkRepository, storage::StorageRepository};
+use o3k_store::{DurableStore, NetworkRepository, storage::StorageRepository};
 use uuid::Uuid;
+
+/// Store-backed canonical operation visibility adapter. Historical operation
+/// rows without P12.4 metadata fail closed rather than being reconstructed
+/// with fabricated ownership or action fields.
+pub struct OperationReaderAdapter {
+    pub store: Arc<o3k_store::unified::O3kStore>,
+}
+
+#[async_trait]
+impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
+    async fn show_operation(
+        &self,
+        auth: &o3k_kernel::AuthContext,
+        id: Uuid,
+    ) -> Result<o3k_kernel::Operation, NativeReadError> {
+        let record = self
+            .store
+            .get_canonical_operation(id)
+            .await
+            .map_err(|error| {
+                if matches!(error, o3k_store::StoreError::OperationNotFound) {
+                    NativeReadError::NotFound
+                } else {
+                    tracing::error!(%error, operation_id = %id, "native operation read failed");
+                    NativeReadError::Internal
+                }
+            })?;
+        let operation = o3k_kernel::Operation::try_from(record).map_err(|error| {
+            tracing::error!(%error, operation_id = %id, "invalid canonical operation metadata");
+            NativeReadError::Internal
+        })?;
+        if operation.owner_scope.id() != auth.effective_scope().id() {
+            return Err(NativeReadError::NotFound);
+        }
+        Ok(operation)
+    }
+}
 
 fn network_intent_state_wire(state: o3k_domain::NetworkIntentState) -> &'static str {
     match state {
