@@ -1747,8 +1747,7 @@ impl ComputeService {
         // deterministic server_id uniquely identifies the resource.  A
         // canonical replay carries the same server_id, so the name check must
         // be skipped to avoid rejecting an equivalent replay.
-        let canonical_has_existing =
-            canonical.is_some() && self.store.get_resource(server_id).await.is_ok();
+        let canonical_has_existing = canonical.is_some() && existing_res.is_ok();
         if !canonical_has_existing
             && self
                 .list_servers(&project_id)
@@ -3376,6 +3375,12 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
+        // The destructive path must fail closed on corrupt lifecycle state:
+        // deleting a row whose state cannot be decoded would dispatch a
+        // provider delete on an unknown instance and overwrite the evidence
+        // needed for repair. The decode error is propagated before any
+        // lifecycle operation begins; only a decodable `Deleted` row takes
+        // the already-deleted shortcut.
         let observed =
             server_state_from_storage(&resource.observed_state).map_err(ComputeError::Store)?;
         if observed == ServerState::Deleted {
@@ -3404,6 +3409,27 @@ impl ComputeService {
             return Ok(o3k_store::OperationState::Succeeded);
         }
         if resource.provider_id.is_none() {
+            // A server that never reached a provider cannot be deleted through
+            // the provider path: there is no provider identity to address.
+            // That is safe to complete locally only when the create is
+            // terminally failed WITHOUT any provider acceptance (no provider
+            // operation identity): the create dispatch provably never reached
+            // an agent — e.g. the issue-87 empty-registry terminal — so no
+            // provider side effect can exist, mirroring the reconciler's
+            // "domain already absent" handling of provider NotFound on
+            // delete. A create that WAS accepted (a provider operation
+            // identity exists) is equally absent-proven when the durable
+            // error_category is "not_found": the create provably never took
+            // effect, so no provider side effect can exist either — either
+            // converge_absent_create's presence-inspection evidence (issue-87
+            // S3 rerun #4) or the agent's definitive pre-libvirt failure
+            // evidence, where the failure provably happened before any
+            // libvirt define (issue-87 C-1 qemu-img failure). Every other
+            // shape — in-flight,
+            // accepted without absence proof, or terminally failed for a
+            // reason other than absence — still fails closed: the provider
+            // may hold side effects that only the provider delete can
+            // remove.
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
             let create = self
@@ -3467,6 +3493,23 @@ impl ComputeService {
                 .store
                 .release_reservation_for_operation(&intent.operation_id.to_string())
                 .await;
+            // Issue #88 S3 residue: the create may have been ACCEPTED by an
+            // agent (the config-drive transfers commit before acceptance)
+            // that crashed before any libvirt mutation. The accepted
+            // create's ConfigDriveIso manifests and content survive on that
+            // host with zero durable bindings, and nothing else ever tells
+            // the agent to reap them — the local completion above proves
+            // absence but does not remove the media. Dispatch a BEST-EFFORT
+            // delete for the never-defined resource with the same
+            // deterministic delete operation identity (the provider reuses
+            // the durable command record idempotently on re-dispatch) and a
+            // dedicated reap idempotency key. The agent's delete executor
+            // reaps the config-drive media, network, and console residue
+            // through its "domain already absent" arm — the single reaping
+            // authority. A failed dispatch is logged and never changes the
+            // already-terminal local delete: the residue verifier catches
+            // leftovers separately. NotFound means the create never reached
+            // any agent (e.g. the empty-registry terminal) — a clean no-op.
             if let Err(error) = self
                 .provider
                 .delete_instance(DeleteInstanceRequest {
