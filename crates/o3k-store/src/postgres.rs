@@ -1824,6 +1824,15 @@ impl DurableStore for PostgresStore {
         .await
         .map_err(StoreError::Database)?;
 
+        // Synchronise canonical operation attempt when canonical metadata
+        // exists; a no-op for legacy operations without metadata.
+        sqlx::query("UPDATE canonical_operation_metadata SET attempt = $1 WHERE operation_id = $2")
+            .bind(attempts)
+            .bind(&op_id_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+
         tx.commit().await.map_err(StoreError::Database)?;
         u8::try_from(attempts)
             .map_err(|_| StoreError::Corrupt("operation retry count exceeds limit".to_owned()))

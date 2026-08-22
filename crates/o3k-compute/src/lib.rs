@@ -1417,10 +1417,17 @@ impl ComputeService {
         input: ServerCreateInput,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<Server>, ComputeError> {
-        let action = context.action.clone();
-        if action.namespace() != "compute" {
-            return Err(ComputeError::InvalidRequest);
+        // CANONICAL INVARIANT: the canonical context's action, actor, and
+        // owner_scope must match the authenticated request.  This protects
+        // ComputeService from a future miswired manifest or service adapter
+        // that may construct a CanonicalMutationContext with differing values.
+        if context.action.to_string() != "compute:CreateServer"
+            || context.actor != auth.principal().id().as_str()
+            || context.owner_scope.id().as_str() != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::Unauthorized);
         }
+        let action = context.action.clone();
         let target = ResourceTarget::collection(
             ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
             Some(auth.effective_scope().id().clone()),
@@ -1603,132 +1610,151 @@ impl ComputeService {
         // lifecycle operation identity below. Every other durable state keeps
         // the retry semantics of ADR-0014 (byte-equivalent intent converges,
         // a differing intent conflicts).
+        // CANONICAL INVARIANT: a canonical mutation resolves the idempotency
+        // identity before any legacy existing-resource shortcut or revive
+        // semantics.  The canonical store-level `create_or_replay_*` is the
+        // sole authority for live replay and conflict detection.  Legacy
+        // deterministic resource handling (omit+revive, keypair migration,
+        // reply-equivalence) must NOT run when CanonicalMutationContext is
+        // present — doing so would expose a non-canonical Operation or
+        // revive a tombstone without canonical metadata.
         let mut revived_from: Option<o3k_store::ResourceRecord> = None;
-        match self.store.get_resource(server_id).await {
-            Ok(existing) => {
-                let existing_request: CreateInstanceRequest =
-                    serde_json::from_str(&existing.desired_state)
-                        .map_err(|_| ComputeError::Conflict)?;
-                let existing_request = CreateInstanceRequest {
-                    placement_provider_id: None,
-                    placement_allocation_id: None,
-                    ..existing_request
-                };
-                // Deliberate vs HEAD: corrupt observed state now fails
-                // closed as `ComputeError::Store` instead of being silently
-                // treated as a live row.
-                let observed = server_state_from_storage(&existing.observed_state)
-                    .map_err(ComputeError::Store)?;
-                if observed == ServerState::Deleted {
-                    revived_from = Some(existing);
-                } else {
-                    let legacy_keypair_intent =
-                        requests_match_with_keypair_migration(&existing_request, &request);
-                    // A recreation revive (issue #613 blocker B) persisted a
-                    // fresh lifecycle operation identity for the same caller
-                    // intent; a retry of that recreation rebuilds the
-                    // pre-revive request and differs from the persisted
-                    // intent only in operation_id and idempotency_key. The
-                    // durable intent wins for that exact shape (the retry
-                    // converges on the persisted row and its operation);
-                    // every other difference keeps the ADR-0014 conflict
-                    // semantics.
-                    let revive_equivalent = existing_request != request
-                        && !legacy_keypair_intent
-                        && CreateInstanceRequest {
-                            operation_id: existing_request.operation_id,
-                            idempotency_key: existing_request.idempotency_key.clone(),
-                            ..request.clone()
-                        } == existing_request;
-                    if !(existing_request == request || legacy_keypair_intent || revive_equivalent)
-                    {
-                        return Err(ComputeError::Conflict);
-                    }
-                    if legacy_keypair_intent {
-                        let desired_state =
-                            serde_json::to_string(&request).map_err(|_| ComputeError::Conflict)?;
-                        self.store
-                            .update_resource(
-                                existing.id,
-                                existing.generation,
-                                &desired_state,
-                                &existing.observed_state,
-                                existing.observed_generation,
-                                existing.provider_id.as_deref(),
-                            )
-                            .await?;
-                    }
-                    let attached = self.store.get_server_keypair_name(server_id).await?;
-                    let mut repaired_association = false;
-                    if attached != key_name {
-                        if attached.is_none() {
-                            if let Some(keypair) = keypair.as_ref() {
-                                self.store
-                                    .attach_server_keypair(server_id, keypair.id)
-                                    .await?;
-                                repaired_association = true;
+        if canonical.is_none() {
+            match self.store.get_resource(server_id).await {
+                Ok(existing) => {
+                    let existing_request: CreateInstanceRequest =
+                        serde_json::from_str(&existing.desired_state)
+                            .map_err(|_| ComputeError::Conflict)?;
+                    let existing_request = CreateInstanceRequest {
+                        placement_provider_id: None,
+                        placement_allocation_id: None,
+                        ..existing_request
+                    };
+                    // Deliberate vs HEAD: corrupt observed state now fails
+                    // closed as `ComputeError::Store` instead of being silently
+                    // treated as a live row.
+                    let observed = server_state_from_storage(&existing.observed_state)
+                        .map_err(ComputeError::Store)?;
+                    if observed == ServerState::Deleted {
+                        revived_from = Some(existing);
+                    } else {
+                        let legacy_keypair_intent =
+                            requests_match_with_keypair_migration(&existing_request, &request);
+                        // A recreation revive (issue #613 blocker B) persisted a
+                        // fresh lifecycle operation identity for the same caller
+                        // intent; a retry of that recreation rebuilds the
+                        // pre-revive request and differs from the persisted
+                        // intent only in operation_id and idempotency_key. The
+                        // durable intent wins for that exact shape (the retry
+                        // converges on the persisted row and its operation);
+                        // every other difference keeps the ADR-0014 conflict
+                        // semantics.
+                        let revive_equivalent = existing_request != request
+                            && !legacy_keypair_intent
+                            && CreateInstanceRequest {
+                                operation_id: existing_request.operation_id,
+                                idempotency_key: existing_request.idempotency_key.clone(),
+                                ..request.clone()
+                            } == existing_request;
+                        if !(existing_request == request
+                            || legacy_keypair_intent
+                            || revive_equivalent)
+                        {
+                            return Err(ComputeError::Conflict);
+                        }
+                        if legacy_keypair_intent {
+                            let desired_state = serde_json::to_string(&request)
+                                .map_err(|_| ComputeError::Conflict)?;
+                            self.store
+                                .update_resource(
+                                    existing.id,
+                                    existing.generation,
+                                    &desired_state,
+                                    &existing.observed_state,
+                                    existing.observed_generation,
+                                    existing.provider_id.as_deref(),
+                                )
+                                .await?;
+                        }
+                        let attached = self.store.get_server_keypair_name(server_id).await?;
+                        let mut repaired_association = false;
+                        if attached != key_name {
+                            if attached.is_none() {
+                                if let Some(keypair) = keypair.as_ref() {
+                                    self.store
+                                        .attach_server_keypair(server_id, keypair.id)
+                                        .await?;
+                                    repaired_association = true;
+                                } else {
+                                    return Err(ComputeError::Conflict);
+                                }
                             } else {
                                 return Err(ComputeError::Conflict);
                             }
-                        } else {
-                            return Err(ComputeError::Conflict);
                         }
-                    }
-                    if repaired_association {
-                        match self
-                            .journal
-                            .reconcile_once(existing_request.operation_id)
-                            .await
-                        {
-                            Ok(o3k_store::OperationState::Failed) => {
-                                self.store.detach_server_keypair(server_id).await?;
-                                self.project_terminal_binding_outcome(
-                                    existing_request.operation_id.to_string().as_str(),
-                                    o3k_store::OperationState::Failed,
-                                )
-                                .await;
-                                return Err(ComputeError::Conflict);
-                            }
-                            Ok(o3k_store::OperationState::Succeeded) => {
-                                self.project_terminal_binding_outcome(
-                                    existing_request.operation_id.to_string().as_str(),
-                                    o3k_store::OperationState::Succeeded,
-                                )
-                                .await;
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                self.store.detach_server_keypair(server_id).await?;
-                                return Err(ComputeError::Reconcile(error));
+                        if repaired_association {
+                            match self
+                                .journal
+                                .reconcile_once(existing_request.operation_id)
+                                .await
+                            {
+                                Ok(o3k_store::OperationState::Failed) => {
+                                    self.store.detach_server_keypair(server_id).await?;
+                                    self.project_terminal_binding_outcome(
+                                        existing_request.operation_id.to_string().as_str(),
+                                        o3k_store::OperationState::Failed,
+                                    )
+                                    .await;
+                                    return Err(ComputeError::Conflict);
+                                }
+                                Ok(o3k_store::OperationState::Succeeded) => {
+                                    self.project_terminal_binding_outcome(
+                                        existing_request.operation_id.to_string().as_str(),
+                                        o3k_store::OperationState::Succeeded,
+                                    )
+                                    .await;
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    self.store.detach_server_keypair(server_id).await?;
+                                    return Err(ComputeError::Reconcile(error));
+                                }
                             }
                         }
+                        let server = self
+                            .show_server(&project_id, ServerId::from_uuid(server_id))
+                            .await?;
+                        let operation = self
+                            .store
+                            .get_operation(existing_request.operation_id)
+                            .await?;
+                        return Ok(CreateMutationReceipt {
+                            server,
+                            operation_id: operation.id,
+                            operation_state: operation.state,
+                            replayed: true,
+                        });
                     }
-                    let server = self
-                        .show_server(&project_id, ServerId::from_uuid(server_id))
-                        .await?;
-                    let operation = self
-                        .store
-                        .get_operation(existing_request.operation_id)
-                        .await?;
-                    return Ok(CreateMutationReceipt {
-                        server,
-                        operation_id: operation.id,
-                        operation_state: operation.state,
-                        replayed: true,
-                    });
                 }
+                Err(StoreError::ResourceNotFound) => {}
+                Err(error) => return Err(ComputeError::Store(error)),
             }
-            Err(StoreError::ResourceNotFound) => {}
-            Err(error) => return Err(ComputeError::Store(error)),
         }
         // A name conflict is deterministic control-plane state. Reject it
         // before reserving Placement capacity; the second check below still
         // protects against a concurrent create racing this read.
-        if self
-            .list_servers(&project_id)
-            .await?
-            .iter()
-            .any(|server| server.name == name && server.state != ServerState::Deleted)
+        // CANONICAL INVARIANT: when CanonicalMutationContext is present the
+        // deterministic server_id uniquely identifies the resource.  A
+        // canonical replay carries the same server_id, so the name check must
+        // be skipped to avoid rejecting an equivalent replay.
+        let canonical_has_existing =
+            canonical.is_some() && self.store.get_resource(server_id).await.is_ok();
+        if !canonical_has_existing
+            && self
+                .list_servers(&project_id)
+                .await?
+                .iter()
+                .any(|server| server.name == name && server.state != ServerState::Deleted)
         {
             return Err(ComputeError::Conflict);
         }
@@ -1783,9 +1809,10 @@ impl ComputeService {
                 return Err(error);
             }
         };
-        if servers
-            .iter()
-            .any(|server| server.name == name && server.state != ServerState::Deleted)
+        if !canonical_has_existing
+            && servers
+                .iter()
+                .any(|server| server.name == name && server.state != ServerState::Deleted)
         {
             // A racing identical request may have persisted this server while
             // the schedule was in flight; its allocation idempotently backs
@@ -1978,6 +2005,17 @@ impl ComputeService {
                     }
                     Ok(_) => {}
                     Err(ReconcileError::Store(StoreError::ResourceAlreadyExists)) => {
+                        // CANONICAL INVARIANT: a pre-existing legacy resource
+                        // with no matching canonical idempotency reservation
+                        // must fail closed.  The legacy path below preserves
+                        // the existing OpenStack/TestLab recreate contract
+                        // only for non-canonical mutations.
+                        if canonical.is_some() {
+                            if let Some(decision) = placement.as_ref() {
+                                self.release_placement_decision(decision).await?;
+                            }
+                            return Err(ComputeError::Conflict);
+                        }
                         let existing = self.store.get_resource(id).await?;
                         let existing_request: CreateInstanceRequest =
                             serde_json::from_str(&existing.desired_state)
@@ -3215,10 +3253,15 @@ impl ComputeService {
         id: ServerId,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<ServerId>, ComputeError> {
-        let action = context.action.clone();
-        if action.namespace() != "compute" {
-            return Err(ComputeError::InvalidRequest);
+        // CANONICAL INVARIANT: the canonical context's action, actor, and
+        // owner_scope must match the authenticated request.
+        if context.action.to_string() != "compute:DeleteServer"
+            || context.actor != auth.principal().id().as_str()
+            || context.owner_scope.id().as_str() != auth.effective_scope().id().as_str()
+        {
+            return Err(ComputeError::Unauthorized);
         }
+        let action = context.action.clone();
         let target = ResourceTarget::instance(
             ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
             ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
@@ -3279,32 +3322,49 @@ impl ComputeService {
             }
             o3k_store::CanonicalAcceptanceOutcome::Created { .. } => false,
         };
-        self.delete_server_with_accepted_operation(
-            auth.effective_scope().id().as_str(),
-            id,
-            Some(operation_id),
-        )
-        .await?;
-        let operation = self.store.get_operation(operation_id).await?;
+        let operation_state = self
+            .delete_server_with_accepted_operation(
+                auth.effective_scope().id().as_str(),
+                id,
+                Some(operation_id),
+            )
+            .await?;
         Ok(MutationReceipt {
             resource: id,
             operation_id,
-            operation_state: operation.state,
+            operation_state,
             replayed,
         })
     }
 
     pub async fn delete_server(&self, project_id: &str, id: ServerId) -> Result<(), ComputeError> {
-        self.delete_server_with_accepted_operation(project_id, id, None)
-            .await
+        let state = self
+            .delete_server_with_accepted_operation(project_id, id, None)
+            .await?;
+        if state != o3k_store::OperationState::Succeeded {
+            return Err(ComputeError::Conflict);
+        }
+        Ok(())
     }
 
+    /// Returns the operation state after a bounded execution pass.
+    ///
+    /// LEGACY callers (no accepted_operation_id) reconcile in a polling loop
+    /// until the operation reaches terminal, then run compensatory cleanup and
+    /// return `Ok(OperationState::Succeeded)` if completed, or
+    /// `Err(ComputeError::Conflict)` if not.
+    ///
+    /// CANONICAL callers (with accepted_operation_id) perform one
+    /// reconciliation pass and return the resulting state directly without
+    /// blocking.  The caller maps `Succeeded → 204` and
+    /// `Pending/Running/Retryable/UnknownOutcome → 202` in the native API
+    /// adapter; compensatory cleanup runs only after terminal success.
     async fn delete_server_with_accepted_operation(
         &self,
         project_id: &str,
         id: ServerId,
         accepted_operation_id: Option<Uuid>,
-    ) -> Result<(), ComputeError> {
+    ) -> Result<o3k_store::OperationState, ComputeError> {
         let resource =
             self.store
                 .get_resource(id.as_uuid())
@@ -3316,12 +3376,6 @@ impl ComputeService {
         if resource.project_id != project_id {
             return Err(ComputeError::NotFound);
         }
-        // The destructive path must fail closed on corrupt lifecycle state:
-        // deleting a row whose state cannot be decoded would dispatch a
-        // provider delete on an unknown instance and overwrite the evidence
-        // needed for repair. The decode error is propagated before any
-        // lifecycle operation begins; only a decodable `Deleted` row takes
-        // the already-deleted shortcut.
         let observed =
             server_state_from_storage(&resource.observed_state).map_err(ComputeError::Store)?;
         if observed == ServerState::Deleted {
@@ -3330,9 +3384,6 @@ impl ComputeService {
             self.release_placement_allocation(id.as_uuid(), &intent)
                 .await?;
             self.store.detach_server_keypair(id.as_uuid()).await?;
-            // The delete reached terminal success in a previous run; clear
-            // any binding that was not yet unbound and reap the config-drive
-            // media that the earlier run could not.
             self.unbind_ports_from_intent(&intent).await;
             self.cleanup_config_drive_best_effort(&id.as_uuid().to_string());
             let _ = self
@@ -3350,30 +3401,9 @@ impl ComputeService {
                     )
                     .await?;
             }
-            return Ok(());
+            return Ok(o3k_store::OperationState::Succeeded);
         }
         if resource.provider_id.is_none() {
-            // A server that never reached a provider cannot be deleted through
-            // the provider path: there is no provider identity to address.
-            // That is safe to complete locally only when the create is
-            // terminally failed WITHOUT any provider acceptance (no provider
-            // operation identity): the create dispatch provably never reached
-            // an agent — e.g. the issue-87 empty-registry terminal — so no
-            // provider side effect can exist, mirroring the reconciler's
-            // "domain already absent" handling of provider NotFound on
-            // delete. A create that WAS accepted (a provider operation
-            // identity exists) is equally absent-proven when the durable
-            // error_category is "not_found": the create provably never took
-            // effect, so no provider side effect can exist either — either
-            // converge_absent_create's presence-inspection evidence (issue-87
-            // S3 rerun #4) or the agent's definitive pre-libvirt failure
-            // evidence, where the failure provably happened before any
-            // libvirt define (issue-87 C-1 qemu-img failure). Every other
-            // shape — in-flight,
-            // accepted without absence proof, or terminally failed for a
-            // reason other than absence — still fails closed: the provider
-            // may hold side effects that only the provider delete can
-            // remove.
             let intent: CreateInstanceRequest = serde_json::from_str(&resource.desired_state)
                 .map_err(|_| ComputeError::Conflict)?;
             let create = self
@@ -3406,11 +3436,6 @@ impl ComputeService {
                     Err(error) => return Err(ComputeError::Reconcile(error)),
                 }
             }
-            // The create never reached a provider, so the delete completes
-            // without a provider call. The durable delete operation and the
-            // DELETED resource projection make the outcome terminal and
-            // idempotent; the reverse-order compensation releases the
-            // placement allocation, detaches the keypair, and unbinds ports.
             self.store
                 .update_operation(
                     operation_id,
@@ -3442,23 +3467,6 @@ impl ComputeService {
                 .store
                 .release_reservation_for_operation(&intent.operation_id.to_string())
                 .await;
-            // Issue #88 S3 residue: the create may have been ACCEPTED by an
-            // agent (the config-drive transfers commit before acceptance)
-            // that crashed before any libvirt mutation. The accepted
-            // create's ConfigDriveIso manifests and content survive on that
-            // host with zero durable bindings, and nothing else ever tells
-            // the agent to reap them — the local completion above proves
-            // absence but does not remove the media. Dispatch a BEST-EFFORT
-            // delete for the never-defined resource with the same
-            // deterministic delete operation identity (the provider reuses
-            // the durable command record idempotently on re-dispatch) and a
-            // dedicated reap idempotency key. The agent's delete executor
-            // reaps the config-drive media, network, and console residue
-            // through its "domain already absent" arm — the single reaping
-            // authority. A failed dispatch is logged and never changes the
-            // already-terminal local delete: the residue verifier catches
-            // leftovers separately. NotFound means the create never reached
-            // any agent (e.g. the empty-registry terminal) — a clean no-op.
             if let Err(error) = self
                 .provider
                 .delete_instance(DeleteInstanceRequest {
@@ -3481,7 +3489,7 @@ impl ComputeService {
                     );
                 }
             }
-            return Ok(());
+            return Ok(o3k_store::OperationState::Succeeded);
         }
         let operation_id = accepted_operation_id.unwrap_or_else(|| {
             Uuid::new_v5(
@@ -3499,20 +3507,31 @@ impl ComputeService {
                 Err(error) => return Err(ComputeError::Reconcile(error)),
             }
         }
-        if self
-            .reconcile_lifecycle_until_terminal(operation_id)
-            .await?
-            != o3k_store::OperationState::Succeeded
-        {
-            return Err(ComputeError::Conflict);
+        // CANONICAL PATH: one reconciliation pass, return current state without
+        // blocking.  The caller maps Succeeded→204 and non-terminal→202.  No
+        // compensatory cleanup runs for an incomplete operation.
+        //
+        // LEGACY PATH: poll until terminal; the synchronous caller contract
+        // requires the delete to complete before returning.
+        let state = match accepted_operation_id {
+            Some(_) => self
+                .journal
+                .reconcile_lifecycle_once(operation_id)
+                .await
+                .map_err(ComputeError::Reconcile)?,
+            None => {
+                self.reconcile_lifecycle_until_terminal(operation_id)
+                    .await?
+            }
+        };
+        if state != o3k_store::OperationState::Succeeded {
+            return Ok(state);
         }
         let intent: CreateInstanceRequest =
             serde_json::from_str(&resource.desired_state).map_err(|_| ComputeError::Conflict)?;
         self.release_placement_allocation(id.as_uuid(), &intent)
             .await?;
         self.store.detach_server_keypair(id.as_uuid()).await?;
-        // Terminal delete success means the agent removed the host execution;
-        // the ports are reusable and must no longer claim a binding.
         self.project_terminal_binding_outcome(
             operation_id.to_string().as_str(),
             o3k_store::OperationState::Succeeded,
@@ -3522,7 +3541,7 @@ impl ComputeService {
             .store
             .release_reservation_for_operation(&intent.operation_id.to_string())
             .await;
-        Ok(())
+        Ok(o3k_store::OperationState::Succeeded)
     }
 
     async fn release_placement_allocation(
@@ -8625,6 +8644,332 @@ mod tests {
             store.get_canonical_operation(deleted.operation_id).await?,
         )?;
         assert_eq!(public_delete.action.to_string(), "compute:DeleteServer");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_native_create_delete_same_key_no_revive()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use o3k_store::DurableStore;
+        // CANONICAL INVARIANT: a deleted resource must NOT be revived into a
+        // new lifecycle when the SAME canonical Idempotency-Key is reused.
+        // The original key represents the original accepted mutation; the
+        // caller must use a NEW key to create a subsequent lifecycle.
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "same-key".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        let create_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"same-key","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        // 1. Create the server
+        let created = service
+            .create_server_for_auth_canonical(&auth, input.clone(), create_ctx.clone())
+            .await?;
+        assert_eq!(provider.instance_count(), 1);
+        // 2. Delete the server
+        let delete_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "DeleteServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "delete-A".into(),
+            serde_json::json!({"resource_id":created.resource.id.to_string()}),
+        )?;
+        service
+            .delete_server_for_auth_canonical(&auth, created.resource.id, delete_ctx)
+            .await?;
+        assert_eq!(provider.instance_count(), 0);
+        // 3. Retry create with SAME key — must fail closed (the original key
+        //    represents the original accepted mutation; recreating requires a
+        //    new Idempotency-Key).
+        let retry = service
+            .create_server_for_auth_canonical(&auth, input, create_ctx)
+            .await;
+        assert!(
+            matches!(
+                retry,
+                Err(ComputeError::Conflict) | Err(ComputeError::NotFound)
+            ),
+            "retry with same key after delete must fail closed, got {:?}",
+            retry
+        );
+        // 4. No duplicate provider mutation occurred
+        assert_eq!(provider.instance_count(), 0);
+        // 5. No second resource was created
+        let resources = store
+            .list_resources("project-a", "compute_instance")
+            .await?;
+        assert_eq!(resources.len(), 1, "only the original tombstone must exist");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_native_create_delete_new_key_creates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // CANONICAL INVARIANT: a NEW Idempotency-Key after delete creates the
+        // next lifecycle correctly.
+        use o3k_store::DurableStore;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input_a = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "first-srv".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        let ctx_a = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"first-srv","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        // 1. Create first server
+        let first = service
+            .create_server_for_auth_canonical(&auth, input_a, ctx_a)
+            .await?;
+        assert_eq!(provider.instance_count(), 1);
+        // 2. Delete it
+        let del_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "DeleteServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "delete-A".into(),
+            serde_json::json!({"resource_id":first.resource.id.to_string()}),
+        )?;
+        service
+            .delete_server_for_auth_canonical(&auth, first.resource.id, del_ctx)
+            .await?;
+        assert_eq!(provider.instance_count(), 0);
+        // 3. Create second server with NEW key and a different deterministic
+        //    server_id (derived from the new idempotency key).
+        let input_b = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "second-srv".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-B".into(),
+        };
+        let ctx_b = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-B".into(),
+            serde_json::json!({"spec":{"name":"second-srv","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let second = service
+            .create_server_for_auth_canonical(&auth, input_b, ctx_b)
+            .await?;
+        assert!(
+            second.resource.id != first.resource.id,
+            "new key must produce a different server_id"
+        );
+        assert_eq!(provider.instance_count(), 1);
+        // 4. Verify two resource rows exist (one tombstone, one active)
+        let resources = store
+            .list_resources("project-a", "compute_instance")
+            .await?;
+        assert_eq!(resources.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_native_create_context_actor_mismatch_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // CANONICAL INVARIANT: a context with mismatched actor is rejected.
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "mismatch".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        // Context with a DIFFERENT actor than the auth principal
+        let bad_actor = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-evil".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"mismatch","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let result = service
+            .create_server_for_auth_canonical(&auth, input.clone(), bad_actor)
+            .await;
+        assert!(
+            matches!(result, Err(ComputeError::Unauthorized)),
+            "mismatched actor must be Unauthorized, got {:?}",
+            result
+        );
+        let bad_scope_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            o3k_kernel::OwnershipScope::project(
+                o3k_kernel::ScopeId::new_unchecked("different-project"),
+                None,
+                None,
+            ),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"mismatch","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let result2 = service
+            .create_server_for_auth_canonical(&auth, input, bad_scope_ctx)
+            .await;
+        assert!(
+            matches!(result2, Err(ComputeError::Unauthorized)),
+            "mismatched scope must be Unauthorized, got {:?}",
+            result2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_native_delete_returns_state_not_conflict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // CANONICAL INVARIANT: a canonical delete returns the actual operation
+        // state rather than unconditionally converting non-terminal to
+        // Conflict, enabling the native API to produce a real 202.
+        //
+        // This test uses a fake provider that returns a non-terminal state
+        // (Accepted), proving the first async delete request returns the
+        // non-terminal state instead of ComputeError::Conflict.
+        use o3k_provider::FailureInjection;
+        use o3k_store::DurableStore;
+        let fake = Arc::new(FakeComputeProvider::new());
+        fake.set_failure(FailureInjection::Timeout)?;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let service = ComputeService::new(store.clone(), fake.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "async-delete".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        let create_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"async-delete","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        // 1. Create server
+        let created = service
+            .create_server_for_auth_canonical(&auth, input, create_ctx)
+            .await?;
+        // 2. Clear the failure so create converges
+        fake.set_failure(FailureInjection::None)?;
+        // Wait for create to converge
+        let operation = store.get_operation(created.operation_id).await?;
+        if operation.state != o3k_store::OperationState::Succeeded {
+            // Drive convergence
+            let _ = service.journal.reconcile_once(created.operation_id).await;
+        }
+        // 3. Set provider to Timeout so delete stays non-terminal
+        fake.set_failure(FailureInjection::Timeout)?;
+        let delete_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "DeleteServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "delete-A".into(),
+            serde_json::json!({"resource_id":created.resource.id.to_string()}),
+        )?;
+        let delete_receipt = service
+            .delete_server_for_auth_canonical(&auth, created.resource.id, delete_ctx)
+            .await?;
+        // The delete state must NOT be Succeeded (the provider is timing out)
+        // and the receipt must carry the actual non-terminal state rather
+        // than erroring with Conflict.
+        assert!(
+            delete_receipt.operation_state != o3k_store::OperationState::Succeeded,
+            "delete must not succeed with failing provider, state={:?}",
+            delete_receipt.operation_state
+        );
+        // 4. GET /operations/O returns the canonical operation
+        let public_op = o3k_kernel::Operation::try_from(
+            store
+                .get_canonical_operation(delete_receipt.operation_id)
+                .await?,
+        )?;
+        assert_eq!(public_op.action.to_string(), "compute:DeleteServer");
+        assert_eq!(
+            public_op.resource_id.as_ref().map(ToString::to_string),
+            Some(created.resource.id.to_string())
+        );
+        assert_eq!(
+            public_op.state,
+            o3k_kernel::OperationState::from(delete_receipt.operation_state)
+        );
+        // 5. Replay returns the SAME operation
+        let delete_ctx2 = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "DeleteServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "delete-A".into(),
+            serde_json::json!({"resource_id":created.resource.id.to_string()}),
+        )?;
+        let replay = service
+            .delete_server_for_auth_canonical(&auth, created.resource.id, delete_ctx2)
+            .await?;
+        assert_eq!(
+            replay.operation_id, delete_receipt.operation_id,
+            "replay must return same operation_id"
+        );
+        // 6. Clear failure and let delete converge
+        fake.set_failure(FailureInjection::None)?;
+        // Drive convergence
+        let _ = service
+            .journal
+            .reconcile_lifecycle_once(delete_receipt.operation_id)
+            .await;
         Ok(())
     }
 

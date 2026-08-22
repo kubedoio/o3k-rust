@@ -6225,6 +6225,15 @@ impl DurableStore for SqliteStore {
                 .await
                 .map_err(StoreError::Database)?;
         }
+        // Synchronise canonical operation attempt when canonical metadata
+        // exists; a no-op for legacy operations without metadata.
+        sqlx::query("UPDATE canonical_operation_metadata SET attempt = ? WHERE operation_id = ?")
+            .bind(attempts)
+            .bind(operation_id.to_string())
+            .execute(&mut *transaction)
+            .await
+            .map_err(StoreError::Database)?;
+
         transaction.commit().await.map_err(StoreError::Database)?;
         u8::try_from(attempts)
             .map_err(|_| StoreError::Corrupt("operation retry count exceeds limit".to_owned()))
