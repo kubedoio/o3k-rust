@@ -11,6 +11,8 @@ use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
+static TEST_DATABASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance")
@@ -19,6 +21,7 @@ fn url() -> String {
 #[tokio::test]
 #[ignore = "requires the mandatory PostgreSQL P12.3/P12.4 CI job"]
 async fn postgres_p12_3_canonical_resource_and_lifecycle_acceptance() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let store = PostgresStore::connect(&url()).await.expect("connect");
     store.clean_tables_for_testing().await.expect("clean");
     let rid = Uuid::now_v7();
@@ -214,6 +217,7 @@ async fn race(
 #[tokio::test]
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let database_url = url();
     let store = PostgresStore::connect(&database_url)
         .await
