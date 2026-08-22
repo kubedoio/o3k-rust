@@ -553,6 +553,11 @@ pub(crate) fn validate_canonical_idempotent_operation_identity(
             "canonical operation and idempotency actions differ".into(),
         ));
     }
+    if kernel.resource_type.to_string() != request.resource_type {
+        return Err(StoreError::Corrupt(
+            "canonical operation and idempotency resource types differ".into(),
+        ));
+    }
     if kernel.owner_scope.kind() != o3k_kernel::ScopeKind::Project
         || kernel.owner_scope.id().as_str() != request.owner_scope
     {
@@ -576,6 +581,7 @@ pub(crate) fn validate_canonical_idempotent_operation_identity(
 pub struct IdempotencyReservationRequest {
     pub owner_scope: String,
     pub action: String,
+    pub resource_type: String,
     pub key: String,
     pub fingerprint: String,
     pub operation_id: Uuid,
@@ -603,6 +609,21 @@ impl IdempotencyReservationRequest {
         {
             return Err(StoreError::Corrupt("invalid idempotency identity".into()));
         }
+        let action_id = o3k_kernel::ActionId::parse(&action)
+            .map_err(|error| StoreError::Corrupt(format!("invalid idempotency action: {error}")))?;
+        let (resource_namespace, resource_name) = resource_type
+            .split_once(':')
+            .ok_or_else(|| StoreError::Corrupt("invalid idempotency resource type".into()))?;
+        let resource_type = o3k_kernel::ResourceType::new(resource_namespace, resource_name)
+            .map_err(|error| {
+                StoreError::Corrupt(format!("invalid idempotency resource type: {error}"))
+            })?;
+        if action_id.namespace() != resource_type.namespace() {
+            return Err(StoreError::Corrupt(
+                "idempotency action and resource namespaces differ".into(),
+            ));
+        }
+        let resource_type = resource_type.to_string();
         let canonical = canonical_json(body);
         let material = format!(
             "{action}\n{resource_type}\n{}\n{canonical}",
@@ -613,6 +634,7 @@ impl IdempotencyReservationRequest {
         Ok(Self {
             owner_scope,
             action,
+            resource_type,
             key,
             fingerprint,
             operation_id,
@@ -2536,133 +2558,89 @@ impl SqliteStore {
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError> {
         validate_canonical_idempotent_operation_identity(operation, canonical, request)?;
-
-        let resource = sqlx::query("SELECT project_id FROM resources WHERE id = ?")
-            .bind(operation.resource_id.to_string())
-            .fetch_optional(&self.pool)
+        let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
             .await
-            .map_err(StoreError::Database)?
-            .ok_or(StoreError::ResourceNotFound)?;
-        let resource_project: String = resource.get("project_id");
-        if resource_project != canonical.owner_scope {
-            return Err(StoreError::Corrupt(
-                "operation resource does not match canonical owner".into(),
-            ));
-        }
-        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
-        let operation_inserted = match sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            .bind(operation.id.to_string()).bind(operation.resource_id.to_string())
-            .bind(&operation.kind).bind(operation.state.as_str())
-            .bind(&operation.provider_operation_id).bind(&operation.error_category)
-            .bind(&operation.error_message).execute(&mut *tx).await
-        {
-            Ok(_) => true,
-            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => false,
-            Err(error) => return Err(StoreError::Database(error)),
-        };
-
-        if operation_inserted {
-            sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
-                .bind(canonical.id.to_string()).bind(&canonical.service)
-                .bind(&canonical.action).bind(&canonical.actor)
-                .bind(&canonical.owner_scope).bind(&canonical.resource_type)
-                .bind(&canonical.resource_id).bind(i64::from(canonical.attempt))
-                .bind(&canonical.created_at).bind(&canonical.started_at)
-                .bind(&canonical.finished_at).bind(&canonical.error)
-                .bind(&canonical.request_id).execute(&mut *tx).await
-                .map_err(StoreError::Database)?;
-        }
-
-        let reservation = sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES (?, ?, ?, ?, ?)")
-            .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
-            .bind(&request.fingerprint).bind(request.operation_id.to_string())
-            .execute(&mut *tx).await;
-        let outcome = match reservation {
-            Ok(_) => IdempotencyReservation::Created(request.operation_id),
-            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
-                let row = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = ? AND action = ? AND idempotency_key = ?")
-                    .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
-                    .fetch_optional(&mut *tx).await.map_err(StoreError::Database)?
-                    .ok_or(StoreError::IdempotencyConflict)?;
-                let fingerprint: String =
-                    row.try_get("fingerprint").map_err(StoreError::Database)?;
-                let id: String = row.try_get("operation_id").map_err(StoreError::Database)?;
-                let existing = Uuid::parse_str(&id).map_err(StoreError::InvalidUuid)?;
-                if fingerprint == request.fingerprint {
-                    IdempotencyReservation::ExistingEquivalent(existing)
-                } else {
-                    IdempotencyReservation::Conflict
+            .map_err(StoreError::Database)?;
+        let outcome: Result<IdempotencyReservation, StoreError> = async {
+            // Idempotency is resolved before inspecting the proposed target.
+            // This preserves replay after the accepted resource is removed or
+            // advances beyond the request's original precondition.
+            let reservation = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = ? AND action = ? AND idempotency_key = ?")
+                .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+                .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?;
+            if let Some(reservation) = reservation {
+                let fingerprint: String = reservation.try_get("fingerprint").map_err(StoreError::Database)?;
+                if fingerprint != request.fingerprint {
+                    return Ok(IdempotencyReservation::Conflict);
                 }
-            }
-            Err(error) => return Err(StoreError::Database(error)),
-        };
-
-        if operation_inserted && !matches!(outcome, IdempotencyReservation::Created(_)) {
-            // Canonical metadata cascades with the losing operation. This is
-            // part of the same transaction, so no losing proposal can escape.
-            sqlx::query("DELETE FROM operations WHERE id = ?")
-                .bind(operation.id.to_string())
-                .execute(&mut *tx)
-                .await
-                .map_err(StoreError::Database)?;
-        }
-
-        if matches!(outcome, IdempotencyReservation::Created(_)) && !operation_inserted {
-            return Err(StoreError::Corrupt(
-                "cannot attach a new idempotency reservation to a pre-existing operation".into(),
-            ));
-        }
-
-        let complete_existing = match outcome {
-            IdempotencyReservation::ExistingEquivalent(existing) => Some(existing),
-            _ => None,
-        };
-        if let Some(existing) = complete_existing {
-            let operation_row = sqlx::query("SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?")
-                .bind(existing.to_string()).fetch_optional(&mut *tx).await
-                .map_err(StoreError::Database)?
-                .ok_or_else(|| StoreError::Corrupt("idempotency reservation references missing operation".into()))?;
-            let existing_operation = operation_from_row(&operation_row)?;
-            let metadata =
-                sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id = ?")
-                    .bind(existing.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
+                let existing = Uuid::parse_str(&reservation.try_get::<String, _>("operation_id").map_err(StoreError::Database)?)
+                    .map_err(StoreError::InvalidUuid)?;
+                let operation_row = sqlx::query("SELECT id, resource_id, kind, state, provider_operation_id, error_category, error_message FROM operations WHERE id = ?")
+                    .bind(existing.to_string()).fetch_optional(&mut *connection).await
                     .map_err(StoreError::Database)?
-                    .ok_or_else(|| {
-                        StoreError::Corrupt(
-                    "idempotency reservation references operation without canonical metadata"
-                        .into(),
-                )
-                    })?;
-            let existing_canonical = CanonicalOperationRecord {
-                id: existing,
-                service: metadata.get("service"),
-                action: metadata.get("action"),
-                actor: metadata.get("actor"),
-                owner_scope: metadata.get("owner_scope"),
-                resource_type: metadata.get("resource_type"),
-                resource_id: metadata.get("resource_id"),
-                state: existing_operation.state,
-                attempt: u32::try_from(metadata.get::<i64, _>("attempt"))
-                    .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
-                created_at: metadata.get("created_at"),
-                started_at: metadata.get("started_at"),
-                finished_at: metadata.get("finished_at"),
-                error: metadata.get("error"),
-                request_id: metadata.get("request_id"),
-            };
-            let mut existing_request = request.clone();
-            existing_request.operation_id = existing;
-            validate_canonical_idempotent_operation_identity(
-                &existing_operation,
-                &existing_canonical,
-                &existing_request,
-            )?;
-        }
+                    .ok_or_else(|| StoreError::Corrupt("idempotency reservation references missing operation".into()))?;
+                let existing_operation = operation_from_row(&operation_row)?;
+                let metadata = sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id = ?")
+                    .bind(existing.to_string()).fetch_optional(&mut *connection).await
+                    .map_err(StoreError::Database)?
+                    .ok_or_else(|| StoreError::Corrupt("idempotency reservation references operation without canonical metadata".into()))?;
+                let existing_canonical = CanonicalOperationRecord {
+                    id: existing,
+                    service: metadata.get("service"), action: metadata.get("action"),
+                    actor: metadata.get("actor"), owner_scope: metadata.get("owner_scope"),
+                    resource_type: metadata.get("resource_type"), resource_id: metadata.get("resource_id"),
+                    state: existing_operation.state,
+                    attempt: u32::try_from(metadata.get::<i64, _>("attempt"))
+                        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+                    created_at: metadata.get("created_at"), started_at: metadata.get("started_at"),
+                    finished_at: metadata.get("finished_at"), error: metadata.get("error"),
+                    request_id: metadata.get("request_id"),
+                };
+                let mut existing_request = request.clone();
+                existing_request.operation_id = existing;
+                validate_canonical_idempotent_operation_identity(&existing_operation, &existing_canonical, &existing_request)?;
+                let winning_owner: String = sqlx::query("SELECT project_id FROM resources WHERE id = ?")
+                    .bind(existing_operation.resource_id.to_string())
+                    .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
+                    .ok_or_else(|| StoreError::Corrupt("canonical operation references missing resource".into()))?
+                    .try_get("project_id").map_err(StoreError::Database)?;
+                if winning_owner != existing_canonical.owner_scope {
+                    return Err(StoreError::Corrupt("canonical operation resource and owner scopes differ".into()));
+                }
+                return Ok(IdempotencyReservation::ExistingEquivalent(existing));
+            }
 
-        tx.commit().await.map_err(StoreError::Database)?;
-        Ok(outcome)
+            let resource_owner: String = sqlx::query("SELECT project_id FROM resources WHERE id = ?")
+                .bind(operation.resource_id.to_string())
+                .fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
+                .ok_or(StoreError::ResourceNotFound)?
+                .try_get("project_id").map_err(StoreError::Database)?;
+            if resource_owner != canonical.owner_scope {
+                return Err(StoreError::Corrupt("operation resource does not match canonical owner".into()));
+            }
+            let inserted = sqlx::query("INSERT OR IGNORE INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                .bind(operation.id.to_string()).bind(operation.resource_id.to_string())
+                .bind(&operation.kind).bind(operation.state.as_str())
+                .bind(&operation.provider_operation_id).bind(&operation.error_category)
+                .bind(&operation.error_message).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            if inserted.rows_affected() != 1 {
+                return Err(StoreError::Corrupt("cannot attach a new idempotency reservation to a pre-existing operation".into()));
+            }
+            sqlx::query("INSERT INTO canonical_operation_metadata (operation_id,service,action,actor,owner_scope,resource_type,resource_id,attempt,created_at,started_at,finished_at,error,request_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+                .bind(canonical.id.to_string()).bind(&canonical.service).bind(&canonical.action)
+                .bind(&canonical.actor).bind(&canonical.owner_scope).bind(&canonical.resource_type)
+                .bind(&canonical.resource_id).bind(i64::from(canonical.attempt)).bind(&canonical.created_at)
+                .bind(&canonical.started_at).bind(&canonical.finished_at).bind(&canonical.error)
+                .bind(&canonical.request_id).execute(&mut *connection).await.map_err(StoreError::Database)?;
+            sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES (?, ?, ?, ?, ?)")
+                .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+                .bind(&request.fingerprint).bind(request.operation_id.to_string())
+                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+            Ok(IdempotencyReservation::Created(operation.id))
+        }.await;
+        Self::commit_or_rollback(&mut connection, outcome).await
     }
 
     pub async fn list_keypairs(
@@ -8907,6 +8885,117 @@ mod tests {
         assert_eq!(kernel.id, operation_id);
         assert_eq!(kernel.action.as_str(), "compute:CreateServer");
         assert_eq!(kernel.owner_scope.id().as_str(), "project-a");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_canonical_replay_precedes_proposed_resource_lookup() -> Result<(), StoreError> {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        let operation = idempotent_operation(resource_id, Uuid::now_v7());
+        let canonical =
+            canonical_idempotent_operation(&operation, "project-a", "compute:CreateServer");
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "replay-before-resource",
+            "compute:server",
+            None,
+            &serde_json::json!({"name":"demo"}),
+            operation.id,
+        )?;
+        assert_eq!(
+            store
+                .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &request,)
+                .await?,
+            IdempotencyReservation::Created(operation.id)
+        );
+
+        // A retried create may propose a newly allocated public resource ID.
+        // Idempotency must resolve the committed winner before requiring that
+        // losing proposal's resource to exist.
+        let proposal = idempotent_operation(Uuid::now_v7(), Uuid::now_v7());
+        let proposal_canonical =
+            canonical_idempotent_operation(&proposal, "project-a", "compute:CreateServer");
+        let mut replay = request.clone();
+        replay.operation_id = proposal.id;
+        assert_eq!(
+            store
+                .create_or_replay_canonical_idempotent_operation(
+                    &proposal,
+                    &proposal_canonical,
+                    &replay,
+                )
+                .await?,
+            IdempotencyReservation::ExistingEquivalent(operation.id)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_canonical_replay_fails_closed_on_winning_owner_corruption()
+    -> Result<(), StoreError> {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        let operation = idempotent_operation(resource_id, Uuid::now_v7());
+        let canonical =
+            canonical_idempotent_operation(&operation, "project-a", "compute:CreateServer");
+        let request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "corrupt-winning-owner",
+            "compute:server",
+            None,
+            &serde_json::json!({"name":"demo"}),
+            operation.id,
+        )?;
+        store
+            .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &request)
+            .await?;
+        sqlx::query("UPDATE resources SET project_id = 'project-b' WHERE id = ?")
+            .bind(resource_id.to_string())
+            .execute(&store.pool)
+            .await
+            .map_err(StoreError::Database)?;
+
+        let proposal = idempotent_operation(resource_id, Uuid::now_v7());
+        let proposal_canonical =
+            canonical_idempotent_operation(&proposal, "project-a", "compute:CreateServer");
+        let mut replay = request;
+        replay.operation_id = proposal.id;
+        assert!(matches!(
+            store
+                .create_or_replay_canonical_idempotent_operation(
+                    &proposal,
+                    &proposal_canonical,
+                    &replay,
+                )
+                .await,
+            Err(StoreError::Corrupt(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_idempotency_rejects_resource_type_mismatch() -> Result<(), StoreError> {
+        let operation = idempotent_operation(Uuid::now_v7(), Uuid::now_v7());
+        let canonical =
+            canonical_idempotent_operation(&operation, "project-a", "compute:CreateServer");
+        let mut request = IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "resource-type-mismatch",
+            "compute:image",
+            None,
+            &serde_json::json!({"name":"demo"}),
+            operation.id,
+        )?;
+        // The request's retained, normalized type is part of cross-record
+        // identity validation even if a caller constructs a fingerprint from
+        // otherwise valid canonical semantics.
+        request.resource_type = "compute:image".to_owned();
+        assert!(matches!(
+            validate_canonical_idempotent_operation_identity(&operation, &canonical, &request),
+            Err(StoreError::Corrupt(_))
+        ));
         Ok(())
     }
 
