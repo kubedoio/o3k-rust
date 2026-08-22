@@ -572,23 +572,10 @@ mod network_reader_tests {
 
     #[test]
     fn network_intent_state_is_serialized_from_canonical_state() {
-        let foreign_bytes = axum::body::to_bytes(foreign.into_body(), usize::MAX)
-            .await
-            .expect("foreign body");
-        let missing_bytes = axum::body::to_bytes(missing.into_body(), usize::MAX)
-            .await
-            .expect("missing body");
-        let foreign_body: serde_json::Value = serde_json::from_slice(&foreign_bytes).expect("foreign json");
-        let missing_body: serde_json::Value = serde_json::from_slice(&missing_bytes).expect("missing json");
         assert_eq!(
-            foreign_body["status"], missing_body["status"]
-        );
-        assert_eq!(foreign_body["code"], missing_body["code"]);
-        assert_eq!(foreign_body["type"], missing_body["type"]);
-        /* assert_eq!(
             network_intent_state_wire(o3k_domain::NetworkIntentState::Requested),
             "requested"
-        ); */
+        );
         assert_eq!(
             network_intent_state_wire(o3k_domain::NetworkIntentState::Deleting),
             "deleting"
