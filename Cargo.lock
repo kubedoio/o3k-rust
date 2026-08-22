@@ -1880,6 +1880,7 @@ dependencies = [
  "o3k-store",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
