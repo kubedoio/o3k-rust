@@ -1546,7 +1546,7 @@ impl ManifestRegistry {
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("compute", "server"),
                         schema_version: "v1".to_owned(),
-                        collection: None,
+                        collection: Some("servers".to_owned()),
                         scope: ResourceScope::Tenant,
                         operations: std::collections::HashMap::from([
                             (
@@ -1556,6 +1556,14 @@ impl ManifestRegistry {
                             (
                                 "show".to_owned(),
                                 ActionId::new_unchecked("compute", "ReadServer"),
+                            ),
+                            (
+                                "create".to_owned(),
+                                ActionId::new_unchecked("compute", "CreateServer"),
+                            ),
+                            (
+                                "delete".to_owned(),
+                                ActionId::new_unchecked("compute", "DeleteServer"),
                             ),
                         ]),
                     },
