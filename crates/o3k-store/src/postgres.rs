@@ -841,6 +841,9 @@ impl DurableStore for PostgresStore {
         update: &crate::CanonicalOperationLifecycleUpdate,
     ) -> Result<CanonicalOperationRecord, StoreError> {
         crate::validate_canonical_lifecycle_update(update)?;
+        let attempt = i32::try_from(update.attempt).map_err(|_| {
+            StoreError::Corrupt("canonical operation attempt exceeds PostgreSQL INT4".into())
+        })?;
         let id_str = id.to_string();
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
         let exists = sqlx::query("SELECT state FROM operations WHERE id = $1 FOR UPDATE")
@@ -869,8 +872,8 @@ impl DurableStore for PostgresStore {
             .execute(&mut *tx)
             .await
             .map_err(StoreError::Database)?;
-        sqlx::query("UPDATE canonical_operation_metadata SET state = $1, attempt = $2, started_at = $3, finished_at = $4, error = $5 WHERE operation_id = $6")
-            .bind(update.state.as_str()).bind(update.attempt as i64).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(&id_str)
+        sqlx::query("UPDATE canonical_operation_metadata SET attempt = $1, started_at = $2, finished_at = $3, error = $4 WHERE operation_id = $5")
+            .bind(attempt).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(&id_str)
             .execute(&mut *tx).await.map_err(StoreError::Database)?;
         tx.commit().await.map_err(StoreError::Database)?;
         self.get_canonical_operation(id).await

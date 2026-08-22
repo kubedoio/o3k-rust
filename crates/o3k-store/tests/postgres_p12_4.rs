@@ -1,8 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use o3k_store::{
-    CanonicalOperationRecord, DurableStore, IdempotencyReservation, IdempotencyReservationRequest,
-    OperationRecord, OperationState, PostgresStore, ResourceRecord, StoreError,
+    CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
+    IdempotencyReservation, IdempotencyReservationRequest, OperationRecord, OperationState,
+    PostgresStore, ResourceRecord, StoreError,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -332,6 +333,99 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
     assert_eq!(kernel.finished_at, None);
     assert_eq!(kernel.error, None);
     assert_eq!(kernel.request_id.as_deref(), Some("request-user-reload"));
+
+    let started = "2026-01-01T00:01:00Z".to_owned();
+    let running = reopened
+        .update_canonical_operation_lifecycle(
+            id,
+            &CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Running,
+                1,
+                Some(started.clone()),
+                None,
+                None,
+            )
+            .expect("running lifecycle update"),
+        )
+        .await
+        .expect("running lifecycle persistence");
+    assert_eq!(running.state, OperationState::Running);
+    assert_eq!(running.attempt, 1);
+    assert_eq!(running.started_at.as_deref(), Some(started.as_str()));
+    assert_eq!(running.finished_at, None);
+    let running_kernel = o3k_kernel::Operation::try_from(
+        reopened
+            .get_canonical_operation(id)
+            .await
+            .expect("reload running"),
+    )
+    .expect("running kernel conversion");
+    assert_eq!(running_kernel.state, o3k_kernel::OperationState::Running);
+    assert_eq!(running_kernel.attempt, 1);
+    assert_eq!(running_kernel.started_at.as_deref(), Some(started.as_str()));
+
+    let finished = "2026-01-01T00:02:00Z".to_owned();
+    let succeeded = reopened
+        .update_canonical_operation_lifecycle(
+            id,
+            &CanonicalOperationLifecycleUpdate::new(
+                o3k_kernel::OperationState::Succeeded,
+                1,
+                Some(started.clone()),
+                Some(finished.clone()),
+                None,
+            )
+            .expect("succeeded lifecycle update"),
+        )
+        .await
+        .expect("succeeded lifecycle persistence");
+    assert_eq!(succeeded.state, OperationState::Succeeded);
+    assert_eq!(succeeded.attempt, 1);
+    assert_eq!(succeeded.finished_at.as_deref(), Some(finished.as_str()));
+    let terminal_kernel = o3k_kernel::Operation::try_from(
+        reopened
+            .get_canonical_operation(id)
+            .await
+            .expect("reload terminal"),
+    )
+    .expect("terminal kernel conversion");
+    assert_eq!(terminal_kernel.state, o3k_kernel::OperationState::Succeeded);
+    assert_eq!(terminal_kernel.attempt, 1);
+    assert_eq!(
+        terminal_kernel.started_at.as_deref(),
+        Some(started.as_str())
+    );
+    assert_eq!(
+        terminal_kernel.finished_at.as_deref(),
+        Some(finished.as_str())
+    );
+    assert_eq!(terminal_kernel.error, None);
+    let row = sqlx::query("SELECT state FROM operations WHERE id = $1")
+        .bind(id.to_string())
+        .fetch_one(reopened.pool())
+        .await
+        .expect("authoritative operation state");
+    assert_eq!(row.get::<String, _>("state"), "succeeded");
+    drop(reopened);
+    let reopened = PostgresStore::connect(&database_url)
+        .await
+        .expect("reconnect lifecycle");
+    let reconnected_kernel = o3k_kernel::Operation::try_from(
+        reopened
+            .get_canonical_operation(id)
+            .await
+            .expect("reload after reconnect"),
+    )
+    .expect("reconnected kernel conversion");
+    assert_eq!(
+        reconnected_kernel.state,
+        o3k_kernel::OperationState::Succeeded
+    );
+    assert_eq!(reconnected_kernel.attempt, 1);
+    assert_eq!(
+        reconnected_kernel.finished_at.as_deref(),
+        Some(finished.as_str())
+    );
 
     // A retry resolves the committed scoped identity before considering a
     // newly proposed target. The proposal may use a fresh operation/resource

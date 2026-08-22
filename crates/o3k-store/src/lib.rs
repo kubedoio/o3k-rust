@@ -5604,8 +5604,8 @@ impl DurableStore for SqliteStore {
             }
             sqlx::query("UPDATE operations SET state = ? WHERE id = ?")
                 .bind(update.state.as_str()).bind(id.to_string()).execute(&mut *connection).await.map_err(StoreError::Database)?;
-            sqlx::query("UPDATE canonical_operation_metadata SET state = ?, attempt = ?, started_at = ?, finished_at = ?, error = ? WHERE operation_id = ?")
-                .bind(update.state.as_str()).bind(update.attempt as i64).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(id.to_string())
+            sqlx::query("UPDATE canonical_operation_metadata SET attempt = ?, started_at = ?, finished_at = ?, error = ? WHERE operation_id = ?")
+                .bind(update.attempt as i64).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(id.to_string())
                 .execute(&mut *connection).await.map_err(StoreError::Database)?;
             Ok(())
         }.await;

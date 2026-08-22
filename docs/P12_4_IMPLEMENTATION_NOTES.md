@@ -62,10 +62,16 @@ kinds to their canonical resource types during validation.
 
 Canonical lifecycle updates atomically evolve both the provider-neutral
 `OperationRecord` state and canonical metadata (`attempt`, timestamps, and
-secret-safe public error). The typed update constructor rejects malformed
-timestamps, missing terminal timestamps, and fabricated `finished_at` values
-for `UnknownOutcome`; the same validation runs at both SQLite and PostgreSQL
-store boundaries.
+secret-safe public error). `operations.state` is the single authoritative
+durable lifecycle state; `canonical_operation_metadata` deliberately has no
+duplicate state column and owns only the public identity and lifecycle
+projection fields. `get_canonical_operation()` joins those two durable
+representations. The focused SQLite lifecycle test and the mandatory
+PostgreSQL P12.4 test both execute Pending -> Running -> Succeeded, reload,
+and reconnect/reopen reconstruction. The typed update constructor rejects
+malformed timestamps, missing terminal timestamps, and fabricated
+`finished_at` values for `UnknownOutcome`; the same validation runs at both
+SQLite and PostgreSQL store boundaries before mutation.
 
 Historical rows without `canonical_operation_metadata` remain usable by legacy
 OperationJournal paths but cannot be reconstructed as a public Kernel
