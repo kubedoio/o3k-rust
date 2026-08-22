@@ -9,7 +9,7 @@
 //! - A service does not need an OpenStack service_type or Keystone endpoint
 //!   definition to be a valid first-class O3K service.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -132,7 +132,7 @@ pub struct ServiceHealth {
 
 /// A registered resource type in a service manifest — preserves all accepted
 /// descriptor fields from service-manifest-v1.schema.json.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisteredResourceType {
     /// Canonical resource type (e.g. `"compute:server"`).
     pub resource_type: ResourceType,
@@ -142,6 +142,11 @@ pub struct RegisteredResourceType {
     pub collection: Option<String>,
     /// Scope kind: tenant, system, or mixed.
     pub scope: ResourceScope,
+    /// Explicit generic lifecycle operation to canonical ActionId mapping.
+    /// An omitted operation is a supported capability omission, not invalid
+    /// registration (read-only resources are valid).
+    #[serde(default)]
+    pub operations: std::collections::HashMap<String, ActionId>,
 }
 
 /// Resource ownership scope classification.
@@ -368,6 +373,23 @@ impl ServiceManifest {
                     "resource_types[].collection (1..128)",
                 ));
             }
+            let collection = rt.collection.as_deref().unwrap_or(rt.resource_type.name());
+            if ["services", "resource-types", "identity", "operations"].contains(&collection) {
+                return Err(ManifestError::InvalidField(
+                    "resource_types[].collection collides with native control endpoint",
+                ));
+            }
+            if self.resource_types[..i].iter().any(|previous| {
+                previous
+                    .collection
+                    .as_deref()
+                    .unwrap_or(previous.resource_type.name())
+                    == collection
+            }) {
+                return Err(ManifestError::InvalidField(
+                    "resource_types[].collection is ambiguous",
+                ));
+            }
         }
 
         // actions: 1..256, unique, accepted syntax
@@ -405,6 +427,26 @@ impl ServiceManifest {
                 return Err(ManifestError::InvalidField(
                     "action name must be PascalCase",
                 ));
+            }
+        }
+
+        let declared_actions: HashSet<ActionId> = self
+            .actions
+            .iter()
+            .filter_map(|action| ActionId::parse(action).ok())
+            .collect();
+        for resource in &self.resource_types {
+            for (operation, action) in &resource.operations {
+                if !["list", "show", "create", "update", "delete"].contains(&operation.as_str()) {
+                    return Err(ManifestError::InvalidField(
+                        "resource_types[].operations key",
+                    ));
+                }
+                if action.namespace() != self.namespace || !declared_actions.contains(action) {
+                    return Err(ManifestError::InvalidField(
+                        "resource_types[].operations action must be declared by service",
+                    ));
+                }
             }
         }
 
@@ -572,6 +614,9 @@ pub struct ResourceTypeDescriptor {
     /// Scope kind: `"tenant"`, `"system"`, or `"mixed"`.
     #[serde(default = "default_tenant_scope")]
     pub scope: String,
+    /// Explicit lifecycle operation to canonical ActionId mapping.
+    #[serde(default)]
+    pub operations: std::collections::HashMap<String, String>,
 }
 
 fn default_tenant_scope() -> String {
@@ -669,6 +714,16 @@ impl TryFrom<ServiceManifestV1> for ServiceManifest {
                     schema_version: rt.schema_version,
                     collection: rt.collection,
                     scope,
+                    operations: rt
+                        .operations
+                        .into_iter()
+                        .map(|(operation, action)| {
+                            let action = ActionId::parse(&action).map_err(|e| {
+                                ManifestError::InvalidIdentifier(action.clone(), e.to_string())
+                            })?;
+                            Ok((operation, action))
+                        })
+                        .collect::<Result<_, ManifestError>>()?,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1403,24 +1458,28 @@ impl ManifestRegistry {
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::new(),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("identity", "project"),
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::new(),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("identity", "user"),
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::System,
+                        operations: std::collections::HashMap::new(),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("identity", "role"),
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::System,
+                        operations: std::collections::HashMap::new(),
                     },
                 ],
                 // Accepted in contracts/cloud-kernel-actions.yaml
@@ -1453,6 +1512,7 @@ impl ManifestRegistry {
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::new(),
                 }],
                 // Accepted in contracts/cloud-kernel-actions.yaml
                 actions: vec![
@@ -1488,18 +1548,30 @@ impl ManifestRegistry {
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::from([
+                            (
+                                "list".to_owned(),
+                                ActionId::new_unchecked("compute", "ListServers"),
+                            ),
+                            (
+                                "show".to_owned(),
+                                ActionId::new_unchecked("compute", "ReadServer"),
+                            ),
+                        ]),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("compute", "flavor"),
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::new(),
                     },
                     RegisteredResourceType {
                         resource_type: ResourceType::new_unchecked("compute", "keypair"),
                         schema_version: "v1".to_owned(),
                         collection: None,
                         scope: ResourceScope::Tenant,
+                        operations: std::collections::HashMap::new(),
                     },
                 ],
                 // Accepted in contracts/cloud-kernel-actions.yaml
@@ -1545,6 +1617,16 @@ impl ManifestRegistry {
                     schema_version: "v1".to_owned(),
                     collection: Some("address-realms".to_owned()),
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::from([
+                        (
+                            "list".to_owned(),
+                            ActionId::new_unchecked("network", "ListAddressRealms"),
+                        ),
+                        (
+                            "show".to_owned(),
+                            ActionId::new_unchecked("network", "ReadAddressRealm"),
+                        ),
+                    ]),
                 }],
                 actions: vec![
                     "network:ListAddressRealms".to_owned(),
@@ -1574,6 +1656,16 @@ impl ManifestRegistry {
                     schema_version: "v1".to_owned(),
                     collection: Some("volumes".to_owned()),
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::from([
+                        (
+                            "list".to_owned(),
+                            ActionId::new_unchecked("volume", "ListVolumes"),
+                        ),
+                        (
+                            "show".to_owned(),
+                            ActionId::new_unchecked("volume", "ReadVolume"),
+                        ),
+                    ]),
                 }],
                 actions: vec![
                     "volume:ListVolumes".to_owned(),
@@ -1655,6 +1747,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
+                operations: std::collections::HashMap::new(),
             }],
             actions: vec![
                 "database:CreateInstance".to_owned(),
@@ -1701,6 +1794,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         }];
         assert_eq!(
             m.validate().unwrap_err(),
@@ -1805,6 +1899,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         };
         m.resource_types = vec![rt.clone(), rt];
         let mut reg = ManifestRegistry::new();
@@ -1832,6 +1927,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         }];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
@@ -1860,6 +1956,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         }];
         // Try to claim database:CreateInstance which is owned by database-example
         m2.actions = vec!["database:CreateInstance".to_owned()];
@@ -1900,6 +1997,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         }]; // clashes
         let _ = reg.register(bad);
 
@@ -1917,6 +2015,7 @@ mod tests {
             schema_version: "v1".to_owned(),
             collection: None,
             scope: ResourceScope::Tenant,
+            operations: std::collections::HashMap::new(),
         }];
         let mut reg = ManifestRegistry::new();
         let err = reg.register(m).unwrap_err();
@@ -1997,6 +2096,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
+                operations: std::collections::HashMap::new(),
             }],
             actions: vec!["compute:CreateServer".to_owned()],
             capabilities: vec![],
@@ -2048,6 +2148,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
+                operations: HashMap::new(),
             }],
             actions: vec!["compute:CustomAction".to_owned()],
             capabilities: vec![],
@@ -2121,6 +2222,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: Some("instances".to_owned()),
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec![
                 "database:CreateInstance".to_owned(),
@@ -2164,6 +2266,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["bad:Action".to_owned()],
             capabilities: vec![],
@@ -2309,6 +2412,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: Some("instances".to_owned()),
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["database:CreateInstance".to_owned()],
             capabilities: vec![],
@@ -2354,6 +2458,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["test:Action".to_owned()],
             capabilities: vec![],
@@ -2391,6 +2496,7 @@ mod tests {
                 schema_version: "v2".to_owned(),
                 collection: Some("myinstances".to_owned()),
                 scope: "system".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["database:CreateInstance".to_owned()],
             capabilities: vec![],
@@ -2427,18 +2533,21 @@ mod tests {
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: "tenant".to_owned(),
+                    operations: HashMap::new(),
                 },
                 ResourceTypeDescriptor {
                     type_: "test:sys-res".to_owned(),
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: "system".to_owned(),
+                    operations: HashMap::new(),
                 },
                 ResourceTypeDescriptor {
                     type_: "test:mixed-res".to_owned(),
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: "mixed".to_owned(),
+                    operations: HashMap::new(),
                 },
             ],
             actions: vec!["test:Action".to_owned()],
@@ -2475,6 +2584,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["test:Action".to_owned()],
             capabilities: vec![],
@@ -2531,6 +2641,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["test:Action".to_owned()],
             capabilities: vec![],
@@ -2571,6 +2682,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["ext:Action".to_owned()],
             capabilities: vec![],
@@ -2611,6 +2723,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["test:Action".to_owned()],
             capabilities: vec![],
@@ -2731,6 +2844,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: "tenant".to_owned(),
+                operations: HashMap::new(),
             }],
             actions: vec!["test:Action".to_owned()],
             capabilities: vec![],
@@ -3028,6 +3142,7 @@ mod tests {
                 schema_version: "v1".to_owned(),
                 collection: None,
                 scope: ResourceScope::Tenant,
+                operations: HashMap::new(),
             })
             .collect();
         let err = reg.register(m).unwrap_err();

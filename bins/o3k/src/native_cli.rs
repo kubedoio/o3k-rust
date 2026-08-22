@@ -12,6 +12,7 @@
 //! The underlying protocol is O3K native HTTP API (ADR-0173/SPEC-0030).
 
 use serde_json::Value;
+use std::path::Path;
 
 use crate::HttpClient;
 use crate::context::HttpResponse;
@@ -147,6 +148,54 @@ pub fn show_resource(ns_type: &str, id: &str) -> Result<(), String> {
     let pretty =
         serde_json::to_string_pretty(&json).map_err(|e| format!("serialization error: {e}"))?;
     println!("{pretty}");
+    Ok(())
+}
+
+pub fn create_resource(ns_type: &str, file: &Path, key: Option<&str>) -> Result<(), String> {
+    let (ns, name) = ns_type
+        .split_once(':')
+        .ok_or("resource type must be namespace:type")?;
+    let body =
+        std::fs::read_to_string(file).map_err(|e| format!("cannot read create file: {e}"))?;
+    if body.len() > 1024 * 1024 {
+        return Err("create file exceeds 1 MiB limit".to_owned());
+    }
+    let _: Value = serde_json::from_str(&body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt.block_on(client.post_json_with_idempotency(
+        &format!("{}/{ns}/{name}", api_base()),
+        &body,
+        key,
+    ))?;
+    if response.status != 201 && response.status != 202 {
+        return Err(format!(
+            "API returned status {}: {}",
+            response.status, response.body
+        ));
+    }
+    println!("{}", response.body);
+    Ok(())
+}
+
+pub fn delete_resource(ns_type: &str, id: &str, key: Option<&str>) -> Result<(), String> {
+    let (ns, name) = ns_type
+        .split_once(':')
+        .ok_or("resource type must be namespace:type")?;
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt.block_on(
+        client.delete_with_idempotency(&format!("{}/{ns}/{name}/{id}", api_base()), key),
+    )?;
+    if response.status != 202 && response.status != 204 {
+        return Err(format!(
+            "API returned status {}: {}",
+            response.status, response.body
+        ));
+    }
+    if !response.body.is_empty() {
+        println!("{}", response.body);
+    }
     Ok(())
 }
 

@@ -319,6 +319,11 @@ Each discoverable service/resource type comes from the validated service registr
 
 Discovery MUST NOT advertise a capability merely because a manifest syntactically mentions it. Enabled/readiness/support/claim state must remain distinguishable.
 
+Generic dispatch resolves collection and lifecycle operation from the validated
+ManifestRegistry descriptor. It invokes only operations explicitly declared by
+that descriptor and uses the mapped canonical ActionId for authorization;
+resource names and collection names are never used to infer actions.
+
 OpenStack compatibility projection metadata is not required for native discovery.
 
 ## 14. Initial representative resources

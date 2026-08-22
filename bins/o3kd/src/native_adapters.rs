@@ -15,6 +15,10 @@ use o3k_native_api::{
     compute::ServerItem,
     error::{NativeReadError, ProblemDetails},
     network::AddressRealmItem,
+    resource::{
+        CreateRequest, MutationResult, ResourceApplication, ResourceApplicationError,
+        ResourceDescriptor,
+    },
     volume::VolumeItem,
 };
 use o3k_store::{DurableStore, NetworkRepository, storage::StorageRepository};
@@ -243,6 +247,7 @@ mod operation_visibility_tests {
             None,
             None,
         )
+        .expect("test manifest registry is valid")
         .with_operation_reader(reader);
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
@@ -391,6 +396,119 @@ impl TokenIssuer for TokenIssuerAdapter {
 
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
+}
+
+/// Composition-root application adapter for generic native reads. It delegates
+/// only to canonical native application/read ports; it never reaches a
+/// provider or controller directly. Mutations remain unsupported until a
+/// canonical mutation service is wired for the resource.
+pub struct GenericResourceApplication {
+    pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
+    pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
+    pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
+}
+
+fn generic_read_error(error: o3k_native_api::error::NativeReadError) -> ResourceApplicationError {
+    match error {
+        o3k_native_api::error::NativeReadError::NotFound => ResourceApplicationError::NotFound,
+        o3k_native_api::error::NativeReadError::Forbidden => ResourceApplicationError::Forbidden,
+        o3k_native_api::error::NativeReadError::Internal => ResourceApplicationError::Internal,
+    }
+}
+
+fn server_json(item: ServerItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"compute:server","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"name":item.name,"flavor_id":item.flavor_id,"image_id":item.image_id},"status":{"state":item.state}})
+}
+
+fn volume_json(item: VolumeItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"volume:volume","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"size_bytes":item.size_bytes,"volume_type":item.volume_type},"status":{"state":item.state}})
+}
+
+fn realm_json(item: AddressRealmItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
+}
+
+#[async_trait::async_trait]
+impl ResourceApplication for GenericResourceApplication {
+    async fn list(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .list_servers(auth)
+                .await
+                .map(|items| items.into_iter().map(server_json).collect())
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .list_address_realms(auth)
+                .await
+                .map(|items| items.into_iter().map(realm_json).collect())
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .list_volumes(auth)
+                .await
+                .map(|items| items.into_iter().map(volume_json).collect())
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn show(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+    ) -> Result<serde_json::Value, ResourceApplicationError> {
+        let id = id
+            .parse::<Uuid>()
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .show_server(auth, id)
+                .await
+                .map(server_json)
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .show_address_realm(auth, id)
+                .await
+                .map(realm_json)
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .show_volume(auth, id)
+                .await
+                .map(volume_json)
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn create(
+        &self,
+        _descriptor: &ResourceDescriptor,
+        _auth: &o3k_kernel::AuthContext,
+        _request: CreateRequest,
+        _idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
+
+    async fn delete(
+        &self,
+        _descriptor: &ResourceDescriptor,
+        _auth: &o3k_kernel::AuthContext,
+        _id: &str,
+        _idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        Err(ResourceApplicationError::UnsupportedOperation)
+    }
 }
 
 #[async_trait::async_trait]

@@ -85,6 +85,20 @@ enum ResourceAction {
     List { resource_type: String },
     /// Show a specific resource
     Show { resource_type: String, id: String },
+    /// Create a resource from a JSON file
+    Create {
+        resource_type: String,
+        file: std::path::PathBuf,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
+    /// Delete a resource
+    Delete {
+        resource_type: String,
+        id: String,
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -129,6 +143,24 @@ fn main() -> ExitCode {
             ResourceAction::Show { resource_type, id } => {
                 handle_result(native_cli::show_resource(&resource_type, &id))
             }
+            ResourceAction::Create {
+                resource_type,
+                file,
+                idempotency_key,
+            } => handle_result(native_cli::create_resource(
+                &resource_type,
+                &file,
+                idempotency_key.as_deref(),
+            )),
+            ResourceAction::Delete {
+                resource_type,
+                id,
+                idempotency_key,
+            } => handle_result(native_cli::delete_resource(
+                &resource_type,
+                &id,
+                idempotency_key.as_deref(),
+            )),
         },
     }
 }

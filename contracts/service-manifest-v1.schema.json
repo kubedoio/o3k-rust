@@ -128,6 +128,16 @@
         },
         "scope": {
           "enum": ["tenant", "system", "mixed"]
+        },
+        "operations": {
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": {
+            "enum": ["list", "show", "create", "update", "delete"]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/action"
+          }
         }
       }
     },

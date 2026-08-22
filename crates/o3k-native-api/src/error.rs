@@ -31,6 +31,8 @@ pub enum NativeReadError {
 pub enum ErrorCode {
     /// Generic bad request / validation error.
     BadRequest,
+    /// The manifest does not declare the requested lifecycle operation.
+    UnsupportedOperation,
     /// Missing or invalid authentication credentials.
     Unauthorized,
     /// Authenticated caller lacks required authorization.
@@ -56,6 +58,7 @@ impl ErrorCode {
     pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest => StatusCode::BAD_REQUEST,
+            Self::UnsupportedOperation => StatusCode::NOT_IMPLEMENTED,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::ResourceNotFound => StatusCode::NOT_FOUND,
@@ -72,6 +75,7 @@ impl ErrorCode {
     pub fn title(&self) -> &'static str {
         match self {
             Self::BadRequest => "Bad Request",
+            Self::UnsupportedOperation => "Unsupported Operation",
             Self::Unauthorized => "Unauthorized",
             Self::Forbidden => "Forbidden",
             Self::ResourceNotFound => "Resource Not Found",
@@ -89,6 +93,7 @@ impl ErrorCode {
     pub fn as_code_str(&self) -> &'static str {
         match self {
             Self::BadRequest => "BAD_REQUEST",
+            Self::UnsupportedOperation => "UNSUPPORTED_OPERATION",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::Forbidden => "FORBIDDEN",
             Self::ResourceNotFound => "RESOURCE_NOT_FOUND",
