@@ -386,6 +386,49 @@ impl DurableStore for PostgresStore {
         }
     }
 
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        if operation.id != request.operation_id {
+            return Err(StoreError::Corrupt("operation and idempotency identities differ".into()));
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let inserted = sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(operation.id.to_string()).bind(operation.resource_id.to_string()).bind(&operation.kind)
+            .bind(operation.state.as_str()).bind(&operation.provider_operation_id)
+            .bind(&operation.error_category).bind(&operation.error_message).execute(&mut *tx).await;
+        let operation_inserted = match inserted {
+            Ok(_) => true,
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => false,
+            Err(error) => return Err(StoreError::Database(error)),
+        };
+        let result = sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES ($1,$2,$3,$4,$5)")
+            .bind(&request.owner_scope).bind(&request.action).bind(&request.key).bind(&request.fingerprint)
+            .bind(request.operation_id.to_string()).execute(&mut *tx).await;
+        let outcome = match result {
+            Ok(_) => IdempotencyReservation::Created(request.operation_id),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let row = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope=$1 AND action=$2 AND idempotency_key=$3")
+                    .bind(&request.owner_scope).bind(&request.action).bind(&request.key).fetch_one(&mut *tx).await.map_err(StoreError::Database)?;
+                let fingerprint: String = row.try_get("fingerprint").map_err(StoreError::Database)?;
+                let id = Uuid::parse_str(&row.try_get::<String, _>("operation_id").map_err(StoreError::Database)?).map_err(StoreError::InvalidUuid)?;
+                if fingerprint == request.fingerprint { IdempotencyReservation::ExistingEquivalent(id) } else { IdempotencyReservation::Conflict }
+            }
+            Err(error) => return Err(StoreError::Database(error)),
+        };
+        if operation_inserted && (matches!(outcome, IdempotencyReservation::Conflict) || matches!(outcome, IdempotencyReservation::ExistingEquivalent(id) if id != operation.id)) {
+            sqlx::query("DELETE FROM operations WHERE id=$1").bind(operation.id.to_string()).execute(&mut *tx).await.map_err(StoreError::Database)?;
+        }
+        if let IdempotencyReservation::ExistingEquivalent(id) = outcome {
+            let exists = sqlx::query("SELECT 1 FROM operations WHERE id=$1").bind(id.to_string()).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?.is_some();
+            if !exists { return Err(StoreError::Corrupt("idempotency reservation references missing operation".into())); }
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(outcome)
+    }
+
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
         let id_str = id.to_string();
         let row = sqlx::query("SELECT * FROM operations WHERE id = $1")

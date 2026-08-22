@@ -789,6 +789,14 @@ pub trait DurableStore: Send + Sync {
         &self,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError>;
+    /// Atomically creates an operation and its idempotency reservation.
+    /// Existing reservations are only replayable when their operation still
+    /// exists; a dangling reservation is treated as corruption.
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError>;
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError>;
     async fn update_operation(
         &self,
@@ -2309,6 +2317,78 @@ impl SqliteStore {
             }
             Err(error) => Err(StoreError::Database(error)),
         }
+    }
+
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        if operation.id != request.operation_id {
+            return Err(StoreError::Corrupt(
+                "operation and idempotency identities differ".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let inserted = sqlx::query("INSERT INTO operations (id, resource_id, kind, state, provider_operation_id, error_category, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(operation.id.to_string()).bind(operation.resource_id.to_string())
+            .bind(&operation.kind).bind(operation.state.as_str())
+            .bind(&operation.provider_operation_id).bind(&operation.error_category)
+            .bind(&operation.error_message).execute(&mut *tx).await;
+        let operation_inserted = match inserted {
+            Ok(_) => true,
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => false,
+            Err(error) => return Err(StoreError::Database(error)),
+        };
+        let reservation = sqlx::query("INSERT INTO idempotency_reservations (owner_scope, action, idempotency_key, fingerprint, operation_id) VALUES (?, ?, ?, ?, ?)")
+            .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+            .bind(&request.fingerprint).bind(request.operation_id.to_string())
+            .execute(&mut *tx).await;
+        let outcome = match reservation {
+            Ok(_) => IdempotencyReservation::Created(request.operation_id),
+            Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {
+                let row = sqlx::query("SELECT fingerprint, operation_id FROM idempotency_reservations WHERE owner_scope = ? AND action = ? AND idempotency_key = ?")
+                    .bind(&request.owner_scope).bind(&request.action).bind(&request.key)
+                    .fetch_optional(&mut *tx).await.map_err(StoreError::Database)?
+                    .ok_or(StoreError::IdempotencyConflict)?;
+                let fingerprint: String =
+                    row.try_get("fingerprint").map_err(StoreError::Database)?;
+                let id: String = row.try_get("operation_id").map_err(StoreError::Database)?;
+                let existing = Uuid::parse_str(&id).map_err(StoreError::InvalidUuid)?;
+                if fingerprint != request.fingerprint {
+                    IdempotencyReservation::Conflict
+                } else {
+                    IdempotencyReservation::ExistingEquivalent(existing)
+                }
+            }
+            Err(error) => return Err(StoreError::Database(error)),
+        };
+        if operation_inserted && (matches!(outcome, IdempotencyReservation::Conflict)
+            || matches!(outcome, IdempotencyReservation::ExistingEquivalent(id) if id != operation.id)
+        ) {
+            // This transaction may have inserted the losing proposal. Remove
+            // it before commit so concurrent losers cannot leave orphan rows.
+            sqlx::query("DELETE FROM operations WHERE id = ?")
+                .bind(operation.id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?;
+        }
+        if let IdempotencyReservation::ExistingEquivalent(id) = outcome {
+            let exists = sqlx::query("SELECT 1 FROM operations WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(StoreError::Database)?
+                .is_some();
+            if !exists {
+                return Err(StoreError::Corrupt(
+                    "idempotency reservation references missing operation".into(),
+                ));
+            }
+        }
+        tx.commit().await.map_err(StoreError::Database)?;
+        Ok(outcome)
     }
 
     pub async fn list_keypairs(
@@ -4890,6 +4970,14 @@ impl DurableStore for SqliteStore {
             }
             Err(error) => Err(StoreError::Database(error)),
         }
+    }
+
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        SqliteStore::create_or_replay_idempotent_operation(self, operation, request).await
     }
 
     async fn list_non_terminal_lifecycle_operations(
@@ -8056,6 +8144,56 @@ mod tests {
             store.reserve_idempotent_operation(&other).await?,
             IdempotencyReservation::Created(other.operation_id)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_generation_cas_allows_only_one_concurrent_writer() -> Result<(), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-p12-4-generation-{}", Uuid::now_v7()));
+        let url = format!("sqlite://{}", path.display());
+        let store = SqliteStore::connect(&url).await?;
+        let resource = ResourceRecord {
+            id: Uuid::now_v7(),
+            kind: "server".to_owned(),
+            project_id: "project-a".to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: "requested".to_owned(),
+            observed_state: "unknown".to_owned(),
+            provider_id: None,
+        };
+        store.insert_resource(&resource).await?;
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+        let first = store.clone();
+        let first_barrier = barrier.clone();
+        let first_task = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first
+                .update_resource(resource.id, 1, "active", "running", 1, Some("provider-a"))
+                .await
+        });
+        let second = store.clone();
+        let second_barrier = barrier.clone();
+        let second_task = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second
+                .update_resource(resource.id, 1, "active", "running", 1, Some("provider-b"))
+                .await
+        });
+        barrier.wait().await;
+        let first_result = first_task.await.expect("first CAS task must finish");
+        let second_result = second_task.await.expect("second CAS task must finish");
+        let winner_count = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
+        let stale_count = usize::from(matches!(first_result, Err(StoreError::StaleGeneration)))
+            + usize::from(matches!(second_result, Err(StoreError::StaleGeneration)));
+        assert_eq!(winner_count, 1, "exactly one writer may claim generation 1");
+        assert_eq!(
+            stale_count, 1,
+            "the losing writer must observe a stale generation"
+        );
+        assert_eq!(store.get_resource(resource.id).await?.generation, 2);
+        let _ = std::fs::remove_file(path);
         Ok(())
     }
 
