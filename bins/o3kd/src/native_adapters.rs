@@ -184,7 +184,15 @@ mod operation_visibility_tests {
             })
             .await
             .expect("canonical operation");
-        (store, id, path)
+        // Exercise the same durable reconstruction path used after an o3kd
+        // restart, rather than serving the record from the seeding pool.
+        drop(store);
+        let reopened = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_file(&path)
+                .await
+                .expect("reopen sqlite store"),
+        );
+        (reopened, id, path)
     }
 
     #[tokio::test]
