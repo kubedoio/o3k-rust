@@ -1128,6 +1128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             authorizer: std::sync::Arc::new(o3k_kernel::StaticAuthorizer::standard()),
         })
             as std::sync::Arc<dyn o3k_native_api::network::NetworkReader>);
+    let operation_reader: std::sync::Arc<dyn o3k_native_api::operation::OperationReader> =
+        std::sync::Arc::new(native_adapters::OperationReaderAdapter {
+            store: native_api_store.clone(),
+        });
     let token_issuer: Option<std::sync::Arc<dyn o3k_native_api::auth::TokenIssuer>> =
         identity.as_ref().map(|id_service| {
             std::sync::Arc::new(native_adapters::TokenIssuerAdapter {
@@ -1164,14 +1168,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         o3k_native_api::pagination::CursorConfig::default()
     };
-    state = state.with_native_api(o3k_native_api::NativeApiState::new(
-        Some(native_manifest_registry),
-        cursor_config,
-        token_issuer,
-        server_reader,
-        volume_reader,
-        network_reader,
-    ));
+    state = state.with_native_api(
+        o3k_native_api::NativeApiState::new(
+            Some(native_manifest_registry),
+            cursor_config,
+            token_issuer,
+            server_reader,
+            volume_reader,
+            network_reader,
+        )
+        .with_operation_reader(operation_reader),
+    );
     if let Some(allocator) = public_allocator {
         state = state.with_public_allocator(allocator);
     }

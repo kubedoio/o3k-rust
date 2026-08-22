@@ -10,14 +10,15 @@ use o3k_kernel::{
 
 use crate::{
     AgentCommandRecord, AgentCommandState, ArtifactTransferRecord, ArtifactTransferUpdate,
-    ComputeRepository, ControllerEpoch, ControllerId, ControllerSession, CoordinationRepository,
-    DatabaseHealth, DurableStore, FencingToken, IdentityRepository, ImageMetadataRecord,
-    ImageOverlayIdentity, ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository,
-    KeypairRecord, KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord,
-    KeystoneProjectRecord, KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord,
-    KeystoneServiceRecord, KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord,
-    NetworkIntentRecord, NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord,
-    OperationState, PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
+    CanonicalOperationRecord, ComputeRepository, ControllerEpoch, ControllerId, ControllerSession,
+    CoordinationRepository, DatabaseHealth, DurableStore, FencingToken, IdempotencyReservation,
+    IdempotencyReservationRequest, IdentityRepository, ImageMetadataRecord, ImageOverlayIdentity,
+    ImageOverlayOwnershipRecord, ImageOverlayUpdate, ImageRepository, KeypairRecord,
+    KeypairRepository, KeystoneDomainRecord, KeystoneEndpointRecord, KeystoneProjectRecord,
+    KeystoneRegionRecord, KeystoneRoleAssignmentRecord, KeystoneRoleRecord, KeystoneServiceRecord,
+    KeystoneUserRecord, LeaseAcquireOutcome, NetworkAddressAllocationRecord, NetworkIntentRecord,
+    NetworkRecord, NetworkRepository, ObservationUpdate, OperationRecord, OperationState,
+    PlacementAllocationRecord, PlacementIntentRecord, PlacementInventoryRecord,
     PlacementProviderRecord, PlacementReconcileRecord, PlacementRepository, PortRecord,
     PostgresStore, ProviderReference, ResourceRecord, SecurityGroupBindingRecord,
     SecurityGroupRecord, SecurityGroupRuleRecord, SnapshotRecord, SqliteStore,
@@ -311,10 +312,67 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn reserve_idempotent_operation(
+        &self,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.reserve_idempotent_operation(request).await,
+            Self::Postgres(s) => s.reserve_idempotent_operation(request).await,
+        }
+    }
+
+    async fn create_or_replay_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(s) => {
+                s.create_or_replay_idempotent_operation(operation, request)
+                    .await
+            }
+            Self::Postgres(s) => {
+                s.create_or_replay_idempotent_operation(operation, request)
+                    .await
+            }
+        }
+    }
+
+    async fn create_or_replay_canonical_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                    .await
+            }
+        }
+    }
+
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
         match self {
             Self::Sqlite(s) => s.get_operation(id).await,
             Self::Postgres(s) => s.get_operation(id).await,
+        }
+    }
+
+    async fn get_canonical_operation(
+        &self,
+        id: Uuid,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.get_canonical_operation(id).await,
+            Self::Postgres(s) => s.get_canonical_operation(id).await,
         }
     }
 
@@ -347,6 +405,17 @@ impl DurableStore for O3kStore {
                 )
                 .await
             }
+        }
+    }
+
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &crate::CanonicalOperationLifecycleUpdate,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_canonical_operation_lifecycle(id, update).await,
+            Self::Postgres(s) => s.update_canonical_operation_lifecycle(id, update).await,
         }
     }
 
