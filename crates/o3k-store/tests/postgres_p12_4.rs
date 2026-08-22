@@ -17,7 +17,7 @@ fn url() -> String {
 fn resource(id: Uuid, project: &str) -> ResourceRecord {
     ResourceRecord {
         id,
-        kind: "compute_server".into(),
+        kind: "compute:server".into(),
         project_id: project.into(),
         generation: 1,
         observed_generation: 0,
