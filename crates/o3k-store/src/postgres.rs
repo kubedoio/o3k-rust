@@ -545,6 +545,13 @@ impl DurableStore for PostgresStore {
         canonical: &CanonicalOperationRecord,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError> {
+        if request.key.is_empty()
+            || request.key.len() > IdempotencyReservationRequest::MAX_KEY_LENGTH
+        {
+            return Err(StoreError::Corrupt(
+                "invalid idempotency key byte length".into(),
+            ));
+        }
         validate_canonical_idempotent_operation_identity(operation, canonical, request)?;
         let attempt = i32::try_from(canonical.attempt)
             .map_err(|_| StoreError::Corrupt("operation attempt exceeds storage range".into()))?;
@@ -826,6 +833,46 @@ impl DurableStore for PostgresStore {
 
         tx.commit().await.map_err(StoreError::Database)?;
         self.get_operation(id).await
+    }
+
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &crate::CanonicalOperationLifecycleUpdate,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        let id_str = id.to_string();
+        let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+        let exists = sqlx::query("SELECT state FROM operations WHERE id = $1 FOR UPDATE")
+            .bind(&id_str)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?
+            .ok_or(StoreError::OperationNotFound)?;
+        let current: String = exists.try_get("state").map_err(StoreError::Database)?;
+        if (current == OperationState::Succeeded.as_str()
+            && update.state != OperationState::Succeeded)
+            || (current == OperationState::Failed.as_str()
+                && update.state != OperationState::Failed)
+        {
+            return Err(StoreError::Corrupt(
+                "terminal operation state cannot regress".into(),
+            ));
+        }
+        let metadata = sqlx::query("SELECT operation_id FROM canonical_operation_metadata WHERE operation_id = $1 FOR UPDATE")
+            .bind(&id_str).fetch_optional(&mut *tx).await.map_err(StoreError::Database)?
+            .ok_or_else(|| StoreError::Corrupt("canonical lifecycle metadata is missing".into()))?;
+        let _ = metadata;
+        sqlx::query("UPDATE operations SET state = $1 WHERE id = $2")
+            .bind(update.state.as_str())
+            .bind(&id_str)
+            .execute(&mut *tx)
+            .await
+            .map_err(StoreError::Database)?;
+        sqlx::query("UPDATE canonical_operation_metadata SET state = $1, attempt = $2, started_at = $3, finished_at = $4, error = $5 WHERE operation_id = $6")
+            .bind(update.state.as_str()).bind(update.attempt as i64).bind(&update.started_at).bind(&update.finished_at).bind(&update.public_error).bind(&id_str)
+            .execute(&mut *tx).await.map_err(StoreError::Database)?;
+        tx.commit().await.map_err(StoreError::Database)?;
+        self.get_canonical_operation(id).await
     }
 
     async fn list_non_terminal_lifecycle_operations(

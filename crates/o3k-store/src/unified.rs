@@ -408,6 +408,17 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn update_canonical_operation_lifecycle(
+        &self,
+        id: Uuid,
+        update: &crate::CanonicalOperationLifecycleUpdate,
+    ) -> Result<CanonicalOperationRecord, StoreError> {
+        match self {
+            Self::Sqlite(s) => s.update_canonical_operation_lifecycle(id, update).await,
+            Self::Postgres(s) => s.update_canonical_operation_lifecycle(id, update).await,
+        }
+    }
+
     async fn list_non_terminal_lifecycle_operations(
         &self,
     ) -> Result<Vec<OperationRecord>, StoreError> {

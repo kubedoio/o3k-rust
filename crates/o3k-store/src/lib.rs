@@ -488,10 +488,18 @@ impl TryFrom<CanonicalOperationRecord> for o3k_kernel::Operation {
     fn try_from(value: CanonicalOperationRecord) -> Result<Self, Self::Error> {
         if value.created_at.trim().is_empty()
             || DateTime::parse_from_rfc3339(&value.created_at).is_err()
-            || value.started_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
-            || value.finished_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+            || value
+                .started_at
+                .as_deref()
+                .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+            || value
+                .finished_at
+                .as_deref()
+                .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
         {
-            return Err(StoreError::Corrupt("invalid canonical operation timestamp".into()));
+            return Err(StoreError::Corrupt(
+                "invalid canonical operation timestamp".into(),
+            ));
         }
         let action = o3k_kernel::ActionId::parse(&value.action)
             .map_err(|e| StoreError::Corrupt(format!("invalid operation action: {e}")))?;
@@ -620,8 +628,14 @@ pub(crate) fn validate_canonical_operation_read(
     if canonical.actor.trim().is_empty()
         || canonical.created_at.trim().is_empty()
         || DateTime::parse_from_rfc3339(&canonical.created_at).is_err()
-        || canonical.started_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
-        || canonical.finished_at.as_deref().is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+        || canonical
+            .started_at
+            .as_deref()
+            .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
+        || canonical
+            .finished_at
+            .as_deref()
+            .is_some_and(|v| DateTime::parse_from_rfc3339(v).is_err())
     {
         return Err(StoreError::Corrupt(
             "canonical operation identity is incomplete".into(),
@@ -667,11 +681,7 @@ pub(crate) fn canonical_resource_type_for_record(
         "address_realm" | "network_address_realm" | "network:address_realm" => {
             ("network", "address_realm")
         }
-        _ => {
-            return Err(StoreError::Corrupt(
-                "unknown durable resource kind".into(),
-            ))
-        }
+        _ => return Err(StoreError::Corrupt("unknown durable resource kind".into())),
     };
     o3k_kernel::ResourceType::new(namespace, name)
         .map_err(|e| StoreError::Corrupt(format!("invalid canonical resource type: {e}")))
@@ -2658,8 +2668,12 @@ impl SqliteStore {
         canonical: &CanonicalOperationRecord,
         request: &IdempotencyReservationRequest,
     ) -> Result<IdempotencyReservation, StoreError> {
-        if request.key.is_empty() || request.key.len() > IdempotencyReservationRequest::MAX_KEY_LENGTH {
-            return Err(StoreError::Corrupt("invalid idempotency key byte length".into()));
+        if request.key.is_empty()
+            || request.key.len() > IdempotencyReservationRequest::MAX_KEY_LENGTH
+        {
+            return Err(StoreError::Corrupt(
+                "invalid idempotency key byte length".into(),
+            ));
         }
         validate_canonical_idempotent_operation_identity(operation, canonical, request)?;
         let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
@@ -5484,7 +5498,10 @@ impl DurableStore for SqliteStore {
         update: &CanonicalOperationLifecycleUpdate,
     ) -> Result<CanonicalOperationRecord, StoreError> {
         let mut connection = self.pool.acquire().await.map_err(StoreError::Database)?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *connection).await.map_err(StoreError::Database)?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .map_err(StoreError::Database)?;
         let result: Result<(), StoreError> = async {
             let operation = sqlx::query("SELECT state FROM operations WHERE id = ?")
                 .bind(id.to_string()).fetch_optional(&mut *connection).await.map_err(StoreError::Database)?
