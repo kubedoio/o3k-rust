@@ -51,6 +51,11 @@ conversion after reconnect, equivalent/conflicting/cross-scope races, losing
 row absence, injected rollback, and concurrent generation CAS. Absence of
 `O3K_DATABASE_URL` is a failure in that gate.
 
+Canonical P12.4 ownership is project-scoped in this schema: `owner_scope` is a
+project identifier, and non-project `OwnershipScope` values are not accepted
+by the native P12.4 creation path. This avoids silently coercing Domain/System
+scope kinds while the accepted P12 contract remains project-owned.
+
 Historical rows without `canonical_operation_metadata` remain usable by legacy
 OperationJournal paths but cannot be reconstructed as a public Kernel
 Operation; conversion requires complete typed action, scope, resource, actor,

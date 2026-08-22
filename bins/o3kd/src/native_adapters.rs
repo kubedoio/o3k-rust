@@ -50,7 +50,9 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
             tracing::error!(%error, operation_id = %id, "invalid canonical operation metadata");
             NativeReadError::Internal
         })?;
-        if operation.owner_scope.id() != auth.effective_scope().id() {
+        if operation.owner_scope.kind() != auth.effective_scope().kind()
+            || operation.owner_scope.id() != auth.effective_scope().id()
+        {
             return Err(NativeReadError::NotFound);
         }
         Ok(operation)

@@ -366,15 +366,6 @@ impl DurableStore for O3kStore {
         }
     }
 
-    async fn insert_canonical_operation(
-        &self,
-        o: &CanonicalOperationRecord,
-    ) -> Result<(), StoreError> {
-        match self {
-            Self::Sqlite(s) => s.insert_canonical_operation(o).await,
-            Self::Postgres(s) => s.insert_canonical_operation(o).await,
-        }
-    }
     async fn get_canonical_operation(
         &self,
         id: Uuid,
