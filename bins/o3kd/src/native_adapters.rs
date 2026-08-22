@@ -45,10 +45,7 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
                 NativeReadError::Internal
             }
         })?;
-        let resource_id = durable.resource_id.ok_or_else(|| {
-            tracing::error!(operation_id = %id, "canonical operation has no durable resource");
-            NativeReadError::Internal
-        })?;
+        let resource_id = durable.resource_id;
         let resource = self.store.get_resource(resource_id).await.map_err(|error| {
             if matches!(error, o3k_store::StoreError::ResourceNotFound) {
                 NativeReadError::NotFound
