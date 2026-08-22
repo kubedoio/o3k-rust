@@ -38,6 +38,7 @@ fn operation(id: Uuid, resource_id: Uuid) -> OperationRecord {
 }
 
 #[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_persistence_idempotency_and_cas() {
     let database_url = url();
     let store = PostgresStore::connect(&database_url)

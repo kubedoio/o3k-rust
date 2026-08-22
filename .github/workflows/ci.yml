@@ -202,7 +202,7 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
       - name: P12.4 PostgreSQL conformance (mandatory)
-        run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --nocapture
+        run: cargo test -p o3k-store --test postgres_p12_4 --all-features -- --ignored --nocapture
       - name: Emit exact-source binary build manifest (preparation for artifact pipeline)
         # Safest useful preparation for the follow-up pre-built-artifact pipeline:
         # record the exact commit and sha256 of the two protected-run binaries so
