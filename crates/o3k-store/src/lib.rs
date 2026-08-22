@@ -8317,8 +8317,14 @@ mod tests {
             }));
         }
         barrier.wait().await;
-        let first = tasks.remove(0).await.expect("task panicked")?;
-        let second = tasks.remove(0).await.expect("task panicked")?;
+        let first = tasks
+            .remove(0)
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("idempotency task failed: {error}")))??;
+        let second = tasks
+            .remove(0)
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("idempotency task failed: {error}")))??;
         let winner = match (first, second) {
             (IdempotencyReservation::Created(a), IdempotencyReservation::ExistingEquivalent(b))
             | (IdempotencyReservation::ExistingEquivalent(b), IdempotencyReservation::Created(a)) =>
@@ -8326,7 +8332,11 @@ mod tests {
                 assert_eq!(a, b);
                 a
             }
-            other => panic!("equivalent race did not converge: {other:?}"),
+            other => {
+                return Err(StoreError::Corrupt(format!(
+                    "equivalent race did not converge: {other:?}"
+                )));
+            }
         };
         let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
             .fetch_one(&store.pool)
@@ -8339,7 +8349,10 @@ mod tests {
         assert_eq!(operations, 1);
         assert_eq!(reservations, 1);
         assert!(proposed.contains(&winner));
-        let loser = proposed.into_iter().find(|id| *id != winner).unwrap();
+        let loser = proposed
+            .into_iter()
+            .find(|id| *id != winner)
+            .ok_or_else(|| StoreError::Corrupt("equivalent race produced no loser".into()))?;
         assert!(matches!(
             store.get_operation(loser).await,
             Err(StoreError::OperationNotFound)
@@ -8377,8 +8390,14 @@ mod tests {
             }));
         }
         barrier.wait().await;
-        let a = tasks.remove(0).await.expect("task panicked")?;
-        let b = tasks.remove(0).await.expect("task panicked")?;
+        let a = tasks
+            .remove(0)
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("idempotency task failed: {error}")))??;
+        let b = tasks
+            .remove(0)
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("idempotency task failed: {error}")))??;
         assert!(matches!(
             (a, b),
             (
@@ -8430,7 +8449,9 @@ mod tests {
         barrier.wait().await;
         for task in tasks {
             assert!(matches!(
-                task.await.expect("task panicked")?,
+                task.await.map_err(|error| StoreError::Corrupt(format!(
+                    "idempotency task failed: {error}"
+                )))??,
                 IdempotencyReservation::Created(_)
             ));
         }
