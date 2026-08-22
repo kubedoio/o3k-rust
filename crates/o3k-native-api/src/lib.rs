@@ -6,7 +6,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -36,8 +36,9 @@ pub struct NativeApiState {
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
     /// Validated generic resource descriptors.  This is the northbound
     /// registry; applications below it are intentionally controller-agnostic.
-    pub resource_registry: resource::ResourceRegistry,
+    resource_index: resource::ResourceDispatcher,
     pub resource_application: Option<resource::SharedResourceApplication>,
+    pub authorizer: Option<std::sync::Arc<dyn o3k_kernel::Authorizer>>,
 }
 
 impl NativeApiState {
@@ -50,6 +51,10 @@ impl NativeApiState {
         volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
         network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     ) -> Self {
+        let resource_index = registry
+            .as_ref()
+            .and_then(|r| resource::ResourceDispatcher::from_manifest_registry(r).ok())
+            .unwrap_or_default();
         Self {
             registry,
             cursor_config,
@@ -58,8 +63,9 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
-            resource_registry: resource::ResourceRegistry::default(),
+            resource_index,
             resource_application: None,
+            authorizer: None,
         }
     }
 
@@ -75,11 +81,18 @@ impl NativeApiState {
     #[must_use]
     pub fn with_resource_application(
         mut self,
-        registry: resource::ResourceRegistry,
         application: resource::SharedResourceApplication,
     ) -> Self {
-        self.resource_registry = registry;
         self.resource_application = Some(application);
+        self
+    }
+
+    #[must_use]
+    pub fn with_authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn o3k_kernel::Authorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
         self
     }
 }
@@ -101,12 +114,16 @@ pub fn router(state: NativeApiState) -> Router {
             "/network/address-realms/{id}",
             get(network::show_address_realm),
         )
-        .route("/{namespace}/{collection}", post(resource::create))
+        .route(
+            "/{namespace}/{collection}",
+            get(resource::list).post(resource::create),
+        )
         .route(
             "/{namespace}/{collection}/{id}",
-            axum::routing::delete(resource::delete),
+            get(resource::show).delete(resource::delete),
         )
         .route("/operations/{id}", get(operation::show_operation))
+        .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }
 
@@ -223,7 +240,7 @@ pub struct ResourceTypesResponse {
 }
 
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
+    let Some(_registry) = &state.registry else {
         return (
             StatusCode::OK,
             Json(serde_json::json!({"resource_types": [], "count": 0})),
@@ -232,30 +249,7 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
     };
 
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    for m in registry.all() {
-        for rt_meta in &m.resource_types {
-            let rt = &rt_meta.resource_type;
-            {
-                resource_types.push(DiscoveredResourceType {
-                    namespace: rt.namespace().to_owned(),
-                    name: rt.name().to_owned(),
-                    service: m.service_id.clone(),
-                    schema_version: rt_meta.schema_version.clone(),
-                    collection: rt_meta
-                        .collection
-                        .clone()
-                        .unwrap_or_else(|| rt.name().to_owned()),
-                    scope: rt_meta.scope.to_string(),
-                    ready: registry
-                        .controller(&m.service_id)
-                        .is_some_and(|c| c.state == o3k_kernel::controller::ControllerState::Ready),
-                    lifecycle_actions: std::collections::HashMap::new(),
-                });
-            }
-        }
-    }
-
-    for descriptor in state.resource_registry.all() {
+    for descriptor in state.resource_index.all() {
         let mut actions = std::collections::HashMap::new();
         for (op, action) in &descriptor.lifecycle_actions {
             actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
@@ -310,12 +304,14 @@ mod tests {
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::new(),
                 },
                 RegisteredResourceType {
                     resource_type: ResourceType::new_unchecked("compute", "flavor"),
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::new(),
                 },
             ],
             actions: vec![
