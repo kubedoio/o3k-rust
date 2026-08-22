@@ -8292,8 +8292,12 @@ mod tests {
                 .await
         });
         barrier.wait().await;
-        let first_result = first_task.await.expect("first CAS task must finish");
-        let second_result = second_task.await.expect("second CAS task must finish");
+        let first_result = first_task
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("first CAS task failed: {error}")))?;
+        let second_result = second_task
+            .await
+            .map_err(|error| StoreError::Corrupt(format!("second CAS task failed: {error}")))?;
         let winner_count = usize::from(first_result.is_ok()) + usize::from(second_result.is_ok());
         let stale_count = usize::from(matches!(first_result, Err(StoreError::StaleGeneration)))
             + usize::from(matches!(second_result, Err(StoreError::StaleGeneration)));
