@@ -209,6 +209,19 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
             IdempotencyReservation::Created(_)
         )
     ));
+    let conflict_winner = match (&conflict.0, &conflict.1) {
+        (IdempotencyReservation::Created(id), _) | (_, IdempotencyReservation::Created(id)) => *id,
+        _ => unreachable!("the assertion above requires one created operation"),
+    };
+    let conflict_loser = if conflict_winner == a { b } else { a };
+    assert!(matches!(
+        store.get_operation(conflict_loser).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert!(matches!(
+        store.get_canonical_operation(conflict_loser).await,
+        Err(StoreError::OperationNotFound)
+    ));
     assert_eq!(counts(&store).await, (1, 1, 1));
 
     store
@@ -254,8 +267,11 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
         .insert_resource(&resource(rid, "project-rollback"))
         .await
         .expect("resource");
-    sqlx::query("CREATE OR REPLACE FUNCTION p12_4_reject_reservation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.idempotency_key = 'rollback-sentinel' THEN RAISE EXCEPTION 'p12.4 injected reservation failure'; END IF; RETURN NEW; END $$").execute(store.pool()).await.expect("create trigger function");
-    sqlx::query("CREATE TRIGGER p12_4_reject_reservation BEFORE INSERT ON idempotency_reservations FOR EACH ROW EXECUTE FUNCTION p12_4_reject_reservation()").execute(store.pool()).await.expect("create trigger");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let function = format!("p12_4_reject_reservation_{suffix}");
+    let trigger = format!("p12_4_reject_reservation_{suffix}");
+    sqlx::query(&format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.idempotency_key = 'rollback-sentinel' THEN RAISE EXCEPTION 'p12.4 injected reservation failure'; END IF; RETURN NEW; END $$")).execute(store.pool()).await.expect("create trigger function");
+    sqlx::query(&format!("CREATE TRIGGER {trigger} BEFORE INSERT ON idempotency_reservations FOR EACH ROW EXECUTE FUNCTION {function}()")).execute(store.pool()).await.expect("create trigger");
     let id = Uuid::now_v7();
     let rollback = store
         .create_or_replay_canonical_idempotent_operation(
@@ -266,11 +282,13 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
         .await;
     assert!(rollback.is_err());
     assert_eq!(counts(&store).await, (0, 0, 0));
-    sqlx::query("DROP TRIGGER p12_4_reject_reservation ON idempotency_reservations")
-        .execute(store.pool())
-        .await
-        .expect("drop trigger");
-    sqlx::query("DROP FUNCTION p12_4_reject_reservation()")
+    sqlx::query(&format!(
+        "DROP TRIGGER {trigger} ON idempotency_reservations"
+    ))
+    .execute(store.pool())
+    .await
+    .expect("drop trigger");
+    sqlx::query(&format!("DROP FUNCTION {function}()"))
         .execute(store.pool())
         .await
         .expect("drop trigger function");
@@ -298,10 +316,42 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
     )
     .expect("kernel conversion");
     assert_eq!(kernel.id, id);
+    assert_eq!(kernel.service, "compute");
+    assert_eq!(kernel.action.as_str(), "compute:CreateServer");
+    assert_eq!(kernel.actor, "user-reload");
     assert_eq!(kernel.owner_scope.id().as_str(), "project-rollback");
+    assert_eq!(kernel.resource_type.to_string(), "compute:server");
+    assert_eq!(
+        kernel.resource_id.as_ref().map(ToString::to_string),
+        Some(rid.to_string())
+    );
+    assert_eq!(kernel.state, o3k_kernel::OperationState::Pending);
+    assert_eq!(kernel.attempt, 0);
+    assert_eq!(kernel.created_at, "2026-01-01T00:00:00Z");
+    assert_eq!(kernel.started_at, None);
+    assert_eq!(kernel.finished_at, None);
+    assert_eq!(kernel.error, None);
+    assert_eq!(kernel.request_id.as_deref(), Some("request-user-reload"));
+
+    // A retry resolves the committed scoped identity before considering a
+    // newly proposed target. The proposal may use a fresh operation/resource
+    // identity after the caller lost the original response.
+    let retry_id = Uuid::now_v7();
+    let retry_resource = Uuid::now_v7();
+    let mut retry_request = req.clone();
+    retry_request.operation_id = retry_id;
     assert_eq!(
         reopened
-            .create_or_replay_canonical_idempotent_operation(&op, &meta, &req)
+            .create_or_replay_canonical_idempotent_operation(
+                &operation(retry_id, retry_resource),
+                &canonical(
+                    retry_id,
+                    retry_resource,
+                    "project-rollback",
+                    "retrying-user",
+                ),
+                &retry_request,
+            )
             .await
             .expect("replay"),
         IdempotencyReservation::ExistingEquivalent(id)

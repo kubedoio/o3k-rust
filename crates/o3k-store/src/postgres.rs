@@ -190,6 +190,87 @@ fn validate_image_overlay_transition(
     }
 }
 
+async fn validate_existing_canonical_reservation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    operation_id: Uuid,
+    request: &IdempotencyReservationRequest,
+) -> Result<(), StoreError> {
+    let durable_row = sqlx::query("SELECT * FROM operations WHERE id=$1")
+        .bind(operation_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or_else(|| {
+            StoreError::Corrupt("idempotency reservation references missing operation".into())
+        })?;
+    let durable = row_to_operation(&durable_row)?;
+    let metadata = sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id=$1")
+        .bind(operation_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or_else(|| {
+            StoreError::Corrupt(
+                "idempotency reservation references operation without canonical metadata".into(),
+            )
+        })?;
+    let canonical = CanonicalOperationRecord {
+        id: operation_id,
+        service: metadata.try_get("service").map_err(StoreError::Database)?,
+        action: metadata.try_get("action").map_err(StoreError::Database)?,
+        actor: metadata.try_get("actor").map_err(StoreError::Database)?,
+        owner_scope: metadata
+            .try_get("owner_scope")
+            .map_err(StoreError::Database)?,
+        resource_type: metadata
+            .try_get("resource_type")
+            .map_err(StoreError::Database)?,
+        resource_id: metadata
+            .try_get("resource_id")
+            .map_err(StoreError::Database)?,
+        state: durable.state,
+        attempt: u32::try_from(
+            metadata
+                .try_get::<i32, _>("attempt")
+                .map_err(StoreError::Database)?,
+        )
+        .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
+        created_at: metadata
+            .try_get("created_at")
+            .map_err(StoreError::Database)?,
+        started_at: metadata
+            .try_get("started_at")
+            .map_err(StoreError::Database)?,
+        finished_at: metadata
+            .try_get("finished_at")
+            .map_err(StoreError::Database)?,
+        error: metadata.try_get("error").map_err(StoreError::Database)?,
+        request_id: metadata
+            .try_get("request_id")
+            .map_err(StoreError::Database)?,
+    };
+    let mut winning_request = request.clone();
+    winning_request.operation_id = operation_id;
+    validate_canonical_idempotent_operation_identity(&durable, &canonical, &winning_request)?;
+
+    let resource_owner: String = sqlx::query("SELECT project_id FROM resources WHERE id=$1")
+        .bind(durable.resource_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(StoreError::Database)?
+        .ok_or_else(|| {
+            StoreError::Corrupt("canonical operation references missing resource".into())
+        })?
+        .try_get("project_id")
+        .map_err(StoreError::Database)?;
+    if resource_owner != canonical.owner_scope {
+        return Err(StoreError::Corrupt(
+            "canonical operation resource and owner scopes differ".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl DurableStore for PostgresStore {
     async fn insert_resource(&self, resource: &ResourceRecord) -> Result<(), StoreError> {
@@ -468,6 +549,39 @@ impl DurableStore for PostgresStore {
         let attempt = i32::try_from(canonical.attempt)
             .map_err(|_| StoreError::Corrupt("operation attempt exceeds storage range".into()))?;
         let mut tx = self.pool.begin().await.map_err(StoreError::Database)?;
+
+        // Resolve an accepted request before inspecting the caller's new
+        // proposal. A retry is identified by its scoped idempotency identity;
+        // it must not depend on a newly proposed resource still existing.
+        if let Some(reservation) = sqlx::query(
+            "SELECT fingerprint, operation_id FROM idempotency_reservations
+             WHERE owner_scope=$1 AND action=$2 AND idempotency_key=$3",
+        )
+        .bind(&request.owner_scope)
+        .bind(&request.action)
+        .bind(&request.key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(StoreError::Database)?
+        {
+            let fingerprint: String = reservation
+                .try_get("fingerprint")
+                .map_err(StoreError::Database)?;
+            if fingerprint != request.fingerprint {
+                tx.commit().await.map_err(StoreError::Database)?;
+                return Ok(IdempotencyReservation::Conflict);
+            }
+            let winning_id = Uuid::parse_str(
+                &reservation
+                    .try_get::<String, _>("operation_id")
+                    .map_err(StoreError::Database)?,
+            )
+            .map_err(StoreError::InvalidUuid)?;
+            validate_existing_canonical_reservation(&mut tx, winning_id, request).await?;
+            tx.commit().await.map_err(StoreError::Database)?;
+            return Ok(IdempotencyReservation::ExistingEquivalent(winning_id));
+        }
+
         let resource_owner = sqlx::query("SELECT project_id FROM resources WHERE id=$1")
             .bind(operation.resource_id.to_string())
             .fetch_optional(&mut *tx)
@@ -587,69 +701,7 @@ impl DurableStore for PostgresStore {
         )
         .map_err(StoreError::InvalidUuid)?;
 
-        let durable_row = sqlx::query("SELECT * FROM operations WHERE id=$1")
-            .bind(winning_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(StoreError::Database)?
-            .ok_or_else(|| {
-                StoreError::Corrupt("idempotency reservation references missing operation".into())
-            })?;
-        let durable = row_to_operation(&durable_row)?;
-        let metadata =
-            sqlx::query("SELECT * FROM canonical_operation_metadata WHERE operation_id=$1")
-                .bind(winning_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(StoreError::Database)?
-                .ok_or_else(|| {
-                    StoreError::Corrupt(
-                        "idempotency reservation references operation without canonical metadata"
-                            .into(),
-                    )
-                })?;
-        let stored_canonical = CanonicalOperationRecord {
-            id: winning_id,
-            service: metadata.try_get("service").map_err(StoreError::Database)?,
-            action: metadata.try_get("action").map_err(StoreError::Database)?,
-            actor: metadata.try_get("actor").map_err(StoreError::Database)?,
-            owner_scope: metadata
-                .try_get("owner_scope")
-                .map_err(StoreError::Database)?,
-            resource_type: metadata
-                .try_get("resource_type")
-                .map_err(StoreError::Database)?,
-            resource_id: metadata
-                .try_get("resource_id")
-                .map_err(StoreError::Database)?,
-            state: durable.state,
-            attempt: u32::try_from(
-                metadata
-                    .try_get::<i32, _>("attempt")
-                    .map_err(StoreError::Database)?,
-            )
-            .map_err(|_| StoreError::Corrupt("invalid operation attempt".into()))?,
-            created_at: metadata
-                .try_get("created_at")
-                .map_err(StoreError::Database)?,
-            started_at: metadata
-                .try_get("started_at")
-                .map_err(StoreError::Database)?,
-            finished_at: metadata
-                .try_get("finished_at")
-                .map_err(StoreError::Database)?,
-            error: metadata.try_get("error").map_err(StoreError::Database)?,
-            request_id: metadata
-                .try_get("request_id")
-                .map_err(StoreError::Database)?,
-        };
-        let mut winning_request = request.clone();
-        winning_request.operation_id = winning_id;
-        validate_canonical_idempotent_operation_identity(
-            &durable,
-            &stored_canonical,
-            &winning_request,
-        )?;
+        validate_existing_canonical_reservation(&mut tx, winning_id, request).await?;
         tx.commit().await.map_err(StoreError::Database)?;
         Ok(IdempotencyReservation::ExistingEquivalent(winning_id))
     }
