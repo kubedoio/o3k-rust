@@ -27,7 +27,7 @@ pub struct OperationReaderAdapter {
     pub store: Arc<o3k_store::unified::O3kStore>,
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
     async fn show_operation(
         &self,
