@@ -8257,6 +8257,191 @@ mod tests {
         Ok(())
     }
 
+    fn idempotent_operation(resource_id: Uuid, id: Uuid) -> OperationRecord {
+        OperationRecord {
+            id,
+            resource_id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        }
+    }
+
+    async fn concurrent_store_fixture() -> Result<(SqliteStore, Uuid), StoreError> {
+        let path = std::env::temp_dir().join(format!("o3k-p12-4-idempotency-{}", Uuid::now_v7()));
+        let store = SqliteStore::connect(&format!("sqlite://{}", path.display())).await?;
+        let resource_id = Uuid::now_v7();
+        store
+            .insert_resource(&ResourceRecord {
+                id: resource_id,
+                kind: "server".to_owned(),
+                project_id: "project-a".to_owned(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "{}".to_owned(),
+                observed_state: "unknown".to_owned(),
+                provider_id: None,
+            })
+            .await?;
+        Ok((store, resource_id))
+    }
+
+    #[tokio::test]
+    async fn sqlite_idempotency_concurrent_equivalent_requests_have_one_winner()
+    -> Result<(), StoreError> {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        let mut proposed = Vec::new();
+        for _ in 0..2 {
+            let operation_id = Uuid::now_v7();
+            proposed.push(operation_id);
+            let request = IdempotencyReservationRequest::from_semantics(
+                "project-a",
+                "compute:CreateServer",
+                "ABC",
+                "compute:server",
+                None,
+                &serde_json::json!({"name":"demo"}),
+                operation_id,
+            )?;
+            let operation = idempotent_operation(resource_id, operation_id);
+            let db = store.clone();
+            let gate = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                db.create_or_replay_idempotent_operation(&operation, &request)
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        let first = tasks.remove(0).await.expect("task panicked")?;
+        let second = tasks.remove(0).await.expect("task panicked")?;
+        let winner = match (first, second) {
+            (IdempotencyReservation::Created(a), IdempotencyReservation::ExistingEquivalent(b))
+            | (IdempotencyReservation::ExistingEquivalent(b), IdempotencyReservation::Created(a)) =>
+            {
+                assert_eq!(a, b);
+                a
+            }
+            other => panic!("equivalent race did not converge: {other:?}"),
+        };
+        let operations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+            .fetch_one(&store.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        let reservations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_reservations")
+            .fetch_one(&store.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        assert_eq!(operations, 1);
+        assert_eq!(reservations, 1);
+        assert!(proposed.contains(&winner));
+        let loser = proposed.into_iter().find(|id| *id != winner).unwrap();
+        assert!(matches!(
+            store.get_operation(loser).await,
+            Err(StoreError::OperationNotFound)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_idempotency_concurrent_conflict_leaves_one_operation() -> Result<(), StoreError>
+    {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let mut tasks = Vec::new();
+        for body in [
+            serde_json::json!({"name":"one"}),
+            serde_json::json!({"name":"two"}),
+        ] {
+            let operation_id = Uuid::now_v7();
+            let request = IdempotencyReservationRequest::from_semantics(
+                "project-a",
+                "compute:CreateServer",
+                "ABC",
+                "compute:server",
+                None,
+                &body,
+                operation_id,
+            )?;
+            let operation = idempotent_operation(resource_id, operation_id);
+            let db = store.clone();
+            let gate = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                db.create_or_replay_idempotent_operation(&operation, &request)
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        let a = tasks.remove(0).await.expect("task panicked")?;
+        let b = tasks.remove(0).await.expect("task panicked")?;
+        assert!(matches!(
+            (a, b),
+            (
+                IdempotencyReservation::Created(_),
+                IdempotencyReservation::Conflict
+            ) | (
+                IdempotencyReservation::Conflict,
+                IdempotencyReservation::Created(_)
+            )
+        ));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+            .fetch_one(&store.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        assert_eq!(count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sqlite_idempotency_concurrent_scopes_and_actions_are_isolated()
+    -> Result<(), StoreError> {
+        let (store, resource_id) = concurrent_store_fixture().await?;
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let mut tasks = Vec::new();
+        for (scope, action) in [
+            ("project-a", "compute:CreateServer"),
+            ("project-b", "compute:CreateServer"),
+            ("project-a", "compute:DeleteServer"),
+        ] {
+            let operation_id = Uuid::now_v7();
+            let request = IdempotencyReservationRequest::from_semantics(
+                scope,
+                action,
+                "ABC",
+                "compute:server",
+                None,
+                &serde_json::json!({"name":"demo"}),
+                operation_id,
+            )?;
+            let operation = idempotent_operation(resource_id, operation_id);
+            let db = store.clone();
+            let gate = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                gate.wait().await;
+                db.create_or_replay_idempotent_operation(&operation, &request)
+                    .await
+            }));
+        }
+        barrier.wait().await;
+        for task in tasks {
+            assert!(matches!(
+                task.await.expect("task panicked")?,
+                IdempotencyReservation::Created(_)
+            ));
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM operations")
+            .fetch_one(&store.pool)
+            .await
+            .map_err(StoreError::Database)?;
+        assert_eq!(count, 3);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn sqlite_generation_cas_allows_only_one_concurrent_writer() -> Result<(), StoreError> {
         let path = std::env::temp_dir().join(format!("o3k-p12-4-generation-{}", Uuid::now_v7()));
