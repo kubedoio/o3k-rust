@@ -232,9 +232,21 @@ mod operation_visibility_tests {
         assert_eq!(body["id"], id.to_string());
         assert_eq!(body["owner_scope"]["id"], "project-a");
         let serialized = body.to_string();
-        assert!(!serialized.contains("provider_operation_id"));
-        assert!(!serialized.contains("secret-provider-op"));
-        assert!(!serialized.contains("secret provider detail"));
+        for forbidden in [
+            "provider_operation_id",
+            "provider_resource_id",
+            "secret-provider-op",
+            "secret-provider-resource",
+            "secret provider detail",
+            "agent_id",
+            "agent_epoch",
+            "database",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "native operation response leaked `{forbidden}`"
+            );
+        }
 
         let foreign = app
             .clone()
