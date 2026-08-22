@@ -2958,7 +2958,10 @@ impl SqliteStore {
             sqlx::query("INSERT INTO resources (id,kind,project_id,generation,observed_generation,desired_state,observed_state,provider_id) VALUES (?,?,?,?,?,?,?,?)")
                 .bind(resource.id.to_string()).bind(&resource.kind).bind(&resource.project_id).bind(resource.generation)
                 .bind(resource.observed_generation).bind(&resource.desired_state).bind(&resource.observed_state).bind(&resource.provider_id)
-                .execute(&mut *connection).await.map_err(StoreError::Database)?;
+                .execute(&mut *connection).await.map_err(|e| match e {
+                    sqlx::Error::Database(ref db) if db.is_unique_violation() => StoreError::ResourceAlreadyExists,
+                    _ => StoreError::Database(e),
+                })?;
             insert_sqlite_canonical_acceptance(&mut connection, operation, canonical, request).await?;
             Ok(CanonicalAcceptanceOutcome::Created { operation_id: operation.id, resource_id: resource.id })
         }.await;

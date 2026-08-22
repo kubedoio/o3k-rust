@@ -1417,12 +1417,14 @@ impl ComputeService {
         input: ServerCreateInput,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<Server>, ComputeError> {
-        // CANONICAL INVARIANT: the canonical context's action, actor, and
-        // owner_scope must match the authenticated request.  This protects
-        // ComputeService from a future miswired manifest or service adapter
-        // that may construct a CanonicalMutationContext with differing values.
-        if context.action.to_string() != "compute:CreateServer"
-            || context.actor != auth.principal().id().as_str()
+        // CANONICAL INVARIANT: the canonical context's action must match the
+        // expected mutation (InvalidRequest — a structural wiring error),
+        // while the actor and owner_scope must match the authenticated request
+        // (Unauthorized — an authorization failure).
+        if context.action.to_string() != "compute:CreateServer" {
+            return Err(ComputeError::InvalidRequest);
+        }
+        if context.actor != auth.principal().id().as_str()
             || context.owner_scope.id().as_str() != auth.effective_scope().id().as_str()
         {
             return Err(ComputeError::Unauthorized);
@@ -3252,10 +3254,13 @@ impl ComputeService {
         id: ServerId,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<ServerId>, ComputeError> {
-        // CANONICAL INVARIANT: the canonical context's action, actor, and
-        // owner_scope must match the authenticated request.
-        if context.action.to_string() != "compute:DeleteServer"
-            || context.actor != auth.principal().id().as_str()
+        // CANONICAL INVARIANT: the canonical context's action must match the
+        // expected mutation (InvalidRequest), while actor and owner_scope
+        // must match the authenticated request (Unauthorized).
+        if context.action.to_string() != "compute:DeleteServer" {
+            return Err(ComputeError::InvalidRequest);
+        }
+        if context.actor != auth.principal().id().as_str()
             || context.owner_scope.id().as_str() != auth.effective_scope().id().as_str()
         {
             return Err(ComputeError::Unauthorized);
@@ -8919,7 +8924,6 @@ mod tests {
         use o3k_provider::FailureInjection;
         use o3k_store::DurableStore;
         let fake = Arc::new(FakeComputeProvider::new());
-        fake.set_failure(FailureInjection::Timeout)?;
         let store = Arc::new(o3k_store::testkit::open_memory().await?);
         let service = ComputeService::new(store.clone(), fake.clone());
         let auth = test_compute_auth("project-a", "user-a", "member");
@@ -8942,19 +8946,11 @@ mod tests {
             "create-A".into(),
             serde_json::json!({"spec":{"name":"async-delete","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
         )?;
-        // 1. Create server
+        // 1. Create server normally (no failure injection)
         let created = service
             .create_server_for_auth_canonical(&auth, input, create_ctx)
             .await?;
-        // 2. Clear the failure so create converges
-        fake.set_failure(FailureInjection::None)?;
-        // Wait for create to converge
-        let operation = store.get_operation(created.operation_id).await?;
-        if operation.state != o3k_store::OperationState::Succeeded {
-            // Drive convergence
-            let _ = service.journal.reconcile_once(created.operation_id).await;
-        }
-        // 3. Set provider to Timeout so delete stays non-terminal
+        // 2. Set provider to Timeout so delete stays non-terminal on first pass
         fake.set_failure(FailureInjection::Timeout)?;
         let delete_ctx = o3k_reconciler::CanonicalMutationContext::new(
             ActionId::new("compute", "DeleteServer")?,
@@ -8967,13 +8963,12 @@ mod tests {
         let delete_receipt = service
             .delete_server_for_auth_canonical(&auth, created.resource.id, delete_ctx)
             .await?;
-        // The delete state must NOT be Succeeded (the provider is timing out)
-        // and the receipt must carry the actual non-terminal state rather
-        // than erroring with Conflict.
-        assert!(
-            delete_receipt.operation_state != o3k_store::OperationState::Succeeded,
-            "delete must not succeed with failing provider, state={:?}",
-            delete_receipt.operation_state
+        // The delete must return a non-terminal state (UnknownOutcome — the
+        // provider timed out) instead of erroring with Conflict.
+        assert_eq!(
+            delete_receipt.operation_state,
+            o3k_store::OperationState::UnknownOutcome,
+            "delete with timing-out provider must be UnknownOutcome"
         );
         // 4. GET /operations/O returns the canonical operation
         let public_op = o3k_kernel::Operation::try_from(
