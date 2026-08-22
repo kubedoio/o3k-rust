@@ -11,7 +11,9 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 o3k-domain = { path = "../o3k-domain" }
+o3k-kernel = { path = "../o3k-kernel" }
 o3k-provider = { path = "../o3k-provider" }
 o3k-store = { path = "../o3k-store" }
 o3k-storage = { path = "../o3k-storage" }

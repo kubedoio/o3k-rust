@@ -10,7 +10,8 @@ use o3k_provider::{
     OperationState as ProviderOperationState, ProviderError,
 };
 use o3k_store::{
-    AgentCommandRecord, AgentCommandState, DurableStore, ObservationUpdate, OperationRecord,
+    AgentCommandRecord, AgentCommandState, CanonicalAcceptanceOutcome, CanonicalOperationRecord,
+    DurableStore, IdempotencyReservationRequest, ObservationUpdate, OperationRecord,
     OperationState, ProviderReference, ResourceRecord, StoreError, server_state_to_storage,
 };
 use thiserror::Error;
@@ -58,6 +59,86 @@ pub enum LifecycleAction {
     Stop,
     Reboot,
     Delete,
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalMutationContext {
+    pub action: o3k_kernel::ActionId,
+    pub actor: String,
+    pub owner_scope: o3k_kernel::OwnershipScope,
+    pub request_id: Option<String>,
+    pub idempotency_key: String,
+    pub semantic_request: serde_json::Value,
+    pub created_at: String,
+}
+
+impl CanonicalMutationContext {
+    pub fn new(
+        action: o3k_kernel::ActionId,
+        actor: String,
+        owner_scope: o3k_kernel::OwnershipScope,
+        request_id: Option<String>,
+        idempotency_key: String,
+        semantic_request: serde_json::Value,
+    ) -> Result<Self, ReconcileError> {
+        if owner_scope.kind() != o3k_kernel::ScopeKind::Project
+            || actor.trim().is_empty()
+            || idempotency_key.is_empty()
+            || idempotency_key.len() > IdempotencyReservationRequest::MAX_KEY_LENGTH
+        {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        Ok(Self {
+            action,
+            actor,
+            owner_scope,
+            request_id,
+            idempotency_key,
+            semantic_request,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    fn records(
+        &self,
+        operation: &OperationRecord,
+        resource_type: o3k_kernel::ResourceType,
+        target: Option<&str>,
+    ) -> Result<(CanonicalOperationRecord, IdempotencyReservationRequest), ReconcileError> {
+        if self.action.namespace() != resource_type.namespace() {
+            return Err(ReconcileError::InvalidIntent);
+        }
+        let kernel = o3k_kernel::Operation {
+            id: operation.id,
+            service: self.action.namespace().to_owned(),
+            action: self.action.clone(),
+            actor: self.actor.clone(),
+            owner_scope: self.owner_scope.clone(),
+            resource_type: resource_type.clone(),
+            resource_id: Some(
+                o3k_kernel::ResourceId::new(operation.resource_id.to_string())
+                    .map_err(|_| ReconcileError::InvalidIntent)?,
+            ),
+            state: operation.state.into(),
+            attempt: 0,
+            created_at: self.created_at.clone(),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            request_id: self.request_id.clone(),
+        };
+        let canonical = CanonicalOperationRecord::from_kernel_operation(&kernel)?;
+        let reservation = IdempotencyReservationRequest::from_semantics(
+            self.owner_scope.id().as_str(),
+            self.action.to_string(),
+            self.idempotency_key.clone(),
+            &resource_type.to_string(),
+            target,
+            &self.semantic_request,
+            operation.id,
+        )?;
+        Ok((canonical, reservation))
+    }
 }
 
 impl LifecycleAction {
@@ -391,6 +472,55 @@ where
         Ok(operation.id)
     }
 
+    pub async fn begin_canonical_create(
+        &self,
+        project_id: &str,
+        request: &CreateInstanceRequest,
+        context: &CanonicalMutationContext,
+    ) -> Result<CanonicalAcceptanceOutcome, ReconcileError> {
+        let resource = ResourceRecord {
+            id: request.o3k_server_id,
+            kind: "compute_instance".to_owned(),
+            project_id: project_id.to_owned(),
+            generation: 1,
+            observed_generation: 0,
+            desired_state: serde_json::to_string(request)
+                .map_err(|_| ReconcileError::InvalidIntent)?,
+            observed_state: server_state_to_storage(ServerState::Requested).to_owned(),
+            provider_id: None,
+        };
+        let operation = OperationRecord {
+            id: request.operation_id,
+            resource_id: request.o3k_server_id,
+            kind: "create".to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let resource_type = o3k_kernel::ResourceType::new("compute", "server")
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let (canonical, reservation) = context.records(&operation, resource_type, None)?;
+        let outcome = self
+            .store
+            .create_or_replay_canonical_resource_operation(
+                &resource,
+                &operation,
+                &canonical,
+                &reservation,
+                request.placement_allocation_id.as_deref(),
+            )
+            .await?;
+        if matches!(outcome, CanonicalAcceptanceOutcome::Created { .. }) {
+            self.event(
+                request.operation_id,
+                request.o3k_server_id,
+                JournalEventKind::IntentPersisted,
+            );
+        }
+        Ok(outcome)
+    }
+
     pub async fn begin_lifecycle(
         &self,
         resource_id: Uuid,
@@ -410,6 +540,36 @@ where
             .await?;
         self.event(operation_id, resource_id, JournalEventKind::IntentPersisted);
         Ok(operation_id)
+    }
+
+    pub async fn begin_canonical_lifecycle(
+        &self,
+        resource_id: Uuid,
+        operation_id: Uuid,
+        action: LifecycleAction,
+        context: &CanonicalMutationContext,
+    ) -> Result<CanonicalAcceptanceOutcome, ReconcileError> {
+        let operation = OperationRecord {
+            id: operation_id,
+            resource_id,
+            kind: action.kind().to_owned(),
+            state: OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let resource_type = o3k_kernel::ResourceType::new("compute", "server")
+            .map_err(|_| ReconcileError::InvalidIntent)?;
+        let target = resource_id.to_string();
+        let (canonical, reservation) = context.records(&operation, resource_type, Some(&target))?;
+        let outcome = self
+            .store
+            .create_or_replay_canonical_lifecycle_operation(&operation, &canonical, &reservation)
+            .await?;
+        if matches!(outcome, CanonicalAcceptanceOutcome::Created { .. }) {
+            self.event(operation_id, resource_id, JournalEventKind::IntentPersisted);
+        }
+        Ok(outcome)
     }
 
     /// Applies an authenticated compute-agent update to the same durable records

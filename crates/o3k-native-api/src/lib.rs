@@ -6,7 +6,7 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -21,6 +21,7 @@ pub mod identity;
 pub mod network;
 pub mod operation;
 pub mod pagination;
+pub mod resource;
 pub mod volume;
 
 /// Shared application state for the native API router.
@@ -33,6 +34,11 @@ pub struct NativeApiState {
     pub volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
     pub network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
     pub operation_reader: Option<std::sync::Arc<dyn operation::OperationReader>>,
+    /// Validated generic resource descriptors.  This is the northbound
+    /// registry; applications below it are intentionally controller-agnostic.
+    resource_index: resource::ResourceDispatcher,
+    pub resource_application: Option<resource::SharedResourceApplication>,
+    pub authorizer: Option<std::sync::Arc<dyn o3k_kernel::Authorizer>>,
 }
 
 impl NativeApiState {
@@ -44,8 +50,14 @@ impl NativeApiState {
         server_reader: Option<std::sync::Arc<dyn compute::ServerReader>>,
         volume_reader: Option<std::sync::Arc<dyn volume::VolumeReader>>,
         network_reader: Option<std::sync::Arc<dyn network::NetworkReader>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let resource_index = registry
+            .as_ref()
+            .map(resource::ResourceDispatcher::from_manifest_registry)
+            .transpose()
+            .map_err(|error| format!("native resource dispatcher construction failed: {error:?}"))?
+            .unwrap_or_default();
+        Ok(Self {
             registry,
             cursor_config,
             token_issuer,
@@ -53,7 +65,10 @@ impl NativeApiState {
             volume_reader,
             network_reader,
             operation_reader: None,
-        }
+            resource_index,
+            resource_application: None,
+            authorizer: None,
+        })
     }
 
     #[must_use]
@@ -62,6 +77,24 @@ impl NativeApiState {
         reader: std::sync::Arc<dyn operation::OperationReader>,
     ) -> Self {
         self.operation_reader = Some(reader);
+        self
+    }
+
+    #[must_use]
+    pub fn with_resource_application(
+        mut self,
+        application: resource::SharedResourceApplication,
+    ) -> Self {
+        self.resource_application = Some(application);
+        self
+    }
+
+    #[must_use]
+    pub fn with_authorizer(
+        mut self,
+        authorizer: std::sync::Arc<dyn o3k_kernel::Authorizer>,
+    ) -> Self {
+        self.authorizer = Some(authorizer);
         self
     }
 }
@@ -83,7 +116,16 @@ pub fn router(state: NativeApiState) -> Router {
             "/network/address-realms/{id}",
             get(network::show_address_realm),
         )
+        .route(
+            "/{namespace}/{collection}",
+            get(resource::list).post(resource::create),
+        )
+        .route(
+            "/{namespace}/{collection}/{id}",
+            get(resource::show).delete(resource::delete),
+        )
         .route("/operations/{id}", get(operation::show_operation))
+        .layer(DefaultBodyLimit::max(1_048_576))
         .with_state(state)
 }
 
@@ -186,6 +228,11 @@ pub struct DiscoveredResourceType {
     namespace: String,
     name: String,
     service: String,
+    schema_version: String,
+    collection: String,
+    scope: String,
+    ready: bool,
+    lifecycle_actions: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -195,7 +242,7 @@ pub struct ResourceTypesResponse {
 }
 
 pub async fn discover_resource_types(State(state): State<NativeApiState>) -> impl IntoResponse {
-    let Some(registry) = &state.registry else {
+    let Some(_registry) = &state.registry else {
         return (
             StatusCode::OK,
             Json(serde_json::json!({"resource_types": [], "count": 0})),
@@ -203,19 +250,22 @@ pub async fn discover_resource_types(State(state): State<NativeApiState>) -> imp
             .into_response();
     };
 
-    let rts = registry.all_resource_types();
     let mut resource_types: Vec<DiscoveredResourceType> = Vec::new();
-    for rt in &rts {
-        for m in registry.all() {
-            if m.namespace == rt.namespace() {
-                resource_types.push(DiscoveredResourceType {
-                    namespace: rt.namespace().to_owned(),
-                    name: rt.name().to_owned(),
-                    service: m.service_id.clone(),
-                });
-                break;
-            }
+    for descriptor in state.resource_index.all() {
+        let mut actions = std::collections::HashMap::new();
+        for (op, action) in &descriptor.lifecycle_actions {
+            actions.insert(format!("{op:?}").to_lowercase(), action.to_string());
         }
+        resource_types.push(DiscoveredResourceType {
+            namespace: descriptor.resource_type.namespace().to_owned(),
+            name: descriptor.resource_type.name().to_owned(),
+            service: descriptor.owning_service.clone(),
+            schema_version: descriptor.schema_version.clone(),
+            collection: descriptor.collection.clone(),
+            scope: descriptor.scope.to_string(),
+            ready: descriptor.ready,
+            lifecycle_actions: actions,
+        });
     }
 
     let count = resource_types.len();
@@ -256,12 +306,14 @@ mod tests {
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::new(),
                 },
                 RegisteredResourceType {
                     resource_type: ResourceType::new_unchecked("compute", "flavor"),
                     schema_version: "v1".to_owned(),
                     collection: None,
                     scope: ResourceScope::Tenant,
+                    operations: std::collections::HashMap::new(),
                 },
             ],
             actions: vec![
@@ -294,7 +346,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/")
@@ -322,7 +375,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/services")
@@ -355,7 +409,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/services")
@@ -398,7 +453,8 @@ mod tests {
             None,
             None,
             None,
-        );
+        )
+        .unwrap();
         let app = router(state);
         let response = axum::http::Request::builder()
             .uri("/resource-types")

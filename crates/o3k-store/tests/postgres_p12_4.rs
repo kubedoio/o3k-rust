@@ -1,9 +1,9 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use o3k_store::{
-    CanonicalOperationLifecycleUpdate, CanonicalOperationRecord, DurableStore,
-    IdempotencyReservation, IdempotencyReservationRequest, OperationRecord, OperationState,
-    PostgresStore, ResourceRecord, StoreError,
+    CanonicalAcceptanceOutcome, CanonicalOperationLifecycleUpdate, CanonicalOperationRecord,
+    DurableStore, IdempotencyReservation, IdempotencyReservationRequest, OperationRecord,
+    OperationState, PostgresStore, ResourceRecord, StoreError,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -11,9 +11,109 @@ use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
+static TEST_DATABASE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn url() -> String {
     std::env::var("O3K_DATABASE_URL")
         .expect("O3K_DATABASE_URL must be set for PostgreSQL P12.4 conformance")
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.3/P12.4 CI job"]
+async fn postgres_p12_3_canonical_resource_and_lifecycle_acceptance() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+    let rid = Uuid::now_v7();
+    let oid = Uuid::now_v7();
+    let created_resource = resource(rid, "project-native");
+    let created_operation = operation(oid, rid);
+    let created_canonical = canonical(oid, rid, "project-native", "user-native");
+    let request = request("project-native", "create-native", "same", oid);
+    assert!(matches!(
+        store
+            .create_or_replay_canonical_resource_operation(
+                &created_resource,
+                &created_operation,
+                &created_canonical,
+                &request,
+                None,
+            )
+            .await
+            .expect("create"),
+        CanonicalAcceptanceOutcome::Created { .. }
+    ));
+    let replay_oid = Uuid::now_v7();
+    let replay_resource = resource(Uuid::now_v7(), "project-native");
+    let replay_operation = operation(replay_oid, replay_resource.id);
+    let replay_canonical = canonical(
+        replay_oid,
+        replay_resource.id,
+        "project-native",
+        "user-native",
+    );
+    let mut replay_request = request.clone();
+    replay_request.operation_id = replay_oid;
+    assert_eq!(
+        store
+            .create_or_replay_canonical_resource_operation(
+                &replay_resource,
+                &replay_operation,
+                &replay_canonical,
+                &replay_request,
+                None
+            )
+            .await
+            .expect("replay"),
+        CanonicalAcceptanceOutcome::ExistingEquivalent {
+            operation_id: oid,
+            resource_id: rid
+        }
+    );
+    assert_eq!(counts(&store).await, (1, 1, 1));
+
+    let delete_id = Uuid::now_v7();
+    let delete_operation = OperationRecord {
+        id: delete_id,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let mut delete_canonical = canonical(delete_id, rid, "project-native", "user-native");
+    delete_canonical.action = "compute:DeleteServer".into();
+    let delete_request = IdempotencyReservationRequest::from_semantics(
+        "project-native",
+        "compute:DeleteServer",
+        "delete-native",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        delete_id,
+    )
+    .expect("delete request");
+    assert!(matches!(
+        store
+            .create_or_replay_canonical_lifecycle_operation(
+                &delete_operation,
+                &delete_canonical,
+                &delete_request
+            )
+            .await
+            .expect("delete"),
+        CanonicalAcceptanceOutcome::Created { .. }
+    ));
+    assert!(
+        o3k_kernel::Operation::try_from(
+            store
+                .get_canonical_operation(delete_id)
+                .await
+                .expect("canonical delete")
+        )
+        .is_ok()
+    );
 }
 fn resource(id: Uuid, project: &str) -> ResourceRecord {
     ResourceRecord {
@@ -117,6 +217,7 @@ async fn race(
 #[tokio::test]
 #[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
 async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
     let database_url = url();
     let store = PostgresStore::connect(&database_url)
         .await

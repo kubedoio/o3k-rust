@@ -250,6 +250,11 @@ It MUST NOT contain Database/DNS/AI/etc. business logic.
 
 ### 14. Generic API/CLI discovery is mandatory
 
+The validated ManifestRegistry is the sole authority for native resource
+descriptors. Native dispatch may maintain only a derived index/cache, and
+resource lifecycle operation-to-ActionId mappings are part of each manifest
+resource descriptor.
+
 A registered service/resource type must become visible through native service/resource-type discovery.
 
 The generic CLI path defined by ADR-0173/SPEC-0030 MUST allow at least basic CRUD/action invocation supported by the manifest without rebuilding the CLI specifically for that service.

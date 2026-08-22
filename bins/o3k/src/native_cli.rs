@@ -12,6 +12,7 @@
 //! The underlying protocol is O3K native HTTP API (ADR-0173/SPEC-0030).
 
 use serde_json::Value;
+use std::path::Path;
 
 use crate::HttpClient;
 use crate::context::HttpResponse;
@@ -49,6 +50,23 @@ fn api_get(path: &str) -> Result<Value, String> {
         return Err(format!("API returned status {status}: {body}"));
     }
     serde_json::from_str(&body).map_err(|e| format!("API response parse error: {e}"))
+}
+
+fn resolve_resource(ns_type: &str) -> Result<(String, String), String> {
+    let (namespace, name) = ns_type
+        .split_once(':')
+        .ok_or("resource type must be namespace:type")?;
+    let json = api_get("/resource-types")?;
+    json["resource_types"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["namespace"] == namespace && item["name"] == name)
+        })
+        .and_then(|item| item["collection"].as_str())
+        .map(|collection| (namespace.to_owned(), collection.to_owned()))
+        .ok_or_else(|| format!("unknown resource type '{ns_type}'"))
 }
 
 /// Lists all registered services.
@@ -113,22 +131,27 @@ pub fn list_resource_types() -> Result<(), String> {
 
 /// Lists resources of a given namespace:type.
 pub fn list_resources(ns_type: &str) -> Result<(), String> {
-    let Some((ns, type_name)) = ns_type.split_once(':') else {
-        return Err("resource type must be namespace:type (e.g. compute:server)".to_owned());
-    };
-    let path = format!("/{ns}/{type_name}");
-    let json = api_get(&path)?;
-    let items = json["items"]
-        .as_array()
-        .map_or(&[] as &[_], |a| a.as_slice());
+    let (ns, collection) = resolve_resource(ns_type)?;
+    let mut cursor = None;
+    let mut items = Vec::new();
+    loop {
+        let path = cursor.as_deref().map_or_else(
+            || format!("/{ns}/{collection}"),
+            |cursor| format!("/{ns}/{collection}?cursor={cursor}"),
+        );
+        let json = api_get(&path)?;
+        items.extend(json["items"].as_array().cloned().unwrap_or_default());
+        cursor = json["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
 
     println!("{:<36} {:<20} {:<12}", "ID", "OWNER", "GENERATION");
     println!("{}", "-".repeat(70));
-    for item in items {
+    for item in &items {
         let id = item["metadata"]["id"].as_str().unwrap_or("?");
-        let owner = item["metadata"]["owner_scope"]["id"]
-            .as_str()
-            .unwrap_or("?");
+        let owner = item["metadata"]["owner_scope"].as_str().unwrap_or("?");
         let generation = item["metadata"]["generation"].as_i64().unwrap_or(0);
         println!("{id:<36} {owner:<20} {generation:<12}");
     }
@@ -138,15 +161,57 @@ pub fn list_resources(ns_type: &str) -> Result<(), String> {
 
 /// Shows a specific resource by namespace:type and id.
 pub fn show_resource(ns_type: &str, id: &str) -> Result<(), String> {
-    let Some((ns, type_name)) = ns_type.split_once(':') else {
-        return Err("resource type must be namespace:type (e.g. compute:server)".to_owned());
-    };
-    let path = format!("/{ns}/{type_name}/{id}");
+    let (ns, collection) = resolve_resource(ns_type)?;
+    let path = format!("/{ns}/{collection}/{id}");
     let json = api_get(&path)?;
 
     let pretty =
         serde_json::to_string_pretty(&json).map_err(|e| format!("serialization error: {e}"))?;
     println!("{pretty}");
+    Ok(())
+}
+
+pub fn create_resource(ns_type: &str, file: &Path, key: Option<&str>) -> Result<(), String> {
+    let (ns, collection) = resolve_resource(ns_type)?;
+    let body =
+        std::fs::read_to_string(file).map_err(|e| format!("cannot read create file: {e}"))?;
+    if body.len() > 1024 * 1024 {
+        return Err("create file exceeds 1 MiB limit".to_owned());
+    }
+    let _: Value = serde_json::from_str(&body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt.block_on(client.post_json_with_idempotency(
+        &format!("{}/{ns}/{collection}", api_base()),
+        &body,
+        key,
+    ))?;
+    if response.status != 201 && response.status != 202 {
+        return Err(format!(
+            "API returned status {}: {}",
+            response.status, response.body
+        ));
+    }
+    println!("{}", response.body);
+    Ok(())
+}
+
+pub fn delete_resource(ns_type: &str, id: &str, key: Option<&str>) -> Result<(), String> {
+    let (ns, collection) = resolve_resource(ns_type)?;
+    let client = SystemHttpClient;
+    let rt = runtime()?;
+    let response = rt.block_on(
+        client.delete_with_idempotency(&format!("{}/{ns}/{collection}/{id}", api_base()), key),
+    )?;
+    if response.status != 202 && response.status != 204 {
+        return Err(format!(
+            "API returned status {}: {}",
+            response.status, response.body
+        ));
+    }
+    if !response.body.is_empty() {
+        println!("{}", response.body);
+    }
     Ok(())
 }
 

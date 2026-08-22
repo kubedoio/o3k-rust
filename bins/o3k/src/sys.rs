@@ -489,7 +489,12 @@ fn authority_header(host: &str, port: u16) -> String {
 }
 
 /// One bounded HTTP exchange.
-fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, String> {
+fn request_with_key(
+    url: &str,
+    method: &str,
+    body: Option<&str>,
+    key: Option<&str>,
+) -> Result<HttpResponse, String> {
     let (host, port, path) = parse_http_url(url)?;
     let address = format!("{host}:{port}");
     let mut stream = TcpStream::connect_timeout(
@@ -512,6 +517,9 @@ fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, 
     if let Some(body) = body {
         head.push_str("Content-Type: application/json\r\n");
         head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    if let Some(key) = key {
+        head.push_str(&format!("Idempotency-Key: {key}\r\n"));
     }
     head.push_str("\r\n");
     let mut payload = head.into_bytes();
@@ -571,6 +579,9 @@ fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, 
         body: body.to_owned(),
     })
 }
+fn request(url: &str, method: &str, body: Option<&str>) -> Result<HttpResponse, String> {
+    request_with_key(url, method, body, None)
+}
 
 #[async_trait]
 impl HttpClient for SystemHttpClient {
@@ -580,6 +591,24 @@ impl HttpClient for SystemHttpClient {
 
     async fn post_json(&self, url: &str, body: &str) -> Result<HttpResponse, String> {
         request(url, "POST", Some(body))
+    }
+    async fn delete(&self, url: &str) -> Result<HttpResponse, String> {
+        request(url, "DELETE", None)
+    }
+    async fn post_json_with_idempotency(
+        &self,
+        url: &str,
+        body: &str,
+        key: Option<&str>,
+    ) -> Result<HttpResponse, String> {
+        request_with_key(url, "POST", Some(body), key)
+    }
+    async fn delete_with_idempotency(
+        &self,
+        url: &str,
+        key: Option<&str>,
+    ) -> Result<HttpResponse, String> {
+        request_with_key(url, "DELETE", None, key)
     }
 }
 

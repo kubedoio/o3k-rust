@@ -359,6 +359,60 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn create_or_replay_canonical_resource_operation(
+        &self,
+        resource: &crate::ResourceRecord,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+        expected_placement_allocation_id: Option<&str>,
+    ) -> Result<crate::CanonicalAcceptanceOutcome, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .create_or_replay_canonical_resource_operation(
+                        resource,
+                        operation,
+                        canonical,
+                        request,
+                        expected_placement_allocation_id,
+                    )
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_or_replay_canonical_resource_operation(
+                        resource,
+                        operation,
+                        canonical,
+                        request,
+                        expected_placement_allocation_id,
+                    )
+                    .await
+            }
+        }
+    }
+
+    async fn create_or_replay_canonical_lifecycle_operation(
+        &self,
+        operation: &crate::OperationRecord,
+        canonical: &crate::CanonicalOperationRecord,
+        request: &crate::IdempotencyReservationRequest,
+    ) -> Result<crate::CanonicalAcceptanceOutcome, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_or_replay_canonical_lifecycle_operation(operation, canonical, request)
+                    .await
+            }
+        }
+    }
+
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
         match self {
             Self::Sqlite(s) => s.get_operation(id).await,

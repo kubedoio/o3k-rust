@@ -394,6 +394,15 @@ pub fn router_with_state(state: AppState) -> Router {
                 "/o3k/v1/operations/{id}",
                 get(o3k_native_api::operation::show_operation),
             );
+        router = router
+            .route(
+                "/o3k/v1/{namespace}/{collection}",
+                get(o3k_native_api::resource::list).post(o3k_native_api::resource::create),
+            )
+            .route(
+                "/o3k/v1/{namespace}/{collection}/{id}",
+                get(o3k_native_api::resource::show).delete(o3k_native_api::resource::delete),
+            );
     }
     router
         .layer(axum::middleware::from_fn(microversion_middleware))

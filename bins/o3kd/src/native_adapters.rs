@@ -15,6 +15,10 @@ use o3k_native_api::{
     compute::ServerItem,
     error::{NativeReadError, ProblemDetails},
     network::AddressRealmItem,
+    resource::{
+        CreateRequest, MutationResult, ResourceApplication, ResourceApplicationError,
+        ResourceDescriptor,
+    },
     volume::VolumeItem,
 };
 use o3k_store::{DurableStore, NetworkRepository, storage::StorageRepository};
@@ -243,6 +247,7 @@ mod operation_visibility_tests {
             None,
             None,
         )
+        .expect("test manifest registry is valid")
         .with_operation_reader(reader);
         let app = o3k_api::router_with_state(o3k_api::AppState::new().with_native_api(native));
 
@@ -391,6 +396,254 @@ impl TokenIssuer for TokenIssuerAdapter {
 
 pub struct ServerReaderAdapter {
     pub service: Arc<o3k_compute::ComputeService>,
+}
+
+/// Composition-root application adapter for generic native reads. It delegates
+/// only to canonical native application/read ports; it never reaches a
+/// provider or controller directly. Mutations remain unsupported until a
+/// canonical mutation service is wired for the resource.
+pub struct GenericResourceApplication {
+    pub compute: Arc<o3k_compute::ComputeService>,
+    pub store: Arc<o3k_store::unified::O3kStore>,
+    pub server: Arc<dyn o3k_native_api::compute::ServerReader>,
+    pub volume: Arc<dyn o3k_native_api::volume::VolumeReader>,
+    pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
+}
+
+fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
+    match error {
+        o3k_compute::ComputeError::Unauthorized => ResourceApplicationError::Forbidden,
+        o3k_compute::ComputeError::NotFound => ResourceApplicationError::NotFound,
+        o3k_compute::ComputeError::InvalidRequest => ResourceApplicationError::Validation,
+        o3k_compute::ComputeError::Conflict => ResourceApplicationError::Conflict,
+        _ => ResourceApplicationError::Internal,
+    }
+}
+
+fn generic_read_error(error: o3k_native_api::error::NativeReadError) -> ResourceApplicationError {
+    match error {
+        o3k_native_api::error::NativeReadError::NotFound => ResourceApplicationError::NotFound,
+        o3k_native_api::error::NativeReadError::Forbidden => ResourceApplicationError::Forbidden,
+        o3k_native_api::error::NativeReadError::Internal => ResourceApplicationError::Internal,
+    }
+}
+
+fn server_json(item: ServerItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"compute:server","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"name":item.name,"flavor_id":item.flavor_id,"image_id":item.image_id},"status":{"state":item.state}})
+}
+
+fn volume_json(item: VolumeItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"volume:volume","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"size_bytes":item.size_bytes,"volume_type":item.volume_type},"status":{"state":item.state}})
+}
+
+fn realm_json(item: AddressRealmItem) -> serde_json::Value {
+    serde_json::json!({"api_version":"o3k.io/v1","kind":"network:address_realm","metadata":{"id":item.id,"owner_scope":item.project_id,"generation":item.generation,"created_at":item.created_at},"spec":{"prefix":item.prefix,"overlapping_prefixes":item.overlapping_prefixes},"status":{"state":item.state}})
+}
+
+#[async_trait::async_trait]
+impl ResourceApplication for GenericResourceApplication {
+    async fn list(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+    ) -> Result<Vec<serde_json::Value>, ResourceApplicationError> {
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .list_servers(auth)
+                .await
+                .map(|items| items.into_iter().map(server_json).collect())
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .list_address_realms(auth)
+                .await
+                .map(|items| items.into_iter().map(realm_json).collect())
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .list_volumes(auth)
+                .await
+                .map(|items| items.into_iter().map(volume_json).collect())
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn show(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+    ) -> Result<serde_json::Value, ResourceApplicationError> {
+        let id = id
+            .parse::<Uuid>()
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        match descriptor.resource_type.to_string().as_str() {
+            "compute:server" => self
+                .server
+                .show_server(auth, id)
+                .await
+                .map(server_json)
+                .map_err(generic_read_error),
+            "network:address_realm" => self
+                .network
+                .show_address_realm(auth, id)
+                .await
+                .map(realm_json)
+                .map_err(generic_read_error),
+            "volume:volume" => self
+                .volume
+                .show_volume(auth, id)
+                .await
+                .map(volume_json)
+                .map_err(generic_read_error),
+            _ => Err(ResourceApplicationError::NotFound),
+        }
+    }
+
+    async fn create(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        request: CreateRequest,
+        idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ComputeSpec {
+            name: String,
+            image_id: String,
+            flavor_id: Uuid,
+            network_ids: Vec<String>,
+            #[serde(default)]
+            key_name: Option<String>,
+        }
+        let semantic_request = serde_json::json!({"spec": request.spec});
+        let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
+            .map_err(|_| ResourceApplicationError::Validation)?;
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Create)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key.clone(),
+            semantic_request,
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .create_server_for_auth_canonical(
+                auth,
+                o3k_compute::ServerCreateInput {
+                    user_id: auth.principal().id().to_string(),
+                    project_id: auth.effective_scope().id().as_str().to_owned(),
+                    name: spec.name,
+                    image_id: spec.image_id,
+                    flavor_id: spec.flavor_id,
+                    network_ids: spec.network_ids,
+                    key_name: spec.key_name,
+                    config_drive: None,
+                    idempotency_key: key,
+                },
+                context,
+            )
+            .await
+            .map_err(compute_error)?;
+        let server = receipt.resource;
+        let resource = self
+            .store
+            .get_resource(server.id.as_uuid())
+            .await
+            .map_err(|_| ResourceApplicationError::Internal)?;
+        Ok(MutationResult {
+            operation_id: receipt.operation_id.to_string(),
+            resource_id: Some(server.id.as_uuid().to_string()),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
+            resource: Some(server_json(ServerItem {
+                id: server.id.as_uuid().to_string(),
+                project_id: server.project_id,
+                name: server.name,
+                flavor_id: server.flavor_id.to_string(),
+                image_id: server.image_id,
+                state: format!("{:?}", server.state),
+                generation: resource.generation,
+                created_at: None,
+            })),
+        })
+    }
+
+    async fn delete(
+        &self,
+        descriptor: &ResourceDescriptor,
+        auth: &o3k_kernel::AuthContext,
+        id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<MutationResult, ResourceApplicationError> {
+        if descriptor.resource_type.to_string() != "compute:server" {
+            return Err(ResourceApplicationError::UnsupportedOperation);
+        }
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
+        let resource_id = id
+            .parse::<Uuid>()
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        let existing = self
+            .store
+            .get_resource(resource_id)
+            .await
+            .map_err(|_| ResourceApplicationError::NotFound)?;
+        if existing.project_id != auth.effective_scope().id().as_str() {
+            return Err(ResourceApplicationError::NotFound);
+        }
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key,
+            serde_json::json!({"resource_id": id}),
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .delete_server_for_auth_canonical(
+                auth,
+                o3k_domain::ServerId::from_uuid(resource_id),
+                context,
+            )
+            .await
+            .map_err(compute_error)?;
+        Ok(MutationResult {
+            operation_id: receipt.operation_id.to_string(),
+            resource_id: Some(id.to_owned()),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
+            resource: None,
+        })
+    }
 }
 
 #[async_trait::async_trait]

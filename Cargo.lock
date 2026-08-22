@@ -1794,7 +1794,9 @@ name = "o3k-reconciler"
 version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
+ "chrono",
  "o3k-domain",
+ "o3k-kernel",
  "o3k-provider",
  "o3k-storage",
  "o3k-store",
@@ -1858,6 +1860,7 @@ version = "0.4.0-alpha.1"
 dependencies = [
  "async-trait",
  "axum",
+ "chrono",
  "o3k-api",
  "o3k-cellhv",
  "o3k-cinder",
@@ -1876,8 +1879,10 @@ dependencies = [
  "o3k-placement",
  "o3k-provider",
  "o3k-provider-contract",
+ "o3k-reconciler",
  "o3k-scheduler",
  "o3k-store",
+ "serde",
  "serde_json",
  "tokio",
  "tower",
