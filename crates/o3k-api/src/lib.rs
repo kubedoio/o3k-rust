@@ -354,16 +354,46 @@ pub fn router_with_state(state: AppState) -> Router {
         router = router
             .route("/o3k/v1", get(o3k_native_api::api_root))
             .route("/o3k/v1/services", get(o3k_native_api::discover_services))
-            .route("/o3k/v1/resource-types", get(o3k_native_api::discover_resource_types))
-            .route("/o3k/v1/identity/tokens", post(o3k_native_api::identity::issue_token))
-            .route("/o3k/v1/identity/me", get(o3k_native_api::identity::current_context))
-            .route("/o3k/v1/compute/servers", get(o3k_native_api::compute::list_servers))
-            .route("/o3k/v1/compute/servers/{id}", get(o3k_native_api::compute::show_server))
-            .route("/o3k/v1/volume/volumes", get(o3k_native_api::volume::list_volumes))
-            .route("/o3k/v1/volume/volumes/{id}", get(o3k_native_api::volume::show_volume))
-            .route("/o3k/v1/network/address-realms", get(o3k_native_api::network::list_address_realms))
-            .route("/o3k/v1/network/address-realms/{id}", get(o3k_native_api::network::show_address_realm))
-            .route("/o3k/v1/operations/{id}", get(o3k_native_api::operation::show_operation));
+            .route(
+                "/o3k/v1/resource-types",
+                get(o3k_native_api::discover_resource_types),
+            )
+            .route(
+                "/o3k/v1/identity/tokens",
+                post(o3k_native_api::identity::issue_token),
+            )
+            .route(
+                "/o3k/v1/identity/me",
+                get(o3k_native_api::identity::current_context),
+            )
+            .route(
+                "/o3k/v1/compute/servers",
+                get(o3k_native_api::compute::list_servers),
+            )
+            .route(
+                "/o3k/v1/compute/servers/{id}",
+                get(o3k_native_api::compute::show_server),
+            )
+            .route(
+                "/o3k/v1/volume/volumes",
+                get(o3k_native_api::volume::list_volumes),
+            )
+            .route(
+                "/o3k/v1/volume/volumes/{id}",
+                get(o3k_native_api::volume::show_volume),
+            )
+            .route(
+                "/o3k/v1/network/address-realms",
+                get(o3k_native_api::network::list_address_realms),
+            )
+            .route(
+                "/o3k/v1/network/address-realms/{id}",
+                get(o3k_native_api::network::show_address_realm),
+            )
+            .route(
+                "/o3k/v1/operations/{id}",
+                get(o3k_native_api::operation::show_operation),
+            );
     }
     router
         .layer(axum::middleware::from_fn(microversion_middleware))
