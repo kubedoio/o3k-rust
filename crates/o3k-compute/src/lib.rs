@@ -1417,8 +1417,10 @@ impl ComputeService {
         input: ServerCreateInput,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<Server>, ComputeError> {
-        let action =
-            ActionId::new("compute", "CreateServer").map_err(|_| ComputeError::InvalidRequest)?;
+        let action = context.action.clone();
+        if action.namespace() != "compute" {
+            return Err(ComputeError::InvalidRequest);
+        }
         let target = ResourceTarget::collection(
             ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
             Some(auth.effective_scope().id().clone()),
@@ -3213,8 +3215,10 @@ impl ComputeService {
         id: ServerId,
         context: o3k_reconciler::CanonicalMutationContext,
     ) -> Result<MutationReceipt<ServerId>, ComputeError> {
-        let action =
-            ActionId::new("compute", "DeleteServer").map_err(|_| ComputeError::InvalidRequest)?;
+        let action = context.action.clone();
+        if action.namespace() != "compute" {
+            return Err(ComputeError::InvalidRequest);
+        }
         let target = ResourceTarget::instance(
             ResourceType::new("compute", "server").map_err(|_| ComputeError::InvalidRequest)?,
             ResourceId::new(id.to_string()).map_err(|_| ComputeError::InvalidRequest)?,
