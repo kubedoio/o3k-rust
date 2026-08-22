@@ -95,7 +95,8 @@ impl PostgresStore {
     pub async fn clean_tables_for_testing(&self) -> Result<(), StoreError> {
         sqlx::query(
             "TRUNCATE TABLE
-                resources, operations, provider_refs, observation_watermarks,
+                resources, operations, canonical_operation_metadata, idempotency_reservations,
+                provider_refs, observation_watermarks,
                 keypairs, server_keypairs, agent_commands, artifact_transfers,
                 image_overlay_ownership, volume_attachments,
                 keystone_domains, keystone_projects, keystone_users, keystone_roles,
