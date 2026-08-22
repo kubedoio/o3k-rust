@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use o3k_store::{
-    DurableStore, IdempotencyReservation, IdempotencyReservationRequest, OperationRecord,
-    OperationState, PostgresStore, ResourceRecord,
+    CanonicalOperationRecord, DurableStore, IdempotencyReservation, IdempotencyReservationRequest,
+    OperationRecord, OperationState, PostgresStore, ResourceRecord,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -55,6 +55,22 @@ async fn postgres_p12_4_persistence_idempotency_and_cas() {
         .expect("resource");
     let operation_id = Uuid::now_v7();
     let op = operation(operation_id, resource_id);
+    let canonical = CanonicalOperationRecord {
+        id: operation_id,
+        service: "compute".into(),
+        action: "compute:CreateServer".into(),
+        actor: "user-a".into(),
+        owner_scope: "project-a".into(),
+        resource_type: "compute:server".into(),
+        resource_id: Some(resource_id.to_string()),
+        state: OperationState::Pending,
+        attempt: 0,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        started_at: None,
+        finished_at: None,
+        error: None,
+        request_id: Some("request-a".into()),
+    };
     let request = IdempotencyReservationRequest::from_semantics(
         "project-a",
         "compute:CreateServer",
@@ -72,6 +88,10 @@ async fn postgres_p12_4_persistence_idempotency_and_cas() {
             .expect("create"),
         IdempotencyReservation::Created(operation_id)
     );
+    store
+        .insert_canonical_operation(&canonical)
+        .await
+        .expect("canonical metadata");
     drop(store);
 
     let reopened = PostgresStore::connect(&database_url)
@@ -85,6 +105,14 @@ async fn postgres_p12_4_persistence_idempotency_and_cas() {
             .id,
         operation_id
     );
+    let loaded = reopened
+        .get_canonical_operation(operation_id)
+        .await
+        .expect("canonical reload");
+    let kernel = o3k_kernel::Operation::try_from(loaded).expect("kernel conversion");
+    assert_eq!(kernel.id, operation_id);
+    assert_eq!(kernel.owner_scope.id().as_str(), "project-a");
+    assert_eq!(kernel.action.as_str(), "compute:CreateServer");
     let replay = reopened
         .create_or_replay_idempotent_operation(&op, &request)
         .await
