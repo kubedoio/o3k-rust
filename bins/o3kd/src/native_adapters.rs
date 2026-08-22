@@ -1059,3 +1059,517 @@ impl o3k_native_api::network::NetworkReader for NetworkReaderAdapter {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod native_compute_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use o3k_kernel::{
+        ActionId, AuthContext, OwnershipScope, Principal, PrincipalId, ScopeId, UserPrincipal,
+    };
+    use o3k_native_api::auth::{NativeTokenRequestV1, TokenIssuer};
+    use o3k_provider::{FailureInjection, FakeComputeProvider};
+    use std::sync::Arc;
+    use tower::util::ServiceExt;
+
+    struct TestIssuer;
+
+    fn context(project: &str) -> AuthContext {
+        AuthContext::new(
+            Principal::User(UserPrincipal::new(
+                PrincipalId::new_unchecked(format!("user-{project}")),
+                format!("user-{project}"),
+                None,
+            )),
+            OwnershipScope::project(ScopeId::new_unchecked(project), None, None),
+            vec!["member".into()],
+            1,
+            u64::MAX,
+            "audit",
+            "request",
+            None,
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl TokenIssuer for TestIssuer {
+        async fn issue_native(
+            &self,
+            _request: &NativeTokenRequestV1,
+        ) -> Result<(String, serde_json::Value), ProblemDetails> {
+            Err(ProblemDetails::bad_request(
+                "test issuer does not issue tokens",
+            ))
+        }
+
+        async fn auth_context(&self, token: &str) -> Result<AuthContext, ProblemDetails> {
+            token
+                .strip_prefix("project-")
+                .map(|project| context(&format!("project-{project}")))
+                .ok_or_else(ProblemDetails::unauthorized)
+        }
+    }
+
+    fn compute_manifest_registry() -> o3k_kernel::ManifestRegistry {
+        use std::collections::HashMap;
+        let mut reg = o3k_kernel::ManifestRegistry::new();
+        let mut ops = HashMap::new();
+        ops.insert(
+            "create".to_owned(),
+            ActionId::new_unchecked("compute", "CreateServer"),
+        );
+        ops.insert(
+            "delete".to_owned(),
+            ActionId::new_unchecked("compute", "DeleteServer"),
+        );
+        ops.insert(
+            "list".to_owned(),
+            ActionId::new_unchecked("compute", "ListServers"),
+        );
+        ops.insert(
+            "show".to_owned(),
+            ActionId::new_unchecked("compute", "ShowServer"),
+        );
+        let m = o3k_kernel::ServiceManifest {
+            manifest_version: 1,
+            service_id: "compute".to_owned(),
+            namespace: "compute".to_owned(),
+            service_version: "0.4.0".to_owned(),
+            ownership: o3k_kernel::ServiceOwnership::O3kImplemented,
+            resource_types: vec![o3k_kernel::RegisteredResourceType {
+                resource_type: o3k_kernel::ResourceType::new_unchecked("compute", "server"),
+                schema_version: "v1".to_owned(),
+                collection: Some("servers".to_owned()),
+                scope: o3k_kernel::ResourceScope::Tenant,
+                operations: ops,
+            }],
+            actions: vec![
+                "compute:ListServers".to_owned(),
+                "compute:CreateServer".to_owned(),
+                "compute:DeleteServer".to_owned(),
+                "compute:ShowServer".to_owned(),
+            ],
+            capabilities: vec![],
+            dependencies: vec![],
+            quota_dimensions: vec![],
+            regions: vec![],
+            availability_domains: vec![],
+            controller: Some(o3k_kernel::ManifestController {
+                mode: "in-process".to_owned(),
+                protocol: "in-process".to_owned(),
+                protocol_version: "1.0".to_owned(),
+                service_principal: None,
+            }),
+            health: None,
+        };
+        let _ = reg.register(m);
+        let _ = reg.register_controller(
+            "compute",
+            o3k_kernel::controller::ControllerSession {
+                controller_id: "test-controller".to_owned(),
+                session_generation: 1,
+                protocol_version: o3k_kernel::controller::ProtocolVersion::new(1, 0),
+                started_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+        );
+        let _ = reg.activate_controller("compute");
+        reg
+    }
+
+    async fn setup() -> (
+        axum::Router,
+        Arc<o3k_store::unified::O3kStore>,
+        Arc<FakeComputeProvider>,
+    ) {
+        use axum::Router;
+        use axum::routing::get;
+        use o3k_native_api::{operation, resource};
+
+        let store = Arc::new(
+            o3k_store::unified::O3kStore::connect_sqlite_memory()
+                .await
+                .expect("store"),
+        );
+        let provider = Arc::new(FakeComputeProvider::new());
+        let compute = Arc::new(o3k_compute::ComputeService::new(
+            store.clone(),
+            provider.clone(),
+        ));
+
+        let app = GenericResourceApplication {
+            compute: compute.clone(),
+            store: store.clone(),
+            server: Arc::new(ServerReaderAdapter {
+                service: compute.clone(),
+            }),
+            volume: Arc::new(VolumeReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
+            }),
+            network: Arc::new(NetworkReaderAdapter {
+                store: store.clone(),
+                authorizer: Arc::new(o3k_kernel::StaticAuthorizer::empty()),
+            }),
+        };
+
+        let native = o3k_native_api::NativeApiState::new(
+            Some(compute_manifest_registry()),
+            o3k_native_api::pagination::CursorConfig::default(),
+            Some(Arc::new(TestIssuer)),
+            Some(Arc::new(ServerReaderAdapter {
+                service: compute.clone(),
+            })),
+            None,
+            None,
+        )
+        .expect("native state")
+        .with_operation_reader(Arc::new(OperationReaderAdapter {
+            store: store.clone(),
+        }))
+        .with_resource_application(Arc::new(app))
+        .with_authorizer(Arc::new(o3k_kernel::StaticAuthorizer::standard()));
+
+        // Build a minimal router that only has generic resource routes and
+        // the operation route — we deliberately omit the concrete
+        // /compute/servers GET-only route so that POST to the generic
+        // {namespace}/{collection} route resolves correctly.
+        let router = Router::new()
+            .route(
+                "/{namespace}/{collection}",
+                get(resource::list).post(resource::create),
+            )
+            .route(
+                "/{namespace}/{collection}/{id}",
+                get(resource::show).delete(resource::delete),
+            )
+            .route("/operations/{id}", get(operation::show_operation))
+            .with_state(native);
+
+        (router, store, provider)
+    }
+
+    fn authed(path: &str, project: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .header("authorization", format!("Bearer project-{project}"))
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    fn authed_post(
+        path: &str,
+        project: &str,
+        idempotency_key: &str,
+        body: serde_json::Value,
+    ) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("content-type", "application/json")
+            .header("idempotency-key", idempotency_key)
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .expect("request")
+    }
+
+    fn authed_delete(path: &str, project: &str, idempotency_key: &str) -> Request<Body> {
+        Request::builder()
+            .uri(path)
+            .method("DELETE")
+            .header("authorization", format!("Bearer project-{project}"))
+            .header("idempotency-key", idempotency_key)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    /// Helper: send a request through a cloned router and return (status, parsed JSON body).
+    /// Panics if the body is not valid JSON.
+    async fn exec(router: &axum::Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {
+        let response = router.clone().oneshot(req).await.expect("request");
+        let status = response.status();
+        let body_bytes = &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(body_bytes).expect("json");
+        (status, json)
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn native_compute_create_and_read_operation() {
+        let (router, _, _) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // POST create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(json["complete"].as_bool().unwrap());
+        let operation_id = json["operation_id"].as_str().unwrap().to_owned();
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // GET /operations/{id}
+        let (status, op) = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(op["id"], operation_id);
+        assert_eq!(op["action"]["namespace"], "compute");
+        assert_eq!(op["action"]["action"], "CreateServer");
+        assert_eq!(op["resource_type"]["namespace"], "compute");
+        assert_eq!(op["resource_type"]["name"], "server");
+        assert_eq!(op["resource_id"], resource_id);
+        assert_eq!(op["owner_scope"]["id"], "project-a");
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_replay_equivalent() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // First create
+        let (status, first) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(first["complete"].as_bool().unwrap());
+
+        // Replay with same key
+        let (status, replay) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(replay["operation_id"], first["operation_id"]);
+        assert_eq!(replay["resource_id"], first["resource_id"]);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_changed_body_conflict() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body_a = serde_json::json!({
+            "spec": {
+                "name": "test-a",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+        let body_b = serde_json::json!({
+            "spec": {
+                "name": "test-b",
+                "image_id": "image-b",
+                "flavor_id": "00000000-0000-0000-0000-000000000002",
+                "network_ids": ["net-b"]
+            }
+        });
+
+        // First create
+        let (status, _) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body_a),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Replay with DIFFERENT body → 409 Conflict
+        let (status, _) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body_b),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(provider.instance_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn native_compute_delete_returns_operation() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create first
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Set provider timeout so delete becomes async (202)
+        provider
+            .set_failure(FailureInjection::Timeout)
+            .expect("set failure");
+
+        // DELETE → 202 Accepted
+        let (status, delete_json) = exec(
+            router,
+            authed_delete(&format!("/compute/servers/{resource_id}"), "a", "delete-A"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let operation_id = delete_json["operation_id"].as_str().unwrap().to_owned();
+        assert!(!delete_json["complete"].as_bool().unwrap());
+
+        // GET /operations/{id} shows the delete
+        let (status, op) = exec(router, authed(&format!("/operations/{operation_id}"), "a")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(op["id"], operation_id);
+        assert_eq!(op["action"]["namespace"], "compute");
+        assert_eq!(op["action"]["action"], "DeleteServer");
+        assert_eq!(op["resource_id"], resource_id);
+        assert_eq!(op["owner_scope"]["id"], "project-a");
+
+        // Replay delete with same idempotency key — same operation
+        provider
+            .set_failure(FailureInjection::Timeout)
+            .expect("set failure");
+        let (status, replay) = exec(
+            router,
+            authed_delete(&format!("/compute/servers/{resource_id}"), "a", "delete-A"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(replay["operation_id"], operation_id);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_after_delete_same_key_fails() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Clear failure for synchronous delete
+        provider
+            .set_failure(FailureInjection::None)
+            .expect("clear failure");
+
+        // Delete (synchronous → 204 No Content)
+        let response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "delete-B",
+            ))
+            .await
+            .expect("delete");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Create with SAME key — the idempotency reservation still exists so
+        // the replay returns the original (now-deleted) resource, not a new one.
+        // This is the "fail closed" behavior: the system does not create a new
+        // resource for a consumed idempotency key, even after the original
+        // resource has been deleted. The replay returns the original resource_id.
+        let (status, _replay) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body),
+        )
+        .await;
+        // After deletion, the idempotency key is still bound to the original
+        // create operation. Replaying returns the original resource (404 not
+        // found is expected for a deleted resource — the system rejects the
+        // request rather than silently creating a new resource with the same
+        // key).
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn native_compute_create_after_delete_new_key_succeeds() {
+        let (router, _, provider) = setup().await;
+        let router = &router;
+        let body = serde_json::json!({
+            "spec": {
+                "name": "test",
+                "image_id": "image-a",
+                "flavor_id": "00000000-0000-0000-0000-000000000001",
+                "network_ids": ["net-a"]
+            }
+        });
+
+        // Create
+        let (status, json) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-A", body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let resource_id = json["resource_id"].as_str().unwrap().to_owned();
+
+        // Clear failure for sync delete
+        provider
+            .set_failure(FailureInjection::None)
+            .expect("clear failure");
+
+        // Delete
+        let response = router
+            .clone()
+            .oneshot(authed_delete(
+                &format!("/compute/servers/{resource_id}"),
+                "a",
+                "delete-A",
+            ))
+            .await
+            .expect("delete");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Create with NEW key — starts a new lifecycle
+        let (status, recreate) = exec(
+            router,
+            authed_post("/compute/servers", "a", "create-B", body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_ne!(recreate["resource_id"].as_str().unwrap(), resource_id);
+        assert!(recreate["complete"].as_bool().unwrap());
+    }
+}

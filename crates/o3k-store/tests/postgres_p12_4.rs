@@ -582,3 +582,321 @@ async fn postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas() {
         2
     );
 }
+
+type ResourceProposal = (
+    ResourceRecord,
+    OperationRecord,
+    CanonicalOperationRecord,
+    IdempotencyReservationRequest,
+);
+async fn race_resource_create(
+    store: &PostgresStore,
+    a: ResourceProposal,
+    b: ResourceProposal,
+) -> (CanonicalAcceptanceOutcome, CanonicalAcceptanceOutcome) {
+    let barrier = Arc::new(Barrier::new(3));
+    let sa = store.clone();
+    let ba = barrier.clone();
+    let ta = tokio::spawn(async move {
+        ba.wait().await;
+        sa.create_or_replay_canonical_resource_operation(&a.0, &a.1, &a.2, &a.3, None)
+            .await
+            .expect("race caller a")
+    });
+    let sb = store.clone();
+    let bb = barrier.clone();
+    let tb = tokio::spawn(async move {
+        bb.wait().await;
+        sb.create_or_replay_canonical_resource_operation(&b.0, &b.1, &b.2, &b.3, None)
+            .await
+            .expect("race caller b")
+    });
+    barrier.wait().await;
+    (ta.await.unwrap(), tb.await.unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_resource_create_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let res = resource(rid, "project-create-race");
+
+    let (outcome_a, outcome_b) = race_resource_create(
+        &store,
+        (
+            res.clone(),
+            operation(oid_a, rid),
+            canonical(oid_a, rid, "project-create-race", "user-a"),
+            request("project-create-race", "create-race-key", "same", oid_a),
+        ),
+        (
+            res.clone(),
+            operation(oid_b, rid),
+            canonical(oid_b, rid, "project-create-race", "user-b"),
+            request("project-create-race", "create-race-key", "same", oid_b),
+        ),
+    )
+    .await;
+
+    let created: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::Created { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::ExistingEquivalent { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one caller must see Created");
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the other caller must see ExistingEquivalent"
+    );
+
+    let winner_id = match (&outcome_a, &outcome_b) {
+        (
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            },
+            _,
+        )
+        | (
+            _,
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            },
+        ) => (*operation_id, *resource_id),
+        _ => unreachable!("one outcome must be Created"),
+    };
+    let loser_oid = if winner_id.0 == oid_a { oid_b } else { oid_a };
+    for o in [&outcome_a, &outcome_b] {
+        match o {
+            CanonicalAcceptanceOutcome::Created {
+                operation_id,
+                resource_id,
+            }
+            | CanonicalAcceptanceOutcome::ExistingEquivalent {
+                operation_id,
+                resource_id,
+            } => {
+                assert_eq!(*resource_id, rid);
+                assert_eq!(*operation_id, winner_id.0);
+            }
+            _ => {}
+        }
+    }
+    assert!(matches!(
+        store.get_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert!(matches!(
+        store.get_canonical_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert_eq!(counts(&store).await, (1, 1, 1));
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_resource_create_conflict_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let res = resource(rid, "project-conflict");
+
+    let (outcome_a, outcome_b) = race_resource_create(
+        &store,
+        (
+            res.clone(),
+            operation(oid_a, rid),
+            canonical(oid_a, rid, "project-conflict", "user-a"),
+            request("project-conflict", "conflict-key", "first", oid_a),
+        ),
+        (
+            res.clone(),
+            operation(oid_b, rid),
+            canonical(oid_b, rid, "project-conflict", "user-b"),
+            request("project-conflict", "conflict-key", "second", oid_b),
+        ),
+    )
+    .await;
+
+    assert!(
+        matches!(
+            (&outcome_a, &outcome_b),
+            (
+                CanonicalAcceptanceOutcome::Created { .. },
+                CanonicalAcceptanceOutcome::Conflict
+            ) | (
+                CanonicalAcceptanceOutcome::Conflict,
+                CanonicalAcceptanceOutcome::Created { .. }
+            )
+        ),
+        "one must be Created, the other Conflict: {outcome_a:?}, {outcome_b:?}"
+    );
+
+    let conflict_winner_oid = match (&outcome_a, &outcome_b) {
+        (CanonicalAcceptanceOutcome::Created { operation_id, .. }, _) => *operation_id,
+        (_, CanonicalAcceptanceOutcome::Created { operation_id, .. }) => *operation_id,
+        _ => unreachable!("one outcome must be Created"),
+    };
+    let loser_oid = if conflict_winner_oid == oid_a {
+        oid_b
+    } else {
+        oid_a
+    };
+    assert!(matches!(
+        store.get_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert!(matches!(
+        store.get_canonical_operation(loser_oid).await,
+        Err(StoreError::OperationNotFound)
+    ));
+    assert_eq!(counts(&store).await, (1, 1, 1));
+}
+
+type LifecycleProposal = (
+    OperationRecord,
+    CanonicalOperationRecord,
+    IdempotencyReservationRequest,
+);
+async fn race_lifecycle_delete(
+    store: &PostgresStore,
+    a: LifecycleProposal,
+    b: LifecycleProposal,
+) -> (CanonicalAcceptanceOutcome, CanonicalAcceptanceOutcome) {
+    let barrier = Arc::new(Barrier::new(3));
+    let sa = store.clone();
+    let ba = barrier.clone();
+    let ta = tokio::spawn(async move {
+        ba.wait().await;
+        sa.create_or_replay_canonical_lifecycle_operation(&a.0, &a.1, &a.2)
+            .await
+            .expect("race lifecycle caller a")
+    });
+    let sb = store.clone();
+    let bb = barrier.clone();
+    let tb = tokio::spawn(async move {
+        bb.wait().await;
+        sb.create_or_replay_canonical_lifecycle_operation(&b.0, &b.1, &b.2)
+            .await
+            .expect("race lifecycle caller b")
+    });
+    barrier.wait().await;
+    (ta.await.unwrap(), tb.await.unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires the mandatory PostgreSQL P12.4 CI job"]
+async fn postgres_p12_4_canonical_lifecycle_delete_race() {
+    let _database_guard = TEST_DATABASE_LOCK.lock().await;
+    let store = PostgresStore::connect(&url()).await.expect("connect");
+    store.clean_tables_for_testing().await.expect("clean");
+
+    let rid = Uuid::now_v7();
+    store
+        .insert_resource(&resource(rid, "project-delete-race"))
+        .await
+        .expect("pre-insert resource");
+
+    let oid_a = Uuid::now_v7();
+    let oid_b = Uuid::now_v7();
+    let op_a = OperationRecord {
+        id: oid_a,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+    let op_b = OperationRecord {
+        id: oid_b,
+        resource_id: rid,
+        kind: "lifecycle:delete".into(),
+        state: OperationState::Pending,
+        provider_operation_id: None,
+        error_category: None,
+        error_message: None,
+    };
+
+    let mut canonical_a = canonical(oid_a, rid, "project-delete-race", "user-a");
+    canonical_a.action = "compute:DeleteServer".into();
+    let mut canonical_b = canonical(oid_b, rid, "project-delete-race", "user-b");
+    canonical_b.action = "compute:DeleteServer".into();
+
+    let delete_request = IdempotencyReservationRequest::from_semantics(
+        "project-delete-race",
+        "compute:DeleteServer",
+        "delete-race-key",
+        "compute:server",
+        Some(&rid.to_string()),
+        &json!({}),
+        oid_a,
+    )
+    .expect("delete request");
+
+    let (outcome_a, outcome_b) = race_lifecycle_delete(
+        &store,
+        (op_a, canonical_a, delete_request.clone()),
+        (op_b, canonical_b, delete_request),
+    )
+    .await;
+
+    let created: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::Created { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    let replayed: Vec<_> = [&outcome_a, &outcome_b]
+        .into_iter()
+        .filter_map(|o| match o {
+            CanonicalAcceptanceOutcome::ExistingEquivalent { .. } => Some(()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 1, "exactly one caller must see Created");
+    assert_eq!(
+        replayed.len(),
+        1,
+        "the other caller must see ExistingEquivalent"
+    );
+
+    let winner_oid = match (&outcome_a, &outcome_b) {
+        (CanonicalAcceptanceOutcome::Created { operation_id, .. }, _)
+        | (_, CanonicalAcceptanceOutcome::Created { operation_id, .. }) => *operation_id,
+        _ => unreachable!("one outcome must be Created"),
+    };
+    for o in [&outcome_a, &outcome_b] {
+        if let CanonicalAcceptanceOutcome::ExistingEquivalent { operation_id, .. }
+        | CanonicalAcceptanceOutcome::Created { operation_id, .. } = o
+        {
+            assert_eq!(
+                *operation_id, winner_oid,
+                "both must report the same operation_id"
+            );
+        }
+    }
+    assert_eq!(counts(&store).await, (1, 1, 1));
+}

@@ -9012,6 +9012,231 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_native_create_action_mismatch_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // CANONICAL INVARIANT: create_server_for_auth_canonical requires
+        // context.action == compute:CreateServer; a different action returns
+        // InvalidRequest.
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "action-test".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        // Context with DeleteServer action on a create call
+        let bad_action = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "DeleteServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"action-test","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let result = service
+            .create_server_for_auth_canonical(&auth, input, bad_action)
+            .await;
+        assert!(
+            matches!(result, Err(ComputeError::InvalidRequest)),
+            "action mismatch must be InvalidRequest, got {:?}",
+            result
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_native_delete_action_mismatch_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // CANONICAL INVARIANT: delete_server_for_auth_canonical requires
+        // context.action == compute:DeleteServer; a different action returns
+        // InvalidRequest.
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let provider = Arc::new(FakeComputeProvider::default());
+        let service = ComputeService::new(store.clone(), provider.clone());
+        let auth = test_compute_auth("project-a", "user-a", "member");
+        // First create a server so we have something to pass to delete
+        let input = ServerCreateInput {
+            user_id: "user-a".into(),
+            project_id: "project-a".into(),
+            name: "del-action".into(),
+            image_id: "image-a".into(),
+            flavor_id: Uuid::from_u128(1),
+            network_ids: vec!["network-a".into()],
+            key_name: None,
+            config_drive: None,
+            idempotency_key: "create-A".into(),
+        };
+        let create_ctx = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "create-A".into(),
+            serde_json::json!({"spec":{"name":"del-action","image_id":"image-a","flavor_id":Uuid::from_u128(1),"network_ids":["network-a"]}}),
+        )?;
+        let created = service
+            .create_server_for_auth_canonical(&auth, input, create_ctx)
+            .await?;
+        // Context with CreateServer action on a delete call
+        let bad_action = o3k_reconciler::CanonicalMutationContext::new(
+            ActionId::new("compute", "CreateServer")?,
+            "user-a".into(),
+            auth.effective_scope().clone(),
+            None,
+            "delete-A".into(),
+            serde_json::json!({"resource_id":created.resource.id.to_string()}),
+        )?;
+        let result = service
+            .delete_server_for_auth_canonical(&auth, created.resource.id, bad_action)
+            .await;
+        assert!(
+            matches!(result, Err(ComputeError::InvalidRequest)),
+            "action mismatch must be InvalidRequest, got {:?}",
+            result
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn canonical_operation_attempt_synchronization() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use o3k_store::DurableStore;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let resource_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        // Insert a resource first
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute:server".into(),
+                project_id: "project-a".into(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "active".into(),
+                observed_state: "active".into(),
+                provider_id: None,
+            })
+            .await?;
+        // Create canonical operation via the store
+        let operation = o3k_store::OperationRecord {
+            id: operation_id,
+            resource_id,
+            kind: "lifecycle:create".into(),
+            state: o3k_store::OperationState::Pending,
+            provider_operation_id: None,
+            error_category: None,
+            error_message: None,
+        };
+        let canonical = o3k_store::CanonicalOperationRecord {
+            id: operation_id,
+            service: "compute".into(),
+            action: "compute:CreateServer".into(),
+            actor: "user-a".into(),
+            owner_scope: "project-a".into(),
+            resource_type: "compute:server".into(),
+            resource_id: Some(resource_id.to_string()),
+            state: o3k_store::OperationState::Pending,
+            attempt: 0,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            request_id: Some("req".into()),
+        };
+        let request = o3k_store::IdempotencyReservationRequest::from_semantics(
+            "project-a",
+            "compute:CreateServer",
+            "attempt-sync-key",
+            "compute:server",
+            None,
+            &serde_json::json!({"name":"sync"}),
+            operation_id,
+        )?;
+        store
+            .create_or_replay_canonical_idempotent_operation(&operation, &canonical, &request)
+            .await?;
+
+        // Verify initial attempt = 0
+        let meta = store.get_canonical_operation(operation_id).await?;
+        assert_eq!(meta.attempt, 0, "initial canonical attempt must be 0");
+
+        // First increment
+        let retry = store.increment_operation_retry(operation_id).await?;
+        assert_eq!(retry, 1, "first retry count must be 1");
+        let meta = store.get_canonical_operation(operation_id).await?;
+        assert_eq!(
+            meta.attempt, 1,
+            "canonical attempt must be 1 after first increment"
+        );
+
+        // Second increment
+        let retry2 = store.increment_operation_retry(operation_id).await?;
+        assert_eq!(retry2, 2, "second retry count must be 2");
+        let meta2 = store.get_canonical_operation(operation_id).await?;
+        assert_eq!(
+            meta2.attempt, 2,
+            "canonical attempt must be 2 after second increment"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_operation_retry_no_canonical_metadata() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use o3k_store::DurableStore;
+        let store = Arc::new(o3k_store::testkit::open_memory().await?);
+        let resource_id = Uuid::now_v7();
+        let operation_id = Uuid::now_v7();
+        store
+            .insert_resource(&o3k_store::ResourceRecord {
+                id: resource_id,
+                kind: "compute_instance".into(),
+                project_id: "project-a".into(),
+                generation: 1,
+                observed_generation: 0,
+                desired_state: "active".into(),
+                observed_state: "active".into(),
+                provider_id: None,
+            })
+            .await?;
+        store
+            .insert_operation(&o3k_store::OperationRecord {
+                id: operation_id,
+                resource_id,
+                kind: "lifecycle:create".into(),
+                state: o3k_store::OperationState::Pending,
+                provider_operation_id: None,
+                error_category: None,
+                error_message: None,
+            })
+            .await?;
+        // Legacy operation — no canonical_operation_metadata exists
+
+        let retry = store.increment_operation_retry(operation_id).await?;
+        assert_eq!(retry, 1, "legacy retry must still work");
+
+        // No canonical metadata should exist
+        assert!(
+            matches!(
+                store.get_canonical_operation(operation_id).await,
+                Err(o3k_store::StoreError::OperationNotFound)
+            ),
+            "legacy operation must not have canonical metadata fabricated"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn compute_quota_enforcement_and_isolation() -> Result<(), Box<dyn std::error::Error>> {
         use o3k_store::QuotaRepository;
 
