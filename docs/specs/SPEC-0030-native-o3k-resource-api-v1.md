@@ -237,6 +237,15 @@ Rules:
 - one tenant's key cannot collide with or reveal another tenant's request;
 - deterministic internal derivation is allowed because idempotency identity is intentionally deterministic.
 
+For a native canonical mutation, acceptance commits the canonical resource
+intent (or validates the existing target for a lifecycle mutation), execution
+Operation, canonical Operation metadata, and idempotency reservation in one
+store transaction before external execution. The public Operation ID is the
+same identity driven by service reconciliation; it is not a wrapper attached
+to a pre-existing legacy journal row. Compatibility callers that do not claim
+native canonical Operation exposure may continue using their existing legacy
+journal acceptance path.
+
 The raw key MUST NOT be used directly as a provider resource name without bounded encoding/validation.
 
 ## 10. Optimistic concurrency

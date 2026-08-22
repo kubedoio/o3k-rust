@@ -410,10 +410,6 @@ pub struct GenericResourceApplication {
     pub network: Arc<dyn o3k_native_api::network::NetworkReader>,
 }
 
-fn mutation_now() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
 fn compute_error(error: o3k_compute::ComputeError) -> ResourceApplicationError {
     match error {
         o3k_compute::ComputeError::Unauthorized => ResourceApplicationError::Forbidden,
@@ -526,14 +522,29 @@ impl ResourceApplication for GenericResourceApplication {
             #[serde(default)]
             key_name: Option<String>,
         }
-        let spec: ComputeSpec = serde_json::from_value(request.spec)
+        let semantic_request = serde_json::json!({"spec": request.spec});
+        let spec: ComputeSpec = serde_json::from_value(semantic_request["spec"].clone())
             .map_err(|_| ResourceApplicationError::Validation)?;
         let key = idempotency_key
             .map(str::to_owned)
             .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
-        let server = self
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Create)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key.clone(),
+            semantic_request,
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
             .compute
-            .create_server_for_auth(
+            .create_server_for_auth_canonical(
                 auth,
                 o3k_compute::ServerCreateInput {
                     user_id: auth.principal().id().to_string(),
@@ -546,26 +557,23 @@ impl ResourceApplication for GenericResourceApplication {
                     config_drive: None,
                     idempotency_key: key,
                 },
+                context,
             )
             .await
             .map_err(compute_error)?;
+        let server = receipt.resource;
         let resource = self
             .store
             .get_resource(server.id.as_uuid())
             .await
             .map_err(|_| ResourceApplicationError::Internal)?;
-        let intent: o3k_provider::CreateInstanceRequest =
-            serde_json::from_str(&resource.desired_state)
-                .map_err(|_| ResourceApplicationError::Internal)?;
-        let operation = self
-            .store
-            .get_operation(intent.operation_id)
-            .await
-            .map_err(|_| ResourceApplicationError::Internal)?;
         Ok(MutationResult {
-            operation_id: intent.operation_id.to_string(),
+            operation_id: receipt.operation_id.to_string(),
             resource_id: Some(server.id.as_uuid().to_string()),
-            complete: matches!(operation.state, o3k_store::OperationState::Succeeded),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
             resource: Some(server_json(ServerItem {
                 id: server.id.as_uuid().to_string(),
                 project_id: server.project_id,
@@ -574,7 +582,7 @@ impl ResourceApplication for GenericResourceApplication {
                 image_id: server.image_id,
                 state: format!("{:?}", server.state),
                 generation: resource.generation,
-                created_at: Some(mutation_now()),
+                created_at: None,
             })),
         })
     }
@@ -589,7 +597,9 @@ impl ResourceApplication for GenericResourceApplication {
         if descriptor.resource_type.to_string() != "compute:server" {
             return Err(ResourceApplicationError::UnsupportedOperation);
         }
-        let _key = idempotency_key.unwrap_or("");
+        let key = idempotency_key
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("native:{}", Uuid::new_v4()));
         let resource_id = id
             .parse::<Uuid>()
             .map_err(|_| ResourceApplicationError::NotFound)?;
@@ -601,29 +611,36 @@ impl ResourceApplication for GenericResourceApplication {
         if existing.project_id != auth.effective_scope().id().as_str() {
             return Err(ResourceApplicationError::NotFound);
         }
-        self.compute
-            .delete_server_for_auth(auth, o3k_domain::ServerId::from_uuid(resource_id))
+        let action = descriptor
+            .lifecycle_actions
+            .get(&o3k_native_api::resource::LifecycleOperation::Delete)
+            .cloned()
+            .ok_or(ResourceApplicationError::UnsupportedOperation)?;
+        let context = o3k_reconciler::CanonicalMutationContext::new(
+            action,
+            auth.principal().id().to_string(),
+            auth.effective_scope().clone(),
+            None,
+            key,
+            serde_json::json!({"resource_id": id}),
+        )
+        .map_err(|_| ResourceApplicationError::Validation)?;
+        let receipt = self
+            .compute
+            .delete_server_for_auth_canonical(
+                auth,
+                o3k_domain::ServerId::from_uuid(resource_id),
+                context,
+            )
             .await
             .map_err(compute_error)?;
-        let operation_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!(
-                "o3k:delete:{}:{}:{}",
-                auth.effective_scope().id(),
-                id,
-                existing.generation
-            )
-            .as_bytes(),
-        );
-        let operation = self
-            .store
-            .get_operation(operation_id)
-            .await
-            .map_err(|_| ResourceApplicationError::Internal)?;
         Ok(MutationResult {
-            operation_id: operation_id.to_string(),
+            operation_id: receipt.operation_id.to_string(),
             resource_id: Some(id.to_owned()),
-            complete: matches!(operation.state, o3k_store::OperationState::Succeeded),
+            complete: matches!(
+                receipt.operation_state,
+                o3k_store::OperationState::Succeeded
+            ),
             resource: None,
         })
     }
