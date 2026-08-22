@@ -146,7 +146,7 @@ mod operation_visibility_tests {
         store
             .insert_resource(&ResourceRecord {
                 id: resource_id,
-                kind: "server".into(),
+                kind: "compute:server".into(),
                 project_id: "project-a".into(),
                 generation: 1,
                 observed_generation: 1,
