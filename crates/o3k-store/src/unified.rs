@@ -339,6 +339,26 @@ impl DurableStore for O3kStore {
         }
     }
 
+    async fn create_or_replay_canonical_idempotent_operation(
+        &self,
+        operation: &OperationRecord,
+        canonical: &CanonicalOperationRecord,
+        request: &IdempotencyReservationRequest,
+    ) -> Result<IdempotencyReservation, StoreError> {
+        match self {
+            Self::Sqlite(store) => {
+                store
+                    .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                    .await
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_or_replay_canonical_idempotent_operation(operation, canonical, request)
+                    .await
+            }
+        }
+    }
+
     async fn get_operation(&self, id: Uuid) -> Result<OperationRecord, StoreError> {
         match self {
             Self::Sqlite(s) => s.get_operation(id).await,
