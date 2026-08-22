@@ -10,8 +10,9 @@ idempotency_key)`. For a newly accepted canonical request, the legacy operation
 row, canonical operation metadata, and reservation commit in one transaction.
 Identity validation binds their operation IDs, action, owner scope, resource
 identity, and service/resource/action namespaces before insertion. Equivalent
-replay resolves and validates the complete canonical operation; conflicting
-reuse creates no rows. The bounded request constructor fingerprints the action,
+replay is resolved before inspecting a new proposal's target and validates the
+complete canonical operation plus its durable resource owner; conflicting reuse
+creates no rows. The bounded request constructor fingerprints the action,
 resource type, target, and recursively key-ordered semantic JSON with SHA-256.
 
 Generation compare-and-set continues to use the existing atomic store update
@@ -44,7 +45,11 @@ all three tables roll back. The file-backed
 `sqlite_canonical_idempotency_reopens_and_replays_complete_operation` proves
 reopen and replay reconstruction. PostgreSQL uses the mandatory CI-provisioned
 PostgreSQL 16.4 service and focused P12.4 integration target for the equivalent
-runtime evidence; absence of `O3K_DATABASE_URL` is a failure in that gate.
+runtime evidence. Test
+`postgres_p12_4_atomic_triplet_concurrency_recovery_and_cas` covers canonical
+conversion after reconnect, equivalent/conflicting/cross-scope races, losing
+row absence, injected rollback, and concurrent generation CAS. Absence of
+`O3K_DATABASE_URL` is a failure in that gate.
 
 Historical rows without `canonical_operation_metadata` remain usable by legacy
 OperationJournal paths but cannot be reconstructed as a public Kernel
