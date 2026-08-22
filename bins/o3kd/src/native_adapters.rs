@@ -34,6 +34,34 @@ impl o3k_native_api::operation::OperationReader for OperationReaderAdapter {
         auth: &o3k_kernel::AuthContext,
         id: Uuid,
     ) -> Result<o3k_kernel::Operation, NativeReadError> {
+        // Establish non-disclosure from the authoritative durable resource
+        // owner before touching canonical metadata.  A corrupt foreign row
+        // must be indistinguishable from a missing operation.
+        let durable = self.store.get_operation(id).await.map_err(|error| {
+            if matches!(error, o3k_store::StoreError::OperationNotFound) {
+                NativeReadError::NotFound
+            } else {
+                tracing::error!(%error, operation_id = %id, "native operation owner lookup failed");
+                NativeReadError::Internal
+            }
+        })?;
+        let resource_id = durable.resource_id.ok_or_else(|| {
+            tracing::error!(operation_id = %id, "canonical operation has no durable resource");
+            NativeReadError::Internal
+        })?;
+        let resource = self.store.get_resource(resource_id).await.map_err(|error| {
+            if matches!(error, o3k_store::StoreError::ResourceNotFound) {
+                NativeReadError::NotFound
+            } else {
+                tracing::error!(%error, operation_id = %id, "native operation resource lookup failed");
+                NativeReadError::Internal
+            }
+        })?;
+        if resource.project_id != auth.effective_scope().id().as_str()
+            || auth.effective_scope().kind() != o3k_kernel::ScopeKind::Project
+        {
+            return Err(NativeReadError::NotFound);
+        }
         let record = self
             .store
             .get_canonical_operation(id)
