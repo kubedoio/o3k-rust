@@ -76,6 +76,7 @@ fn network_intent_identity_valid(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod operation_visibility_tests {
     use super::*;
     use axum::body::Body;
