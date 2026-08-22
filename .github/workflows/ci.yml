@@ -12,6 +12,22 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16.4
+        env:
+          POSTGRES_USER: o3k
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: o3k_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U o3k -d o3k_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      O3K_DATABASE_URL: postgres://o3k:password@127.0.0.1:5432/o3k_test
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
