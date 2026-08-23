@@ -1366,9 +1366,14 @@ impl o3k_kernel::Controller for GrpcControllerAdapter {
                         _ => o3k_kernel::ReconcileOutcome::Failed { failure },
                     }
                 }
-                None => o3k_kernel::ReconcileOutcome::Accepted {
-                    observation: observation_from_wire(response.observation),
-                },
+                None => {
+                    let observation = observation_from_wire(response.observation);
+                    if response.accepted {
+                        o3k_kernel::ReconcileOutcome::Accepted { observation }
+                    } else {
+                        o3k_kernel::ReconcileOutcome::Succeeded { observation }
+                    }
+                }
             },
             Err(error) => o3k_kernel::ReconcileOutcome::Unknown {
                 failure: o3k_kernel::ControllerFailure::new(
@@ -1450,9 +1455,14 @@ impl o3k_kernel::Controller for GrpcControllerAdapter {
                 Some(failure) => o3k_kernel::ReconcileOutcome::Failed {
                     failure: failure_from_wire(failure),
                 },
-                None => o3k_kernel::ReconcileOutcome::Accepted {
-                    observation: observation_from_wire(response.observation),
-                },
+                None => {
+                    let observation = observation_from_wire(response.observation);
+                    if response.accepted {
+                        o3k_kernel::ReconcileOutcome::Accepted { observation }
+                    } else {
+                        o3k_kernel::ReconcileOutcome::Succeeded { observation }
+                    }
+                }
             },
             Err(error) => o3k_kernel::ReconcileOutcome::Unknown {
                 failure: o3k_kernel::ControllerFailure::new(

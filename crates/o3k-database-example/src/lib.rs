@@ -278,10 +278,11 @@ impl<C: ServiceCompositionClient + 'static> ControllerHandler for DatabaseContro
             )
             .await
             .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
+        let accepted = status.phase != "Ready";
         Ok(proto::ReconcileResponse {
             observation: Some(observation_response(resource, status)),
             failure: None,
-            accepted: true,
+            accepted,
         })
     }
 
@@ -397,7 +398,7 @@ impl<C: ServiceCompositionClient + 'static> ControllerHandler for DatabaseContro
                 diagnostics: String::new(),
             }),
             failure: None,
-            accepted: true,
+            accepted: false,
         })
     }
 }
