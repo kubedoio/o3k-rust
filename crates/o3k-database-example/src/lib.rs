@@ -920,6 +920,7 @@ mod tests {
 
     struct FakeComposition {
         calls: Mutex<Vec<String>>,
+        fail_create: Option<String>,
     }
 
     #[async_trait::async_trait]
@@ -932,6 +933,9 @@ mod tests {
                 .lock()
                 .expect("calls lock")
                 .push(request.slot.clone());
+            if self.fail_create.as_deref() == Some(request.slot.as_str()) {
+                return Err(CompositionError::Failed("injected child failure".into()));
+            }
             Ok(ChildResourceReceipt {
                 resource: o3k_kernel::ResourceReference {
                     resource_type: request.resource_type,
@@ -970,6 +974,7 @@ mod tests {
     async fn composition_uses_generic_deterministic_child_slots() {
         let client = Arc::new(FakeComposition {
             calls: Mutex::new(Vec::new()),
+            fail_create: None,
         });
         let lifecycle = ChildLifecycleActions {
             network_create: ActionId::new("network", "CreateNetwork").unwrap(),
@@ -1056,6 +1061,69 @@ mod tests {
                 "volume-data",
                 "network-primary"
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_child_failure_compensates_exclusive_children_in_reverse_order() {
+        let client = Arc::new(FakeComposition {
+            calls: Mutex::new(Vec::new()),
+            fail_create: Some("volume-data".into()),
+        });
+        let lifecycle = ChildLifecycleActions {
+            network_create: ActionId::new("network", "CreateNetwork").unwrap(),
+            network_observe: ActionId::new("network", "ReadNetwork").unwrap(),
+            network_delete: ActionId::new("network", "DeleteNetwork").unwrap(),
+            volume_create: ActionId::new("volume", "CreateVolume").unwrap(),
+            volume_observe: ActionId::new("volume", "ReadVolume").unwrap(),
+            volume_delete: ActionId::new("volume", "DeleteVolume").unwrap(),
+            compute_create: ActionId::new("compute", "CreateServer").unwrap(),
+            compute_observe: ActionId::new("compute", "ReadServer").unwrap(),
+            compute_delete: ActionId::new("compute", "DeleteServer").unwrap(),
+        };
+        let composition = DatabaseComposition::new(client.clone(), lifecycle);
+        let parent = o3k_kernel::ResourceReference {
+            resource_type: o3k_kernel::ResourceType::new("database", "instance").unwrap(),
+            resource_id: o3k_kernel::ResourceId::new("parent-failure").unwrap(),
+            generation: 1,
+        };
+        let scope = o3k_kernel::OwnershipScope::project(
+            o3k_kernel::ScopeId::new("project-failure").unwrap(),
+            None,
+            None,
+        );
+        let operation = uuid::Uuid::new_v4();
+        let context = o3k_kernel::OperationContext {
+            request_id: uuid::Uuid::new_v4(),
+            operation_id: operation,
+            action: ActionId::new("database", "CreateInstance").unwrap(),
+            service_id: "database-example".into(),
+            owner_scope: scope.clone(),
+            session_id: uuid::Uuid::new_v4(),
+            session_generation: 1,
+            deadline_unix_ms: 300_000,
+            replay_identity: format!("parent:{operation}"),
+            audit_correlation: "failure-test".into(),
+        };
+        let result = composition
+            .reconcile(
+                parent,
+                operation,
+                context,
+                "database-controller".into(),
+                scope,
+                &InstanceSpec {
+                    engine: "test".into(),
+                    version: "1".into(),
+                    storage_gb: 1,
+                },
+                CompositionState::default(),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            client.calls.lock().unwrap().as_slice(),
+            ["network-primary", "volume-data", "network-primary"]
         );
     }
 }
