@@ -1017,6 +1017,16 @@ impl CompositionResourceHandler {
         let Some(manifest) = self.manifests.get(&request.context.service_id) else {
             return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
         };
+        let expected_principal = manifest
+            .controller
+            .as_ref()
+            .and_then(|controller| controller.service_principal.as_deref())
+            .ok_or(o3k_service_sdk::composition::CompositionError::Unauthorized)?;
+        if expected_principal != request.service_principal
+            || request.parent.resource_type.namespace() != manifest.namespace
+        {
+            return Err(o3k_service_sdk::composition::CompositionError::Unauthorized);
+        }
         let resource = request.resource_type.to_string();
         let action = request.action.to_string();
         let declared = manifest.dependencies.iter().any(|dependency| {
